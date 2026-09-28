@@ -7,8 +7,8 @@ use dotty_core::ast::{
     UntypedNode,
 };
 use dotty_core::types::{
-    ClassInfo, MethodKind, MethodParamSpec, TermRefTarget, Type, TypeParamSpec, TypeRefTarget,
-    method_type_from_symbols, poly_type_from_symbols,
+    ClassInfo, MethodKind, MethodParamSpec, MethodType, TermRefTarget, Type, TypeParamSpec,
+    TypeRefTarget, method_type_from_symbols, poly_type_from_symbols,
 };
 use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
@@ -502,6 +502,16 @@ struct TypedArgument {
     typed: TreeId<Typed>,
     own_type: TypeId,
     widened_type: TypeId,
+}
+
+fn overload_arity_rejection(method: &MethodType, actual: usize) -> Option<usize> {
+    match method.params.iter().position(|parameter| parameter.varargs) {
+        Some(varargs_index) if varargs_index + 1 == method.params.len() => {
+            (actual < varargs_index).then_some(varargs_index)
+        }
+        Some(_) => None,
+        None => (actual != method.params.len()).then_some(method.params.len()),
+    }
 }
 
 struct ResolvedApplicationFunction {
@@ -1479,9 +1489,12 @@ impl<'a> SourceTyper<'a> {
                 Some(Type::Method(method)) => method.clone(),
                 Some(Type::Poly(poly)) => {
                     let rejection = match self.store.types.try_get(poly.result) {
-                        Some(Type::Method(method)) if method.params.len() != arguments.len() => {
+                        Some(Type::Method(method))
+                            if let Some(expected) =
+                                overload_arity_rejection(method, arguments.len()) =>
+                        {
                             OverloadRejection::WrongArity {
-                                expected: method.params.len(),
+                                expected,
                                 actual: arguments.len(),
                             }
                         }
@@ -1505,11 +1518,11 @@ impl<'a> SourceTyper<'a> {
                     });
                 }
             };
-            if method.params.len() != arguments.len() {
+            if let Some(expected) = overload_arity_rejection(&method, arguments.len()) {
                 rejected.push((
                     candidate.symbol,
                     OverloadRejection::WrongArity {
-                        expected: method.params.len(),
+                        expected,
                         actual: arguments.len(),
                     },
                 ));
@@ -12069,6 +12082,92 @@ mod tests {
                 ..
             }) if matches!(typer.store().symbols.get(candidate).info, SymbolInfo::Missing)
                 || matches!(typer.store().symbols.get(candidate).info, SymbolInfo::Complete(_))
+        ));
+    }
+
+    #[test]
+    fn potentially_applicable_repeated_parameter_overload_blocks_selection() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def method(x: Int, y: Int): Int = 1; def method(xs: Int*): Int = 2; def use(x: Int, y: Int): Int = method(x, y) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate { candidate, .. }) =
+            typer.type_expression(rhs, context)
+        else {
+            panic!("a potentially applicable repeated-parameter overload must block selection")
+        };
+        let info = typer.complete_symbol(candidate).unwrap();
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::Method(method) if method.params.len() == 1 && method.params[0].varargs
+        ));
+    }
+
+    #[test]
+    fn repeated_parameter_overload_with_too_few_arguments_is_filtered() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def method(): Int = 1; def method(prefix: Int, xs: Int*): Int = 2; def use(): Int = method() }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(use_method).unwrap(),
+            owner: use_method,
+        };
+        let expected_method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "method"
+                    && definition.value_param_clauses[0].is_empty())
+                .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("zero-argument overload should produce an Apply")
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == expected_method
         ));
     }
 
