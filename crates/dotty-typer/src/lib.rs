@@ -5,8 +5,10 @@
 //! [`SourceTyper::type_expression`] builds typed AST nodes for literals, term
 //! identifiers, `this`, unique member selections, plain method applications,
 //! explicit positional type applications for one polymorphic callee, and
-//! source type ascriptions, assignments to mutable references, and ordinary
-//! `if` expressions with a bounded branch join.
+//! source type ascriptions, assignments to mutable references, ordinary `if`
+//! expressions with a bounded branch join, condition-bearing `while`
+//! expressions, and local `return` expressions in methods with explicit result
+//! types.
 //! [`SourceTyper::type_expression_expected`] checks
 //! the widened expression type against a semantic expected type while keeping
 //! the expression node's own type unchanged.

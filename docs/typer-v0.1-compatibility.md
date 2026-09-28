@@ -62,8 +62,9 @@ Expression typing currently includes typed identifiers, stable term selections,
 literal expressions, plain method applications, and blocks with expressions
 and local `val`/`var` definitions with or without explicit types. It also
 supports expected-type conformance checks, source type ascriptions, direct
-assignments to mutable locals and fields, and ordinary `if` expressions over
-that expression subset, plus ordinary condition-bearing `while` expressions.
+assignments to mutable locals and fields, ordinary `if` expressions over the
+supported expression subset, condition-bearing `while` expressions, and local
+`return` expressions in methods with an explicit result type.
 Expected typing widens the expression type for the existing conformance
 relation without changing the child tree's own type; a typed ascription node
 carries the projected source type. Assignment requires an exact mutable symbol
@@ -91,6 +92,17 @@ result type matches Scala 3.9.0's `TypeAssigner.assignType(WhileDo)`
 ([pinned source](https://github.com/scala/scala3/blob/3.9.0/compiler/src/dotty/tools/dotc/typer/TypeAssigner.scala#L476-L477)).
 The parser currently represents ordinary loops with a condition; conditionless
 loops and `Nothing` results are not part of this source typing contract.
+
+A local `return` follows the semantic owner chain to its enclosing source
+method and projects that method's explicit result type through normal method
+completion. Its expression is checked against that type, and the typed Return
+node has canonical `Nothing` type, matching Scala 3.9.0's
+`TypeAssigner.assignType(Return)`
+([pinned source](https://github.com/scala/scala3/blob/3.9.0/compiler/src/dotty/tools/dotc/typer/TypeAssigner.scala#L473-L474)).
+For a bare source `return`, the parser preserves an absent operand and Scala
+3.9.0's `typedReturn` supplies a synthetic Unit literal before expected-type
+checking
+([pinned source](https://github.com/scala/scala3/blob/3.9.0/compiler/src/dotty/tools/dotc/typer/Typer.scala#L2445-L2473)); the source typer mirrors that behavior. Returns in methods with inferred results and valid explicit `Return.from` targets remain deferred; malformed targets return a focused error. Constructors are outside this contract. Since `Nothing` conforms as the bottom type, a return in one `if` branch leaves the other branch's ordinary result type intact. If the existing bounded conformance relation cannot decide whether the return expression matches the declared result, typing reports a focused unsupported-relation error.
 
 An inferred local
 uses the already typed RHS and `widen_expression_type`; it does not repeat
@@ -169,9 +181,9 @@ parts remain deferred until their source semantic implementation and fixtures
 are ready:
 
 - expression forms outside the supported identifier, selection, literal,
-  application, block, ordinary `if`, and condition-bearing `while` subset,
-  including `match`, `try`, lambdas, and other forms that are not currently
-  handled by the expression typer;
+  application, block, ordinary `if`, condition-bearing `while`, and local
+  `return` subset, including `match`, `try`, lambdas, and other forms that are
+  not currently handled by the expression typer;
 - local `def`, class, type, and pattern declarations, plus imports in block
   statements;
 - generic overload inference, `using`/implicit argument insertion, dependent
