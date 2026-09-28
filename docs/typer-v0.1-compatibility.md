@@ -56,14 +56,17 @@ For the tested subset, source Typer completion currently supports:
 - primary constructor signature normalization for a plain constructor.
 
 Expression typing currently includes typed identifiers, stable term selections,
-literal expressions, plain method applications, and expression-only blocks.
+literal expressions, plain method applications, and blocks with expressions and
+explicitly typed local values.
 Blocks type their statements in order, preserve the typed Block shape and
 source position, and use the final expression's own type without widening it.
 Each block allocates an empty scope in `SemanticStore` owned by the current
 semantic expression owner; nested blocks push nested scopes. The scope and all
-typed nodes and source mappings are rolled back when any part of the block
-fails. Local declarations and imports in block statements return an explicit
-deferral.
+typed nodes, local symbol mappings, and source mappings are rolled back when
+any part of the block fails. A local `val` or `var` with a source-written type
+is checked before it enters the block scope; `var` symbols carry the mutable
+flag. Inferred local value types, missing initializers, other local declarations
+and imports in block statements return an explicit deferral.
 
 Application sites can resolve lexical, imported, and selected overload buckets
 for supported monomorphic methods. Candidate filtering uses exact arity and
@@ -117,7 +120,7 @@ parts remain deferred until their source semantic implementation and fixtures
 are ready:
 
 - expression forms outside the supported identifier, selection, literal,
-  application, and expression-only block subset;
+  application, and block subset;
 - method result-type inference;
 - enum semantics, case-class synthetic APIs, and `derives`;
 - context-bound evidence synthesis;
