@@ -465,7 +465,7 @@ fn is_bare_assignment<S: dotty_core::TokenSource>(parser: &mut Parser<'_, '_, S>
     parser.current().kind == TokenKind::Operator && parser.current_text_is("=")
 }
 
-fn is_definition_boundary(kind: TokenKind) -> bool {
+pub(crate) fn is_definition_boundary(kind: TokenKind) -> bool {
     matches!(
         kind,
         TokenKind::Eof
