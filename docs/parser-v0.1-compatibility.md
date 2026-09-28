@@ -476,3 +476,49 @@ report before choosing follow-up grammar work. The aggregate clean-file gains
 are real for this corpus, but this measurement alone does not attribute each
 gain to a specific parser change. Hard failures, process failures, panics, and
 hangs remain zero.
+
+## Corpus rerun after PR #411
+
+Issue #413 reran the same 1,236-file source corpus at parser revision
+`ff5a6949ee09c5846ad585d8f1580a3e7d376827` (main after PR #411), using the
+same Scala 3.9.0 source revision
+`777528f19a58e794c9954a42f433373472ec57f8`. The deterministic report is
+[`parser-post-issue-411-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-411-scala3-3.9.0.json).
+
+| Measure | After #393 (`d0c2f517`) | After #411 (`ff5a6949`) | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parse | 987 (79.85%) | 1,040 (84.14%) | +53 (+4.29 pp) |
+| Recoverable diagnostics | 249 (20.15%) | 196 (15.86%) | -53 (-4.29 pp) |
+| Hard parser failures / panics / hangs | 0 / 0 / 0 | 0 / 0 / 0 | unchanged |
+| Scanner diagnostics | 13 | 13 | 0 |
+| Scala oracle results / exceptions | 1,236 / 30 | 1,236 / 30 | unchanged |
+
+The capture-checking-disabled cohort gained 50 clean files (778 to 828 of
+994); the enabled cohort gained 3 (209 to 212 of 242). Diagnostic occurrences
+fell from 6,746 to 5,384 (-1,362, or 20.2%):
+
+| Diagnostic occurrences | After #393 | After #411 | Change |
+| --- | ---: | ---: | ---: |
+| `ExpectedExpression` | 2,112 | 1,777 | -335 |
+| `ExpectedPattern` | 5 | 5 | 0 |
+| `ExpectedToken` | 989 | 556 | -433 |
+| `ExpectedType` | 376 | 269 | -107 |
+| `UnexpectedToken` | 1,932 | 1,527 | -405 |
+| `UnsupportedSyntax` | 1,332 | 1,250 | -82 |
+| **Total** | **6,746** | **5,384** | **-1,362 (-20.2%)** |
+
+The largest first-failure buckets are now `ExpectedToken` (85 files),
+`ExpectedExpression` (37), `ExpectedType` (34), and `UnexpectedToken` (27).
+Compared with the previous report, the first three expression/type/token
+counts moved by -11, -22, and +8 respectively, while `UnexpectedToken` fell
+by 29. These counts describe only each file's first diagnostic; newly exposed
+later failures can increase a bucket even when overall parsing improves. The
+largest diagnostic-occurrence buckets are `ExpectedExpression` (1,777),
+`UnexpectedToken` (1,527), and `UnsupportedSyntax` (1,250). Representative
+paths and capture-checking cohort details are in the JSON report.
+
+This is an aggregate comparison from the post-#393 report through the main tip
+after #411, including the intervening merged parser and typer changes; it does
+not attribute the 53 newly clean files to PR #411 alone. Hard failures,
+process failures, panics, and hangs remain zero.
