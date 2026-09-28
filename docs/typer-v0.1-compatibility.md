@@ -56,8 +56,16 @@ For the tested subset, source Typer completion currently supports:
 - primary constructor signature normalization for a plain constructor.
 
 Expression typing currently includes typed identifiers, stable term selections,
-literal expressions, plain method applications, and blocks with expressions and
-explicitly typed local values.
+literal expressions, plain method applications, and blocks with expressions
+and local `val`/`var` definitions with or without explicit types. An inferred
+local uses the already typed RHS and `widen_expression_type`; it does not repeat
+identifier, member, or application lookup. The pinned Scala 3.9.0 source, TASTy,
+and normalized typed-tree oracle are in
+[`local-value-inference`](../crates/dotty-typer/tests/fixtures/local-value-inference).
+They show `val n = 1` as `val n: Int = 1`, while the RHS remains a literal.
+Inferred declarations publish the widened type and `var` retains its mutable
+flag. The synthetic missing annotation's source `TypeTree` maps to the typed
+`TypeTree` that carries the inferred type.
 Blocks type their statements in order, preserve the typed Block shape and
 source position, and use the final expression's own type without widening it.
 Each block allocates an empty scope in `SemanticStore` owned by the current
@@ -66,10 +74,13 @@ typed nodes, local symbol mappings, and source mappings are rolled back when
 any part of the block fails. A local `val` or `var` with a source-written type
 shadows outer bindings throughout the statement sequence, including its own
 initializer; a reference to the local while it is being initialized reports a
-recursive initializer error. Initializers are checked against their declared
-types, and `var` symbols carry the mutable flag. Inferred local value types,
-missing initializers, other local declarations and imports in block statements
-return an explicit deferral.
+recursive initializer error. Explicitly typed initializers are checked against
+their declared types. Inferred initializers are typed before the new local is
+entered, so they resolve an outer binding of the same name or report ordinary
+name lookup failure. Unsupported methodic, bounds, incomplete, and other
+non-value inferred infos return a focused error. Both typed explicit and
+inferred locals are entered with one stable symbol identity; a later failure in
+the block rolls back local symbols, source mappings, and typed nodes.
 
 Application sites can resolve lexical, imported, and selected overload buckets
 for supported monomorphic methods. Candidate filtering uses exact arity and
@@ -123,7 +134,12 @@ parts remain deferred until their source semantic implementation and fixtures
 are ready:
 
 - expression forms outside the supported identifier, selection, literal,
-  application, and block subset;
+  application, and block subset, including `if`, `match`, `try`, lambdas, and
+  other forms that are not currently handled by the expression typer;
+- local `def`, class, type, and pattern declarations, plus imports in block
+  statements;
+- generic overload inference, `using`/implicit argument insertion, dependent
+  result application, and right-associative extension normalization;
 - method result-type inference;
 - enum semantics, case-class synthetic APIs, and `derives`;
 - context-bound evidence synthesis;
