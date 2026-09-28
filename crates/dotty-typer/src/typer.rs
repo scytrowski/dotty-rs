@@ -630,6 +630,28 @@ pub enum TyperError {
         child_tree_index: u32,
         role: &'static str,
     },
+    /// The condition of a while expression does not conform to canonical Boolean.
+    WhileConditionTypeMismatch {
+        source: SourceId,
+        tree_index: u32,
+        actual: TypeId,
+        expected: TypeId,
+    },
+    /// The supported relation cannot decide while-condition conformance.
+    WhileConditionConformanceUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        actual: TypeId,
+        expected: TypeId,
+        error: Box<TypeRelationError>,
+    },
+    /// A while expression references a missing condition or body tree.
+    WhileChildTreeOutsideArena {
+        source: SourceId,
+        tree_index: u32,
+        child_tree_index: u32,
+        role: &'static str,
+    },
     /// Every overload rejected the supplied arguments; reasons are kept per candidate.
     OverloadApplicationNoApplicable {
         source: SourceId,
@@ -1256,6 +1278,23 @@ impl<'a> SourceTyper<'a> {
         Ok(())
     }
 
+    fn require_while_child_tree(
+        &self,
+        while_tree: TreeId<Untyped>,
+        child: TreeId<Untyped>,
+        role: &'static str,
+    ) -> Result<(), TyperError> {
+        if self.arena.try_get(child).is_none() {
+            return Err(TyperError::WhileChildTreeOutsideArena {
+                source: self.source,
+                tree_index: while_tree.index(),
+                child_tree_index: child.index(),
+                role,
+            });
+        }
+        Ok(())
+    }
+
     fn run_expression_transaction<T>(
         &mut self,
         operation: impl FnOnce(
@@ -1573,6 +1612,52 @@ impl<'a> SourceTyper<'a> {
                     then_branch,
                     else_branch,
                     ty,
+                    source_tree.position,
+                ))
+            }
+            TreeKind::While(while_expr) => {
+                self.require_while_child_tree(tree, while_expr.cond, "condition")?;
+                self.require_while_child_tree(tree, while_expr.body, "body")?;
+                let cond = self
+                    .type_expression_expected_inner(
+                        while_expr.cond,
+                        context,
+                        self.definitions.boolean,
+                        info_journal,
+                        new_mappings,
+                    )
+                    .map_err(|error| match error {
+                        TyperError::ExpectedExpressionTypeMismatch { actual, .. } => {
+                            TyperError::WhileConditionTypeMismatch {
+                                source: self.source,
+                                tree_index: tree.index(),
+                                actual,
+                                expected: self.definitions.boolean,
+                            }
+                        }
+                        TyperError::ExpectedExpressionConformanceUnsupported {
+                            actual,
+                            error,
+                            ..
+                        } => TyperError::WhileConditionConformanceUnsupported {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            actual,
+                            expected: self.definitions.boolean,
+                            error,
+                        },
+                        other => other,
+                    })?;
+                let body = self.type_expression_inner(
+                    while_expr.body,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?;
+                Ok(TypedAstBuilder::new(&mut self.typed_arena).while_expr(
+                    cond,
+                    body,
+                    self.definitions.unit,
                     source_tree.position,
                 ))
             }
@@ -18219,6 +18304,248 @@ mod tests {
         };
         assert_eq!(method_type.result, definitions.int);
         assert!(typer.source_typed_index().get(source, rhs).is_some());
+    }
+
+    #[test]
+    fn while_expression_checks_boolean_and_discards_body_value() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def repeat(flag: Boolean) = while flag do 1");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "repeat");
+        let position = parsed.ast.get(rhs).position;
+        let TreeKind::While(source_while) = parsed.ast.get(rhs).kind else {
+            panic!("expected source while expression");
+        };
+        let condition_position = parsed.ast.get(source_while.cond).position;
+        let body_position = parsed.ast.get(source_while.body).position;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let scope_count = typer.expression_scopes.len();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.unit);
+        assert_eq!(typer.typed_ast().get(typed).position, position);
+        let TreeKind::While(typed_while) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected typed while expression");
+        };
+        let (typed_cond, typed_body) = (typed_while.cond, typed_while.body);
+        assert_eq!(
+            typer.typed_ast().get(typed_cond).position,
+            condition_position
+        );
+        assert_eq!(typer.typed_ast().get(typed_body).position, body_position);
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed_cond).ty)
+                .unwrap(),
+            definitions.boolean
+        );
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_body).ty),
+            Type::Constant(dotty_core::Constant::Int(1))
+        ));
+        assert_eq!(typer.expression_scopes.len(), scope_count);
+    }
+
+    #[test]
+    fn while_expression_types_mutable_block_body_and_nested_if() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "def repeat(flag: Boolean) = while flag do { var count = 0; count = if flag then 1 else 2 }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "repeat");
+        let TreeKind::While(source_while) = parsed.ast.get(rhs).kind else {
+            panic!("expected source while expression");
+        };
+        let TreeKind::Block(source_block) = &parsed.ast.get(source_while.body).kind else {
+            panic!("expected block loop body");
+        };
+        let local_tree = source_block.stats[0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.unit);
+        let local = typer.local_symbol_at(source, local_tree).unwrap();
+        assert!(
+            typer
+                .store()
+                .symbols
+                .get(local)
+                .flags
+                .contains(SymbolFlags::MUTABLE)
+        );
+        let TreeKind::While(typed_while) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected typed while expression");
+        };
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_while.body).kind else {
+            panic!("expected typed block loop body");
+        };
+        let TreeKind::Assign(assignment) = &typer.typed_ast().get(typed_block.expr).kind else {
+            unreachable!();
+        };
+        assert!(matches!(
+            typer.typed_ast().get(assignment.rhs).kind,
+            TreeKind::If(_)
+        ));
+    }
+
+    #[test]
+    fn non_boolean_while_condition_has_a_focused_error() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def repeat = while 1 do 2");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "repeat");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::WhileConditionTypeMismatch { expected, .. })
+                if expected == definitions.boolean
+        ));
+    }
+
+    #[test]
+    fn malformed_while_child_has_a_focused_error() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def repeat(flag: Boolean) = while flag do 1");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "repeat");
+        let position = parsed.ast.get(rhs).position;
+        let mut foreign_arena = AstArena::new();
+        let outside_tree = (0..=parsed.ast.iter().count() + 1)
+            .map(|_| {
+                foreign_arena.alloc(Tree {
+                    kind: TreeKind::Literal(dotty_core::ast::Literal {
+                        value: dotty_core::Constant::Boolean(true),
+                    }),
+                    position: None,
+                    ty: (),
+                })
+            })
+            .last()
+            .unwrap();
+        let while_tree = parsed.ast.alloc(Tree {
+            kind: TreeKind::While(dotty_core::ast::While {
+                cond: outside_tree,
+                body: rhs,
+            }),
+            position,
+            ty: (),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(while_tree, context),
+            Err(TyperError::WhileChildTreeOutsideArena {
+                child_tree_index,
+                role: "condition",
+                ..
+            }) if child_tree_index == outside_tree.index()
+        ));
+    }
+
+    #[test]
+    fn type_parameter_while_condition_reports_unsupported_conformance() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def repeat[A](condition: A) = while condition do 1");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "repeat");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::WhileConditionConformanceUnsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn inferred_method_result_from_while_is_unit() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def repeat(flag: Boolean) = while flag do 1");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "repeat");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Method(method_type) = typer.store().types.get(signature) else {
+            panic!("expected a method signature");
+        };
+        assert_eq!(method_type.result, definitions.unit);
+        assert!(typer.source_typed_index().get(source, rhs).is_some());
+    }
+
+    #[test]
+    fn failed_while_body_rolls_back_all_expression_state() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def repeat(flag: Boolean) = while flag do { var count = 0; missing }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "repeat");
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let scope_count = typer.expression_scopes.len();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.local_symbols.is_empty());
+        assert_eq!(typer.expression_scopes.len(), scope_count);
     }
 
     #[test]
