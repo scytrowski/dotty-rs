@@ -2,143 +2,226 @@
 
 ## Project overview
 
-This repository contains a Rust decoder and encoder for the Scala 3.9.0
-TASTy format. The normative wire-format reference is
-`docs/tasty-format-3.9.0.md`, based on Scala's `TastyFormat.scala`.
+`dotty-rs` is an experimental implementation of Scala 3 compiler
+infrastructure in Rust. It is under active development and is not a complete
+Scala compiler or a drop-in replacement for `scalac`.
 
-The current compatibility target is Scala 3.9.0 and TASTy format version
-`28.9.0`. Do not infer behavior from a newer Scala release without updating
-the specification, compatibility policy, and fixtures first. Version-dependent
-behavior must be documented explicitly.
+The repository is developed incrementally. The assigned GitHub issue defines
+the scope of an implementation increment; avoid turning a focused issue into a
+general compiler refactor or implementing adjacent roadmap items speculatively.
 
-The workspace is named `dotty-rs`. The root package is `dotty`, while the
-implementation package lives at `crates/dotty-tasty` and is imported internally
-as `dotty_tasty`. Public TASTy APIs must be exposed and tested through
-`dotty::tasty` so future compiler components can use sibling namespaces.
+For source-language and TASTy compatibility work, Scala 3.9.0 is the current
+reference unless an issue explicitly changes that target. The repository's
+compatibility fixtures and reports are pinned to Scala revision
+`777528f19a58e794c9954a42f433373472ec57f8`. Do not silently adopt behavior
+from a newer Scala release.
 
-Keep the binary, raw AST, structured AST, and file-level APIs deliberately
-separated. Prefer lossless raw representations when a semantic interpretation
-is incomplete or uncertain.
+The project is pre-1.0. APIs and internal architecture may evolve, but changes
+should still preserve existing invariants and avoid unnecessary churn.
+
+## Workspace architecture
+
+The workspace is intentionally split into small compiler components with
+one-way dependency boundaries:
+
+- `dotty-core` owns shared compiler contracts and semantic data structures:
+  source locations, diagnostics, token contracts, names, IDs, symbols, scopes,
+  types, semantic storage, and phase-indexed ASTs.
+- `dotty-lexer` tokenizes Scala source and produces the token contracts from
+  `dotty-core`.
+- `dotty-parser` is the incremental handwritten Scala 3 source parser. It
+  consumes `dotty-core::TokenSource` rather than depending on the concrete
+  lexer implementation and produces the shared untyped AST.
+- `dotty-namer` enters source declarations into the shared semantic model. It
+  operates on `dotty-core` trees and must not depend on parser-private types.
+- `dotty-typer` completes source semantics and builds typed information on top
+  of `dotty-core` and the namer. Unsupported or ambiguous semantics should be
+  reported explicitly rather than guessed.
+- `dotty-tasty` owns structural/lossless TASTy decoding and encoding.
+- `dotty-tasty-unpickler` projects decoded TASTy into the shared
+  `dotty-core` semantic model.
+- `dotty-classfile` owns JVM class-file decoding and encoding.
+- `dotty-classloader` owns classpath and binary loading concerns and combines
+  TASTy/class-file information without moving those responsibilities into the
+  source frontend.
+- the root `dotty` crate is the public facade over the compiler libraries.
+- `tools/` contains compatibility, corpus, oracle, and diagnostic tooling. It
+  is part of the validation infrastructure, not production compiler logic.
+
+### Boundary rules
+
+Preserve these boundaries unless the issue explicitly requires an architectural
+change:
+
+1. `dotty-core` must remain foundational. It must not depend on the lexer,
+   parser, TASTy, class-file, classloader, namer, or typer implementations.
+2. The parser must remain independent of the concrete lexer. Use the shared
+   `TokenSource` contract.
+3. The namer must consume the shared AST/semantic model rather than parser
+   internals.
+4. The typer must not parse source or decode TASTy/class files. Those are
+   separate frontend/adapter responsibilities.
+5. TASTy and class-file crates must not invent parallel symbol/type models when
+   the information belongs in `dotty-core`.
+6. Prefer extending an existing shared abstraction over introducing a second
+   representation for the same compiler concept.
+7. Do not introduce reverse dependencies merely to reuse a convenience helper.
+   Move genuinely shared logic to the lowest appropriate crate instead.
+
+## Sources of truth
+
+Before editing a component, inspect its implementation, focused tests, relevant
+design/compatibility document, and the assigned issue.
+
+Useful project documents include:
+
+- `docs/parser-design-3.9.0.md`
+- `docs/parser-v0.1-compatibility.md`
+- `docs/namer-v0.1-compatibility.md`
+- `docs/typer-v0.1-compatibility.md`
+- `docs/dotty-core-design.md`
+- `docs/tasty-format-3.9.0.md`
+- `docs/tasty-semantic-unpickler.md`
+- `docs/classloader.md`
+
+Some design documents record an earlier development stage and can lag behind
+the implementation. When prose conflicts with current code and regression
+tests, verify the intended behavior from the issue and current architecture,
+then update the stale documentation if it is in scope. Do not preserve an
+obsolete constraint merely because an old document says that a later component
+does not exist yet.
+
+For Scala compatibility questions, prefer the pinned Scala 3.9.0 sources,
+specification, compiler-generated fixtures, and repository oracle/corpus tools
+over assumptions about how Scala "probably" behaves.
+
+## Implementation principles
+
+### Keep increments narrow
+
+- Implement the smallest coherent behavior that satisfies the issue.
+- Avoid unrelated cleanup, renames, broad API redesigns, or speculative
+  abstractions.
+- Reuse existing arenas, IDs, interning, symbol tables, type representations,
+  diagnostics, and AST nodes before creating new ones.
+- If an adjacent unsupported case is discovered, add a focused regression test
+  only when it is part of the issue; otherwise document or file it separately
+  instead of expanding scope silently.
+
+### Preserve compiler invariants
+
+- Symbol, tree, type, scope, and source identity must use the repository's
+  typed IDs rather than ad-hoc integers or name-based identity.
+- Preserve ownership, scope, source-span, and origin information when lowering
+  or projecting between representations.
+- Do not silently manufacture semantic information merely to make a test pass.
+  Unsupported, ambiguous, malformed, or incomplete inputs should remain
+  observable through typed errors or diagnostics.
+- Semantic operations that can partially mutate shared state must leave the
+  store in a valid state when they fail. Use the existing checkpoint/rollback
+  mechanisms where applicable.
+- Keep behavior deterministic. Tests and semantic output must not depend on
+  hash-map iteration order, filesystem traversal order, or allocation order
+  unless that order is explicitly part of the contract.
+
+### Treat external input as untrusted
+
+Source files, TASTy files, class files, archives, and classpath data must not be
+able to crash the library through ordinary malformed input.
+
+- Return typed errors or diagnostics instead of panicking.
+- Validate lengths, indexes, references, UTF-8 assumptions, recursion depth,
+  and allocation sizes at the layer that introduces them.
+- Keep explicit recursion/fuel limits where recursive compiler operations can
+  otherwise become unbounded.
+- Parser recovery must make progress; malformed source must not produce hangs
+  or infinite recovery loops.
+
+### Prefer correctness over speculative acceptance
+
+The project intentionally implements Scala semantics incrementally.
+
+- The parser may recover from unsupported syntax, but recovery must preserve
+  useful spans and diagnostics.
+- The namer should not guess symbol ownership or visibility when the semantic
+  relationship is unknown.
+- The typer should reject unsupported or ambiguous typing situations with a
+  typed error rather than selecting a plausible-looking candidate.
+- Binary decoders should preserve raw information when a higher-level
+  interpretation is incomplete, where the format and existing API support
+  lossless preservation.
 
 ## Testing requirements
 
-Every implementation increment must include tests for the behavior introduced
-or changed by that increment before it is considered complete.
+Every behavior change must have regression coverage at the lowest useful layer.
 
-### Unit tests
+### Focused tests first
 
-- Add a focused unit test for every new parser, encoder, validator, tag, enum
-  variant, or meaningful edge case.
-- Keep one primary behavior per test. Do not use one large test to hide dozens
-  of unrelated cases behind a loop or a broad assertion.
-- Cover valid forms, optional and repeated fields, empty collections, malformed
-  input, truncated input, invalid references, and trailing bytes whenever they
-  apply.
-- A regression discovered in an integration test must first be reproduced by a
-  small unit test at the lowest relevant layer.
+- Add a small unit test for the exact new behavior or bug before relying on a
+  corpus-wide or end-to-end test.
+- Keep independently regressible behaviors independently observable.
+- Assert exact diagnostics/errors, relevant source spans, symbol/type
+  relationships, or decoded fields rather than only checking success/failure.
+- Add cross-crate or fixture-based tests when the behavior crosses a component
+  boundary.
 
-### Integration tests
+### Component-specific validation
 
-- Add an integration test when behavior crosses module boundaries, depends on
-  a real `.tasty` fixture, or exercises a complete decode/validate/encode
-  pipeline.
-- Use Scala 3.9.0 fixtures for file-level and AST-level compatibility checks.
-- Verify round-trips at the appropriate level: raw bytes, structured AST
-  nodes, standard sections, and AST address allocation.
-- Fixture-wide loops are appropriate for corpus coverage, but they do not
-  replace focused unit tests for individual cases.
+- Parser changes should cover successful parsing and relevant recovery/error
+  behavior. Use the Scala parser oracle and corpus tools when the issue changes
+  compatibility or corpus behavior.
+- Namer changes should validate semantic-index invariants, ownership, scopes,
+  rollback behavior, and parser-recovered inputs where relevant.
+- Typer changes should test positive typing, ambiguity/unsupported cases, and
+  source-to-TASTy semantic parity when the changed behavior is part of that
+  compatibility surface.
+- TASTy changes must preserve the distinction between wire/raw, structured,
+  semantic, and file-level behavior. State explicitly whether a round trip is
+  byte-for-byte, structural, or semantic.
+- Class-file/classloader changes should use focused binary fixtures and test
+  malformed inputs and origin/resolution behavior when applicable.
 
-### Test quality
+Corpus and compatibility metrics are evidence, not substitutes for focused
+tests. A lower diagnostic count alone does not prove a parser change is
+correct, and a parseable round-trip alone does not prove encoder equivalence.
 
-- Test names should describe one observable behavior.
-- When a feature has several independent supported variants, prefer separate
-  tests or a clearly scoped table-driven group with per-case failure context.
-- For every compiler component, add focused tests for each independent
-  supported variant and meaningful malformed, truncated, or recovery case.
-  Keep distinct behaviors in distinct tests; one representative test, broad
-  scenario, or integration fixture does not establish sufficient coverage.
-- Treat tests as regression protection for the compiler: when a behavior can
-  regress independently, make that behavior directly observable in a test at
-  the lowest relevant layer and add integration coverage when it crosses
-  module boundaries.
-- Add assertions for exact error variants and important offsets/references,
-  not only `is_err()`.
-- Keep test counts meaningful: adding coverage should normally add a test or
-  clearly extend an existing test with a documented reason.
-- Every round-trip test must state which guarantee it checks: byte-for-byte,
-  structural, or semantic equivalence. A parseable output alone is not enough
-  to establish encoder completeness.
+Do not regenerate checked-in baselines or compatibility expectations merely to
+make a failing test green. Regeneration must correspond to an intentional,
+reviewable behavior change.
 
-### Fixtures
+## Required checks
 
-- Prefer fixtures generated by Scala 3.9.0; mark synthetic fixtures clearly.
-- Update fixture inventory counts deliberately and review the reason for every
-  inventory change.
-- Fixture-wide failures must report the exact fixture path, tag, offset, and
-  reference involved.
-- Maintain coverage for common constructs and difficult cases such as
-  overloaded signatures, multiple parameter clauses, annotations, nested
-  definitions, and nested types.
-
-The required pre-commit check is:
+The repository CI currently enforces:
 
 ```text
-cargo fmt
-cargo test --all-targets
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo test --workspace --all-targets --locked
 git diff --check
 ```
 
-## Implementation conventions
+Run targeted crate/tests while iterating, then run the complete relevant checks
+before considering the change finished.
 
-- Treat all input files as untrusted. Library code must not panic on malformed
-  TASTy input; return a typed error instead of using `unwrap` or equivalent
-  unchecked assumptions on decoded data.
-- Check integer overflow, truncated payloads, invalid lengths, invalid UTF-8,
-  recursion depth, and allocation sizes at the layer where they are introduced.
-- Preserve unknown tags and unknown sections when the format permits lossless
-  handling; do not guess their grammar.
-- When a payload length is known but its grammar is unsupported, preserve the
-  raw bounded bytes so they can be re-encoded unchanged.
-- Respect bounded readers and require length-delimited payloads to be fully
-  consumed where the grammar is known.
-- Keep one-based name references distinct from zero-based section-name indexes.
-- Validate AST references both for being inside the AST section and for
-  targeting the start of a visible AST node. Preserve absolute offsets when
-  traversing nested payloads.
-- Preserve wire ordering when decoding and re-encoding. Grouped convenience
-  views must not discard ordering information needed for a lossless round-trip.
-- Keep binary parsing, raw AST handling, structured AST interpretation, and
-  file-level validation as separate layers.
-- Retain raw AST access when structured decoding is incomplete or fails. Do
-  not silently discard fields required by the encoder.
-- Keep borrowed, zero-copy decoder representations separate from owned encoder
-  representations. Avoid unnecessary copying in read-only paths, while making
-  ownership explicit for programmatic construction.
-- Make the cost of eager indexing, semantic decoding, or large allocations
-  clear in public API documentation. Add regression coverage for deep nesting
-  and large length-prefixed payloads.
-- Document public API additions and update
-  `docs/tasty-format-3.9.0.md` when the supported format surface changes.
-
-## API and compatibility conventions
-
-- Public APIs should return typed errors rather than panics or ambiguous
-  sentinel values.
-- A newly supported AST tag or enum variant must be wired through decoding,
-  structured dispatch, reference collection, validation, and encoding as
-  applicable.
-- If a convenient grouped representation cannot preserve wire ordering, add a
-  separate ordering-preserving representation instead of accepting lossy
-  re-encoding.
-- Avoid exposing implementation details unless they are needed for lossless
-  decoding or encoding. Breaking changes are acceptable before 1.0 only when
-  they materially improve correctness or remove a flawed abstraction.
+Compatibility/oracle workflows under `.github/workflows/` may perform
+additional validation for lexer, parser, or TASTy changes. Use the corresponding
+workflow/tooling when the issue touches those compatibility surfaces.
 
 ## Change workflow
 
-1. Inspect the existing representation and related tests before editing.
-2. Add or update focused unit tests for the smallest affected layer.
-3. Implement the change with the narrowest compatible API surface.
-4. Add or update fixture-based integration coverage when the change affects
-   file-level behavior.
-5. Run the complete test and formatting checks before committing.
+1. Read the assigned issue and inspect the affected implementation and tests.
+2. Identify the owning crate and verify that the change respects dependency
+   boundaries.
+3. Reproduce the missing behavior or bug with the smallest useful test.
+4. Implement the narrowest change that makes the behavior correct.
+5. Run focused tests for the affected crate.
+6. Run dependent/parity/corpus tests when a shared contract or compatibility
+   surface changed.
+7. Run the repository CI checks.
+8. Update public API documentation, compatibility reports, or design documents
+   when the change makes them materially stale.
+
+Do not use a passing test suite as justification for broadening the issue. A
+small, reviewable compiler increment with explicit unsupported behavior is
+preferable to a larger implementation that guesses at semantics.
