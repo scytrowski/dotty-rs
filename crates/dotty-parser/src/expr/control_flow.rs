@@ -296,9 +296,8 @@ where
         loop {
             let token = self.cursor.lookahead(offset).clone();
             match token.kind {
-                TokenKind::Eof | TokenKind::Punctuation(Punctuation::RightBrace)
-                    if delimiter_depth == 0 =>
-                {
+                TokenKind::Eof => return false,
+                TokenKind::Punctuation(Punctuation::RightBrace) if delimiter_depth == 0 => {
                     return false;
                 }
                 TokenKind::Indent => layout_depth += 1,
@@ -1478,6 +1477,34 @@ mod tests {
         assert!(matches!(
             parser.ast().get(expr).kind,
             TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_an_unclosed_application_in_a_catch_case_at_eof() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "try x catch case E => f(",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Try), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Keyword(HardKeyword::Catch), 6, 11),
+                token(TokenKind::Keyword(HardKeyword::Case), 12, 16),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Operator, 19, 21),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 23, 24),
+                token(TokenKind::Eof, 24, 24),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ParsedTry(_))
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(!parser.diagnostics().is_empty());
