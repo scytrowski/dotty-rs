@@ -74,7 +74,7 @@ impl SourceTyper<'_> {
     ///
     /// The relation reads already completed class information. Call
     /// [`SourceTyper::complete_symbol`] explicitly first when source class
-    /// completion is desired. `And`, `Or`, methodic, refined, recursive, match,
+    /// completion is desired. `And`, methodic, refined, recursive, match,
     /// wildcard, error, and name-designed structural types return
     /// `Or` uses the bounded union rules documented on [`Self::conforms`];
     /// intersection, methodic, refined, recursive, match, wildcard, error, and
