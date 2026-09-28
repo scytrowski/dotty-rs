@@ -582,12 +582,6 @@ where
                     | TokenKind::Punctuation(Punctuation::Colon)
             )
             && self.token_text(&colon).ok() == Some(":")
-            && matches!(
-                candidate.kind,
-                TokenKind::Identifier
-                    | TokenKind::BackquotedIdentifier
-                    | TokenKind::Punctuation(Punctuation::LeftParen)
-            )
             && !self.has_line_break_between(colon.span.end(), candidate.span.start())
     }
 
@@ -1024,6 +1018,47 @@ mod tests {
         );
         assert_eq!(definition.type_params.len(), 1);
         assert!(parameter.metadata.modifiers.contains(&Modifier::Given));
+        assert!(definition.rhs.is_some());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_named_generic_given_with_a_this_type_result() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given self[T]: this.type = this",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 10),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 10, 11),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 12, 13),
+                token(TokenKind::Punctuation(Punctuation::Colon), 13, 14),
+                token(TokenKind::Keyword(HardKeyword::This), 15, 19),
+                token(TokenKind::Punctuation(Punctuation::Dot), 19, 20),
+                token(TokenKind::Keyword(HardKeyword::Type), 20, 24),
+                token(TokenKind::Operator, 25, 26),
+                token(TokenKind::Keyword(HardKeyword::This), 27, 31),
+                token(TokenKind::Eof, 31, 31),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a named generic given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method-like given definition");
+        };
+        assert_eq!(
+            parser.names.resolve(definition.name.as_name().text()),
+            "self"
+        );
+        assert_eq!(definition.type_params.len(), 1);
+        assert!(matches!(
+            parser.ast().get(definition.tpt).kind,
+            TreeKind::SingletonTypeTree(_)
+        ));
         assert!(definition.rhs.is_some());
         assert!(parser.diagnostics().is_empty());
     }
