@@ -156,9 +156,21 @@ impl ContextualScanner {
             return false;
         };
         next.kind == TokenKind::Keyword(HardKeyword::Case)
+            && self.has_open_brace_before(current_index)
             && has_source_line_break(&self.source, current.span.end(), next.span.start())
             && line_indentation(&self.source, current.span.start())
                 == line_indentation(&self.source, next.span.start())
+    }
+
+    fn has_open_brace_before(&self, index: usize) -> bool {
+        self.tokens[..index]
+            .iter()
+            .fold(0usize, |depth, token| match token.kind {
+                TokenKind::Punctuation(Punctuation::LeftBrace) => depth.saturating_add(1),
+                TokenKind::Punctuation(Punctuation::RightBrace) => depth.saturating_sub(1),
+                _ => depth,
+            })
+            > 0
     }
 
     fn current_starts_match_case(&self) -> bool {
@@ -2304,6 +2316,29 @@ mod tests {
         scanner.observe(ScannerEvent::Outdented);
 
         assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        assert!(scanner.feedback_regions.is_empty());
+    }
+
+    #[test]
+    fn match_feedback_does_not_open_same_indent_cases_outside_braces() {
+        let source = "value match\ncase A => first";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Match) {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::MatchCasesIndented);
+
+        assert_eq!(
+            scanner.current().kind,
+            TokenKind::Keyword(HardKeyword::Match)
+        );
+        assert_eq!(
+            next_real_token(&scanner.tokens, scanner.current_index())
+                .expect("case follows match")
+                .kind,
+            TokenKind::Keyword(HardKeyword::Case)
+        );
         assert!(scanner.feedback_regions.is_empty());
     }
 
