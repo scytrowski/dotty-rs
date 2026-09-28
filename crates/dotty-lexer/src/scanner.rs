@@ -365,6 +365,15 @@ impl TokenSource for ContextualScanner {
             }
         }
     }
+
+    fn observe_at(&mut self, offset: usize, event: ScannerEvent) {
+        let current_position = self.position;
+        self.position = current_position
+            .saturating_add(offset)
+            .min(self.tokens.len().saturating_sub(1));
+        self.observe(event);
+        self.position = current_position;
+    }
 }
 
 fn build_tokens(
@@ -2641,6 +2650,40 @@ mod tests {
         assert_eq!(scanner.current().kind, TokenKind::Indent);
         scanner.advance();
         assert_eq!(scanner.current().kind, TokenKind::Identifier);
+    }
+
+    #[test]
+    fn lookahead_arrow_feedback_reports_an_indented_lambda_body_without_advancing() {
+        let mut scanner = ContextualScanner::new("f: cb =>\n  body").expect("source scans");
+        while !(scanner.current().kind == TokenKind::Operator
+            && scanner.source.get(
+                scanner.current().span.start() as usize..scanner.current().span.end() as usize,
+            ) == Some("=>"))
+        {
+            scanner.advance();
+        }
+        let position = scanner.position();
+
+        scanner.observe_at(0, ScannerEvent::ArrowIndented);
+
+        assert_eq!(scanner.position(), position);
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
+    }
+
+    #[test]
+    fn lookahead_arrow_feedback_does_not_mark_an_aligned_body_as_indented() {
+        let mut scanner = ContextualScanner::new("f: cb =>\nbody").expect("source scans");
+        while !(scanner.current().kind == TokenKind::Operator
+            && scanner.source.get(
+                scanner.current().span.start() as usize..scanner.current().span.end() as usize,
+            ) == Some("=>"))
+        {
+            scanner.advance();
+        }
+
+        scanner.observe_at(0, ScannerEvent::ArrowIndented);
+
+        assert_ne!(scanner.lookahead(1).kind, TokenKind::Indent);
     }
 
     #[test]

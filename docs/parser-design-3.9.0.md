@@ -256,7 +256,9 @@ expression type ascriptions with the supported simple/infix type parser,
 including annotation-only forms such as `value: @unchecked` and
 `(tree: @unchecked)`
 parenthesized `using` argument lists, including nested application clauses
-indented colon arguments, including block, lambda, and case bodies
+indented colon arguments, including block, lambda, and case bodies; a
+`ColonFollow` before an indented lambda is disambiguated from a type ascription
+using Dotty's lambda-after-colon lookahead
 prefix operators `-`, `+`, `~`, and `!` on the same physical line
 bare symbolic operator references such as `???` and `::`, while structural
 tokens such as assignment/arrow operators remain grammar delimiters
