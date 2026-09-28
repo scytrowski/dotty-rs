@@ -1,5 +1,6 @@
 use dotty_core::{
-    HardKeyword, Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped,
+    HardKeyword, Punctuation, SourceSpan, Span, TextRange, Token, TokenKind, TreeId, TreeKind,
+    Untyped,
 };
 
 use crate::modifiers::DefinitionPrefix;
@@ -25,6 +26,37 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    /// Returns whether a token can begin a statement in a block.
+    ///
+    /// Layout-sensitive expression bodies use this to decide whether a
+    /// physical newline starts a block body rather than a single expression.
+    pub(crate) fn can_start_block_stat(&self, token: &Token) -> bool {
+        let kind = token.kind;
+        crate::modifiers::is_hard_modifier(kind)
+            || (kind == TokenKind::Operator && self.token_text(token).ok() == Some("@"))
+            || matches!(
+                kind,
+                TokenKind::CaseClass
+                    | TokenKind::CaseObject
+                    | TokenKind::Keyword(
+                        HardKeyword::Given
+                            | HardKeyword::Val
+                            | HardKeyword::Var
+                            | HardKeyword::Def
+                            | HardKeyword::Type
+                            | HardKeyword::Enum
+                            | HardKeyword::Class
+                            | HardKeyword::Trait
+                            | HardKeyword::Object
+                            | HardKeyword::Package
+                            | HardKeyword::Import
+                            | HardKeyword::Export
+                            | HardKeyword::Match
+                    )
+            )
+            || crate::expr::can_start_expr(kind)
+    }
+
     /// Returns whether `extension` is being used as the contextual
     /// extension-definition introducer.
     ///

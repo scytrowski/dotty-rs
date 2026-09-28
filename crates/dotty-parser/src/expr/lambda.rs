@@ -1,7 +1,6 @@
 use dotty_core::ast::{Function, Modifiers, UntypedNode, ValDef};
 use dotty_core::{
-    HardKeyword, Punctuation, SourceSpan, Span, TermName, TextRange, TokenKind, TreeId, TreeKind,
-    Untyped,
+    Punctuation, SourceSpan, Span, TermName, TextRange, TokenKind, TreeId, TreeKind, Untyped,
 };
 
 use super::can_start_expr;
@@ -312,8 +311,7 @@ where
             body_offset += 1;
         }
 
-        let body = self.cursor.lookahead(body_offset);
-        let body_kind = body.kind;
+        let body = self.cursor.lookahead(body_offset).clone();
         let body_start = body.span.start();
         let arrow_end = self.current().span.end();
         let has_line_break = self
@@ -321,7 +319,7 @@ where
             .as_str()
             .get(arrow_end as usize..body_start as usize)
             .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
-        has_line_break && (can_start_expr(body_kind) || can_start_local_definition(body_kind))
+        has_line_break && self.can_start_block_stat(&body)
     }
 
     pub(super) fn fresh_wildcard_param_name(&mut self) -> TermName {
@@ -340,38 +338,12 @@ where
     }
 }
 
-const fn can_start_local_definition(kind: TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::Keyword(
-            HardKeyword::Abstract
-                | HardKeyword::Class
-                | HardKeyword::Def
-                | HardKeyword::Enum
-                | HardKeyword::Final
-                | HardKeyword::Given
-                | HardKeyword::Import
-                | HardKeyword::Lazy
-                | HardKeyword::Object
-                | HardKeyword::Override
-                | HardKeyword::Private
-                | HardKeyword::Protected
-                | HardKeyword::Sealed
-                | HardKeyword::Trait
-                | HardKeyword::Type
-                | HardKeyword::Val
-                | HardKeyword::Var
-                | HardKeyword::Export
-        )
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::{Function, ValDef};
-    use dotty_core::{NameInterner, TextRange, Token, TokenValue};
+    use dotty_core::{HardKeyword, NameInterner, TextRange, Token, TokenValue};
 
     #[test]
     fn parses_a_single_parameter_function_literal() {
@@ -923,6 +895,50 @@ mod tests {
                 },
                 token(TokenKind::Newline, 4, 5),
                 token(TokenKind::Keyword(HardKeyword::Import), 7, 13),
+            ],
+            &mut names,
+        );
+
+        parser.advance();
+        assert!(parser.arrow_starts_indented_body());
+    }
+
+    #[test]
+    fn lambda_arrow_opens_layout_for_a_local_case_class() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x =>\n  case class C()",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Newline, 4, 5),
+                token(TokenKind::CaseClass, 7, 17),
+            ],
+            &mut names,
+        );
+
+        parser.advance();
+        assert!(parser.arrow_starts_indented_body());
+    }
+
+    #[test]
+    fn lambda_arrow_opens_layout_for_a_local_case_object() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x =>\n  case object C",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Newline, 4, 5),
+                token(TokenKind::CaseObject, 7, 18),
             ],
             &mut names,
         );
