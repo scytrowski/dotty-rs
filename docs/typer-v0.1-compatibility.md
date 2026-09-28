@@ -64,9 +64,12 @@ Each block allocates an empty scope in `SemanticStore` owned by the current
 semantic expression owner; nested blocks push nested scopes. The scope and all
 typed nodes, local symbol mappings, and source mappings are rolled back when
 any part of the block fails. A local `val` or `var` with a source-written type
-is checked before it enters the block scope; `var` symbols carry the mutable
-flag. Inferred local value types, missing initializers, other local declarations
-and imports in block statements return an explicit deferral.
+shadows outer bindings throughout the statement sequence, including its own
+initializer; a reference to the local while it is being initialized reports a
+recursive initializer error. Initializers are checked against their declared
+types, and `var` symbols carry the mutable flag. Inferred local value types,
+missing initializers, other local declarations and imports in block statements
+return an explicit deferral.
 
 Application sites can resolve lexical, imported, and selected overload buckets
 for supported monomorphic methods. Candidate filtering uses exact arity and

@@ -1,6 +1,6 @@
 //! Source declaration completion driver.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -575,6 +575,12 @@ pub enum TyperError {
     InferredLocalValueTypeDeferred { source: SourceId, tree_index: u32 },
     /// A local value declaration has no initializer.
     LocalValueRightHandSideMissing { source: SourceId, tree_index: u32 },
+    /// A local value initializer refers to the local value currently being initialized.
+    RecursiveLocalValueInitializer {
+        source: SourceId,
+        tree_index: u32,
+        symbol: SymbolId,
+    },
     /// Local value declarations are only supported as statements in a block.
     LocalValueOutsideBlock { source: SourceId, tree_index: u32 },
     /// Two local values with the same name occur in one block scope.
@@ -681,6 +687,7 @@ pub struct SourceTyper<'a> {
     resolver: Box<dyn SymbolResolver + 'a>,
     type_index: SourceTypeIndex,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
+    initializing_local_symbols: HashSet<SymbolId>,
     typed_arena: AstArena<Typed>,
     typed_index: SourceTypedIndex,
     expression_scopes: Vec<ExpressionScopeFrame>,
@@ -865,6 +872,7 @@ impl<'a> SourceTyper<'a> {
             resolver: Box::new(NoResolver),
             type_index: SourceTypeIndex::default(),
             local_symbols: HashMap::new(),
+            initializing_local_symbols: HashSet::new(),
             typed_arena: AstArena::new(),
             typed_index: SourceTypedIndex::new(),
             expression_scopes: Vec::new(),
@@ -1000,6 +1008,7 @@ impl<'a> SourceTyper<'a> {
         let store_checkpoint = self.store.checkpoint();
         let type_index_checkpoint = self.type_index.checkpoint();
         let local_symbols_checkpoint = self.local_symbols.clone();
+        let initializing_local_symbols_checkpoint = self.initializing_local_symbols.clone();
         let expression_scope_checkpoint = self.expression_scopes.len();
         let mut info_journal = Vec::new();
         let mut new_mappings = Vec::new();
@@ -1017,6 +1026,7 @@ impl<'a> SourceTyper<'a> {
                 self.store.rollback_to(store_checkpoint);
                 self.type_index.restore(type_index_checkpoint);
                 self.local_symbols = local_symbols_checkpoint;
+                self.initializing_local_symbols = initializing_local_symbols_checkpoint;
                 self.expression_scopes.truncate(expression_scope_checkpoint);
                 for (source, source_tree) in new_mappings.into_iter().rev() {
                     self.typed_index.remove(source, source_tree);
@@ -1740,8 +1750,9 @@ impl<'a> SourceTyper<'a> {
             })?;
         let declared_type = self.type_of_tpt_inner(definition.tpt, context.lexical)?;
 
-        // Allocate identity before typing the initializer, but keep the new name
-        // out of lexical lookup until after the initializer has been checked.
+        // Scala 3 gives a local definition scope over the entire statement
+        // sequence, including its own initializer. Enter the binding now so it
+        // shadows outer names, and diagnose a reference to it while initializing.
         let symbol = self.store.symbols.alloc(dotty_core::Symbol {
             name,
             owner: Some(context.owner),
@@ -1762,8 +1773,12 @@ impl<'a> SourceTyper<'a> {
             position,
             links: dotty_core::SymbolLinks::default(),
         });
+        self.store.scopes.get_mut(scope).enter(name, symbol);
+        self.initializing_local_symbols.insert(symbol);
 
-        let typed_rhs = self.type_expression_inner(rhs, context, info_journal, new_mappings)?;
+        let typed_rhs_result = self.type_expression_inner(rhs, context, info_journal, new_mappings);
+        self.initializing_local_symbols.remove(&symbol);
+        let typed_rhs = typed_rhs_result?;
         let rhs_type = self.typed_arena.get(typed_rhs).ty;
         let actual = self.widen_expression_type_journaled(rhs_type, info_journal, 0)?;
         match self.conforms(actual, declared_type) {
@@ -1789,7 +1804,6 @@ impl<'a> SourceTyper<'a> {
         self.store
             .symbols
             .set_info(symbol, SymbolInfo::Complete(declared_type));
-        self.store.scopes.get_mut(scope).enter(name, symbol);
         self.local_symbols.insert((self.source, tree), symbol);
 
         let typed_tpt = self.reify_type_argument(definition.tpt, declared_type, new_mappings)?;
@@ -3097,6 +3111,13 @@ impl<'a> SourceTyper<'a> {
             }
         }
         if kind != SymbolKind::Object {
+            if self.initializing_local_symbols.contains(&symbol) {
+                return Err(TyperError::RecursiveLocalValueInitializer {
+                    source: self.source,
+                    tree_index,
+                    symbol,
+                });
+            }
             let info = self.completed_expression_symbol_info(symbol, info_journal)?;
             if matches!(self.store.types.try_get(info), Some(Type::Repeated { .. })) {
                 return Err(TyperError::VarargsParameterReferenceDeferred {
@@ -12453,8 +12474,14 @@ mod tests {
 
     #[test]
     fn local_initializer_cannot_resolve_the_definition_being_entered() {
-        let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("class C { def use: Int = { val local: Int = local; local } }");
+        // In Scala 3.9 commit 777528f19a58e794c9954a42f433373472ec57f8,
+        // typedBlockStats indexes definitions for the statement sequence before
+        // typedStats types each RHS, and typedValDef then types the RHS. The
+        // local therefore shadows this same-typed class field in its RHS, where
+        // the compiler reports a recursive/forward reference.
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { val local: Int = 1; def use: Int = { val local: Int = local; local } }",
+        );
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -12468,7 +12495,8 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::TermNameNotFound { .. })
+            Err(TyperError::RecursiveLocalValueInitializer { source: actual, .. })
+                if actual == source
         ));
         assert!(typer.local_symbols.is_empty());
     }
