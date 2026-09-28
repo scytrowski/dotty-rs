@@ -55,7 +55,9 @@ where
         let type_params = if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBracket)
         {
             let params = self.parse_type_param_clause(ParamOwner::Given);
-            self.expect_arrow();
+            if self.current_is_arrow() {
+                self.advance();
+            }
             params
         } else {
             Vec::new()
@@ -754,6 +756,36 @@ mod tests {
         assert!(definition.metadata.modifiers.contains(&Modifier::Given));
         assert!(!definition.metadata.modifiers.contains(&Modifier::Final));
         assert!(!definition.metadata.modifiers.contains(&Modifier::Lazy));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_parameterized_given_alias_without_an_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given [A] Show = makeShow",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 6, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Identifier, 10, 14),
+                token(TokenKind::Operator, 15, 16),
+                token(TokenKind::Identifier, 17, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method definition");
+        };
+        assert_eq!(definition.type_params.len(), 1);
+        assert!(definition.value_param_clauses.is_empty());
+        assert!(definition.metadata.modifiers.contains(&Modifier::Given));
         assert!(parser.diagnostics().is_empty());
     }
 
