@@ -83,10 +83,12 @@ where
             self.consume_match_newlines();
             if self.accept(TokenKind::Indent) {
                 let cases = self.case_clauses();
-                if !self.cursor.at(TokenKind::Outdent) {
+                let closed_by_delimiter =
+                    self.current().kind == TokenKind::Punctuation(Punctuation::RightParen);
+                if !self.cursor.at(TokenKind::Outdent) && !closed_by_delimiter {
                     self.observe_outdented();
                 }
-                if !self.accept(TokenKind::Outdent) {
+                if !self.accept(TokenKind::Outdent) && !closed_by_delimiter {
                     self.report(
                         crate::ParseDiagnosticKind::ExpectedToken,
                         "expected an outdent to close match cases",
@@ -597,6 +599,76 @@ mod tests {
 
         assert!(matches!(parser.ast().get(tree).kind, TreeKind::Match(_)));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parenthesized_match_cases_stop_before_the_following_block_statement() {
+        let source = "{\n  (x match\n    case A => 1\n    case _ => 2)\n  after\n}";
+        let tokens = vec![
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+            token(TokenKind::Newline, 1, 2),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 4, 5),
+            token(TokenKind::Identifier, 5, 6),
+            token(TokenKind::Keyword(HardKeyword::Match), 7, 12),
+            token(TokenKind::Newline, 12, 13),
+            token(TokenKind::Keyword(HardKeyword::Case), 17, 21),
+            token(TokenKind::Identifier, 22, 23),
+            token(TokenKind::Operator, 24, 26),
+            token(TokenKind::IntegerLiteral, 27, 28),
+            token(TokenKind::Newline, 28, 29),
+            token(TokenKind::Keyword(HardKeyword::Case), 33, 37),
+            token(TokenKind::Identifier, 38, 39),
+            token(TokenKind::Operator, 40, 42),
+            token(TokenKind::IntegerLiteral, 43, 44),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 44, 45),
+            token(TokenKind::Newline, 45, 46),
+            token(TokenKind::Identifier, 48, 53),
+            token(TokenKind::Newline, 53, 54),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 54, 55),
+            token(TokenKind::Eof, 55, 55),
+        ];
+        let mut names = NameInterner::new();
+        let mut parser = Parser::new(
+            SourceText::new(source).unwrap(),
+            SourceId::from_index(1),
+            FeedbackTokenSource {
+                tokens,
+                index: 0,
+                arrow_indents: false,
+                outdent_at: Some(0),
+            },
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        let TreeKind::Block(Block { stats, expr }) = &parser.ast().get(tree).kind else {
+            panic!("expected the enclosing block expression");
+        };
+        assert_eq!(
+            stats.len(),
+            1,
+            "unexpected block stats: {:?}",
+            stats
+                .iter()
+                .map(|id| &parser.ast().get(*id).kind)
+                .collect::<Vec<_>>()
+        );
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &parser.ast().get(stats[0]).kind
+        else {
+            panic!("expected the parenthesized match as the preceding statement");
+        };
+        assert!(matches!(
+            parser.ast().get(parens.inner).kind,
+            TreeKind::Match(_)
+        ));
+        assert!(matches!(parser.ast().get(*expr).kind, TreeKind::Ident(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(
+            parser.diagnostics().is_empty(),
+            "{:?}",
+            parser.diagnostics()
+        );
     }
 
     #[test]
