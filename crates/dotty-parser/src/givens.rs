@@ -476,6 +476,7 @@ where
         }
         if self.cursor.lookahead(newline_count).kind == TokenKind::ColonEol
             || self.cursor.lookahead(newline_count).kind == TokenKind::ColonFollow
+            || self.cursor.lookahead(newline_count).kind == TokenKind::ColonOp
             || self.cursor.lookahead(newline_count).kind
                 == TokenKind::Punctuation(Punctuation::Colon)
         {
@@ -1499,7 +1500,7 @@ mod tests {
     }
 
     #[test]
-    fn recovers_from_a_given_signature_without_its_arrow() {
+    fn reports_a_missing_equals_after_a_parameterized_given_type() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "given [A] Show",
@@ -1516,7 +1517,57 @@ mod tests {
 
         let _ = parser.parse_statement(Location::Elsewhere);
         assert!(!parser.diagnostics().is_empty());
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("expected `=` after a given type")
+        }));
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn recovers_from_a_generic_named_given_without_its_type_before_the_next_member() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given foo[T](using ctx: Ctx):\ndef next = value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 11, 12),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 12, 13),
+                token(TokenKind::Identifier, 13, 18),
+                token(TokenKind::Identifier, 19, 22),
+                token(TokenKind::Punctuation(Punctuation::Colon), 22, 23),
+                token(TokenKind::Identifier, 24, 27),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 27, 28),
+                token(TokenKind::Punctuation(Punctuation::Colon), 28, 29),
+                token(TokenKind::Newline, 29, 30),
+                token(TokenKind::Keyword(HardKeyword::Def), 30, 33),
+                token(TokenKind::Identifier, 34, 38),
+                token(TokenKind::Operator, 39, 40),
+                token(TokenKind::Identifier, 41, 46),
+                token(TokenKind::Eof, 46, 46),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_statement(Location::Elsewhere);
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Newline);
+
+        parser.advance();
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected the following method to remain parseable");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected the following method definition");
+        };
+        assert_eq!(
+            parser.names.resolve(definition.name.as_name().text()),
+            "next"
+        );
     }
 
     #[test]
