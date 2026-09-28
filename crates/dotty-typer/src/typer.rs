@@ -44,6 +44,29 @@ pub enum TyperError {
         tree_index: u32,
         context_index: u32,
     },
+    /// The requested expression-context owner is not present in the semantic store.
+    ExpressionOwnerMissing { owner: SymbolId },
+    /// This declaration kind cannot own an expression body context.
+    ExpressionOwnerKindUnsupported { owner: SymbolId, kind: SymbolKind },
+    /// A method or constructor has no indexed lexical scope for its body.
+    ExpressionMethodScopeMissing { owner: SymbolId },
+    /// The recorded method body scope is owned by a different symbol.
+    ExpressionMethodScopeOwnerMismatch {
+        owner: SymbolId,
+        scope: dotty_core::ScopeId,
+        actual: Option<SymbolId>,
+    },
+    /// A source context stored on an expression owner is outside this index.
+    ExpressionOwnerSourceContextMissing {
+        owner: SymbolId,
+        context: SourceContextId,
+    },
+    /// The namer did not record a source context for this expression owner.
+    ExpressionOwnerDeclarationContextMissing { owner: SymbolId },
+    /// A local expression scope is outside the semantic store's scope arena.
+    ExpressionLocalScopeMissing { scope: dotty_core::ScopeId },
+    /// The typer-owned persistent local-scope stack is malformed or foreign.
+    ExpressionLocalScopeStackMissing { stack: ExpressionScopeId },
     /// The type name may come from an import form not supported by this pass.
     UnsupportedImportContext {
         source: SourceId,
@@ -574,13 +597,27 @@ impl fmt::Display for TyperError {
 
 impl std::error::Error for TyperError {}
 
-/// The lexical source scope and semantic owner used to type an expression.
+/// The source/import context, typer-local scope stack, and semantic owner used
+/// to type an expression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExpressionContext {
-    /// Lexical context for term name and import lookup.
+    /// Immutable namer context for source scopes and import lookup.
     pub lexical: SourceContextId,
     /// Semantic declaration that owns the expression, used for `this`.
     pub owner: SymbolId,
+    /// Head of the typer-owned innermost-first local scope stack.
+    pub local_scopes: Option<ExpressionScopeId>,
+}
+
+/// Opaque head identity in one `SourceTyper`'s persistent local scope stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ExpressionScopeId(usize);
+
+impl ExpressionScopeId {
+    /// Returns the stack-frame index backing this identity.
+    pub const fn index(self) -> usize {
+        self.0
+    }
 }
 
 /// Completes source declaration signatures against a shared semantic session.
@@ -595,6 +632,7 @@ pub struct SourceTyper<'a> {
     type_index: SourceTypeIndex,
     typed_arena: AstArena<Typed>,
     typed_index: SourceTypedIndex,
+    expression_scopes: Vec<ExpressionScopeFrame>,
 }
 
 #[derive(Clone, Copy)]
@@ -621,6 +659,12 @@ struct TypedArgument {
     typed: TreeId<Typed>,
     own_type: TypeId,
     widened_type: TypeId,
+}
+
+#[derive(Clone, Copy)]
+struct ExpressionScopeFrame {
+    scope: dotty_core::ScopeId,
+    parent: Option<ExpressionScopeId>,
 }
 
 #[derive(Clone, Copy)]
@@ -769,6 +813,7 @@ impl<'a> SourceTyper<'a> {
             type_index: SourceTypeIndex::default(),
             typed_arena: AstArena::new(),
             typed_index: SourceTypedIndex::new(),
+            expression_scopes: Vec::new(),
         }
     }
 
@@ -779,6 +824,103 @@ impl<'a> SourceTyper<'a> {
     pub fn with_resolver(mut self, resolver: Box<dyn SymbolResolver + 'a>) -> Self {
         self.resolver = resolver;
         self
+    }
+
+    /// Builds the lexical context for a method or constructor body from the
+    /// authoritative identities recorded by the namer.
+    pub fn expression_context_for(
+        &mut self,
+        owner: SymbolId,
+    ) -> Result<ExpressionContext, TyperError> {
+        if !self.store.symbols.contains(owner) {
+            return Err(TyperError::ExpressionOwnerMissing { owner });
+        }
+        let kind = self.store.symbols.get(owner).kind;
+        if !matches!(kind, SymbolKind::Method | SymbolKind::Constructor) {
+            return Err(TyperError::ExpressionOwnerKindUnsupported { owner, kind });
+        }
+        let lexical = self
+            .index
+            .declaration_context_of(owner)
+            .ok_or(TyperError::ExpressionOwnerDeclarationContextMissing { owner })?;
+        if self.index.try_source_context(lexical).is_none() {
+            return Err(TyperError::ExpressionOwnerSourceContextMissing {
+                owner,
+                context: lexical,
+            });
+        }
+        let scope = Self::indexed_method_scope(owner, self.index.scope_of(owner))?;
+        if !self.store.scopes.contains(scope) {
+            return Err(TyperError::ExpressionMethodScopeMissing { owner });
+        }
+        let actual_owner = self.store.scopes.get(scope).owner;
+        if actual_owner != Some(owner) {
+            return Err(TyperError::ExpressionMethodScopeOwnerMismatch {
+                owner,
+                scope,
+                actual: actual_owner,
+            });
+        }
+        self.push_local_scope(
+            ExpressionContext {
+                lexical,
+                owner,
+                local_scopes: None,
+            },
+            scope,
+        )
+    }
+
+    /// Returns a context with `scope` pushed at the innermost lexical depth.
+    /// This lets later expression forms such as `Block` add local scopes
+    /// without changing the namer's immutable source-context model.
+    pub fn push_local_scope(
+        &mut self,
+        context: ExpressionContext,
+        scope: dotty_core::ScopeId,
+    ) -> Result<ExpressionContext, TyperError> {
+        if !self.store.scopes.contains(scope) {
+            return Err(TyperError::ExpressionLocalScopeMissing { scope });
+        }
+        if let Some(parent) = context.local_scopes {
+            self.validate_expression_scope_stack(Some(parent))?;
+        }
+        let stack = ExpressionScopeId(self.expression_scopes.len());
+        self.expression_scopes.push(ExpressionScopeFrame {
+            scope,
+            parent: context.local_scopes,
+        });
+        Ok(ExpressionContext {
+            local_scopes: Some(stack),
+            ..context
+        })
+    }
+
+    fn indexed_method_scope(
+        owner: SymbolId,
+        scope: Option<dotty_core::ScopeId>,
+    ) -> Result<dotty_core::ScopeId, TyperError> {
+        scope.ok_or(TyperError::ExpressionMethodScopeMissing { owner })
+    }
+
+    fn validate_expression_scope_stack(
+        &self,
+        mut stack: Option<ExpressionScopeId>,
+    ) -> Result<(), TyperError> {
+        let mut seen = std::collections::HashSet::new();
+        while let Some(id) = stack {
+            if !seen.insert(id) {
+                return Err(TyperError::ExpressionLocalScopeStackMissing { stack: id });
+            }
+            let Some(frame) = self.expression_scopes.get(id.index()) else {
+                return Err(TyperError::ExpressionLocalScopeStackMissing { stack: id });
+            };
+            if !self.store.scopes.contains(frame.scope) {
+                return Err(TyperError::ExpressionLocalScopeMissing { scope: frame.scope });
+            }
+            stack = frame.parent;
+        }
+        Ok(())
     }
 
     /// Types one supported source expression into this driver's typed arena.
@@ -995,7 +1137,7 @@ impl<'a> SourceTyper<'a> {
             TreeKind::Ident(ident) => {
                 let symbol = self.resolve_expression_term(
                     ident.name,
-                    context.lexical,
+                    context,
                     tree.index(),
                     source_tree.position,
                 )?;
@@ -1872,7 +2014,7 @@ impl<'a> SourceTyper<'a> {
             TreeKind::Ident(ident) => {
                 let candidates = self.expression_term_candidates(
                     ident.name,
-                    context.lexical,
+                    context,
                     function_tree.index(),
                     function_node.position,
                 )?;
@@ -2549,7 +2691,7 @@ impl<'a> SourceTyper<'a> {
     fn resolve_expression_term(
         &mut self,
         name: dotty_core::Name,
-        context: SourceContextId,
+        context: ExpressionContext,
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<SymbolId, TyperError> {
@@ -2564,11 +2706,31 @@ impl<'a> SourceTyper<'a> {
     fn expression_term_candidates(
         &mut self,
         name: dotty_core::Name,
-        context: SourceContextId,
+        context: ExpressionContext,
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Vec<SymbolId>, TyperError> {
-        let contexts = self.source_context_chain(context, tree_index)?;
+        self.validate_expression_scope_stack(context.local_scopes)?;
+        let mut local_scope = context.local_scopes;
+        while let Some(stack) = local_scope {
+            let frame = self
+                .expression_scopes
+                .get(stack.index())
+                .copied()
+                .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack })?;
+            let candidates = self
+                .store
+                .scopes
+                .get(frame.scope)
+                .lookup_all(&name)
+                .to_vec();
+            if !candidates.is_empty() {
+                return Ok(candidates);
+            }
+            local_scope = frame.parent;
+        }
+
+        let contexts = self.source_context_chain(context.lexical, tree_index)?;
         for context_id in &contexts {
             let source_context = self.index.source_context(*context_id);
             let candidates = self
@@ -5488,6 +5650,17 @@ mod tests {
         method: SymbolId,
         parameter_index: usize,
     ) -> SourceContextId {
+        let parameter = method_parameter_symbol(parsed, index, source, method, parameter_index);
+        index.declaration_context_of(parameter).unwrap()
+    }
+
+    fn method_parameter_symbol(
+        parsed: &dotty_parser::ParseResult,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+        method: SymbolId,
+        parameter_index: usize,
+    ) -> SymbolId {
         for (tree, node) in parsed.ast.iter() {
             let TreeKind::DefDef(definition) = &node.kind else {
                 continue;
@@ -5496,8 +5669,7 @@ mod tests {
                 continue;
             }
             let parameter_tree = definition.value_param_clauses[0][parameter_index];
-            let parameter = index.symbol_at(source, parameter_tree).unwrap();
-            return index.declaration_context_of(parameter).unwrap();
+            return index.symbol_at(source, parameter_tree).unwrap();
         }
         panic!("method parameter was not found");
     }
@@ -5508,6 +5680,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(symbol).unwrap(),
             owner: store.symbols.get(symbol).owner.unwrap(),
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -5545,6 +5718,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(symbol).unwrap(),
             owner: store.symbols.get(symbol).owner.unwrap(),
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -5596,6 +5770,7 @@ mod tests {
                     .expect("test method should have a declaration context")
             }),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -11345,6 +11520,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(symbol).unwrap(),
             owner: store.symbols.get(symbol).owner.unwrap(),
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -11444,6 +11620,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(symbol).unwrap(),
             owner: symbol,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -11479,6 +11656,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(symbol).unwrap(),
             owner: symbol,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -11510,6 +11688,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(symbol).unwrap(),
             owner: symbol,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -11535,6 +11714,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -11567,6 +11747,307 @@ mod tests {
     }
 
     #[test]
+    fn method_body_context_resolves_existing_parameter_without_mutating_scopes() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def id(x: Int): Int = x }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "id");
+        let parameter = method_parameter_symbol(&parsed, &index, source, method, 0);
+        let scope = index.scope_of(method).unwrap();
+        let name = store.symbols.get(parameter).name;
+        let bucket_before = store.scopes.get(scope).lookup_all(&name).to_vec();
+        let store_before = store.checkpoint();
+        assert_eq!(bucket_before, vec![parameter]);
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        assert!(context.local_scopes.is_some());
+        assert_eq!(typer.store().checkpoint(), store_before);
+        assert_eq!(
+            typer.store().scopes.get(scope).lookup_all(&name),
+            bucket_before
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == parameter
+        ));
+    }
+
+    #[test]
+    fn method_parameter_shadows_a_same_named_class_field() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val x: Int = 1; def shadow(x: Boolean): Boolean = x }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "shadow");
+        let parameter = method_parameter_symbol(&parsed, &index, source, method, 0);
+        let field = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "x" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == parameter
+        ));
+        assert_ne!(parameter, field);
+    }
+
+    #[test]
+    fn method_body_context_falls_through_to_class_members() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val field: Int = 1; def read(x: Int): Int = field }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "read");
+        let field = val_symbol(&parsed, &store, &index, source, "field").0;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == field
+        ));
+    }
+
+    #[test]
+    fn method_type_parameters_remain_outside_term_lookup() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def method[A](x: Int): Int = A }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "method");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn constructor_body_context_exposes_constructor_owned_parameters() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C(value: Int)");
+        let (constructor, parameter_tree) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                let symbol = index.symbol_at(source, tree)?;
+                (store.symbols.get(symbol).kind == SymbolKind::Constructor)
+                    .then(|| (symbol, definition.value_param_clauses[0][0]))
+            })
+            .expect("primary constructor should have a source definition");
+        let parameter = index
+            .derived_symbol_at(constructor, source, parameter_tree)
+            .unwrap();
+        let name = store.symbols.get(parameter).name;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let context = typer.expression_context_for(constructor).unwrap();
+        let candidates = typer
+            .expression_term_candidates(name, context, parameter_tree.index(), None)
+            .unwrap();
+        assert_eq!(candidates, vec![parameter]);
+    }
+
+    #[test]
+    fn method_body_context_rejects_a_scope_owned_by_another_symbol() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def method(x: Int): Int = x }");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "method");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let scope = index.scope_of(method).unwrap();
+        store.scopes.get_mut(scope).owner = Some(class);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.expression_context_for(method),
+            Err(TyperError::ExpressionMethodScopeOwnerMismatch {
+                owner,
+                scope: actual_scope,
+                actual: Some(actual_owner),
+            }) if owner == method && actual_scope == scope && actual_owner == class
+        ));
+    }
+
+    #[test]
+    fn method_body_context_reports_a_missing_indexed_scope() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def method(x: Int): Int = x }");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "method");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            SourceTyper::indexed_method_scope(method, None),
+            Err(TyperError::ExpressionMethodScopeMissing { owner }) if owner == method
+        ));
+        assert!(typer.expression_context_for(method).is_ok());
+    }
+
+    #[test]
+    fn method_body_context_reports_an_owner_without_source_context() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def method(x: Int): Int = x }");
+        let method = symbol(&mut store, SymbolKind::Method, SymbolInfo::Missing);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.expression_context_for(method),
+            Err(TyperError::ExpressionOwnerDeclarationContextMissing { owner }) if owner == method
+        ));
+    }
+
+    #[test]
+    fn pushed_expression_scope_shadows_the_method_scope() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val x: Int = 1; def method(x: Boolean): Boolean = x }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "method");
+        let field = val_symbol(&parsed, &store, &index, source, "x").0;
+        let name = store.symbols.get(field).name;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let method_context = typer.expression_context_for(method).unwrap();
+        let mut block_scope = dotty_core::Scope::new(Some(method));
+        block_scope.enter(name, field);
+        let block_scope = typer.store.scopes.alloc(block_scope);
+        let block_context = typer.push_local_scope(method_context, block_scope).unwrap();
+
+        let candidates = typer
+            .expression_term_candidates(name, block_context, rhs.index(), None)
+            .unwrap();
+        assert_eq!(candidates, vec![field]);
+    }
+
+    #[test]
+    fn local_scope_overload_bucket_is_preserved_without_first_wins() {
+        let (mut parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def overloaded(x: Int): Int = x; def overloaded(x: String): String = x; def use(x: Int): Int = x }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let overloads: Vec<_> = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "overloaded" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(overloads.len(), 2);
+        let local_name_id = store.names.intern("localOverload");
+        let local_name = Name::new(local_name_id, Namespace::Term);
+        let method_scope = index.scope_of(method).unwrap();
+        store
+            .scopes
+            .get_mut(method_scope)
+            .enter(local_name, overloads[0]);
+        store
+            .scopes
+            .get_mut(method_scope)
+            .enter(local_name, overloads[1]);
+        let local_ident = match &mut parsed.ast.get_mut(rhs).kind {
+            TreeKind::Ident(ident) => ident,
+            _ => panic!("RHS should be an identifier"),
+        };
+        local_ident.name = local_name;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let candidates = typer
+            .expression_term_candidates(local_name, context, rhs.index(), None)
+            .unwrap();
+        assert_eq!(candidates, overloads);
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::OverloadedReferenceDeferred { .. })
+        ));
+    }
+
+    #[test]
     fn field_identifier_completes_and_uses_its_declared_type() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { val field: Int = 1; def method: Int = field }");
@@ -11583,10 +12064,6 @@ mod tests {
                     .then(|| index.symbol_at(source, tree).unwrap())
             })
             .unwrap();
-        let context = ExpressionContext {
-            lexical: index.declaration_context_of(method).unwrap(),
-            owner: method,
-        };
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -11595,6 +12072,7 @@ mod tests {
             definitions,
             &packages,
         );
+        let context = typer.expression_context_for(method).unwrap();
 
         let typed = typer.type_expression(rhs, context).unwrap();
 
@@ -11634,6 +12112,7 @@ mod tests {
         let context = ExpressionContext {
             lexical,
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -11667,6 +12146,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -11726,6 +12206,7 @@ mod tests {
         let context = ExpressionContext {
             lexical,
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -11779,10 +12260,6 @@ mod tests {
                     .then(|| index.symbol_at(source, tree).unwrap())
             })
             .unwrap();
-        let context = ExpressionContext {
-            lexical: index.declaration_context_of(method).unwrap(),
-            owner: method,
-        };
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -11791,6 +12268,7 @@ mod tests {
             definitions,
             &packages,
         );
+        let context = typer.expression_context_for(method).unwrap();
 
         let typed = typer.type_expression(rhs, context).unwrap();
 
@@ -11827,6 +12305,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -11874,6 +12353,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let TreeKind::Select(selection) = &parsed.ast.get(rhs).kind else {
             panic!("source RHS should be a selection")
@@ -11927,6 +12407,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -11965,6 +12446,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(box_parameter).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let TreeKind::Select(selection) = &parsed.ast.get(rhs).kind else {
             panic!("source RHS should be a selection")
@@ -12025,6 +12507,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let store_checkpoint = store.checkpoint();
         let mut typer = SourceTyper::new(
@@ -12055,6 +12538,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -12107,6 +12591,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -12195,6 +12680,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut store = store;
         let mut typer = SourceTyper::new(
@@ -12229,6 +12715,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut store = store;
         let mut typer = SourceTyper::new(
@@ -12257,6 +12744,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let store_checkpoint = store.checkpoint();
         let mut typer = SourceTyper::new(
@@ -12298,6 +12786,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -12329,6 +12818,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -12357,6 +12847,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -12383,6 +12874,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let name = Name::new(store.names.get("method").unwrap(), Namespace::Term);
         let mut typer = SourceTyper::new(
@@ -12395,7 +12887,7 @@ mod tests {
         );
 
         let candidates = typer
-            .expression_term_candidates(name, context.lexical, rhs.index(), None)
+            .expression_term_candidates(name, context, rhs.index(), None)
             .unwrap();
 
         assert_eq!(candidates.len(), 2);
@@ -12434,6 +12926,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_parameter).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let overloads: Vec<_> = parsed
             .ast
@@ -12519,6 +13012,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_parameter).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -12570,6 +13064,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_parameter).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -12629,6 +13124,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -12672,6 +13168,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -12716,6 +13213,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_parameter).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let overloads: Vec<_> = parsed
             .ast
@@ -12791,6 +13289,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let expected = class_symbol(&parsed, &store, &index, source, "Grandchild");
         let mut typer = SourceTyper::new(
@@ -12849,6 +13348,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -12889,6 +13389,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -12914,6 +13415,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let identity = parsed
             .ast
@@ -12999,6 +13501,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let source_type_arguments = match &parsed.ast.get(rhs).kind {
             TreeKind::Apply(application) => match &parsed.ast.get(application.function).kind {
@@ -13067,6 +13570,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -13094,6 +13598,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -13121,6 +13626,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let source_argument = match &parsed.ast.get(rhs).kind {
             TreeKind::TypeApply(type_application) => type_application.args[0],
@@ -13162,6 +13668,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -13203,6 +13710,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -13271,6 +13779,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -13300,6 +13809,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -13329,6 +13839,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -13354,6 +13865,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -13388,6 +13900,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -13413,6 +13926,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let expected = class_symbol(&parsed, &store, &index, source, "Inner");
         let mut typer = SourceTyper::new(
@@ -13463,6 +13977,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -13494,6 +14009,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(use_method).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let expected_method = parsed
             .ast
@@ -13549,6 +14065,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -13585,6 +14102,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let text_class = class_symbol(&parsed, &store, &index, source, "Text");
         let base_method = parsed
@@ -13655,6 +14173,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let base_class = class_symbol(&parsed, &store, &index, source, "Base");
         let mut typer = SourceTyper::new(
@@ -13707,6 +14226,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: use_method,
+            local_scopes: None,
         };
         let receiver_class = class_symbol(&parsed, &store, &index, source, "C");
         let mut typer = SourceTyper::new(
@@ -13747,6 +14267,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -13786,6 +14307,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -13835,6 +14357,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let TreeKind::Select(selection) = &parsed.ast.get(rhs).kind else {
             panic!("source RHS should be a selection")
@@ -13884,6 +14407,7 @@ mod tests {
         let context = ExpressionContext {
             lexical,
             owner: method,
+            local_scopes: None,
         };
         let TreeKind::Select(selection) = &parsed.ast.get(rhs).kind else {
             panic!("source RHS should be a selection")
@@ -13962,6 +14486,7 @@ mod tests {
         let context = ExpressionContext {
             lexical,
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -13990,6 +14515,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(box_symbol).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let TreeKind::Select(outer_selection) = &parsed.ast.get(rhs).kind else {
             panic!("source RHS should be a selection")
@@ -14039,6 +14565,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let source_position = parsed.ast.get(rhs).position;
         let TreeKind::Select(source_select) = &parsed.ast.get(rhs).kind else {
@@ -14086,6 +14613,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14110,6 +14638,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(symbol).unwrap(),
             owner: store.symbols.get(symbol).owner.unwrap(),
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14162,6 +14691,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(symbol).unwrap(),
             owner: store.symbols.get(symbol).owner.unwrap(),
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14190,6 +14720,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(symbol).unwrap(),
             owner: store.symbols.get(symbol).owner.unwrap(),
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14228,6 +14759,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(symbol).unwrap(),
             owner: store.symbols.get(symbol).owner.unwrap(),
+            local_scopes: None,
         };
         let source_position = parsed.ast.get(rhs).position;
         let mut typer = SourceTyper::new(
@@ -14260,6 +14792,7 @@ mod tests {
             let context = ExpressionContext {
                 lexical: index.declaration_context_of(symbol).unwrap(),
                 owner: store.symbols.get(symbol).owner.unwrap(),
+                local_scopes: None,
             };
             let mut typer = SourceTyper::new(
                 &parsed.ast,
@@ -14299,6 +14832,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(symbol).unwrap(),
             owner: store.symbols.get(symbol).owner.unwrap(),
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14327,6 +14861,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(symbol).unwrap(),
             owner: store.symbols.get(symbol).owner.unwrap(),
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14357,6 +14892,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(symbol).unwrap(),
             owner: store.symbols.get(symbol).owner.unwrap(),
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14385,6 +14921,7 @@ mod tests {
             let context = ExpressionContext {
                 lexical: index.declaration_context_of(symbol).unwrap(),
                 owner: store.symbols.get(symbol).owner.unwrap(),
+                local_scopes: None,
             };
             let mut typer = SourceTyper::new(
                 &parsed.ast,
@@ -14425,6 +14962,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14464,6 +15002,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14492,6 +15031,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14516,6 +15056,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14549,6 +15090,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14584,6 +15126,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14612,6 +15155,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let int = definitions.int;
         let identity = parsed
@@ -14674,6 +15218,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: method_parameter_context(&parsed, &index, source, method, 0),
             owner: method,
+            local_scopes: None,
         };
         let boolean = definitions.boolean;
         let mut typer = SourceTyper::new(
@@ -14697,6 +15242,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: method_parameter_context(&parsed, &index, source, method, 0),
             owner: method,
+            local_scopes: None,
         };
         let text = class_symbol(&parsed, &store, &index, source, "Text");
         let mut typer = SourceTyper::new(
@@ -14723,6 +15269,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: method_parameter_context(&parsed, &index, source, method, 0),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14750,6 +15297,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let int = definitions.int;
         let mut typer = SourceTyper::new(
@@ -14773,6 +15321,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let int = definitions.int;
         let boolean = definitions.boolean;
@@ -14804,6 +15353,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14831,6 +15381,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: method_parameter_context(&parsed, &index, source, method, 0),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14862,6 +15413,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14889,6 +15441,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14916,6 +15469,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14940,6 +15494,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -14985,6 +15540,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -15012,6 +15568,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -15053,6 +15610,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -15105,6 +15663,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -15136,6 +15695,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -15171,6 +15731,7 @@ mod tests {
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
+            local_scopes: None,
         };
         let mut typer = SourceTyper::new(
             &parsed.ast,

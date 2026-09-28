@@ -33,9 +33,9 @@ mod types;
 pub use source_type_index::SourceTypeIndex;
 pub use source_typed_index::{ConflictingTypedTree, SourceTypedIndex};
 pub use typer::{
-    ExpressionContext, MAX_MEMBER_LOOKUP_DEPTH, MAX_TYPE_RELATION_DEPTH, MAX_TYPE_RELATION_VIEWS,
-    MemberCandidate, MemberLookupError, SourceTyper, TypeArgumentBoundSide, TypeRelationError,
-    TyperError,
+    ExpressionContext, ExpressionScopeId, MAX_MEMBER_LOOKUP_DEPTH, MAX_TYPE_RELATION_DEPTH,
+    MAX_TYPE_RELATION_VIEWS, MemberCandidate, MemberLookupError, SourceTyper,
+    TypeArgumentBoundSide, TypeRelationError, TyperError,
 };
 pub use types::{
     MAX_TYPE_NORMALIZATION_DEPTH, SymbolInfoState, TypeNormalizeError, TypeNormalizer,
