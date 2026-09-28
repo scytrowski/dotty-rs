@@ -113,7 +113,11 @@ where
                     return (qualifier, Vec::new());
                 }
             };
-            let selector = self.parse_named_selector(imported);
+            let backquoted = match self.ast.get(qualifier).kind {
+                TreeKind::Ident(ident) => ident.backquoted,
+                _ => false,
+            };
+            let selector = self.parse_named_selector(imported, backquoted);
             let empty_name_id = self.names.intern("<empty>");
             let empty_expr = self.alloc(
                 TreeKind::Ident(Ident {
@@ -167,7 +171,7 @@ where
                 continue;
             }
 
-            return (qualifier, vec![self.parse_named_selector(name)]);
+            return (qualifier, vec![self.parse_named_selector(name, backquoted)]);
         }
     }
 
@@ -226,9 +230,9 @@ where
                     self.parse_given_selector()
                 } else if self.current_is_import_wildcard() || self.current_is_legacy_wildcard() {
                     self.parse_wildcard_selector()
-                } else if let Some((name, _backquoted)) = self.current_term_name() {
+                } else if let Some((name, backquoted)) = self.current_term_name() {
                     self.advance();
-                    self.parse_named_selector(name)
+                    self.parse_named_selector(name, backquoted)
                 } else {
                     let position = self.current_span();
                     self.report(
@@ -264,7 +268,11 @@ where
         selectors
     }
 
-    fn parse_named_selector(&mut self, imported: dotty_core::Name) -> ImportSelector<Untyped> {
+    fn parse_named_selector(
+        &mut self,
+        imported: dotty_core::Name,
+        imported_backquoted: bool,
+    ) -> ImportSelector<Untyped> {
         let renamed = if self.current_is_as() || self.current_is_arrow() {
             self.advance();
             if self.is_import_name() || self.current_is_legacy_wildcard() {
@@ -273,6 +281,7 @@ where
                 let Ok(name) = self.intern_current_term_name() else {
                     return ImportSelector {
                         imported,
+                        imported_backquoted,
                         renamed: None,
                         bound: None,
                     };
@@ -298,6 +307,7 @@ where
 
         ImportSelector {
             imported,
+            imported_backquoted,
             renamed,
             bound: None,
         }
@@ -308,6 +318,7 @@ where
         self.advance();
         ImportSelector {
             imported: dotty_core::Name::new(imported, dotty_core::Namespace::Term),
+            imported_backquoted: false,
             renamed: None,
             bound: None,
         }
@@ -323,6 +334,7 @@ where
         };
         ImportSelector {
             imported: dotty_core::Name::new(empty, dotty_core::Namespace::Term),
+            imported_backquoted: false,
             renamed: None,
             bound,
         }
@@ -333,6 +345,7 @@ where
         let bound = Some(self.error_expr(position));
         ImportSelector {
             imported: dotty_core::Name::new(empty, dotty_core::Namespace::Term),
+            imported_backquoted: false,
             renamed: None,
             bound,
         }
@@ -519,6 +532,35 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["::", "List", "Nil"]
         );
+    }
+
+    #[test]
+    fn preserves_backquoted_imported_selector_names() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.{`+`, ::}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::BackquotedIdentifier, 12, 15),
+                token(TokenKind::Punctuation(Punctuation::Comma), 15, 16),
+                token(TokenKind::Operator, 17, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected import tree");
+        };
+        assert_eq!(import.selectors.len(), 2);
+        assert!(import.selectors[0].imported_backquoted);
+        assert!(!import.selectors[1].imported_backquoted);
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
