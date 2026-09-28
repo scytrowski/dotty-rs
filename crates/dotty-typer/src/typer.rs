@@ -571,8 +571,12 @@ pub enum TyperError {
         tree_index: u32,
         kind: &'static str,
     },
-    /// A local value's source type is absent, so this increment cannot infer it.
-    InferredLocalValueTypeDeferred { source: SourceId, tree_index: u32 },
+    /// An inferred local initializer widens to a type that cannot be a value info.
+    InvalidInferredLocalValueType {
+        source: SourceId,
+        tree_index: u32,
+        inferred: TypeId,
+    },
     /// A local value declaration has no initializer.
     LocalValueRightHandSideMissing { source: SourceId, tree_index: u32 },
     /// A local value initializer refers to the local value currently being initialized.
@@ -1736,19 +1740,18 @@ impl<'a> SourceTyper<'a> {
                 tree_index: definition.tpt.index(),
             });
         };
-        if matches!(source_tpt.kind, TreeKind::TypeTree(_)) {
-            return Err(TyperError::InferredLocalValueTypeDeferred {
-                source: self.source,
-                tree_index: tree.index(),
-            });
-        }
+        let inferred = matches!(source_tpt.kind, TreeKind::TypeTree(_));
         let rhs = definition
             .rhs
             .ok_or(TyperError::LocalValueRightHandSideMissing {
                 source: self.source,
                 tree_index: tree.index(),
             })?;
-        let declared_type = self.type_of_tpt_inner(definition.tpt, context.lexical)?;
+        let declared_type = if inferred {
+            None
+        } else {
+            Some(self.type_of_tpt_inner(definition.tpt, context.lexical)?)
+        };
 
         // Scala 3 gives a local definition scope over the entire statement
         // sequence, including its own initializer. Enter the binding now so it
@@ -1773,40 +1776,56 @@ impl<'a> SourceTyper<'a> {
             position,
             links: dotty_core::SymbolLinks::default(),
         });
-        self.store.scopes.get_mut(scope).enter(name, symbol);
-        self.initializing_local_symbols.insert(symbol);
-
+        if !inferred {
+            self.store.scopes.get_mut(scope).enter(name, symbol);
+            self.initializing_local_symbols.insert(symbol);
+        }
         let typed_rhs_result = self.type_expression_inner(rhs, context, info_journal, new_mappings);
-        self.initializing_local_symbols.remove(&symbol);
+        if !inferred {
+            self.initializing_local_symbols.remove(&symbol);
+        }
         let typed_rhs = typed_rhs_result?;
         let rhs_type = self.typed_arena.get(typed_rhs).ty;
         let actual = self.widen_expression_type_journaled(rhs_type, info_journal, 0)?;
-        match self.conforms(actual, declared_type) {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(TyperError::LocalValueTypeMismatch {
-                    source: self.source,
-                    tree_index: tree.index(),
-                    actual,
-                    expected: declared_type,
-                });
+        let declared_type = if let Some(declared_type) = declared_type {
+            match self.conforms(actual, declared_type) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(TyperError::LocalValueTypeMismatch {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        actual,
+                        expected: declared_type,
+                    });
+                }
+                Err(error) => {
+                    return Err(TyperError::LocalValueConformanceUnsupported {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        actual,
+                        expected: declared_type,
+                        error: Box::new(error),
+                    });
+                }
             }
-            Err(error) => {
-                return Err(TyperError::LocalValueConformanceUnsupported {
-                    source: self.source,
-                    tree_index: tree.index(),
-                    actual,
-                    expected: declared_type,
-                    error: Box::new(error),
-                });
-            }
-        }
+            declared_type
+        } else {
+            self.validate_inferred_local_value_type(actual, tree.index())?;
+            actual
+        };
         self.store
             .symbols
             .set_info(symbol, SymbolInfo::Complete(declared_type));
+        if inferred {
+            self.store.scopes.get_mut(scope).enter(name, symbol);
+        }
         self.local_symbols.insert((self.source, tree), symbol);
 
-        let typed_tpt = self.reify_type_argument(definition.tpt, declared_type, new_mappings)?;
+        let typed_tpt = if inferred {
+            self.reify_inferred_local_type_tree(definition.tpt, declared_type, new_mappings)?
+        } else {
+            self.reify_type_argument(definition.tpt, declared_type, new_mappings)?
+        };
         Ok(self.typed_arena.alloc(Tree {
             kind: TreeKind::ValDef(ValDef {
                 name: definition.name,
@@ -1817,6 +1836,77 @@ impl<'a> SourceTyper<'a> {
             position,
             ty: declared_type,
         }))
+    }
+
+    fn validate_inferred_local_value_type(
+        &self,
+        inferred: TypeId,
+        tree_index: u32,
+    ) -> Result<(), TyperError> {
+        if matches!(
+            self.store.types.try_get(inferred),
+            None | Some(
+                Type::NoType
+                    | Type::NoPrefix
+                    | Type::Error(_)
+                    | Type::Bounds { .. }
+                    | Type::AliasingBounds { .. }
+                    | Type::ByName { .. }
+                    | Type::Repeated { .. }
+                    | Type::Method(_)
+                    | Type::Poly(_)
+                    | Type::TypeLambda(_)
+                    | Type::RecThis { .. }
+                    | Type::Wildcard { .. }
+                    | Type::MatchCase { .. }
+                    | Type::ClassInfo(_)
+            )
+        ) {
+            return Err(TyperError::InvalidInferredLocalValueType {
+                source: self.source,
+                tree_index,
+                inferred,
+            });
+        }
+        Ok(())
+    }
+
+    /// The parser uses an empty source `TypeTree` for a missing local annotation.
+    /// In typed trees that source identity maps to a concrete type tree carrying
+    /// the inferred local symbol info.
+    fn reify_inferred_local_type_tree(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        ty: TypeId,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if let Some(typed) = self.typed_index.get(self.source, source_tree) {
+            return Ok(typed);
+        }
+        let Some(source_node) = self.arena.try_get(source_tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: source_tree.index(),
+            });
+        };
+        if !matches!(source_node.kind, TreeKind::TypeTree(_)) {
+            return Err(TyperError::TypeArgumentTreeCannotBeReified {
+                source: self.source,
+                tree_index: source_tree.index(),
+                tree_kind: tree_kind_name(&source_node.kind),
+            });
+        }
+        let typed = TypedAstBuilder::new(&mut self.typed_arena).type_tree(ty, source_node.position);
+        self.typed_index
+            .insert(self.source, source_tree, typed)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, source_tree));
+        Ok(typed)
     }
 
     fn reify_type_argument(
@@ -12492,6 +12582,7 @@ mod tests {
             &packages,
         );
         let context = typer.expression_context_for(method).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
 
         assert!(matches!(
             typer.type_expression(rhs, context),
@@ -12499,13 +12590,275 @@ mod tests {
                 if actual == source
         ));
         assert!(typer.local_symbols.is_empty());
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
     }
 
     #[test]
-    fn inferred_local_value_type_is_reported_as_deferred() {
+    fn inferred_local_value_uses_widened_initializer_type_and_reifies_its_type_tree() {
         let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("class C { def use: Int = { val local = 1; local } }");
+            parse_and_name("class C { def use(x: Int): Int = { val local = x; local } }");
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let local_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed_block_id = typer.type_expression(rhs, context).unwrap();
+        let local = typer.local_symbol_at(source, local_tree).unwrap();
+        assert_eq!(
+            typer.store().symbols.get(local).info,
+            SymbolInfo::Complete(definitions.int)
+        );
+
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_block_id).kind else {
+            panic!("source block should produce a typed block");
+        };
+        let TreeKind::ValDef(typed_local) = &typer.typed_ast().get(typed_block.stats[0]).kind
+        else {
+            panic!("inferred local should remain a typed ValDef");
+        };
+        assert_eq!(typer.typed_ast().get(typed_local.tpt).ty, definitions.int);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_local.rhs.unwrap()).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if typer.store().symbols.get(*symbol).kind == SymbolKind::Parameter
+        ));
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_block.expr).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == local
+        ));
+        let source_tpt = match &parsed.ast.get(local_tree).kind {
+            TreeKind::ValDef(definition) => definition.tpt,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            typer.source_typed_index().get(source, source_tpt),
+            Some(typed_local.tpt)
+        );
+        assert_eq!(
+            typer.typed_ast().get(typed_local.tpt).position,
+            parsed.ast.get(source_tpt).position
+        );
+    }
+
+    #[test]
+    fn inferred_local_var_widens_literal_type_and_keeps_constant_rhs() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = { var local = 1; local } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let local_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed_block_id = typer.type_expression(rhs, context).unwrap();
+        let local = typer.local_symbol_at(source, local_tree).unwrap();
+        let info = typer.store().symbols.get(local);
+        assert!(info.flags.contains(SymbolFlags::MUTABLE));
+        assert_eq!(info.info, SymbolInfo::Complete(definitions.int));
+
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_block_id).kind else {
+            panic!("source block should produce a typed block");
+        };
+        let TreeKind::ValDef(typed_local) = &typer.typed_ast().get(typed_block.stats[0]).kind
+        else {
+            panic!("inferred local should remain a typed ValDef");
+        };
+        assert_eq!(typer.typed_ast().get(typed_local.tpt).ty, definitions.int);
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_local.rhs.unwrap()).ty),
+            Type::Constant(dotty_core::Constant::Int(1))
+        ));
+    }
+
+    #[test]
+    fn inferred_val_literal_matches_scala_39_typed_tree_oracle() {
+        let source_text =
+            include_str!("../tests/fixtures/local-value-inference/LocalValueInference.scala");
+        let oracle = include_str!(
+            "../tests/fixtures/local-value-inference/LocalValueInference.typed-tree.txt"
+        );
+        assert!(oracle.contains("val n: Int = 1"));
+        dotty_tasty::tasty::TastyFile::parse_scala_3_9(include_bytes!(
+            "../tests/fixtures/local-value-inference/LocalValueInference.tasty"
+        ))
+        .expect("Scala 3.9.0 oracle TASTy should be structurally readable");
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "f");
+        let local_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed_block_id = typer.type_expression(rhs, context).unwrap();
+        let local = typer.local_symbol_at(source, local_tree).unwrap();
+        assert_eq!(
+            typer.store().symbols.get(local).info,
+            SymbolInfo::Complete(definitions.int)
+        );
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_block_id).kind else {
+            panic!("source block should produce a typed block");
+        };
+        let TreeKind::ValDef(typed_local) = &typer.typed_ast().get(typed_block.stats[0]).kind
+        else {
+            panic!("inferred local should remain a typed ValDef");
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_local.rhs.unwrap()).ty),
+            Type::Constant(dotty_core::Constant::Int(1))
+        ));
+    }
+
+    #[test]
+    fn inferred_local_uses_typed_application_result() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def id(x: Int): Int = x; def use: Int = { val local = id(1); local } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let local_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed_block_id = typer.type_expression(rhs, context).unwrap();
+        let local = typer.local_symbol_at(source, local_tree).unwrap();
+        assert_eq!(
+            typer.store().symbols.get(local).info,
+            SymbolInfo::Complete(definitions.int)
+        );
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_block_id).kind else {
+            panic!("source block should produce a typed block");
+        };
+        let TreeKind::ValDef(typed_local) = &typer.typed_ast().get(typed_block.stats[0]).kind
+        else {
+            panic!("inferred local should remain a typed ValDef");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(typed_local.rhs.unwrap()).kind,
+            TreeKind::Apply(_)
+        ));
+        assert_eq!(
+            typer.typed_ast().get(typed_local.rhs.unwrap()).ty,
+            definitions.int
+        );
+    }
+
+    #[test]
+    fn inferred_local_rejects_methodic_initializer_types() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def id(x: Int): Int = x; def use: Int = { val local = id; 1 } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let local_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::InvalidInferredLocalValueType { .. })
+        ));
+        assert!(typer.local_symbol_at(source, local_tree).is_none());
+        assert!(typer.source_typed_index().is_empty());
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+    }
+
+    #[test]
+    fn inferred_local_rejects_standalone_recursive_this_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = 1 }");
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let recursive_binder = typer.store.types.reserve();
+        let binder = recursive_binder.id();
+        let recursive_this = typer.store.types.alloc(Type::RecThis { binder });
+        typer.store.types.fill(
+            recursive_binder,
+            Type::Recursive {
+                parent: recursive_this,
+            },
+        );
+        let standalone_recursive_this = typer.store.types.alloc(Type::RecThis { binder });
+
+        assert!(matches!(
+            typer.validate_inferred_local_value_type(standalone_recursive_this, 0),
+            Err(TyperError::InvalidInferredLocalValueType { inferred, .. })
+                if inferred == standalone_recursive_this
+        ));
+        assert!(matches!(
+            typer.store.types.get(binder),
+            Type::Recursive { parent } if *parent == recursive_this
+        ));
+    }
+
+    #[test]
+    fn inferred_local_rejects_polymorphic_initializer_types() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def id[A](x: A): A = x; def use: Int = { val local = id; 1 } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let local_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => unreachable!(),
+        };
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -12518,10 +12871,209 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::InferredLocalValueTypeDeferred { source: actual, .. })
-                if actual == source
+            Err(TyperError::InvalidInferredLocalValueType { .. })
         ));
-        assert!(typer.local_symbols.is_empty());
+        assert!(typer.local_symbol_at(source, local_tree).is_none());
+        assert!(typer.source_typed_index().is_empty());
+    }
+
+    #[test]
+    fn inferred_local_can_reference_a_method_type_parameter() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use[A](x: A): A = { val local = x; local } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let local_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        typer.type_expression(rhs, context).unwrap();
+        let local = typer.local_symbol_at(source, local_tree).unwrap();
+        let SymbolInfo::Complete(inferred) = typer.store().symbols.get(local).info else {
+            panic!("inferred local should be complete");
+        };
+        assert!(
+            matches!(
+                typer.store().types.get(inferred),
+                Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }
+                    if typer.store().symbols.get(*symbol).kind == SymbolKind::TypeParameter
+            ),
+            "inferred type was {:?}",
+            typer.store().types.get(inferred)
+        );
+    }
+
+    #[test]
+    fn inferred_local_shadows_outer_local_in_nested_block() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def use: Int = { val local = 1; { val local = 2; local } } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let (outer_local_tree, inner_local_tree, inner_ref_tree) = {
+            let TreeKind::Block(outer) = &parsed.ast.get(rhs).kind else {
+                unreachable!()
+            };
+            let outer_local = outer.stats[0];
+            let TreeKind::Block(inner) = &parsed.ast.get(outer.expr).kind else {
+                unreachable!()
+            };
+            (outer_local, inner.stats[0], inner.expr)
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        typer.type_expression(rhs, context).unwrap();
+        let outer_local = typer.local_symbol_at(source, outer_local_tree).unwrap();
+        let inner_local = typer.local_symbol_at(source, inner_local_tree).unwrap();
+        assert_ne!(outer_local, inner_local);
+        let typed_inner_ref = typer
+            .source_typed_index()
+            .get(source, inner_ref_tree)
+            .unwrap();
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_inner_ref).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == inner_local
+        ));
+    }
+
+    #[test]
+    fn inferred_local_without_outer_self_name_is_unresolved() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = { val local = local; local } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let local_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert!(typer.local_symbol_at(source, local_tree).is_none());
+        assert!(typer.source_typed_index().is_empty());
+    }
+
+    #[test]
+    fn inferred_local_uses_existing_generic_member_adaptation() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class String; class Box[A] { val value: A = ??? }; class C { def use(box: Box[String]): String = { val local = box.value; local } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let local_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        typer.type_expression(rhs, context).unwrap();
+        let local = typer.local_symbol_at(source, local_tree).unwrap();
+        let actual = match typer.store().symbols.get(local).info {
+            SymbolInfo::Complete(actual) => actual,
+            _ => panic!("inferred local should be complete"),
+        };
+        let method_type = typer.complete_symbol(method).unwrap();
+        let Type::Method(signature) = typer.store().types.get(method_type) else {
+            panic!("use should have a method signature");
+        };
+        assert_eq!(
+            typer.store().types.get(actual).reference_symbol(),
+            typer.store().types.get(signature.result).reference_symbol(),
+            "inferred {:?}, method result {:?}",
+            typer.store().types.get(actual),
+            typer.store().types.get(signature.result)
+        );
+    }
+
+    #[test]
+    fn inferred_local_initializer_resolves_outer_binding_before_new_binding() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { val local: Int = 1; def use: Int = { val local = local; local } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let local_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        typer.type_expression(rhs, context).unwrap();
+        let local = typer.local_symbol_at(source, local_tree).unwrap();
+        assert_eq!(
+            typer.store().symbols.get(local).info,
+            SymbolInfo::Complete(definitions.int)
+        );
+    }
+
+    #[test]
+    fn failed_inferred_local_rhs_rolls_back_binding_and_typed_nodes() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = { val local = 1; missing } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let local_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert!(typer.local_symbol_at(source, local_tree).is_none());
+        assert!(typer.source_typed_index().is_empty());
+        assert_eq!(typer.typed_ast().iter().count(), 0);
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
     }
 
     #[test]
