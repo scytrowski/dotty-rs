@@ -162,7 +162,7 @@ where
         }
 
         if !self.current_is_bare_assignment() {
-            if has_name && crate::definitions::is_definition_boundary(self.current().kind) {
+            if has_name && is_abstract_named_given_boundary(self.current().kind) {
                 return self.alloc_given_definition(
                     mark,
                     GivenSignature {
@@ -462,6 +462,11 @@ where
     }
 }
 
+fn is_abstract_named_given_boundary(kind: TokenKind) -> bool {
+    crate::definitions::is_definition_boundary(kind)
+        || kind == TokenKind::Punctuation(Punctuation::RightParen)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,14 +669,14 @@ mod tests {
     fn still_reports_a_missing_equals_before_a_non_boundary_token() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
-            "given config: Config )",
+            "given config: Config]",
             vec![
                 token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
                 token(TokenKind::Identifier, 6, 12),
                 token(TokenKind::Punctuation(Punctuation::Colon), 12, 13),
                 token(TokenKind::Identifier, 14, 20),
-                token(TokenKind::Punctuation(Punctuation::RightParen), 21, 22),
-                token(TokenKind::Eof, 22, 22),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 20, 21),
+                token(TokenKind::Eof, 21, 21),
             ],
             &mut names,
         );
@@ -686,6 +691,37 @@ mod tests {
         assert!(definition.rhs.is_some());
         assert_eq!(parser.diagnostics().len(), 1);
         assert!(parser.diagnostics()[0].message().contains("expected `=`"));
+    }
+
+    #[test]
+    fn accepts_an_abstract_named_given_before_a_closing_parenthesis() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given config: Config)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 12),
+                token(TokenKind::Punctuation(Punctuation::Colon), 12, 13),
+                token(TokenKind::Identifier, 14, 20),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_given_definition(Location::Elsewhere)
+        else {
+            panic!("expected an abstract given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected an abstract given method definition");
+        };
+        assert!(definition.rhs.is_none());
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Punctuation(Punctuation::RightParen)
+        );
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
