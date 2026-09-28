@@ -1869,6 +1869,45 @@ mod tests {
     }
 
     #[test]
+    fn recovers_a_missing_singleton_enum_case_parent_before_the_next_case() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "enum E { case Child extends\ncase None }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Enum), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 7, 8),
+                token(TokenKind::Keyword(HardKeyword::Case), 9, 13),
+                token(TokenKind::Identifier, 14, 19),
+                token(TokenKind::Keyword(HardKeyword::Extends), 20, 27),
+                token(TokenKind::Newline, 27, 28),
+                token(TokenKind::Keyword(HardKeyword::Case), 28, 32),
+                token(TokenKind::Identifier, 33, 37),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 38, 39),
+                token(TokenKind::Eof, 39, 39),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an enum definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected the enum TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected the enum template");
+        };
+        assert_eq!(template.body.len(), 2);
+        assert!(matches!(
+            parser.ast().get(template.body[1]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn preserves_prefix_metadata_on_all_enum_case_definition_shapes() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
@@ -3764,7 +3803,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_singleton_enum_case_parent_clauses_deferred() {
+    fn parses_a_singleton_enum_case_parent_clause_and_preserves_the_next_case() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "enum E { case Red extends Parent\ncase Blue }",
@@ -3794,20 +3833,20 @@ mod tests {
         let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
             panic!("expected a Template");
         };
-        assert!(matches!(
-            parser.ast().get(template.body[0]).kind,
-            TreeKind::PhaseSpecific(UntypedNode::Error(_))
-        ));
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+            &parser.ast().get(template.body[0]).kind
+        else {
+            panic!("expected a singleton enum-case ModuleDef");
+        };
+        let TreeKind::Template(case_template) = &parser.ast().get(module.template).kind else {
+            panic!("expected the enum-case template");
+        };
+        assert_eq!(case_template.parents.len(), 1);
         assert!(matches!(
             parser.ast().get(template.body[1]).kind,
             TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
         ));
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.message().contains("unsupported enum case") })
-        );
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
