@@ -102,14 +102,16 @@ capture references/sets, and pure function arrows; capture-aware refinements,
 `.rd`, and semantic capability checking remain deferred. The other feature
 switches remain disabled policy boundaries for future grammar.
 
-The parser forwards `ColonEol`, `Indented`, `Outdented`, `ArrowIndented`, and
-the template-specific `SelfArrow` event through readable helpers. A self arrow
-suppresses a pending nested indentation region; layout classification remains
-owned by the scanner while grammar decisions remain in the parser.
+The parser forwards `ColonEol`, `Indented`, `Outdented`,
+`OutdentedByDelimiter`, `ArrowIndented`, and the template-specific `SelfArrow`
+event through readable helpers. A self arrow suppresses a pending nested
+indentation region; layout classification remains owned by the scanner while
+grammar decisions remain in the parser.
 Match-case regions use the same feedback contract: when braced scopes prevent
 eager indentation, the parser requests the case-region indent after `match`
-and requests its outdent before parsing the following sibling statement or
-closing delimiter.
+and balances it before parsing the following sibling statement. If a matching
+parenthesis closes the case region first, the parser closes the feedback state
+without exposing an `Outdent` token inside the parenthesized expression.
 
 For supported method/value-definition RHSs and `if`/`while` bodies, the parser
 likewise asks the scanner for an indentation region at `=`, `then`, `else`, or

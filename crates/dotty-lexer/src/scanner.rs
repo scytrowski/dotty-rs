@@ -346,6 +346,9 @@ impl TokenSource for ContextualScanner {
                     self.feedback_regions -= 1;
                 }
             }
+            ScannerEvent::OutdentedByDelimiter => {
+                self.feedback_regions = self.feedback_regions.saturating_sub(1);
+            }
             ScannerEvent::ArrowIndented => {
                 if self.current_is_arrow() && self.insert_indent_after_current() {
                     self.feedback_regions += 1;
@@ -2159,6 +2162,29 @@ mod tests {
         assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
         scanner.advance();
         assert_eq!(scanner.current().kind, TokenKind::Indent);
+    }
+
+    #[test]
+    fn delimiter_closes_feedback_region_without_emitting_outdent() {
+        let source = "{\n  value match\n    case A => first\n    case _ => second)\n  after\n}";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Match) {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::Indented);
+        assert_eq!(scanner.feedback_regions, 1);
+        while scanner.current().kind != TokenKind::Punctuation(Punctuation::RightParen) {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::OutdentedByDelimiter);
+
+        assert_eq!(scanner.feedback_regions, 0);
+        assert_eq!(
+            scanner.current().kind,
+            TokenKind::Punctuation(Punctuation::RightParen)
+        );
     }
 
     #[test]

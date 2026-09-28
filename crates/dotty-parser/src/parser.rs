@@ -302,14 +302,23 @@ where
         ) {
             lookahead += 1;
         }
-        let already_indented = self.cursor.lookahead(lookahead).kind == TokenKind::Indent;
+        let has_indentation_token = |parser: &mut Self| {
+            (1..=lookahead).any(|offset| parser.cursor.lookahead(offset).kind == TokenKind::Indent)
+        };
+        let already_indented = has_indentation_token(self);
         self.observe_indented();
-        !already_indented && self.cursor.lookahead(lookahead).kind == TokenKind::Indent
+        !already_indented && has_indentation_token(self)
     }
 
     /// Tells the scanner that an indented region was exited.
     pub fn observe_outdented(&mut self) {
         self.observe(ScannerEvent::Outdented);
+    }
+
+    /// Closes a feedback-opened layout region at a grammar delimiter without
+    /// asking the scanner to insert a parser-visible `Outdent` token.
+    pub(crate) fn observe_outdented_by_delimiter(&mut self) {
+        self.observe(ScannerEvent::OutdentedByDelimiter);
     }
 
     /// Tells the scanner that an indented arrow body was entered.

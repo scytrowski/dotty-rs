@@ -60,11 +60,14 @@ where
             && next_kind == TokenKind::Keyword(dotty_core::HardKeyword::Case)
             && !self.has_physical_line_break(self.current().span.end(), next_token.span.start());
         let has_scanner_indented_cases = next_kind == TokenKind::Indent;
-        if !has_braced_cases && !has_inline_case && !has_scanner_indented_cases {
-            // Braced scopes suppress eager indentation in the scanner. Ask it
-            // to open a case region when the cases are laid out after `match`.
-            self.observe_indented();
-        }
+        let opened_feedback_case_region =
+            if !has_braced_cases && !has_inline_case && !has_scanner_indented_cases {
+                // Braced scopes suppress eager indentation in the scanner. Ask it
+                // to open a case region when the cases are laid out after `match`.
+                self.observe_indented_body()
+            } else {
+                false
+            };
         self.advance();
         let cases = if self.accept(TokenKind::Punctuation(Punctuation::LeftBrace)) {
             let cases = self.case_clauses();
@@ -85,7 +88,9 @@ where
                 let cases = self.case_clauses();
                 let closed_by_delimiter =
                     self.current().kind == TokenKind::Punctuation(Punctuation::RightParen);
-                if !self.cursor.at(TokenKind::Outdent) && !closed_by_delimiter {
+                if closed_by_delimiter && opened_feedback_case_region {
+                    self.observe_outdented_by_delimiter();
+                } else if !self.cursor.at(TokenKind::Outdent) {
                     self.observe_outdented();
                 }
                 if !self.accept(TokenKind::Outdent) && !closed_by_delimiter {
@@ -137,12 +142,14 @@ mod tests {
         HardKeyword, NameInterner, ScannerEvent, SourceId, SourceText, TextRange, Token,
         TokenSource,
     };
+    use std::{cell::Cell, rc::Rc};
 
     struct FeedbackTokenSource {
         tokens: Vec<Token>,
         index: usize,
         arrow_indents: bool,
         outdent_at: Option<u32>,
+        closed_feedback_by_delimiter: Rc<Cell<bool>>,
     }
 
     impl TokenSource for FeedbackTokenSource {
@@ -163,6 +170,9 @@ mod tests {
         }
 
         fn observe(&mut self, event: ScannerEvent) {
+            if event == ScannerEvent::OutdentedByDelimiter {
+                self.closed_feedback_by_delimiter.set(true);
+            }
             match (event, self.current().kind) {
                 (ScannerEvent::Indented, TokenKind::Keyword(HardKeyword::Match)) => {
                     let offset = self.current().span.end();
@@ -224,6 +234,7 @@ mod tests {
                 index: 0,
                 arrow_indents: true,
                 outdent_at: None,
+                closed_feedback_by_delimiter: Rc::new(Cell::new(false)),
             },
             &mut names,
         );
@@ -276,6 +287,7 @@ mod tests {
                 index: 0,
                 arrow_indents: true,
                 outdent_at: None,
+                closed_feedback_by_delimiter: Rc::new(Cell::new(false)),
             },
             &mut names,
         );
@@ -340,6 +352,7 @@ mod tests {
                 index: 0,
                 arrow_indents: false,
                 outdent_at: Some(64),
+                closed_feedback_by_delimiter: Rc::new(Cell::new(false)),
             },
             &mut names,
         );
@@ -391,6 +404,7 @@ mod tests {
                 index: 0,
                 arrow_indents: true,
                 outdent_at: None,
+                closed_feedback_by_delimiter: Rc::new(Cell::new(false)),
             },
             &mut names,
         )
@@ -628,6 +642,7 @@ mod tests {
             token(TokenKind::Eof, 55, 55),
         ];
         let mut names = NameInterner::new();
+        let closed_feedback_by_delimiter = Rc::new(Cell::new(false));
         let mut parser = Parser::new(
             SourceText::new(source).unwrap(),
             SourceId::from_index(1),
@@ -636,6 +651,7 @@ mod tests {
                 index: 0,
                 arrow_indents: false,
                 outdent_at: Some(0),
+                closed_feedback_by_delimiter: Rc::clone(&closed_feedback_by_delimiter),
             },
             &mut names,
         );
@@ -664,6 +680,7 @@ mod tests {
         ));
         assert!(matches!(parser.ast().get(*expr).kind, TreeKind::Ident(_)));
         assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(closed_feedback_by_delimiter.get());
         assert!(
             parser.diagnostics().is_empty(),
             "{:?}",
