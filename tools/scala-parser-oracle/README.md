@@ -81,7 +81,8 @@ corpus also covers the initial `Expr1` subset: ordinary assignment, the
 narrow bare-identifier named-argument form, `using` argument lists, expression
 type ascriptions, indented colon arguments, and `if`/`while` expressions,
 including basic indented bodies and local-definition sequences in indented
-method/control-flow/for bodies nested inside braces, plus braced and indented
+method, value-definition, lambda, control-flow, and for bodies nested inside
+braces, plus braced and indented
 `match` expressions with case patterns, same-line and line-broken guards, and
 bodies. Braced case bodies also cover local statement sequences with `val` and
 `var` definitions. The current

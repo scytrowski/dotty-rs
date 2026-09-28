@@ -344,7 +344,7 @@ fn is_annotation_start<S: dotty_core::TokenSource>(parser: &Parser<'_, '_, S>) -
     parser.current().kind == TokenKind::Operator && parser.current_text_is("@")
 }
 
-fn is_hard_modifier(kind: TokenKind) -> bool {
+pub(crate) fn is_hard_modifier(kind: TokenKind) -> bool {
     matches!(
         kind,
         TokenKind::Keyword(
