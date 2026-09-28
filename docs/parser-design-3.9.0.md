@@ -321,8 +321,9 @@ source syntax only and does not lower the parameter to a thunk. By-name
 arguments in ordinary function types remain a separate grammar production.
 class, trait, object, case class, case object, and enum definitions with type
 parameters, primary constructor clauses, simple `extends` parent applications
-including parameterized enum-case parents, comma/`with` parent lists, `derives`
-and capture-checking `uses` clauses, basic
+including parenthesized function-type parents (with union/nullability in their
+parameter or result types) and parameterized enum-case parents, comma/`with`
+parent lists, `derives` and capture-checking `uses` clauses, basic
 `cap`/qualified capture references, self values (`self =>`, typed self types),
 and braced or indented template bodies. The class/trait/case/enum distinctions
 are preserved in definition metadata; case objects remain `ModuleDef` trees.
