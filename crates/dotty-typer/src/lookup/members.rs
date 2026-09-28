@@ -125,10 +125,9 @@ impl SourceTyper<'_> {
     }
 
     /// Finds matching declarations on a receiver and its nominal parents,
-    /// including the nearest inherited buckets hidden by a direct declaration
-    /// on the receiver. A direct bucket on a parent hides deeper declarations
-    /// on that branch. Overload application uses this view before applicability
-    /// filtering.
+    /// including inherited buckets hidden by direct declarations on the path.
+    /// Overload application uses this view before applicability filtering and
+    /// removes only signatures overridden by a more-derived declaration.
     pub(in crate::typer) fn lookup_overload_members_journaled(
         &mut self,
         receiver: TypeId,
@@ -182,16 +181,10 @@ impl SourceTyper<'_> {
             )?;
             processed.push(pending.symbol);
             if !direct.is_empty() {
-                let direct_count = direct.len();
                 candidates.extend(direct);
-                if !include_hidden_inherited
-                    || pending.depth > 0
-                    || (pending.depth == 0 && direct_count > 1)
-                {
+                if !include_hidden_inherited {
                     // Ordinary member selection treats a direct bucket as a
-                    // complete override. Overload applications additionally
-                    // inspect the nearest inherited bucket when the receiver
-                    // declares only one method of that name.
+                    // complete override of inherited declarations.
                     edges.insert(pending.symbol, Vec::new());
                     continue;
                 }

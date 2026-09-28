@@ -514,6 +514,15 @@ fn overload_arity_rejection(method: &MethodType, actual: usize) -> Option<usize>
     }
 }
 
+fn supported_override_signature(method: &MethodType, store: &SemanticStore) -> bool {
+    method.kind == MethodKind::Plain
+        && method.params.iter().all(|parameter| {
+            !parameter.erased
+                && !parameter.varargs
+                && !matches!(store.types.try_get(parameter.ty), Some(Type::ByName { .. }))
+        })
+}
+
 struct ResolvedApplicationFunction {
     typed: TreeId<Typed>,
     callable: TypeId,
@@ -1326,6 +1335,8 @@ impl<'a> SourceTyper<'a> {
             }
         }
 
+        self.remove_overridden_overload_candidates(&mut candidates, application_tree_index)?;
+
         let winner =
             self.choose_overload_candidate(&mut candidates, &arguments, application_tree_index)?;
         let function_type = match function_shape {
@@ -1473,6 +1484,124 @@ impl<'a> SourceTyper<'a> {
         for child in children {
             self.complete_overload_relation_type(child, info_journal, seen, depth + 1)?;
         }
+        Ok(())
+    }
+
+    fn remove_overridden_overload_candidates(
+        &mut self,
+        candidates: &mut Vec<ApplicationCandidate>,
+        tree_index: u32,
+    ) -> Result<(), TyperError> {
+        let mut overridden = vec![false; candidates.len()];
+        for derived_index in 0..candidates.len() {
+            let Some(derived_member) = candidates[derived_index].member else {
+                continue;
+            };
+            let Some(Type::Method(derived_method)) = self
+                .store
+                .types
+                .try_get(candidates[derived_index].callable)
+                .cloned()
+            else {
+                continue;
+            };
+            if !supported_override_signature(&derived_method, self.store)
+                || self.type_contains_param_ref(
+                    derived_method.result,
+                    candidates[derived_index].callable,
+                )?
+            {
+                continue;
+            }
+
+            for base_index in 0..candidates.len() {
+                if base_index == derived_index || overridden[base_index] {
+                    continue;
+                }
+                let Some(base_member) = candidates[base_index].member else {
+                    continue;
+                };
+                if derived_member.declaring_class == base_member.declaring_class {
+                    continue;
+                }
+                let Some(Type::Method(base_method)) = self
+                    .store
+                    .types
+                    .try_get(candidates[base_index].callable)
+                    .cloned()
+                else {
+                    continue;
+                };
+                if !supported_override_signature(&base_method, self.store)
+                    || self.type_contains_param_ref(
+                        base_method.result,
+                        candidates[base_index].callable,
+                    )?
+                    || derived_method.params.len() != base_method.params.len()
+                {
+                    continue;
+                }
+
+                let mut same_parameters = true;
+                for (derived, base) in derived_method.params.iter().zip(&base_method.params) {
+                    let derived_subtype = self.is_subtype(derived.ty, base.ty).map_err(|_| {
+                        TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                            source: self.source,
+                            tree_index,
+                            candidate: candidates[derived_index].symbol,
+                        }
+                    })?;
+                    if !derived_subtype {
+                        same_parameters = false;
+                        break;
+                    }
+                    let base_subtype = self.is_subtype(base.ty, derived.ty).map_err(|_| {
+                        TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                            source: self.source,
+                            tree_index,
+                            candidate: candidates[base_index].symbol,
+                        }
+                    })?;
+                    if !base_subtype {
+                        same_parameters = false;
+                        break;
+                    }
+                }
+                if !same_parameters {
+                    continue;
+                }
+
+                let derived_view = derived_member.receiver_view;
+                let base_view = base_member.receiver_view;
+                let derived_is_subtype =
+                    self.is_subtype(derived_view, base_view).map_err(|_| {
+                        TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                            source: self.source,
+                            tree_index,
+                            candidate: candidates[derived_index].symbol,
+                        }
+                    })?;
+                if !derived_is_subtype {
+                    continue;
+                }
+                let base_is_subtype = self.is_subtype(base_view, derived_view).map_err(|_| {
+                    TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                        source: self.source,
+                        tree_index,
+                        candidate: candidates[base_index].symbol,
+                    }
+                })?;
+                if !base_is_subtype {
+                    overridden[base_index] = true;
+                }
+            }
+        }
+        let mut index = 0;
+        candidates.retain(|_| {
+            let keep = !overridden[index];
+            index += 1;
+            keep
+        });
         Ok(())
     }
 
@@ -12269,9 +12398,61 @@ mod tests {
     }
 
     #[test]
-    fn local_overload_bucket_hides_inherited_method_buckets() {
+    fn inherited_overload_competes_with_a_multi_method_local_bucket() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class ParentType {}; class ChildType extends ParentType {}; class Other {}; class Base { def method(x: ChildType): Int = 1 }; class C extends Base { def method(x: ParentType): Int = 2; def method(x: Other): Int = 3 }; class Client { def use(c: C, x: ChildType): Int = c.method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][1])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let base_class = class_symbol(&parsed, &store, &index, source, "Base");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("local overload bucket should produce an Apply")
+        };
+        let selected = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.function).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected selected method reference, found {other:?}"),
+        };
+        assert_eq!(typer.store().symbols.get(selected).owner, Some(base_class));
+    }
+
+    #[test]
+    fn exact_inherited_signature_is_suppressed_by_its_override() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A {}; class Base { def method(x: A): Int = 1 }; class C extends Base { def method(x: A): Int = 2 }; class Client { def use(c: C, x: A): Int = c.method(x) }",
         );
         let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
         let parameter = parsed
@@ -12304,7 +12485,7 @@ mod tests {
 
         let typed = typer.type_expression(rhs, context).unwrap();
         let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
-            panic!("local overload bucket should produce an Apply")
+            panic!("overridden method should produce an Apply")
         };
         let selected = match typer
             .store()
