@@ -3111,7 +3111,27 @@ impl<'a> SourceTyper<'a> {
         }
 
         let contexts = self.source_context_chain(context.lexical, tree_index)?;
-        for context_id in &contexts {
+        let fallback_scope = self
+            .store
+            .symbols
+            .contains(context.owner)
+            .then(|| self.store.symbols.get(context.owner).owner)
+            .flatten();
+        let fallback_scope = fallback_scope
+            .filter(|owner| {
+                self.store.symbols.contains(*owner)
+                    && matches!(
+                        self.store.symbols.get(*owner).kind,
+                        SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                    )
+            })
+            .and_then(|owner| self.index.scope_of(owner))
+            .filter(|scope| {
+                contexts.iter().all(|context_id| {
+                    self.index.source_context(*context_id).lexical_scope != *scope
+                })
+            });
+        for (context_position, context_id) in contexts.iter().enumerate() {
             let source_context = self.index.source_context(*context_id);
             let candidates = self
                 .store
@@ -3121,6 +3141,18 @@ impl<'a> SourceTyper<'a> {
                 .to_vec();
             if !candidates.is_empty() {
                 return Ok(candidates);
+            }
+            // Top-level source methods are owned by their synthetic package
+            // module class, while their recorded lexical context is the
+            // package wrapper. Check those same-unit members before imports,
+            // matching their source-declaration precedence.
+            if context_position == 0
+                && let Some(scope) = fallback_scope
+            {
+                let candidates = self.store.scopes.get(scope).lookup_all(&name).to_vec();
+                if !candidates.is_empty() {
+                    return Ok(candidates);
+                }
             }
             for selection in [ImportSelection::Explicit, ImportSelection::Wildcard] {
                 let candidates = self.lookup_import_candidates(
@@ -3135,32 +3167,6 @@ impl<'a> SourceTyper<'a> {
                 )?;
                 if !candidates.is_empty() {
                     return Ok(candidates);
-                }
-            }
-        }
-        // Top-level source methods are owned by their synthetic package
-        // module class, while their recorded lexical context is the package
-        // wrapper. Include the owner's members as the final lexical lookup
-        // step so sibling methods (including the method being inferred) can
-        // resolve just as they do for class and object methods.
-        if self.store.symbols.contains(context.owner) {
-            let owner = self.store.symbols.get(context.owner).owner;
-            if let Some(owner) = owner.filter(|owner| {
-                self.store.symbols.contains(*owner)
-                    && matches!(
-                        self.store.symbols.get(*owner).kind,
-                        SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
-                    )
-            }) && let Some(scope) = self.index.scope_of(owner)
-            {
-                let scope_is_in_context_chain = contexts.iter().any(|context_id| {
-                    self.index.source_context(*context_id).lexical_scope == scope
-                });
-                if !scope_is_in_context_chain {
-                    let candidates = self.store.scopes.get(scope).lookup_all(&name).to_vec();
-                    if !candidates.is_empty() {
-                        return Ok(candidates);
-                    }
                 }
             }
         }
@@ -12065,6 +12071,46 @@ mod tests {
         assert_eq!(*typer.store().symbols.info(second), SymbolInfo::Missing);
         assert!(typer.source_typed_index().is_empty());
         assert!(typer.inferred_method_results_in_progress.is_empty());
+    }
+
+    #[test]
+    fn top_level_method_beats_same_named_import_in_term_resolution() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "object Other { def value: Boolean = true }\nimport Other.value\ndef value = 2\ndef use = value",
+        );
+        let mut method_trees = HashMap::new();
+        for (tree, node) in parsed.ast.iter() {
+            if let TreeKind::DefDef(definition) = &node.kind {
+                let name = store.names.resolve(definition.name.as_name().text());
+                method_trees.insert(
+                    name.to_owned(),
+                    (tree, index.symbol_at(source, tree).unwrap()),
+                );
+            }
+        }
+        let (use_tree, use_method) = method_trees["use"];
+        let local_value = method_trees["value"].1;
+        let TreeKind::DefDef(definition) = &parsed.ast.get(use_tree).kind else {
+            unreachable!();
+        };
+        let rhs = definition.rhs.unwrap();
+        let position = parsed.ast.get(rhs).position;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(use_method).unwrap();
+        let name = *dotty_core::TermName::new(typer.store.names.intern("value")).as_name();
+
+        let resolved = typer
+            .resolve_expression_term(name, context, rhs.index(), position)
+            .unwrap();
+
+        assert_eq!(resolved, local_value);
     }
 
     #[test]
