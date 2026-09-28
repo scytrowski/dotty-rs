@@ -58,6 +58,10 @@ where
             );
         }
 
+        if let Some(tree) = self.parse_qualified_this_reference(mark) {
+            return tree;
+        }
+
         if matches!(
             self.current().kind,
             TokenKind::Identifier | TokenKind::BackquotedIdentifier

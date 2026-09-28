@@ -1,7 +1,7 @@
 //! Shared parsing of dotted source references.
 
-use dotty_core::ast::{Ident, Select};
-use dotty_core::{HardKeyword, Name, TokenKind, TreeId, TreeKind, Untyped};
+use dotty_core::ast::{Ident, Select, This};
+use dotty_core::{HardKeyword, Name, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::Parser;
 
@@ -23,6 +23,36 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    /// Parses the shared `[id '.'] this` reference form when qualified.
+    /// Dotty stores the qualifier in the type-name namespace.
+    pub(crate) fn parse_qualified_this_reference(
+        &mut self,
+        mark: crate::Mark,
+    ) -> Option<TreeId<Untyped>> {
+        if !self.current_starts_qualified_this() {
+            return None;
+        }
+
+        let qualifier = *self.intern_current_type_name().ok()?.as_name();
+        self.advance();
+        self.advance();
+        self.advance();
+        Some(self.alloc_from(
+            mark,
+            TreeKind::This(This {
+                qual: Some(qualifier),
+            }),
+        ))
+    }
+
+    pub(crate) fn current_starts_qualified_this(&mut self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) && self.cursor.lookahead(1).kind == TokenKind::Punctuation(Punctuation::Dot)
+            && self.cursor.lookahead(2).kind == TokenKind::Keyword(HardKeyword::This)
+    }
+
     /// Returns the term name accepted after a selection dot. Scala's scanner
     /// presents ordinary symbolic method names as identifiers; our scanner
     /// keeps them as operators, so bridge those spellings here while leaving

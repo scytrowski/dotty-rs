@@ -277,7 +277,12 @@ where
 
     fn simple_pattern(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
+        let starts_qualified_this = self.current_starts_qualified_this();
         let tree = match self.current().kind {
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier if starts_qualified_this => {
+                self.parse_qualified_this_reference(mark)
+                    .unwrap_or_else(|| self.error_pattern(self.current_span()))
+            }
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
                 let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
                 let Ok(name) = self.intern_current_term_name() else {
@@ -652,7 +657,7 @@ mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::{
-        Alternative, Annotated, Apply, Bind, Ident, SplicePattern, Tuple, UntypedNode,
+        Alternative, Annotated, Apply, Bind, Ident, SplicePattern, This, Tuple, UntypedNode,
     };
     use dotty_core::{NameInterner, Punctuation, TextRange};
 
@@ -1543,6 +1548,55 @@ mod tests {
             TreeKind::Select(_)
         ));
         assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parses_a_qualified_this_member_pattern_with_source_spans() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "Outer.this.member",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Punctuation(Punctuation::Dot), 5, 6),
+                token(TokenKind::Keyword(HardKeyword::This), 6, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Identifier, 11, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        let TreeKind::Select(selection) = result.ast.get(result.root).kind else {
+            panic!("expected selection over qualified this");
+        };
+        let TreeKind::This(This {
+            qual: Some(qualifier),
+        }) = result.ast.get(selection.qualifier).kind
+        else {
+            panic!("expected qualified this receiver");
+        };
+
+        assert!(qualifier.is_type());
+        assert_eq!(
+            result
+                .ast
+                .get(selection.qualifier)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(0, 10).unwrap()
+        );
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 17).unwrap()
+        );
+        assert!(result.diagnostics.is_empty());
+        let member = selection.name;
+        drop(result);
+        assert_eq!(names.resolve(qualifier.text()), "Outer");
+        assert_eq!(names.resolve(member.text()), "member");
     }
 
     #[test]
