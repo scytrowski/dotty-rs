@@ -5184,6 +5184,29 @@ mod tests {
     }
 
     #[test]
+    fn recovers_from_a_missing_function_parent_result_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C extends (A => )",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Extends), 8, 15),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 16, 17),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Operator, 19, 21),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 22, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_class_definition(Location::Elsewhere);
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn parses_parent_constructor_arguments_and_parent_lists() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
