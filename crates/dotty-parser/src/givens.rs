@@ -572,6 +572,7 @@ where
         }
 
         let colon = self.cursor.lookahead(offset).clone();
+        let candidate = self.cursor.lookahead(offset.saturating_add(1)).clone();
         saw_parameter_clause
             && matches!(
                 colon.kind,
@@ -581,6 +582,13 @@ where
                     | TokenKind::Punctuation(Punctuation::Colon)
             )
             && self.token_text(&colon).ok() == Some(":")
+            && matches!(
+                candidate.kind,
+                TokenKind::Identifier
+                    | TokenKind::BackquotedIdentifier
+                    | TokenKind::Punctuation(Punctuation::LeftParen)
+            )
+            && !self.has_line_break_between(colon.span.end(), candidate.span.start())
     }
 
     fn has_line_break_between(&self, start: u32, end: u32) -> bool {
@@ -1529,33 +1537,31 @@ mod tests {
     fn recovers_from_a_generic_named_given_without_its_type_before_the_next_member() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
-            "given foo[T](using ctx: Ctx):\ndef next = value",
+            "given foo[T]: Out[T] ? def next = value",
             vec![
                 token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
                 token(TokenKind::Identifier, 6, 9),
                 token(TokenKind::Punctuation(Punctuation::LeftBracket), 9, 10),
                 token(TokenKind::Identifier, 10, 11),
                 token(TokenKind::Punctuation(Punctuation::RightBracket), 11, 12),
-                token(TokenKind::Punctuation(Punctuation::LeftParen), 12, 13),
-                token(TokenKind::Identifier, 13, 18),
-                token(TokenKind::Identifier, 19, 22),
-                token(TokenKind::Punctuation(Punctuation::Colon), 22, 23),
-                token(TokenKind::Identifier, 24, 27),
-                token(TokenKind::Punctuation(Punctuation::RightParen), 27, 28),
-                token(TokenKind::Punctuation(Punctuation::Colon), 28, 29),
-                token(TokenKind::Newline, 29, 30),
-                token(TokenKind::Keyword(HardKeyword::Def), 30, 33),
-                token(TokenKind::Identifier, 34, 38),
-                token(TokenKind::Operator, 39, 40),
-                token(TokenKind::Identifier, 41, 46),
-                token(TokenKind::Eof, 46, 46),
+                token(TokenKind::Punctuation(Punctuation::Colon), 12, 13),
+                token(TokenKind::Identifier, 14, 17),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 17, 18),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 19, 20),
+                token(TokenKind::Operator, 21, 22),
+                token(TokenKind::Keyword(HardKeyword::Def), 23, 26),
+                token(TokenKind::Identifier, 27, 31),
+                token(TokenKind::Operator, 32, 33),
+                token(TokenKind::Identifier, 34, 39),
+                token(TokenKind::Eof, 39, 39),
             ],
             &mut names,
         );
 
         let _ = parser.parse_statement(Location::Elsewhere);
         assert!(!parser.diagnostics().is_empty());
-        assert_eq!(parser.current().kind, TokenKind::Newline);
+        assert_eq!(parser.current().kind, TokenKind::Operator);
 
         parser.advance();
         let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
