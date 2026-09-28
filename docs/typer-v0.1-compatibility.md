@@ -61,10 +61,13 @@ For the tested subset, source Typer completion currently supports:
 Expression typing currently includes typed identifiers, stable term selections,
 literal expressions, plain method applications, and blocks with expressions
 and local `val`/`var` definitions with or without explicit types. It also
-supports expected-type conformance checks and source type ascriptions over
-that expression subset. Expected typing widens the expression type for the
-existing conformance relation without changing the child tree's own type; a
-typed ascription node carries the projected source type. An inferred local
+supports expected-type conformance checks, source type ascriptions, and direct
+assignments to mutable locals and fields over that expression subset. Expected
+typing widens the expression type for the existing conformance relation
+without changing the child tree's own type; a typed ascription node carries the
+projected source type. Assignment requires an exact mutable symbol reference,
+checks the right-hand side through expected typing, and produces `Unit`.
+Selected field types are adapted to the receiver. An inferred local
 uses the already typed RHS and `widen_expression_type`; it does not repeat
 identifier, member, or application lookup. The pinned Scala 3.9.0 source, TASTy,
 and normalized typed-tree oracle are in

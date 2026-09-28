@@ -3,7 +3,7 @@
 
 use crate::ast::arena::AstArena;
 use crate::ast::common::{
-    Apply, ApplyKind, Block, Ident, Literal, Select, This, TypeApply, TypeTree, TypedExpr,
+    Apply, ApplyKind, Assign, Block, Ident, Literal, Select, This, TypeApply, TypeTree, TypedExpr,
 };
 use crate::ast::phase::Typed;
 use crate::ast::tree::{Tree, TreeKind};
@@ -181,6 +181,21 @@ impl<'a> TypedAstBuilder<'a> {
         })
     }
 
+    /// Allocates a typed assignment whose result has the canonical `Unit` type.
+    pub fn assign(
+        &mut self,
+        lhs: TreeId<Typed>,
+        rhs: TreeId<Typed>,
+        unit: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        self.arena.alloc(Tree {
+            kind: TreeKind::Assign(Assign { lhs, rhs }),
+            position,
+            ty: unit,
+        })
+    }
+
     /// Reifies a projected source type as a typed type tree. Type trees carry
     /// their meaning in `Tree::ty`; the source typer records the source mapping.
     pub fn type_tree(&mut self, ty: TypeId, position: Option<SourceSpan>) -> TreeId<Typed> {
@@ -300,6 +315,28 @@ mod tests {
         };
         assert_eq!(typed_expr.expr, expr);
         assert_eq!(typed_expr.tpt, tpt);
+    }
+
+    #[test]
+    fn assign_references_its_operands_and_uses_unit_type() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let lhs = builder.ident(
+            Name::new(NameId::new(1), Namespace::Term),
+            TypeId::new(2),
+            None,
+        );
+        let rhs = builder.literal(Constant::Int(1), TypeId::new(3), None);
+        let unit = TypeId::new(4);
+
+        let assign = builder.assign(lhs, rhs, unit, None);
+
+        assert_eq!(arena.get(assign).ty, unit);
+        let TreeKind::Assign(assign) = arena.get(assign).kind else {
+            panic!("expected an assignment");
+        };
+        assert_eq!(assign.lhs, lhs);
+        assert_eq!(assign.rhs, rhs);
     }
 
     #[test]
