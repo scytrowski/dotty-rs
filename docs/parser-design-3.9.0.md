@@ -202,10 +202,13 @@ Package bodies may be braced, scanner-provided indented regions, or the
 unbraced outermost package form. Import and export clauses preserve source
 order and expand comma-separated expressions into separate `Import` or
 `Export` statement trees. Their selectors retain aliases, wildcard selectors,
-and the narrow `given T` type-bound form. Named selectors accept both modern
-`as` renames and Scala 3.9's deprecated `=>` compatibility spelling, including
-renaming to `_` to hide a name. Wildcard selectors accept both `*` and the
-legacy `_` spelling and preserve the same wildcard selector in the source AST.
+backquoted source names, and the narrow `given T` type-bound form. Symbolic
+term names are accepted for object declarations and import selectors when the
+scanner classifies them as operators rather than identifiers. Named selectors
+accept both modern `as` renames and Scala 3.9's deprecated `=>` compatibility
+spelling, including renaming to `_` to hide a name. Wildcard selectors accept
+both `*` and the legacy `_` spelling and preserve the same wildcard selector
+in the source AST.
 In default Scala 3.9 mode `_` has no parser diagnostic; Dotty's
 `ImportWildcard` migration warning/error is gated on `future-migration`/`future`
 source versions, which the current parser does not configure. Arbitrary
