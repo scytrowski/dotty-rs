@@ -3,7 +3,7 @@
 
 use crate::ast::arena::AstArena;
 use crate::ast::common::{
-    Apply, ApplyKind, Block, Ident, Literal, Select, This, TypeApply, TypeTree,
+    Apply, ApplyKind, Block, Ident, Literal, Select, This, TypeApply, TypeTree, TypedExpr,
 };
 use crate::ast::phase::Typed;
 use crate::ast::tree::{Tree, TreeKind};
@@ -161,6 +161,26 @@ impl<'a> TypedAstBuilder<'a> {
         })
     }
 
+    /// Allocates a typed ascription. The child expression keeps its own type;
+    /// the enclosing node carries the ascribed type.
+    pub fn typed_expr(
+        &mut self,
+        expr: TreeId<Typed>,
+        tpt: TreeId<Typed>,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        debug_assert!(
+            matches!(self.arena.get(tpt).kind, TreeKind::TypeTree(_)),
+            "a typed ascription must reference a typed type tree"
+        );
+        self.arena.alloc(Tree {
+            kind: TreeKind::Typed(TypedExpr { expr, tpt }),
+            position,
+            ty,
+        })
+    }
+
     /// Reifies a projected source type as a typed type tree. Type trees carry
     /// their meaning in `Tree::ty`; the source typer records the source mapping.
     pub fn type_tree(&mut self, ty: TypeId, position: Option<SourceSpan>) -> TreeId<Typed> {
@@ -260,6 +280,26 @@ mod tests {
         };
         assert_eq!(block.stats, vec![stat]);
         assert_eq!(block.expr, expr);
+    }
+
+    #[test]
+    fn typed_expr_references_its_child_and_ascribed_type_tree() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let child_type = TypeId::new(2);
+        let ascribed_type = TypeId::new(3);
+        let expr = builder.literal(Constant::Int(1), child_type, None);
+        let tpt = builder.type_tree(ascribed_type, None);
+
+        let ascription = builder.typed_expr(expr, tpt, ascribed_type, None);
+
+        assert_eq!(arena.get(expr).ty, child_type);
+        assert_eq!(arena.get(ascription).ty, ascribed_type);
+        let TreeKind::Typed(typed_expr) = arena.get(ascription).kind else {
+            panic!("expected a typed expression ascription");
+        };
+        assert_eq!(typed_expr.expr, expr);
+        assert_eq!(typed_expr.tpt, tpt);
     }
 
     #[test]

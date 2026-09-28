@@ -4,7 +4,10 @@
 //! parse source, allocate declaration symbols, or load classpath entries.
 //! [`SourceTyper::type_expression`] builds typed AST nodes for literals, term
 //! identifiers, `this`, unique member selections, plain method applications,
-//! and explicit positional type applications for one polymorphic callee.
+//! explicit positional type applications for one polymorphic callee, and
+//! source type ascriptions. [`SourceTyper::type_expression_expected`] checks
+//! the widened expression type against a semantic expected type while keeping
+//! the expression node's own type unchanged.
 //! Type arguments are projected in the expression's lexical context and
 //! represented by typed `TypeTree` nodes carrying their semantic `TypeId`;
 //! each source type-argument root maps to that node in `SourceTypedIndex`,
