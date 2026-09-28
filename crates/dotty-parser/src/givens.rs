@@ -40,13 +40,16 @@ where
         };
         self.expect(TokenKind::Keyword(HardKeyword::Given));
 
-        let has_name = self.starts_named_given();
+        let has_parameterized_name = self.starts_parameterized_named_given();
+        let has_name = has_parameterized_name || self.starts_named_given();
         let name = if has_name {
             let name = self
                 .intern_current_term_name()
                 .unwrap_or_else(|_| anonymous_term_name(self.names));
             self.advance();
-            self.advance(); // `:`
+            if !has_parameterized_name {
+                self.advance(); // `:`
+            }
             name
         } else {
             anonymous_term_name(self.names)
@@ -65,41 +68,35 @@ where
         let mut value_param_clauses = Vec::new();
         let mut num_lead_params = 0;
         let mut has_explicit_parameter_clause = false;
+        if has_parameterized_name {
+            self.parse_given_parameter_clauses(
+                &mut value_param_clauses,
+                &mut num_lead_params,
+                &mut has_explicit_parameter_clause,
+                true,
+            );
+            self.consume_newlines_before_given_colon();
+            if self.current_is_given_colon() {
+                self.advance();
+            } else {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected `:` after a named given signature",
+                );
+            }
+        } else if !type_params.is_empty() && self.current_is_given_colon() {
+            // Anonymous parameterized givens may use the legacy colon between
+            // their type-parameter clause and the implemented given type.
+            self.advance();
+        }
         let parents = loop {
             if self.starts_given_parameter_clause() {
-                let clause_mark = self.mark();
-                has_explicit_parameter_clause = true;
-                let is_using = self.current_is_using_parameter_clause();
-                let clause = self.parse_single_term_param_clause(
-                    ParamOwner::Given,
-                    true,
-                    is_using,
-                    num_lead_params,
+                self.parse_given_parameter_clauses(
+                    &mut value_param_clauses,
+                    &mut num_lead_params,
+                    &mut has_explicit_parameter_clause,
+                    false,
                 );
-                num_lead_params += clause.len();
-                if !clause.is_empty() {
-                    value_param_clauses.push(clause);
-                } else if num_lead_params > 0 {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedToken,
-                        "expected a context parameter after `()`",
-                    );
-                    let missing_type = self.error_type(self.zero_width_span(clause_mark.start()));
-                    let parameter = self.alloc_synthetic_context_parameter(
-                        clause_mark,
-                        missing_type,
-                        num_lead_params.saturating_add(1),
-                        Modifiers {
-                            modifiers: vec![Modifier::Given, Modifier::Param],
-                            ..Modifiers::default()
-                        },
-                    );
-                    self.ast.get_mut(parameter).position =
-                        Some(self.zero_width_span(clause_mark.start()));
-                    num_lead_params = num_lead_params.saturating_add(1);
-                    value_param_clauses.push(vec![parameter]);
-                }
-                self.expect_arrow();
                 continue;
             }
 
@@ -408,6 +405,86 @@ where
         }
     }
 
+    fn parse_given_parameter_clauses(
+        &mut self,
+        value_param_clauses: &mut Vec<Vec<TreeId<Untyped>>>,
+        num_lead_params: &mut usize,
+        has_explicit_parameter_clause: &mut bool,
+        allow_without_arrow: bool,
+    ) {
+        loop {
+            if allow_without_arrow {
+                self.consume_newlines_before_parameter_clause(TokenKind::Punctuation(
+                    Punctuation::LeftParen,
+                ));
+            }
+            let is_parameter_clause = self.starts_given_parameter_clause()
+                || (allow_without_arrow
+                    && self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen));
+            if !is_parameter_clause {
+                break;
+            }
+
+            let clause_mark = self.mark();
+            *has_explicit_parameter_clause = true;
+            let is_using = self.current_is_using_parameter_clause();
+            let clause = self.parse_single_term_param_clause(
+                ParamOwner::Given,
+                true,
+                is_using,
+                *num_lead_params,
+            );
+            *num_lead_params += clause.len();
+            if !clause.is_empty() {
+                value_param_clauses.push(clause);
+            } else if *num_lead_params > 0 {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected a context parameter after `()`",
+                );
+                let missing_type = self.error_type(self.zero_width_span(clause_mark.start()));
+                let parameter = self.alloc_synthetic_context_parameter(
+                    clause_mark,
+                    missing_type,
+                    num_lead_params.saturating_add(1),
+                    Modifiers {
+                        modifiers: vec![Modifier::Given, Modifier::Param],
+                        ..Modifiers::default()
+                    },
+                );
+                self.ast.get_mut(parameter).position =
+                    Some(self.zero_width_span(clause_mark.start()));
+                *num_lead_params = num_lead_params.saturating_add(1);
+                value_param_clauses.push(vec![parameter]);
+            }
+
+            if self.current_is_arrow() {
+                self.advance();
+            } else if !allow_without_arrow {
+                self.expect_arrow();
+            }
+        }
+    }
+
+    fn consume_newlines_before_given_colon(&mut self) {
+        let mut newline_count = 0;
+        while matches!(
+            self.cursor.lookahead(newline_count).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            newline_count += 1;
+        }
+        if self.cursor.lookahead(newline_count).kind == TokenKind::ColonEol
+            || self.cursor.lookahead(newline_count).kind == TokenKind::ColonFollow
+            || self.cursor.lookahead(newline_count).kind
+                == TokenKind::Punctuation(Punctuation::Colon)
+        {
+            for _ in 0..newline_count {
+                self.advance();
+            }
+        }
+    }
+
     fn starts_named_given(&mut self) -> bool {
         if !matches!(
             self.current().kind,
@@ -432,6 +509,77 @@ where
                     | TokenKind::Punctuation(Punctuation::LeftParen)
             )
             && !self.has_line_break_between(next.span.end(), candidate.span.start())
+    }
+
+    fn starts_parameterized_named_given(&mut self) -> bool {
+        if !matches!(
+            self.current().kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) {
+            return false;
+        }
+
+        let mut offset = 1;
+        let mut saw_parameter_clause = false;
+        loop {
+            while matches!(
+                self.cursor.lookahead(offset).kind,
+                TokenKind::Newline | TokenKind::Newlines
+            ) {
+                offset += 1;
+            }
+            let opening = self.cursor.lookahead(offset).kind;
+            let closing = match opening {
+                TokenKind::Punctuation(Punctuation::LeftParen) => {
+                    TokenKind::Punctuation(Punctuation::RightParen)
+                }
+                TokenKind::Punctuation(Punctuation::LeftBracket) => {
+                    TokenKind::Punctuation(Punctuation::RightBracket)
+                }
+                _ => break,
+            };
+
+            let mut delimiters = vec![closing];
+            offset += 1;
+            while !delimiters.is_empty() {
+                let kind = self.cursor.lookahead(offset).kind;
+                let nested_closing = match kind {
+                    TokenKind::Punctuation(Punctuation::LeftParen) => {
+                        Some(TokenKind::Punctuation(Punctuation::RightParen))
+                    }
+                    TokenKind::Punctuation(Punctuation::LeftBracket) => {
+                        Some(TokenKind::Punctuation(Punctuation::RightBracket))
+                    }
+                    _ => None,
+                };
+                if let Some(nested_closing) = nested_closing {
+                    delimiters.push(nested_closing);
+                } else if matches!(
+                    kind,
+                    TokenKind::Punctuation(Punctuation::RightParen)
+                        | TokenKind::Punctuation(Punctuation::RightBracket)
+                ) {
+                    if delimiters.pop() != Some(kind) {
+                        return false;
+                    }
+                } else if kind == TokenKind::Eof {
+                    return false;
+                }
+                offset += 1;
+            }
+            saw_parameter_clause = true;
+        }
+
+        let colon = self.cursor.lookahead(offset).clone();
+        saw_parameter_clause
+            && matches!(
+                colon.kind,
+                TokenKind::ColonFollow
+                    | TokenKind::ColonEol
+                    | TokenKind::ColonOp
+                    | TokenKind::Punctuation(Punctuation::Colon)
+            )
+            && self.token_text(&colon).ok() == Some(":")
     }
 
     fn has_line_break_between(&self, start: u32, end: u32) -> bool {
@@ -786,6 +934,88 @@ mod tests {
         assert_eq!(definition.type_params.len(), 1);
         assert!(definition.value_param_clauses.is_empty());
         assert!(definition.metadata.modifiers.contains(&Modifier::Given));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_anonymous_parameterized_given_with_colon_separator() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given [A]: Show = makeShow",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 6, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Punctuation(Punctuation::Colon), 9, 10),
+                token(TokenKind::Identifier, 11, 15),
+                token(TokenKind::Operator, 16, 17),
+                token(TokenKind::Identifier, 18, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method definition");
+        };
+        assert_eq!(definition.type_params.len(), 1);
+        assert!(definition.value_param_clauses.is_empty());
+        assert!(definition.metadata.modifiers.contains(&Modifier::Given));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_named_generic_given_with_a_using_clause() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given foo[T](using ctx: Ctx): Out[T] = value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 11, 12),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 12, 13),
+                token(TokenKind::Identifier, 13, 18),
+                token(TokenKind::Identifier, 19, 22),
+                token(TokenKind::Punctuation(Punctuation::Colon), 22, 23),
+                token(TokenKind::Identifier, 24, 27),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 27, 28),
+                token(TokenKind::Punctuation(Punctuation::Colon), 28, 29),
+                token(TokenKind::Identifier, 30, 33),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 33, 34),
+                token(TokenKind::Identifier, 34, 35),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 35, 36),
+                token(TokenKind::Operator, 37, 38),
+                token(TokenKind::Identifier, 39, 44),
+                token(TokenKind::Eof, 44, 44),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method definition");
+        };
+        let [parameter] = definition.value_param_clauses[0].as_slice() else {
+            panic!("expected one using parameter");
+        };
+        let TreeKind::ValDef(parameter) = &parser.ast().get(*parameter).kind else {
+            panic!("expected a parameter value definition");
+        };
+        assert_eq!(
+            parser.names.resolve(definition.name.as_name().text()),
+            "foo"
+        );
+        assert_eq!(definition.type_params.len(), 1);
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Given));
+        assert!(definition.rhs.is_some());
         assert!(parser.diagnostics().is_empty());
     }
 
