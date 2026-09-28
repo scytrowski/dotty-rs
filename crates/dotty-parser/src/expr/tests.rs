@@ -4491,6 +4491,55 @@ fn parses_super_selection_with_a_source_span() {
 }
 
 #[test]
+fn parses_qualified_this_selection_with_full_spans() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "Outer.this.member",
+        vec![
+            token(TokenKind::Identifier, 0, 5),
+            token(TokenKind::Punctuation(Punctuation::Dot), 5, 6),
+            token(TokenKind::Keyword(HardKeyword::This), 6, 10),
+            token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+            token(TokenKind::Identifier, 11, 17),
+            token(TokenKind::Eof, 17, 17),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Select(selection) = parser.ast().get(id).kind else {
+        panic!("expected selection over qualified this");
+    };
+    let TreeKind::This(This {
+        qual: Some(qualifier),
+    }) = parser.ast().get(selection.qualifier).kind
+    else {
+        panic!("expected qualified this receiver");
+    };
+
+    assert!(qualifier.is_type());
+    assert_eq!(
+        parser
+            .ast()
+            .get(selection.qualifier)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(0, 10).unwrap()
+    );
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(0, 17).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+    let (qualifier, member) = (qualifier, selection.name);
+    drop(parser);
+    assert_eq!(names.resolve(qualifier.text()), "Outer");
+    assert_eq!(names.resolve(member.text()), "member");
+}
+
+#[test]
 fn parses_qualified_super_with_a_mixin_qualifier() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
