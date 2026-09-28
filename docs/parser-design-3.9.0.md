@@ -640,7 +640,11 @@ given T = rhs                  -> ValDef
 given name: T = rhs            -> ValDef
 given name: T                  -> DefDef(rhs = None), at a statement boundary
 given [A] => T = rhs            -> DefDef
+given [A]: T = rhs              -> DefDef
+given name[A]: T = rhs          -> DefDef
+given name[A](using x: X): T = rhs -> DefDef
 given (using ctx: Ctx) => T = rhs -> DefDef
+given [A] => (using ctx: Ctx) => T = rhs -> DefDef
 given T => U = rhs              -> DefDef(using x$1: T)
 given (T, U) => V = rhs         -> DefDef(using x$1: T, x$2: U)
 given T: body                  -> ModuleDef(Template(...))
@@ -665,6 +669,9 @@ migration warning for this deprecated syntax is not currently modeled.
 Structural givens preserve constructor applications and comma- or
 `with`-separated parent lists in the shared `Template`; other legacy migration
 syntax and semantic resolution remain outside the parser.
+As in Dotty 3.9, the arrow following a given type-parameter clause is optional;
+named generic signatures may place type and `using` parameter clauses before
+the colon that introduces the given type.
 
 An extension is represented by the existing `UntypedNode::ExtensionMethods`
 wrapper. Its parameter clauses remain in source order: leading type parameters,
