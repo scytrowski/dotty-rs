@@ -20,4 +20,15 @@ pub trait TokenSource {
 
     /// Reports parser context needed by the contextual scanner.
     fn observe(&mut self, event: ScannerEvent);
+
+    /// Reports an event at a lookahead token without advancing the source.
+    ///
+    /// Sources that cannot apply speculative layout feedback may keep the
+    /// default behavior; parser callers should still verify the resulting
+    /// lookahead before relying on it.
+    fn observe_at(&mut self, offset: usize, event: ScannerEvent) {
+        if offset == 0 {
+            self.observe(event);
+        }
+    }
 }

@@ -62,6 +62,11 @@ where
         self.source.observe(event);
     }
 
+    /// Forwards scanner feedback to a lookahead token without advancing.
+    pub fn observe_at(&mut self, offset: usize, event: ScannerEvent) {
+        self.source.observe_at(offset, event);
+    }
+
     /// Consumes the current token when it has `kind`.
     pub fn accept(&mut self, kind: TokenKind) -> bool {
         if self.at(kind) {
