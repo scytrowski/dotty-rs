@@ -56,14 +56,22 @@ For the tested subset, source Typer completion currently supports:
 - primary constructor signature normalization for a plain constructor.
 
 Expression typing currently includes typed identifiers, stable term selections,
-literal expressions, and plain method applications. Application sites can
-resolve lexical, imported, and selected overload buckets for supported
-monomorphic methods. Candidate filtering uses exact arity and nominal
-conformance; when several candidates apply, only a unique method whose formal
-types are strictly more specific than every other applicable candidate is
-selected. Selected members use receiver-adapted signatures, including inherited
-generic methods. Standalone overloaded identifiers and selections remain
-deferred. Generic overload competition remains deferred.
+literal expressions, plain method applications, and expression-only blocks.
+Blocks type their statements in order, preserve the typed Block shape and
+source position, and use the final expression's own type without widening it.
+Each block allocates an empty scope in `SemanticStore` owned by the current
+semantic expression owner; nested blocks push nested scopes. The scope and all
+typed nodes and source mappings are rolled back when any part of the block
+fails. Local declarations and imports in block statements return an explicit
+deferral.
+
+Application sites can resolve lexical, imported, and selected overload buckets
+for supported monomorphic methods. Candidate filtering uses exact arity and
+nominal conformance; when several candidates apply, only a unique method whose
+formal types are strictly more specific than every other applicable candidate
+is selected. Selected members use receiver-adapted signatures, including
+inherited generic methods. Standalone overloaded identifiers and selections
+remain deferred. Generic overload competition remains deferred.
 
 `SourceTyper::expression_context_for` builds a method or constructor body
 context from the namer's declaration context and owned scope. Term lookup checks
@@ -71,9 +79,8 @@ typer-local scopes from innermost to outermost before source scopes and their
 import rules, preserving each matching overload bucket. The method scope is
 reused as indexed, so parameters are not entered a second time. Constructor
 contexts expose constructor-owned parameters for lookup, but constructor-body
-typing is not otherwise implemented. `push_local_scope` provides the typer's
-scope-stack hook for nested expression forms; this does not imply block typing
-support.
+typing is not otherwise implemented. `push_local_scope` adds empty block scopes
+without changing the namer's source-context graph.
 
 Explicit positional type applications are supported for one resolved `Poly`
 callee. Type arguments use the expression's lexical context, require exact
@@ -109,8 +116,9 @@ The parity gate does not claim support for arbitrary Scala 3.9 source. These
 parts remain deferred until their source semantic implementation and fixtures
 are ready:
 
-- expression typing and result-type inference;
-- result-type inference beyond the current explicit method signatures;
+- expression forms outside the supported identifier, selection, literal,
+  application, and expression-only block subset;
+- method result-type inference;
 - enum semantics, case-class synthetic APIs, and `derives`;
 - context-bound evidence synthesis;
 - default imports and general standard-library member lookup;
@@ -121,7 +129,5 @@ Scala 3.9 TASTy records inferred/default module self references that source
 `ClassInfo` completion does not yet synthesize. For module classes only, the
 normalizer treats a missing self type and the matching compiler-generated
 module self reference as the same default. Explicit non-default self types are
-still compared structurally. The next Typer phase should build typed trees and
-expression types after closing the remaining declaration-level parity gaps.
-Do not treat this gate as evidence of expression-typing or full Scala source
-compatibility.
+still compared structurally. Do not treat this gate as evidence of general
+expression typing or full Scala source compatibility.

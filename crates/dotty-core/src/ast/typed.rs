@@ -2,7 +2,9 @@
 //! without a real `TypeId`.
 
 use crate::ast::arena::AstArena;
-use crate::ast::common::{Apply, ApplyKind, Ident, Literal, Select, This, TypeApply, TypeTree};
+use crate::ast::common::{
+    Apply, ApplyKind, Block, Ident, Literal, Select, This, TypeApply, TypeTree,
+};
 use crate::ast::phase::Typed;
 use crate::ast::tree::{Tree, TreeKind};
 use crate::ids::{TreeId, TypeId};
@@ -139,6 +141,26 @@ impl<'a> TypedAstBuilder<'a> {
         })
     }
 
+    /// Allocates a typed block whose type is the final expression's own type.
+    pub fn block(
+        &mut self,
+        stats: Vec<TreeId<Typed>>,
+        expr: TreeId<Typed>,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        debug_assert_eq!(
+            self.arena.get(expr).ty,
+            ty,
+            "a typed block must carry its final expression's own type"
+        );
+        self.arena.alloc(Tree {
+            kind: TreeKind::Block(Block { stats, expr }),
+            position,
+            ty,
+        })
+    }
+
     /// Reifies a projected source type as a typed type tree. Type trees carry
     /// their meaning in `Tree::ty`; the source typer records the source mapping.
     pub fn type_tree(&mut self, ty: TypeId, position: Option<SourceSpan>) -> TreeId<Typed> {
@@ -213,6 +235,31 @@ mod tests {
             panic!("expected an Apply node");
         };
         assert_eq!(apply.kind, ApplyKind::Using);
+    }
+
+    #[test]
+    fn block_references_typed_stats_and_uses_the_final_expression_type() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let stat = builder.ident(
+            Name::new(NameId::new(1), Namespace::Term),
+            TypeId::new(2),
+            None,
+        );
+        let expr = builder.ident(
+            Name::new(NameId::new(3), Namespace::Term),
+            TypeId::new(4),
+            None,
+        );
+
+        let block = builder.block(vec![stat], expr, TypeId::new(4), None);
+
+        assert_eq!(arena.get(block).ty, arena.get(expr).ty);
+        let TreeKind::Block(block) = &arena.get(block).kind else {
+            panic!("expected a Block node");
+        };
+        assert_eq!(block.stats, vec![stat]);
+        assert_eq!(block.expr, expr);
     }
 
     #[test]
