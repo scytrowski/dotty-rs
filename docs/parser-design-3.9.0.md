@@ -135,6 +135,13 @@ construct produces a `misaligned end marker` diagnostic. The parser does not
 infer layout from source indentation; it uses the scanner's existing
 Outdent-feedback contract when an enclosing template ends at an `end` marker.
 
+Braced statement regions retain physical-line separators even when the braces
+occur inside an application or another parenthesized expression, as in an
+anonymous template passed as an argument. Nested parentheses and brackets
+inside that braced region still suppress their own internal line breaks. This
+lets template members beginning with modifiers or contextual definitions
+remain distinct without accepting same-line members that lack a separator.
+
 ## Diagnostics and recovery
 
 Parser diagnostics use the small categories `ExpectedToken`,
