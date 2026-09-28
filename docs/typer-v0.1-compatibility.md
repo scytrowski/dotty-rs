@@ -65,6 +65,16 @@ selected. Selected members use receiver-adapted signatures, including inherited
 generic methods. Standalone overloaded identifiers and selections remain
 deferred. Generic overload competition remains deferred.
 
+`SourceTyper::expression_context_for` builds a method or constructor body
+context from the namer's declaration context and owned scope. Term lookup checks
+typer-local scopes from innermost to outermost before source scopes and their
+import rules, preserving each matching overload bucket. The method scope is
+reused as indexed, so parameters are not entered a second time. Constructor
+contexts expose constructor-owned parameters for lookup, but constructor-body
+typing is not otherwise implemented. `push_local_scope` provides the typer's
+scope-stack hook for nested expression forms; this does not imply block typing
+support.
+
 Explicit positional type applications are supported for one resolved `Poly`
 callee. Type arguments use the expression's lexical context, require exact
 arity, and are checked against ordinary lower and upper bounds before the Poly
