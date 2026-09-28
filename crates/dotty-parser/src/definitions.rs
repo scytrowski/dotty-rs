@@ -151,7 +151,8 @@ where
             lookahead += 1;
         }
 
-        if self.cursor.lookahead(lookahead).kind == TokenKind::Indent {
+        let already_indented = self.cursor.lookahead(lookahead).kind == TokenKind::Indent;
+        if already_indented {
             return false;
         }
 
@@ -167,7 +168,7 @@ where
         }
 
         self.observe_indented();
-        self.cursor.lookahead(1).kind == TokenKind::Indent
+        self.cursor.lookahead(lookahead).kind == TokenKind::Indent
     }
 
     fn parse_method_name(&mut self) -> TermName {
@@ -496,7 +497,43 @@ mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::UntypedNode;
-    use dotty_core::{NameInterner, Punctuation, TokenKind, TreeKind};
+    use dotty_core::{
+        NameInterner, Punctuation, ScannerEvent, SourceId, SourceText, TextRange, Token, TokenKind,
+        TokenSource, TreeKind,
+    };
+
+    struct NewlineFeedbackSource {
+        tokens: Vec<Token>,
+        index: usize,
+    }
+
+    impl TokenSource for NewlineFeedbackSource {
+        fn current(&self) -> &Token {
+            &self.tokens[self.index]
+        }
+
+        fn position(&self) -> usize {
+            self.index
+        }
+
+        fn advance(&mut self) {
+            self.index = (self.index + 1).min(self.tokens.len() - 1);
+        }
+
+        fn lookahead(&mut self, offset: usize) -> &Token {
+            &self.tokens[(self.index + offset).min(self.tokens.len() - 1)]
+        }
+
+        fn observe(&mut self, event: ScannerEvent) {
+            if event == ScannerEvent::Indented && self.current().kind == TokenKind::Operator {
+                let offset = self.current().span.end();
+                self.tokens.insert(
+                    self.index + 2,
+                    Token::new(TokenKind::Indent, TextRange::new(offset, offset).unwrap()),
+                );
+            }
+        }
+    }
 
     #[test]
     fn parses_a_local_definition_block_as_a_value_rhs() {
@@ -2294,6 +2331,27 @@ mod tests {
             result.ast.get(result.root).kind,
             TreeKind::Block(_)
         ));
+    }
+
+    #[test]
+    fn definition_rhs_feedback_checks_indent_after_newline_tokens() {
+        let source = "=\n  rhs";
+        let tokens = vec![
+            token(TokenKind::Operator, 0, 1),
+            token(TokenKind::Newline, 1, 2),
+            token(TokenKind::Identifier, 4, 7),
+            token(TokenKind::Eof, 7, 7),
+        ];
+        let mut names = NameInterner::new();
+        let mut parser = Parser::new(
+            SourceText::new(source).unwrap(),
+            SourceId::from_index(1),
+            NewlineFeedbackSource { tokens, index: 0 },
+            &mut names,
+        );
+
+        assert!(parser.observe_definition_rhs_indentation());
+        assert_eq!(parser.cursor.lookahead(2).kind, TokenKind::Indent);
     }
 
     #[test]
