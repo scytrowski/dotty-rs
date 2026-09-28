@@ -309,10 +309,10 @@ object Main:
       else if prefixWords.contains("protected") then "protected"
       else ""
     val sourceQualifier =
-      prefixText
-        .drop(prefixText.indexOf('[') + 1)
-        .takeWhile(_ != ']')
-        .trim
+      "(?:private|protected)\\s*\\[([^]]+)\\]".r
+        .findFirstMatchIn(prefixText)
+        .map(_.group(1).trim)
+        .getOrElse("")
     val qualifier =
       if visibility.isEmpty then "null"
       else if !mods.privateWithin.isEmpty then quote(mods.privateWithin.toString)

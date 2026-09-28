@@ -1,5 +1,5 @@
 object GenericGivenSignatures {
-  given [DummySoItsADef]: Context = myContext
+  protected given [DummySoItsADef]: Context = myContext
 
   given named[T]: Context[T] = makeContext[T]
 
