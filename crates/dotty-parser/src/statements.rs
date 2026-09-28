@@ -659,8 +659,9 @@ where
     fn is_case_body_terminator(&self) -> bool {
         matches!(
             self.current().kind,
-            TokenKind::Keyword(HardKeyword::Case)
-                | TokenKind::Punctuation(Punctuation::RightBrace)
+            TokenKind::Keyword(
+                HardKeyword::Case | HardKeyword::Else | HardKeyword::Catch | HardKeyword::Finally
+            ) | TokenKind::Punctuation(Punctuation::RightBrace | Punctuation::RightParen)
                 | TokenKind::Outdent
         )
     }
@@ -760,6 +761,104 @@ mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TextRange, TokenKind, TreeKind};
+
+    #[test]
+    fn case_body_sequence_leaves_an_enclosing_else_for_the_if_parser() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "first else fallback",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Keyword(HardKeyword::Else), 6, 10),
+                token(TokenKind::Identifier, 11, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let (_, expr) = parser.with_case_body(|parser| {
+            parser.parse_statement_sequence(StatementSequenceBoundary::Block(TokenKind::Outdent))
+        });
+
+        assert!(matches!(parser.ast.get(expr).kind, TreeKind::Ident(_)));
+        assert_eq!(parser.current().kind, TokenKind::Keyword(HardKeyword::Else));
+        assert!(parser.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn case_body_sequence_leaves_an_enclosing_catch_for_the_try_parser() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "first catch fallback",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Keyword(HardKeyword::Catch), 6, 11),
+                token(TokenKind::Identifier, 12, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let (_, expr) = parser.with_case_body(|parser| {
+            parser.parse_statement_sequence(StatementSequenceBoundary::Block(TokenKind::Outdent))
+        });
+
+        assert!(matches!(parser.ast.get(expr).kind, TreeKind::Ident(_)));
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Keyword(HardKeyword::Catch)
+        );
+        assert!(parser.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn case_body_sequence_leaves_an_enclosing_finally_for_the_try_parser() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "first finally cleanup",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Keyword(HardKeyword::Finally), 6, 13),
+                token(TokenKind::Identifier, 14, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let (_, expr) = parser.with_case_body(|parser| {
+            parser.parse_statement_sequence(StatementSequenceBoundary::Block(TokenKind::Outdent))
+        });
+
+        assert!(matches!(parser.ast.get(expr).kind, TreeKind::Ident(_)));
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Keyword(HardKeyword::Finally)
+        );
+        assert!(parser.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn case_body_sequence_still_reports_a_missing_statement_separator() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "first if",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Keyword(HardKeyword::If), 6, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        parser.with_case_body(|parser| {
+            parser.parse_statement_sequence(StatementSequenceBoundary::Block(TokenKind::Outdent))
+        });
+
+        assert!(parser.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
+                && diagnostic.message() == "expected a block statement separator"
+        }));
+    }
 
     #[test]
     fn matching_if_end_marker_is_consumed_and_extends_the_if_span() {
