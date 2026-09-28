@@ -3,7 +3,7 @@
 
 use crate::ast::arena::AstArena;
 use crate::ast::common::{
-    Apply, ApplyKind, Assign, Block, Ident, If, Literal, Select, This, TypeApply, TypeTree,
+    Apply, ApplyKind, Assign, Block, Ident, If, Literal, Return, Select, This, TypeApply, TypeTree,
     TypedExpr, While,
 };
 use crate::ast::phase::Typed;
@@ -232,6 +232,21 @@ impl<'a> TypedAstBuilder<'a> {
         })
     }
 
+    /// Allocates a typed return with the caller-supplied canonical `Nothing` type.
+    pub fn return_expr(
+        &mut self,
+        expr: Option<TreeId<Typed>>,
+        from: Option<TreeId<Typed>>,
+        nothing: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        self.arena.alloc(Tree {
+            kind: TreeKind::Return(Return { expr, from }),
+            position,
+            ty: nothing,
+        })
+    }
+
     /// Reifies a projected source type as a typed type tree. Type trees carry
     /// their meaning in `Tree::ty`; the source typer records the source mapping.
     pub fn type_tree(&mut self, ty: TypeId, position: Option<SourceSpan>) -> TreeId<Typed> {
@@ -411,6 +426,28 @@ mod tests {
         };
         assert_eq!(while_expr.cond, condition);
         assert_eq!(while_expr.body, body);
+    }
+
+    #[test]
+    fn return_expr_preserves_optional_expression_and_target_and_uses_nothing() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let expr = builder.literal(Constant::Int(1), TypeId::new(2), None);
+        let from = builder.ident(
+            Name::new(NameId::new(3), Namespace::Term),
+            TypeId::new(4),
+            None,
+        );
+        let nothing = TypeId::new(5);
+
+        let returned = builder.return_expr(Some(expr), Some(from), nothing, None);
+
+        assert_eq!(arena.get(returned).ty, nothing);
+        let TreeKind::Return(return_tree) = arena.get(returned).kind else {
+            panic!("expected a typed return expression");
+        };
+        assert_eq!(return_tree.expr, Some(expr));
+        assert_eq!(return_tree.from, Some(from));
     }
 
     #[test]

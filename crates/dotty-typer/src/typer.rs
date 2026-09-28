@@ -652,6 +652,64 @@ pub enum TyperError {
         child_tree_index: u32,
         role: &'static str,
     },
+    /// A return is not nested in a source method supported by this increment.
+    ReturnOutsideSupportedMethod {
+        source: SourceId,
+        tree_index: u32,
+        owner: SymbolId,
+    },
+    /// The enclosing method's source definition cannot be recovered safely.
+    ReturnMethodProvenanceMalformed {
+        source: SourceId,
+        tree_index: u32,
+        method: SymbolId,
+    },
+    /// Returns cannot participate in inferred method-result computation yet.
+    ReturnInInferredResultMethodDeferred {
+        source: SourceId,
+        tree_index: u32,
+        method: SymbolId,
+    },
+    /// A return target is missing or is not a method/label reference tree.
+    MalformedReturnTarget {
+        source: SourceId,
+        tree_index: u32,
+        target_tree_index: u32,
+    },
+    /// Labeled or non-local return targets are outside the current source slice.
+    NonLocalReturnDeferred {
+        source: SourceId,
+        tree_index: u32,
+        target_tree_index: u32,
+    },
+    /// The explicitly typed return value does not conform to the method result.
+    ReturnExpressionTypeMismatch {
+        source: SourceId,
+        tree_index: u32,
+        actual: TypeId,
+        expected: TypeId,
+    },
+    /// The supported relation cannot decide return-value conformance.
+    ReturnExpressionConformanceUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        actual: TypeId,
+        expected: TypeId,
+        error: Box<TypeRelationError>,
+    },
+    /// The owner chain used by a return is cyclic or references a missing owner.
+    MalformedReturnOwnerChain {
+        source: SourceId,
+        tree_index: u32,
+        owner: SymbolId,
+    },
+    /// The enclosing method signature has an invalid methodic result chain.
+    MalformedReturnMethodSignature {
+        source: SourceId,
+        tree_index: u32,
+        method: SymbolId,
+        signature: TypeId,
+    },
     /// Every overload rejected the supplied arguments; reasons are kept per candidate.
     OverloadApplicationNoApplicable {
         source: SourceId,
@@ -1295,6 +1353,159 @@ impl<'a> SourceTyper<'a> {
         Ok(())
     }
 
+    fn enclosing_method_for_return(
+        &self,
+        owner: SymbolId,
+        tree_index: u32,
+    ) -> Result<SymbolId, TyperError> {
+        let mut current = Some(owner);
+        let mut visited = HashSet::new();
+        while let Some(symbol) = current {
+            if !self.store.symbols.contains(symbol) || !visited.insert(symbol) {
+                return Err(TyperError::MalformedReturnOwnerChain {
+                    source: self.source,
+                    tree_index,
+                    owner: symbol,
+                });
+            }
+            let semantic = self.store.symbols.get(symbol);
+            if semantic.kind == SymbolKind::Method {
+                return Ok(symbol);
+            }
+            if semantic.kind == SymbolKind::Constructor {
+                return Err(TyperError::ReturnOutsideSupportedMethod {
+                    source: self.source,
+                    tree_index,
+                    owner: symbol,
+                });
+            }
+            current = semantic.owner;
+        }
+        Err(TyperError::ReturnOutsideSupportedMethod {
+            source: self.source,
+            tree_index,
+            owner,
+        })
+    }
+
+    fn explicit_return_result_type(
+        &mut self,
+        method: SymbolId,
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let Some(definition) = self.index.definition_of(method) else {
+            return Err(TyperError::ReturnMethodProvenanceMalformed {
+                source: self.source,
+                tree_index,
+                method,
+            });
+        };
+        let (source, method_tree) = match definition {
+            SourceDefinition::Canonical { source, tree }
+            | SourceDefinition::Derived { source, tree } => (source, tree),
+        };
+        if source != self.source {
+            return Err(TyperError::ReturnMethodProvenanceMalformed {
+                source: self.source,
+                tree_index,
+                method,
+            });
+        }
+        let Some(method_node) = self.arena.try_get(method_tree) else {
+            return Err(TyperError::ReturnMethodProvenanceMalformed {
+                source: self.source,
+                tree_index,
+                method,
+            });
+        };
+        let TreeKind::DefDef(definition) = &method_node.kind else {
+            return Err(TyperError::ReturnMethodProvenanceMalformed {
+                source: self.source,
+                tree_index,
+                method,
+            });
+        };
+        let Some(result_tree) = self.arena.try_get(definition.tpt) else {
+            return Err(TyperError::ReturnMethodProvenanceMalformed {
+                source: self.source,
+                tree_index,
+                method,
+            });
+        };
+        if matches!(result_tree.kind, TreeKind::TypeTree(_)) {
+            return Err(TyperError::ReturnInInferredResultMethodDeferred {
+                source: self.source,
+                tree_index,
+                method,
+            });
+        }
+
+        let signature = match *self.store.symbols.info(method) {
+            SymbolInfo::Complete(signature) => signature,
+            SymbolInfo::Missing => self.complete_symbol_inner(method, info_journal)?,
+            SymbolInfo::Deferred(_) => {
+                return Err(TyperError::DeferredSymbolCompletion { symbol: method });
+            }
+            SymbolInfo::Error => return Err(TyperError::SymbolAlreadyErrored { symbol: method }),
+        };
+        let mut result = signature;
+        let mut visited = HashSet::new();
+        for _ in 0..MAX_TYPE_RELATION_DEPTH {
+            if !visited.insert(result) {
+                return Err(TyperError::MalformedReturnMethodSignature {
+                    source: self.source,
+                    tree_index,
+                    method,
+                    signature,
+                });
+            }
+            match self.store.types.try_get(result) {
+                Some(Type::Method(method_type)) => result = method_type.result,
+                Some(Type::Poly(poly_type)) => result = poly_type.result,
+                Some(_) => return Ok(result),
+                None => {
+                    return Err(TyperError::MalformedReturnMethodSignature {
+                        source: self.source,
+                        tree_index,
+                        method,
+                        signature,
+                    });
+                }
+            }
+        }
+        Err(TyperError::MalformedReturnMethodSignature {
+            source: self.source,
+            tree_index,
+            method,
+            signature,
+        })
+    }
+
+    fn check_return_expression_type(
+        &mut self,
+        tree_index: u32,
+        actual: TypeId,
+        expected: TypeId,
+    ) -> Result<(), TyperError> {
+        match self.conforms(actual, expected) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(TyperError::ReturnExpressionTypeMismatch {
+                source: self.source,
+                tree_index,
+                actual,
+                expected,
+            }),
+            Err(error) => Err(TyperError::ReturnExpressionConformanceUnsupported {
+                source: self.source,
+                tree_index,
+                actual,
+                expected,
+                error: Box::new(error),
+            }),
+        }
+    }
+
     fn run_expression_transaction<T>(
         &mut self,
         operation: impl FnOnce(
@@ -1658,6 +1869,84 @@ impl<'a> SourceTyper<'a> {
                     cond,
                     body,
                     self.definitions.unit,
+                    source_tree.position,
+                ))
+            }
+            TreeKind::Return(return_expr) => {
+                let method = self.enclosing_method_for_return(context.owner, tree.index())?;
+                if let Some(target) = return_expr.from {
+                    let Some(target_tree) = self.arena.try_get(target) else {
+                        return Err(TyperError::MalformedReturnTarget {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            target_tree_index: target.index(),
+                        });
+                    };
+                    if !matches!(&target_tree.kind, TreeKind::Ident(_) | TreeKind::DefDef(_)) {
+                        return Err(TyperError::MalformedReturnTarget {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            target_tree_index: target.index(),
+                        });
+                    }
+                    return Err(TyperError::NonLocalReturnDeferred {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        target_tree_index: target.index(),
+                    });
+                }
+                let expected =
+                    self.explicit_return_result_type(method, tree.index(), info_journal)?;
+                let expr = if let Some(expr_tree) = return_expr.expr {
+                    Some(
+                        self.type_expression_expected_inner(
+                            expr_tree,
+                            context,
+                            expected,
+                            info_journal,
+                            new_mappings,
+                        )
+                        .map_err(|error| match error {
+                            TyperError::ExpectedExpressionTypeMismatch { actual, .. } => {
+                                TyperError::ReturnExpressionTypeMismatch {
+                                    source: self.source,
+                                    tree_index: tree.index(),
+                                    actual,
+                                    expected,
+                                }
+                            }
+                            TyperError::ExpectedExpressionConformanceUnsupported {
+                                actual,
+                                error,
+                                ..
+                            } => TyperError::ReturnExpressionConformanceUnsupported {
+                                source: self.source,
+                                tree_index: tree.index(),
+                                actual,
+                                expected,
+                                error,
+                            },
+                            other => other,
+                        })?,
+                    )
+                } else {
+                    let unit_literal_type = self
+                        .store
+                        .types
+                        .alloc(Type::Constant(dotty_core::Constant::Unit));
+                    let actual =
+                        self.widen_expression_type_journaled(unit_literal_type, info_journal, 0)?;
+                    self.check_return_expression_type(tree.index(), actual, expected)?;
+                    Some(TypedAstBuilder::new(&mut self.typed_arena).literal(
+                        dotty_core::Constant::Unit,
+                        unit_literal_type,
+                        source_tree.position,
+                    ))
+                };
+                Ok(TypedAstBuilder::new(&mut self.typed_arena).return_expr(
+                    expr,
+                    None,
+                    self.definitions.nothing_type,
                     source_tree.position,
                 ))
             }
@@ -18518,6 +18807,445 @@ mod tests {
         };
         assert_eq!(method_type.result, definitions.unit);
         assert!(typer.source_typed_index().get(source, rhs).is_some());
+    }
+
+    #[test]
+    fn explicit_method_return_checks_value_and_has_nothing_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def identity(value: Int): Int = return value");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "identity");
+        let position = parsed.ast.get(rhs).position;
+        let TreeKind::Return(source_return) = parsed.ast.get(rhs).kind else {
+            panic!("expected source return");
+        };
+        let source_value = source_return.expr.unwrap();
+        let parameter = method_parameter_symbol(&parsed, &index, source, method, 0);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.nothing_type);
+        assert_eq!(typer.typed_ast().get(typed).position, position);
+        let TreeKind::Return(typed_return) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected typed return");
+        };
+        assert_eq!(typed_return.from, None);
+        let typed_value = typed_return.expr.unwrap();
+        assert_eq!(
+            typer.source_typed_index().get(source, source_value),
+            Some(typed_value)
+        );
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_value).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == parameter
+        ));
+    }
+
+    #[test]
+    fn explicit_polymorphic_method_return_uses_its_final_result_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def identity[A](value: Int): Int = return value");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "identity");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.nothing_type);
+        let TreeKind::Return(typed_return) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected typed return");
+        };
+        assert!(typed_return.expr.is_some());
+    }
+
+    #[test]
+    fn return_expression_must_conform_to_explicit_method_result() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def invalid: Int = return true");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "invalid");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ReturnExpressionTypeMismatch { expected, .. })
+                if expected == definitions.int
+        ));
+    }
+
+    #[test]
+    fn return_in_a_block_types_through_existing_local_scope() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "def identity(value: Int): Int = { val copied: Int = value; return copied }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "identity");
+        let TreeKind::Block(source_block) = &parsed.ast.get(rhs).kind else {
+            panic!("expected a source block");
+        };
+        let source_return = source_block.expr;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected typed block");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(typed_block.expr).kind,
+            TreeKind::Return(_)
+        ));
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, source_return)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn return_in_an_if_branch_joins_with_the_other_branch_through_nothing() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "def choose(flag: Boolean, returned: Int, fallback: Int): Int = if flag then return returned else fallback",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "choose");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        let TreeKind::If(typed_if) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected typed if");
+        };
+        assert_eq!(
+            typer.typed_ast().get(typed_if.then_branch).ty,
+            definitions.nothing_type
+        );
+        let fallback_type = typer.typed_ast().get(typed_if.else_branch).ty;
+        assert_eq!(
+            typer.widen_expression_type(fallback_type).unwrap(),
+            definitions.int
+        );
+    }
+
+    #[test]
+    fn return_in_a_while_body_uses_the_enclosing_explicit_result() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "def find(flag: Boolean, value: Int): Int = { while flag do return value; 0 }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "find");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected typed block");
+        };
+        let TreeKind::While(typed_while) = &typer.typed_ast().get(typed_block.stats[0]).kind else {
+            panic!("expected typed while");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(typed_while.body).kind,
+            TreeKind::Return(_)
+        ));
+    }
+
+    #[test]
+    fn bare_return_uses_a_synthetic_unit_expression_when_it_conforms() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def stop: Unit = return");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "stop");
+        let TreeKind::Return(source_return) = parsed.ast.get(rhs).kind else {
+            panic!("expected bare source return");
+        };
+        assert!(source_return.expr.is_none());
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Return(typed_return) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected typed bare return");
+        };
+        let Some(typed_expr) = typed_return.expr else {
+            panic!("Scala's bare return typing supplies a synthetic Unit expression");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(typed_expr).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Unit
+            })
+        ));
+    }
+
+    #[test]
+    fn bare_return_must_conform_to_the_explicit_method_result() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def invalid: Int = return");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "invalid");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ReturnExpressionTypeMismatch { expected, .. })
+                if expected == definitions.int
+        ));
+    }
+
+    #[test]
+    fn inferred_result_method_with_nested_return_is_deferred_without_recursion() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def loop = { return loop }");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "loop");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(method),
+            Err(TyperError::ReturnInInferredResultMethodDeferred {
+                method: returned_method,
+                ..
+            }) if returned_method == method
+        ));
+        assert!(typer.inferred_method_results_in_progress.is_empty());
+    }
+
+    #[test]
+    fn return_outside_a_method_is_rejected_explicitly() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = return 1 }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let mut context = typer.expression_context_for(method).unwrap();
+        context.owner = class;
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ReturnOutsideSupportedMethod { owner, .. }) if owner == class
+        ));
+    }
+
+    #[test]
+    fn non_local_return_target_is_deferred() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def target: Int = 0; def use: Int = 1");
+        let (method, value) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let target_method = method_definition_and_rhs(&parsed, &store, &index, source, "target").0;
+        let SourceDefinition::Canonical {
+            source: target_source,
+            tree: target_tree,
+        } = index.definition_of(target_method).unwrap()
+        else {
+            panic!("method should have canonical source provenance");
+        };
+        assert_eq!(target_source, source);
+        let position = parsed.ast.get(value).position;
+        let returned = parsed.ast.alloc(Tree {
+            kind: TreeKind::Return(dotty_core::ast::Return {
+                expr: Some(value),
+                from: Some(target_tree),
+            }),
+            position,
+            ty: (),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(returned, context),
+            Err(TyperError::NonLocalReturnDeferred { target_tree_index, .. })
+                if target_tree_index == target_tree.index()
+        ));
+    }
+
+    #[test]
+    fn malformed_return_target_has_a_focused_error() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def use: Int = 1");
+        let (method, value) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut foreign_arena = AstArena::new();
+        let target = (0..=parsed.ast.iter().count() + 1)
+            .map(|_| {
+                foreign_arena.alloc(Tree {
+                    kind: TreeKind::Literal(dotty_core::ast::Literal {
+                        value: dotty_core::Constant::Unit,
+                    }),
+                    position: None,
+                    ty: (),
+                })
+            })
+            .last()
+            .unwrap();
+        let returned = parsed.ast.alloc(Tree {
+            kind: TreeKind::Return(dotty_core::ast::Return {
+                expr: Some(value),
+                from: Some(target),
+            }),
+            position: None,
+            ty: (),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(returned, context),
+            Err(TyperError::MalformedReturnTarget { target_tree_index, .. })
+                if target_tree_index == target.index()
+        ));
+    }
+
+    #[test]
+    fn return_target_with_an_invalid_tree_shape_is_malformed() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def use: Int = 1");
+        let (method, value) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let returned = parsed.ast.alloc(Tree {
+            kind: TreeKind::Return(dotty_core::ast::Return {
+                expr: Some(value),
+                from: Some(value),
+            }),
+            position: None,
+            ty: (),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(returned, context),
+            Err(TyperError::MalformedReturnTarget { target_tree_index, .. })
+                if target_tree_index == value.index()
+        ));
+    }
+
+    #[test]
+    fn failed_return_value_rolls_back_expression_and_method_info_state() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def invalid: Int = { var local = 1; return true } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "invalid");
+        let before = store.checkpoint();
+        assert!(matches!(
+            store.symbols.get(method).info,
+            SymbolInfo::Missing
+        ));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let scope_count = typer.expression_scopes.len();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ReturnExpressionTypeMismatch { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert!(matches!(
+            typer.store().symbols.get(method).info,
+            SymbolInfo::Missing
+        ));
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.local_symbols.is_empty());
+        assert_eq!(typer.expression_scopes.len(), scope_count);
     }
 
     #[test]
