@@ -46,8 +46,10 @@ For the tested subset, source Typer completion currently supports:
   parameters, fields, methods, and type members;
 - explicit class parents and explicit self types;
 - class parameters with explicit types, including `val` accessors;
-- method signatures with explicit parameter and result types, polymorphic
-  binders, multiple term clauses, empty clauses, and `using` clauses;
+- method signatures with explicit parameter types and inferred result types,
+  polymorphic binders, multiple term clauses, empty clauses, and `using`
+  clauses. Inferred results come from the typed method body after expression
+  widening, and the typed body is retained for later consumers;
 - extension-method signatures whose receiver and declared signature are
   supported by the source Typer;
 - aliases and bounds represented by the current semantic type model;
@@ -140,7 +142,6 @@ are ready:
   statements;
 - generic overload inference, `using`/implicit argument insertion, dependent
   result application, and right-associative extension normalization;
-- method result-type inference;
 - enum semantics, case-class synthetic APIs, and `derives`;
 - context-bound evidence synthesis;
 - default imports and general standard-library member lookup;
