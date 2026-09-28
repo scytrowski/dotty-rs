@@ -1845,7 +1845,7 @@ impl<'a> SourceTyper<'a> {
     ) -> Result<(), TyperError> {
         if matches!(
             self.store.types.try_get(inferred),
-            Some(
+            None | Some(
                 Type::NoType
                     | Type::NoPrefix
                     | Type::Error(_)
@@ -1856,6 +1856,8 @@ impl<'a> SourceTyper<'a> {
                     | Type::Method(_)
                     | Type::Poly(_)
                     | Type::TypeLambda(_)
+                    | Type::Wildcard { .. }
+                    | Type::MatchCase { .. }
                     | Type::ClassInfo(_)
             )
         ) {
@@ -12810,6 +12812,34 @@ mod tests {
         assert!(typer.local_symbol_at(source, local_tree).is_none());
         assert!(typer.source_typed_index().is_empty());
         assert_eq!(typer.store().checkpoint(), store_checkpoint);
+    }
+
+    #[test]
+    fn inferred_local_rejects_polymorphic_initializer_types() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def id[A](x: A): A = x; def use: Int = { val local = id; 1 } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let local_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::InvalidInferredLocalValueType { .. })
+        ));
+        assert!(typer.local_symbol_at(source, local_tree).is_none());
+        assert!(typer.source_typed_index().is_empty());
     }
 
     #[test]
