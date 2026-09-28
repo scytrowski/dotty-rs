@@ -670,7 +670,7 @@ pub enum TyperError {
         tree_index: u32,
         method: SymbolId,
     },
-    /// A return target does not refer to a tree in this source arena.
+    /// A return target is missing or is not a method/label reference tree.
     MalformedReturnTarget {
         source: SourceId,
         tree_index: u32,
