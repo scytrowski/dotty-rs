@@ -140,6 +140,11 @@ pub enum TyperError {
         method: SymbolId,
         parameter_tree_index: u32,
     },
+    /// A method type-parameter tree has no symbol for this method owner.
+    MethodTypeParameterSymbolMissing {
+        method: SymbolId,
+        parameter_tree_index: u32,
+    },
     /// Extension method prefix parameter metadata is absent from the source index.
     ExtensionPrefixClausesMissing { method: SymbolId },
     /// A method clause has malformed parameter kinds or inconsistent flags.
@@ -470,6 +475,12 @@ pub enum TyperError {
     PolyInstantiation(dotty_core::TypeRebindError),
     /// A projected source type form cannot be represented as a typed type tree.
     TypeArgumentTreeCannotBeReified {
+        source: SourceId,
+        tree_index: u32,
+        tree_kind: &'static str,
+    },
+    /// A projected type ascription tree cannot be represented by a typed TypeTree.
+    TypeAscriptionTreeCannotBeReified {
         source: SourceId,
         tree_index: u32,
         tree_kind: &'static str,
@@ -963,6 +974,62 @@ impl<'a> SourceTyper<'a> {
         )
     }
 
+    fn expression_type_context(
+        &self,
+        context: ExpressionContext,
+    ) -> Result<SourceContextId, TyperError> {
+        let Some(SourceDefinition::Canonical { tree, .. }) =
+            self.index.definition_of(context.owner)
+        else {
+            return Ok(context.lexical);
+        };
+        let Some(source_tree) = self.arena.try_get(tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            });
+        };
+        let TreeKind::DefDef(definition) = &source_tree.kind else {
+            return Ok(context.lexical);
+        };
+        let extension_type_parameter = self
+            .index
+            .extension_prefix_clauses(context.owner)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .find(|tree| {
+                self.arena
+                    .try_get(**tree)
+                    .is_some_and(|node| matches!(node.kind, TreeKind::TypeDef(_)))
+            })
+            .copied()
+            .map(|tree| (tree, true));
+        let type_parameter = extension_type_parameter.or_else(|| {
+            definition
+                .type_params
+                .first()
+                .copied()
+                .map(|tree| (tree, false))
+        });
+        let Some((tree, derived)) = type_parameter else {
+            return Ok(context.lexical);
+        };
+        let symbol = if derived {
+            self.index
+                .derived_symbol_at(context.owner, self.source, tree)
+        } else {
+            self.index.symbol_at(self.source, tree)
+        }
+        .ok_or(TyperError::MethodTypeParameterSymbolMissing {
+            method: context.owner,
+            parameter_tree_index: tree.index(),
+        })?;
+        self.index
+            .declaration_context_of(symbol)
+            .ok_or(TyperError::DeclarationContextMissing { symbol })
+    }
+
     /// Returns a context with `scope` pushed at the innermost lexical depth.
     /// This lets later expression forms such as `Block` add local scopes
     /// without changing the namer's immutable source-context model.
@@ -1297,6 +1364,25 @@ impl<'a> SourceTyper<'a> {
                 Ok(TypedAstBuilder::new(&mut self.typed_arena).this(
                     this.qual,
                     ty,
+                    source_tree.position,
+                ))
+            }
+            TreeKind::Typed(ascription) => {
+                let type_context = self.expression_type_context(context)?;
+                let expected = self.type_of_tpt_inner(ascription.tpt, type_context)?;
+                let expr = self.type_expression_expected_inner(
+                    ascription.expr,
+                    context,
+                    expected,
+                    info_journal,
+                    new_mappings,
+                )?;
+                let tpt =
+                    self.reify_type_ascription_tree(ascription.tpt, expected, new_mappings)?;
+                Ok(TypedAstBuilder::new(&mut self.typed_arena).typed_expr(
+                    expr,
+                    tpt,
+                    expected,
                     source_tree.position,
                 ))
             }
@@ -2017,6 +2103,59 @@ impl<'a> SourceTyper<'a> {
         };
         if !supported {
             return Err(TyperError::TypeArgumentTreeCannotBeReified {
+                source: self.source,
+                tree_index: source_tree.index(),
+                tree_kind: tree_kind_name(&source_node.kind),
+            });
+        }
+        let typed = TypedAstBuilder::new(&mut self.typed_arena).type_tree(ty, source_node.position);
+        self.typed_index
+            .insert(self.source, source_tree, typed)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, source_tree));
+        Ok(typed)
+    }
+
+    fn reify_type_ascription_tree(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        ty: TypeId,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if let Some(typed) = self.typed_index.get(self.source, source_tree) {
+            let node = self.typed_arena.get(typed);
+            if matches!(node.kind, TreeKind::TypeTree(_)) && node.ty == ty {
+                return Ok(typed);
+            }
+            let source_node = self.arena.try_get(source_tree);
+            return Err(TyperError::TypeAscriptionTreeCannotBeReified {
+                source: self.source,
+                tree_index: source_tree.index(),
+                tree_kind: source_node.map_or("tree outside source arena", |node| {
+                    tree_kind_name(&node.kind)
+                }),
+            });
+        }
+        let Some(source_node) = self.arena.try_get(source_tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: source_tree.index(),
+            });
+        };
+        let supported = match &source_node.kind {
+            TreeKind::Ident(ident) => ident.name.is_type(),
+            TreeKind::Select(selection) => selection.name.is_type(),
+            TreeKind::AppliedTypeTree(_) | TreeKind::ByNameTypeTree(_) => true,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_)) => true,
+            _ => false,
+        };
+        if !supported {
+            return Err(TyperError::TypeAscriptionTreeCannotBeReified {
                 source: self.source,
                 tree_index: source_tree.index(),
                 tree_kind: tree_kind_name(&source_node.kind),
@@ -16946,6 +17085,239 @@ mod tests {
         ));
         assert!(typer.typed_ast().iter().next().is_none());
         assert!(typer.source_typed_index().is_empty());
+    }
+
+    #[test]
+    fn source_type_ascription_builds_typed_expr_and_preserves_literal_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = 1: Int }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Typed(source_ascription) = &parsed.ast.get(rhs).kind else {
+            panic!("method RHS should be a source type ascription");
+        };
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let source_position = parsed.ast.get(rhs).position;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).position, source_position);
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        let TreeKind::Typed(ascription) = &typer.typed_ast().get(typed).kind else {
+            panic!("source ascription should produce a typed TypedExpr");
+        };
+        assert_eq!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(ascription.expr).ty),
+            &Type::Constant(dotty_core::Constant::Int(1))
+        );
+        assert_eq!(typer.typed_ast().get(ascription.tpt).ty, definitions.int);
+        assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed));
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, source_ascription.expr)
+                .is_some()
+        );
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, source_ascription.tpt)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn source_type_ascription_accepts_a_subtype_and_preserves_term_reference() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Parent; class Child extends Parent; class C { def use(child: Child): Parent = child: Parent }",
+        );
+        let parent = class_symbol(&parsed, &store, &index, source, "Parent");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = val_symbol(&parsed, &store, &index, source, "child").0;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        typer.complete_symbol(parent).unwrap();
+        typer.complete_symbol(child).unwrap();
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(parent_target),
+            ..
+        } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("ascription should carry the projected parent type");
+        };
+        assert_eq!(*parent_target, parent);
+        let TreeKind::Typed(ascription) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected typed ascription");
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(ascription.expr).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == parameter
+        ));
+    }
+
+    #[test]
+    fn source_type_ascription_resolves_method_type_parameters() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use[A](value: A): A = value: A }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Typed(ascription) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected typed ascription");
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(ascription.tpt).ty),
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } if typer.store().symbols.get(*symbol).kind == SymbolKind::TypeParameter
+        ));
+        assert_eq!(
+            typer.typed_ast().get(typed).ty,
+            typer.typed_ast().get(ascription.tpt).ty
+        );
+    }
+
+    #[test]
+    fn source_type_ascription_types_inside_a_block() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = { val value = 1; value: Int } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed).kind else {
+            panic!("method body should remain a typed block");
+        };
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        assert!(matches!(
+            typer.typed_ast().get(block.expr).kind,
+            TreeKind::Typed(_)
+        ));
+    }
+
+    #[test]
+    fn failed_source_type_ascription_rolls_back_expression_and_type_tree_state() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = 1: Boolean }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ExpectedExpressionTypeMismatch { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.type_index.type_at(source, rhs).is_none());
+    }
+
+    #[test]
+    fn source_type_ascription_reports_unprojectable_type_tree_atomically() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = 1: value }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Typed(ascription) = &parsed.ast.get(rhs).kind else {
+            panic!("method RHS should be a source type ascription");
+        };
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let result = typer.type_expression(rhs, context);
+        assert!(
+            matches!(
+                result,
+                Err(TyperError::TypeNameNotFound {
+                    source: actual_source,
+                    tree_index,
+                    name,
+                    position: Some(_),
+                }) if actual_source == source
+                    && tree_index == ascription.tpt.index()
+                    && typer.store().names.resolve(name.text()) == "value"
+            ),
+            "unexpected ascription typing result: {result:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), before);
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.type_index.type_at(source, rhs).is_none());
     }
 
     #[test]
