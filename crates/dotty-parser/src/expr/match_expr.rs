@@ -14,12 +14,18 @@ where
             } else {
                 self.cursor.lookahead(2).span.start()
             };
-        self.observe_indented();
+        let feedback_indent = self.observe_indented_body_region();
         self.advance();
         let _ = self.accept(TokenKind::Indent);
 
         let cases = self.case_clauses();
-        if !self.cursor.at(TokenKind::Outdent) {
+        if let Some(indent_offset) = feedback_indent {
+            // An outdent at this point may close a nested case body. Ask the
+            // scanner to close this case region as well; it will place the
+            // matching delimiter before an existing nested outdent when
+            // necessary.
+            self.observe_outdented_region(indent_offset);
+        } else if !self.cursor.at(TokenKind::Outdent) {
             self.observe_outdented();
         }
         if !self.accept(TokenKind::Outdent) {

@@ -19,7 +19,10 @@ pub(crate) enum ParsedStatement {
 pub(crate) enum StatementSequenceBoundary {
     CompilationUnit,
     Block(TokenKind),
-    FeedbackBlock(TokenKind),
+    FeedbackRegionBlock {
+        closing: TokenKind,
+        indent_offset: u32,
+    },
 }
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -220,7 +223,10 @@ where
                     && matches!(
                         boundary,
                         StatementSequenceBoundary::Block(TokenKind::Outdent)
-                            | StatementSequenceBoundary::FeedbackBlock(TokenKind::Outdent)
+                            | StatementSequenceBoundary::FeedbackRegionBlock {
+                                closing: TokenKind::Outdent,
+                                ..
+                            }
                     )
                 {
                     return self.finish_statement_sequence(statements);
@@ -237,7 +243,7 @@ where
             let location = match boundary {
                 StatementSequenceBoundary::CompilationUnit => Location::Elsewhere,
                 StatementSequenceBoundary::Block(_)
-                | StatementSequenceBoundary::FeedbackBlock(_) => Location::InBlock,
+                | StatementSequenceBoundary::FeedbackRegionBlock { .. } => Location::InBlock,
             };
             statements.push(self.parse_statement(location));
 
@@ -251,7 +257,7 @@ where
                         StatementSequenceBoundary::Block(_) => {
                             "parser made no progress while parsing a block"
                         }
-                        StatementSequenceBoundary::FeedbackBlock(_) => {
+                        StatementSequenceBoundary::FeedbackRegionBlock { .. } => {
                             "parser made no progress while parsing a block"
                         }
                     },
@@ -263,14 +269,8 @@ where
                 }
             }
 
-            if matches!(boundary, StatementSequenceBoundary::FeedbackBlock(_))
-                && self.current().kind != TokenKind::Outdent
-            {
-                // A feedback-opened body inside braces cannot rely on the
-                // scanner's ordinary indentation stack to emit its closing
-                // token. Ask before the statement-sequence loop decides
-                // whether the following token belongs to this body.
-                self.observe_outdented();
+            if let StatementSequenceBoundary::FeedbackRegionBlock { indent_offset, .. } = boundary {
+                self.observe_outdented_region(indent_offset);
             }
 
             if self.is_sequence_separator(boundary) {
@@ -287,7 +287,7 @@ where
                         StatementSequenceBoundary::Block(_) => {
                             "expected a block statement separator"
                         }
-                        StatementSequenceBoundary::FeedbackBlock(_) => {
+                        StatementSequenceBoundary::FeedbackRegionBlock { .. } => {
                             "expected a block statement separator"
                         }
                     },
@@ -303,7 +303,10 @@ where
                     && matches!(
                         boundary,
                         StatementSequenceBoundary::Block(TokenKind::Outdent)
-                            | StatementSequenceBoundary::FeedbackBlock(TokenKind::Outdent)
+                            | StatementSequenceBoundary::FeedbackRegionBlock {
+                                closing: TokenKind::Outdent,
+                                ..
+                            }
                     )
                 {
                     return self.finish_statement_sequence(statements);
@@ -452,7 +455,7 @@ where
                     || self.current().kind == TokenKind::Eof
                     || (self.context.case_body && self.is_case_body_terminator())
             }
-            StatementSequenceBoundary::FeedbackBlock(end) => {
+            StatementSequenceBoundary::FeedbackRegionBlock { closing: end, .. } => {
                 self.current().kind == end
                     || self.current().kind == TokenKind::Eof
                     // Dotty's statement-sequence end also includes a closing
@@ -473,7 +476,8 @@ where
             StatementSequenceBoundary::CompilationUnit => {
                 is_statement_separator(self.current().kind)
             }
-            StatementSequenceBoundary::Block(_) | StatementSequenceBoundary::FeedbackBlock(_) => {
+            StatementSequenceBoundary::Block(_)
+            | StatementSequenceBoundary::FeedbackRegionBlock { .. } => {
                 is_block_separator(self.current().kind)
             }
         }

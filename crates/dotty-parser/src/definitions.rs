@@ -92,9 +92,9 @@ where
         let rhs = if has_interleaved_type_params {
             None
         } else if is_bare_assignment(self) {
-            let feedback_opened = self.observe_indented_body();
+            let feedback_indent = self.observe_indented_body_region();
             self.advance();
-            Some(self.parse_method_rhs(location, feedback_opened))
+            Some(self.parse_method_rhs(location, feedback_indent))
         } else if has_explicit_return_type && is_definition_boundary(self.current().kind) {
             None
         } else {
@@ -119,20 +119,24 @@ where
         ParsedStatement::Definition(definition)
     }
 
-    fn parse_method_rhs(&mut self, location: Location, feedback_opened: bool) -> TreeId<Untyped> {
-        self.parse_definition_rhs(location, feedback_opened)
+    fn parse_method_rhs(
+        &mut self,
+        location: Location,
+        feedback_indent: Option<u32>,
+    ) -> TreeId<Untyped> {
+        self.parse_definition_rhs(location, feedback_indent)
     }
 
     fn parse_definition_rhs(
         &mut self,
         location: Location,
-        feedback_opened: bool,
+        feedback_indent: Option<u32>,
     ) -> TreeId<Untyped> {
         self.consume_control_newlines();
         self.with_secondary_constructor_allowed(false, |parser| {
             if parser.current().kind == TokenKind::Indent {
-                if feedback_opened {
-                    parser.parse_feedback_indented_block()
+                if let Some(indent_offset) = feedback_indent {
+                    parser.parse_region_feedback_indented_block(indent_offset)
                 } else {
                     parser.parse_indented_block()
                 }
@@ -142,7 +146,7 @@ where
         })
     }
 
-    fn observe_definition_rhs_indentation(&mut self) -> bool {
+    fn observe_definition_rhs_indentation(&mut self) -> Option<u32> {
         let mut lookahead = 1;
         while matches!(
             self.cursor.lookahead(lookahead).kind,
@@ -153,7 +157,7 @@ where
 
         let already_indented = self.cursor.lookahead(lookahead).kind == TokenKind::Indent;
         if already_indented {
-            return false;
+            return None;
         }
 
         let next_start = self.cursor.lookahead(lookahead).span.start();
@@ -164,11 +168,13 @@ where
             .get(current_end as usize..next_start as usize)
             .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
         if lookahead == 1 && !gap_has_line_break {
-            return false;
+            return None;
         }
 
         self.observe_indented();
-        self.cursor.lookahead(lookahead).kind == TokenKind::Indent
+        (1..=lookahead)
+            .find(|offset| self.cursor.lookahead(*offset).kind == TokenKind::Indent)
+            .map(|offset| self.cursor.lookahead(offset).span.start())
     }
 
     fn parse_method_name(&mut self) -> TermName {
@@ -259,9 +265,9 @@ where
         };
 
         let rhs = if is_bare_assignment(self) {
-            let feedback_opened = self.observe_definition_rhs_indentation();
+            let feedback_indent = self.observe_definition_rhs_indentation();
             self.advance();
-            Some(self.parse_definition_rhs(location, feedback_opened))
+            Some(self.parse_definition_rhs(location, feedback_indent))
         } else {
             if has_explicit_type && !is_definition_boundary(self.current().kind) {
                 self.report(
@@ -352,9 +358,9 @@ where
         };
 
         let rhs = if is_bare_assignment(self) {
-            let feedback_opened = self.observe_definition_rhs_indentation();
+            let feedback_indent = self.observe_definition_rhs_indentation();
             self.advance();
-            Some(self.parse_definition_rhs(location, feedback_opened))
+            Some(self.parse_definition_rhs(location, feedback_indent))
         } else if has_explicit_type
             && all_simple_identifiers
             && is_definition_boundary(self.current().kind)
@@ -2350,7 +2356,7 @@ mod tests {
             &mut names,
         );
 
-        assert!(parser.observe_definition_rhs_indentation());
+        assert!(parser.observe_definition_rhs_indentation().is_some());
         assert_eq!(parser.cursor.lookahead(2).kind, TokenKind::Indent);
     }
 
