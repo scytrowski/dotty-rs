@@ -56,15 +56,14 @@ For the tested subset, source Typer completion currently supports:
 - primary constructor signature normalization for a plain constructor.
 
 Expression typing currently includes typed identifiers, stable term selections,
-literal expressions, and plain monomorphic method applications. Application
-sites can resolve lexical, imported, and selected overload buckets for supported
-methods. Candidate filtering uses exact arity and nominal conformance; when
-several candidates apply, only a unique method whose formal types are strictly
-more specific than every other applicable candidate is selected. Selected
-members use receiver-adapted signatures, including inherited generic methods.
-Standalone overloaded identifiers and selections remain deferred. Generic
-overloads and matching-arity candidates with unsupported semantics return typed
-errors rather than being selected speculatively.
+literal expressions, and plain method applications. Application sites can
+resolve lexical, imported, and selected overload buckets for supported
+monomorphic methods. Candidate filtering uses exact arity and nominal
+conformance; when several candidates apply, only a unique method whose formal
+types are strictly more specific than every other applicable candidate is
+selected. Selected members use receiver-adapted signatures, including inherited
+generic methods. Standalone overloaded identifiers and selections remain
+deferred. Generic overload competition remains deferred.
 
 Explicit positional type applications are supported for one resolved `Poly`
 callee. Type arguments use the expression's lexical context, require exact
@@ -72,8 +71,19 @@ arity, and are checked against ordinary lower and upper bounds before the Poly
 binder is instantiated. Typed `TypeApply` nodes retain the exact function
 reference and carry projected type arguments as typed `TypeTree` nodes.
 Overloaded type applications, unsupported bounds, and unsupported source type
-argument forms return typed deferrals/errors. Type argument inference remains
-deferred.
+argument forms return typed deferrals/errors.
+
+Plain applications of one resolved `Poly` whose result is one immediate plain
+`Method` infer type arguments from the method's term arguments. Inference is
+binder/index based and supports direct `ParamRef` formals and matching nested
+`Applied` type constructors. Repeated equivalent constraints are accepted;
+conflicts do not compute a least upper bound. Concrete formal fragments still
+require conformance, and inferred arguments are checked against instantiated
+ordinary bounds. Unconstrained parameters, unsupported shapes, and generic
+overload competition return typed errors. Expected-result inference, variance
+solving, inherited-constructor matching, unions/intersections, wildcard capture,
+match-type reduction, type-lambda unification, implicit search, and numeric
+weak conformance remain deferred.
 
 Source and TASTy snapshots intentionally normalize adapter-specific identity
 and provenance. TASTy's package prefixes on the built-in Scala and

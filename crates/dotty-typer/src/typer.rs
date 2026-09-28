@@ -317,8 +317,6 @@ pub enum TyperError {
         tree_index: u32,
         ty: TypeId,
     },
-    /// Applying a polymorphic method requires explicit application or inference.
-    PolymorphicMethodApplicationDeferred { source: SourceId, tree_index: u32 },
     /// A supported polymorphic application leaves one type parameter without
     /// constraints from its term arguments.
     UnconstrainedTypeParameter {
@@ -363,6 +361,24 @@ pub enum TyperError {
         argument: TypeId,
         bound: TypeId,
         side: TypeArgumentBoundSide,
+    },
+    /// The inferred argument uses bounds this typer cannot validate soundly.
+    UnsupportedInferredTypeArgumentBounds {
+        source: SourceId,
+        tree_index: u32,
+        parameter_index: usize,
+        argument: TypeId,
+        bounds: TypeId,
+    },
+    /// A subtype relation needed to validate an inferred argument's bounds is
+    /// outside the current relation subset.
+    InferredTypeArgumentBoundCheckUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        parameter_index: usize,
+        argument: TypeId,
+        bound: TypeId,
+        error: Box<TypeRelationError>,
     },
     /// An explicit type application callee does not widen to a Poly type.
     ExplicitTypeApplicationCalleeNotPoly {
@@ -1058,6 +1074,62 @@ impl<'a> SourceTyper<'a> {
                                 tree_index: tree.index(),
                                 error,
                             })?;
+                    for (parameter_index, (argument, bounds)) in type_arguments
+                        .iter()
+                        .copied()
+                        .zip(instantiated.bounds.iter().copied())
+                        .enumerate()
+                    {
+                        self.check_explicit_type_argument_bounds(
+                            argument,
+                            bounds,
+                            parameter_index,
+                            tree.index(),
+                            info_journal,
+                        )
+                        .map_err(|error| match error {
+                            TyperError::ExplicitTypeArgumentBoundViolation {
+                                parameter_index,
+                                argument,
+                                bound,
+                                side,
+                                ..
+                            } => TyperError::InferredTypeArgumentBoundViolation {
+                                source: self.source,
+                                tree_index: tree.index(),
+                                parameter_index,
+                                argument,
+                                bound,
+                                side,
+                            },
+                            TyperError::UnsupportedExplicitTypeArgumentBounds {
+                                parameter_index,
+                                bounds,
+                                ..
+                            } => TyperError::UnsupportedInferredTypeArgumentBounds {
+                                source: self.source,
+                                tree_index: tree.index(),
+                                parameter_index,
+                                argument,
+                                bounds,
+                            },
+                            TyperError::ExplicitTypeArgumentBoundCheckUnsupported {
+                                parameter_index,
+                                argument,
+                                bound,
+                                error,
+                                ..
+                            } => TyperError::InferredTypeArgumentBoundCheckUnsupported {
+                                source: self.source,
+                                tree_index: tree.index(),
+                                parameter_index,
+                                argument,
+                                bound,
+                                error,
+                            },
+                            error => error,
+                        })?;
+                    }
                     callable = instantiated.result;
                     typed_arguments = Some(arguments);
                 }
@@ -1445,8 +1517,15 @@ impl<'a> SourceTyper<'a> {
                 binder,
             });
         };
+        if method.params.len() != arguments.len() {
+            return Err(TyperError::ApplicationArityMismatch {
+                source: self.source,
+                tree_index,
+                expected: method.params.len(),
+                actual: arguments.len(),
+            });
+        }
         if method.kind != MethodKind::Plain
-            || method.params.len() != arguments.len()
             || method.params.iter().any(|param| {
                 param.erased
                     || param.varargs
@@ -1465,13 +1544,16 @@ impl<'a> SourceTyper<'a> {
         }
 
         let mut inferred = vec![None; poly.params.len()];
-        for (parameter, argument) in method.params.iter().zip(arguments) {
+        for (argument_index, (parameter, argument)) in
+            method.params.iter().zip(arguments).enumerate()
+        {
             self.infer_type_constraints(
                 parameter.ty,
                 argument.widened_type,
                 binder,
                 &mut inferred,
                 tree_index,
+                argument_index,
                 info_journal,
                 0,
             )?;
@@ -1486,30 +1568,6 @@ impl<'a> SourceTyper<'a> {
                     parameter_index,
                 });
             };
-            self.check_explicit_type_argument_bounds(
-                inferred_type,
-                poly.params[parameter_index].bounds,
-                parameter_index,
-                tree_index,
-                info_journal,
-            )
-            .map_err(|error| match error {
-                TyperError::ExplicitTypeArgumentBoundViolation {
-                    parameter_index,
-                    argument,
-                    bound,
-                    side,
-                    ..
-                } => TyperError::InferredTypeArgumentBoundViolation {
-                    source: self.source,
-                    tree_index,
-                    parameter_index,
-                    argument,
-                    bound,
-                    side,
-                },
-                error => error,
-            })?;
             type_arguments.push(inferred_type);
         }
         Ok(type_arguments)
@@ -1522,6 +1580,7 @@ impl<'a> SourceTyper<'a> {
         binder: TypeId,
         inferred: &mut [Option<TypeId>],
         tree_index: u32,
+        argument_index: usize,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         depth: usize,
     ) -> Result<(), TyperError> {
@@ -1565,9 +1624,24 @@ impl<'a> SourceTyper<'a> {
                     let mut seen = std::collections::HashSet::new();
                     self.complete_relation_type(previous, info_journal, &mut seen, 0)?;
                     self.complete_relation_type(actual, info_journal, &mut seen, 0)?;
-                    if !(self.conforms(previous, actual).unwrap_or(false)
-                        && self.conforms(actual, previous).unwrap_or(false))
-                    {
+                    let equivalent = match (
+                        self.conforms(previous, actual),
+                        self.conforms(actual, previous),
+                    ) {
+                        (Ok(true), Ok(true)) => true,
+                        (Ok(_), Ok(_)) => false,
+                        _ => {
+                            return Err(TyperError::UnsupportedInferenceShape {
+                                source: self.source,
+                                tree_index,
+                                binder,
+                                parameter_index: Some(parameter_index),
+                                formal,
+                                actual,
+                            });
+                        }
+                    };
+                    if !equivalent {
                         return Err(TyperError::ConflictingInferenceConstraints {
                             source: self.source,
                             tree_index,
@@ -1600,8 +1674,23 @@ impl<'a> SourceTyper<'a> {
                         actual,
                     });
                 };
-                let equivalent_constructor = self.conforms(tycon, actual_tycon).unwrap_or(false)
-                    && self.conforms(actual_tycon, tycon).unwrap_or(false);
+                let equivalent_constructor = match (
+                    self.conforms(tycon, actual_tycon),
+                    self.conforms(actual_tycon, tycon),
+                ) {
+                    (Ok(true), Ok(true)) => true,
+                    (Ok(_), Ok(_)) => false,
+                    _ => {
+                        return Err(TyperError::UnsupportedInferenceShape {
+                            source: self.source,
+                            tree_index,
+                            binder,
+                            parameter_index: None,
+                            formal,
+                            actual,
+                        });
+                    }
+                };
                 if !equivalent_constructor || args.len() != actual_args.len() {
                     return Err(TyperError::UnsupportedInferenceShape {
                         source: self.source,
@@ -1619,6 +1708,7 @@ impl<'a> SourceTyper<'a> {
                         binder,
                         inferred,
                         tree_index,
+                        argument_index,
                         info_journal,
                         depth + 1,
                     )?;
@@ -1645,7 +1735,7 @@ impl<'a> SourceTyper<'a> {
             Ok(false) => Err(TyperError::ApplicationArgumentTypeMismatch {
                 source: self.source,
                 tree_index,
-                argument_index: 0,
+                argument_index,
                 actual,
                 expected: formal,
             }),
@@ -1899,10 +1989,13 @@ impl<'a> SourceTyper<'a> {
         self.remove_overridden_overload_candidates(&mut candidates, application_tree_index)?;
 
         if candidates.iter().any(|candidate| {
-            matches!(
-                self.store.types.try_get(candidate.callable),
-                Some(Type::Poly(_))
-            )
+            let Some(Type::Poly(poly)) = self.store.types.try_get(candidate.callable) else {
+                return false;
+            };
+            let Some(Type::Method(method)) = self.store.types.try_get(poly.result) else {
+                return false;
+            };
+            overload_arity_rejection(method, arguments.len()).is_none()
         }) {
             return Err(TyperError::GenericOverloadResolutionDeferred {
                 source: self.source,
@@ -5378,6 +5471,27 @@ mod tests {
             }
         }
         panic!("source method `{target}` not found");
+    }
+
+    fn method_parameter_context(
+        parsed: &dotty_parser::ParseResult,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+        method: SymbolId,
+        parameter_index: usize,
+    ) -> SourceContextId {
+        for (tree, node) in parsed.ast.iter() {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                continue;
+            };
+            if index.symbol_at(source, tree) != Some(method) {
+                continue;
+            }
+            let parameter_tree = definition.value_param_clauses[0][parameter_index];
+            let parameter = index.symbol_at(source, parameter_tree).unwrap();
+            return index.declaration_context_of(parameter).unwrap();
+        }
+        panic!("method parameter was not found");
     }
 
     fn type_value_rhs(source_text: &str) -> (dotty_core::Constant, Type, TypeId, Definitions) {
@@ -12779,11 +12893,7 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
-                candidate,
-                ..
-            }) if matches!(typer.store().symbols.get(candidate).info, SymbolInfo::Missing)
-                || matches!(typer.store().symbols.get(candidate).info, SymbolInfo::Complete(_))
+            Err(TyperError::GenericOverloadResolutionDeferred { .. })
         ));
     }
 
@@ -14496,6 +14606,18 @@ mod tests {
             owner: method,
         };
         let int = definitions.int;
+        let identity = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "id" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -14511,6 +14633,217 @@ mod tests {
             typer.typed_ast().get(typed).kind,
             TreeKind::Apply(_)
         ));
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            unreachable!()
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == identity
+        ));
+        let SymbolInfo::Complete(poly_id) = typer.store().symbols.get(identity).info else {
+            panic!("the original polymorphic method should remain complete")
+        };
+        assert!(matches!(typer.store().types.get(poly_id), Type::Poly(_)));
+        assert!(
+            typer
+                .type_contains_param_ref(poly_result(typer.store(), poly_id), poly_id)
+                .unwrap()
+        );
+    }
+
+    fn poly_result(store: &SemanticStore, poly: TypeId) -> TypeId {
+        match store.types.get(poly) {
+            Type::Poly(poly) => poly.result,
+            _ => panic!("expected original method info to remain polymorphic"),
+        }
+    }
+
+    #[test]
+    fn polymorphic_application_infers_multiple_parameters_by_binder_index() {
+        let source_text = "class C { def second[A, B](a: A, b: B): B = b; def use(a: Int, b: Boolean): Boolean = second(a, b) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+        };
+        let boolean = definitions.boolean;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert_eq!(typer.typed_ast().get(typed).ty, boolean);
+    }
+
+    #[test]
+    fn polymorphic_application_infers_nested_applied_type_arguments() {
+        let source_text = "class Text; class Box[A]; class Use { def unbox[A](box: Box[A]): A = ???; def use(box: Box[Text]): Text = unbox(box) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+        };
+        let text = class_symbol(&parsed, &store, &index, source, "Text");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == text
+        ));
+    }
+
+    #[test]
+    fn polymorphic_application_rejects_conflicting_constraints_without_lub() {
+        let source_text = "class C { def pair[A](x: A, y: A): A = x; def use(x: Int, y: Boolean): Any = pair(x, y) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ConflictingInferenceConstraints {
+                parameter_index: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn polymorphic_application_accepts_equivalent_repeated_constraints() {
+        let source_text = "class C { def pair[A](x: A, y: A): A = x; def use: Int = pair(1, 2) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let int = definitions.int;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert_eq!(typer.typed_ast().get(typed).ty, int);
+    }
+
+    #[test]
+    fn polymorphic_application_still_checks_concrete_formal_fragments() {
+        let source_text = "class C { def accept[A](value: A, count: Int): A = value; def use: Any = accept(1, true) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let int = definitions.int;
+        let boolean = definitions.boolean;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ApplicationArgumentTypeMismatch {
+                argument_index: 1,
+                actual,
+                expected,
+                ..
+            }) if actual == boolean && expected == int
+        ));
+    }
+
+    #[test]
+    fn polymorphic_application_reports_unconstrained_parameters() {
+        let source_text = "class C { def make[A](): A = ???; def use: Any = make() }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::UnconstrainedTypeParameter {
+                parameter_index: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn polymorphic_application_checks_inferred_type_argument_bounds() {
+        let source_text = "class Base; class Other; class Use { def accept[T <: Base](value: T): T = value; def use(value: Other): Other = accept(value) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let store_before = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::InferredTypeArgumentBoundViolation {
+                parameter_index: 0,
+                side: TypeArgumentBoundSide::Upper,
+                ..
+            })
+        ));
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert_eq!(typer.store().checkpoint(), store_before);
     }
 
     #[test]
