@@ -346,7 +346,9 @@ case-class parameters retain the `ParamAccessor`/`PrivateLocal` metadata needed
 by later phases. This metadata describes constructor roles, not source-level
 visibility.
 simple type aliases and abstract type declarations with lower and/or upper
-bounds
+bounds, including symbolic operator names such as `:*`, `==`, and `::` when
+they do not collide with reserved type-grammar tokens; value and method
+operator names remain handled by their separate declaration productions
 parenthesized type grouping and tuple types, represented by the shared
 `Parens` and `Tuple` source nodes; tuple elements use the supported full type
 expression subset and compose with applied types
