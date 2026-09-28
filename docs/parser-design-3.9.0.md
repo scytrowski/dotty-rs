@@ -333,8 +333,10 @@ are preserved in definition metadata; case objects remain `ModuleDef` trees.
 Singleton enum cases are represented as `ModuleDef` trees with the distinct
 parser-generated `Modifier::EnumCase`; comma-separated singleton cases remain
 one `PatDef` with the source identifiers in order. The synthetic primary
-constructor and template body remain parser-level structure. Parameterized enum
-cases are represented as `TypeDef(Template(...))` with `Modifier::EnumCase`;
+constructor and template body remain parser-level structure. Singleton cases
+preserve `extends` parents, including constructor applications, in
+`Template.parents`. Parameterized enum cases are represented as
+`TypeDef(Template(...))` with `Modifier::EnumCase`;
 their type parameters and constructor clauses reuse the `ParamOwner::CaseClass`
 policy, including accessor/private-local metadata. Type-only cases such as
 `case Empty[T]` have no value-parameter clauses.
