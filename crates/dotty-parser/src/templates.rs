@@ -602,6 +602,50 @@ mod tests {
     }
 
     #[test]
+    fn same_line_template_members_still_require_a_separator() {
+        let source = "{ def first = 1 private def second = 2 }";
+        let tokens = vec![
+            source_token(
+                source,
+                TokenKind::Punctuation(Punctuation::LeftBrace),
+                "{",
+                0,
+            ),
+            source_token(source, TokenKind::Keyword(HardKeyword::Def), "def", 0),
+            source_token(source, TokenKind::Identifier, "first", 0),
+            source_token(source, TokenKind::Operator, "=", 0),
+            source_token(source, TokenKind::IntegerLiteral, "1", 0),
+            source_token(
+                source,
+                TokenKind::Keyword(HardKeyword::Private),
+                "private",
+                0,
+            ),
+            source_token(source, TokenKind::Keyword(HardKeyword::Def), "def", 1),
+            source_token(source, TokenKind::Identifier, "second", 0),
+            source_token(source, TokenKind::Operator, "=", 1),
+            source_token(source, TokenKind::IntegerLiteral, "2", 0),
+            source_token(
+                source,
+                TokenKind::Punctuation(Punctuation::RightBrace),
+                "}",
+                0,
+            ),
+            token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+        ];
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(source, tokens, &mut names);
+
+        parser.parse_template_body(TemplateBody::Braced);
+
+        assert!(
+            parser.diagnostics().iter().any(|diagnostic| {
+                diagnostic.message() == "expected a template member separator"
+            })
+        );
+    }
+
+    #[test]
     fn indented_template_body_consumes_layout_delimiters() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(

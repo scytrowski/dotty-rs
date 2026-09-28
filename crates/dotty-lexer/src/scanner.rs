@@ -381,6 +381,7 @@ fn build_tokens(
     let mut paren_depth = 0u32;
     let mut bracket_depth = 0u32;
     let mut brace_depth = 0u32;
+    let mut braced_layout_delimiters = Vec::new();
     let mut xml = XmlState::default();
 
     for (item_index, item) in items.iter().enumerate() {
@@ -396,7 +397,13 @@ fn build_tokens(
                         || (previous_kind != Some(TokenKind::Operator)
                             && previous_indentation != indentation
                             && previous_indentation.is_prefix_of(&indentation)));
-                let layout_enabled = paren_depth == 0 && bracket_depth == 0;
+                let layout_enabled = (paren_depth == 0 && bracket_depth == 0)
+                    || braced_layout_delimiters.last().is_some_and(
+                        |(paren_depth_at_brace, bracket_depth_at_brace)| {
+                            paren_depth == *paren_depth_at_brace
+                                && bracket_depth == *bracket_depth_at_brace
+                        },
+                    );
                 let leading_infix = is_leading_infix(
                     source,
                     items,
@@ -477,6 +484,15 @@ fn build_tokens(
                 }
 
                 let token = Token::new(to_token_kind(raw.kind, previous_kind), raw.span);
+                match raw.kind {
+                    RawTokenKind::Punctuation(Punctuation::LeftBrace) => {
+                        braced_layout_delimiters.push((paren_depth, bracket_depth));
+                    }
+                    RawTokenKind::Punctuation(Punctuation::RightBrace) if brace_depth > 0 => {
+                        braced_layout_delimiters.pop();
+                    }
+                    _ => {}
+                }
                 update_delimiters(
                     raw.kind,
                     &mut paren_depth,
@@ -2796,6 +2812,57 @@ mod tests {
                 TokenKind::IntegerLiteral,
                 TokenKind::Eof,
             ]
+        );
+    }
+
+    #[test]
+    fn inserts_template_member_separators_inside_braces_nested_in_arguments() {
+        let tokens = kinds(
+            "call(new X(null, new Y {\n  override def first = ()\n  override def second = 1\n}))",
+        );
+
+        assert!(tokens.windows(2).any(|pair| {
+            pair == [
+                TokenKind::Newline,
+                TokenKind::Keyword(HardKeyword::Override),
+            ]
+        }));
+    }
+
+    #[test]
+    fn suppresses_argument_newlines_inside_a_braced_template() {
+        let source = "new X { def first = call(\n  a,\n  b\n)\n def second = 1 }";
+        let scanner = ContextualScanner::new(source).expect("source should scan");
+        let tokens = scanner.tokens();
+        let token_index = |text: &str| {
+            tokens
+                .iter()
+                .position(|token| {
+                    source.get(token.span.start() as usize..token.span.end() as usize) == Some(text)
+                })
+                .unwrap_or_else(|| panic!("token `{text}` exists"))
+        };
+        let first_argument = token_index("a");
+        let second_argument = token_index("b");
+        let second_definition = tokens
+            .iter()
+            .enumerate()
+            .find_map(|(index, token)| {
+                (token.kind == TokenKind::Keyword(HardKeyword::Def)
+                    && token.span.start() >= source.find("def second").unwrap() as u32)
+                    .then_some(index)
+            })
+            .expect("second definition exists");
+
+        assert!(
+            !tokens[first_argument..second_argument]
+                .iter()
+                .any(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines))
+        );
+        assert!(
+            tokens[second_argument..second_definition]
+                .iter()
+                .any(|token| token.kind == TokenKind::Newline)
         );
     }
 
