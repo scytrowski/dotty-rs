@@ -2,7 +2,7 @@
 //! without a real `TypeId`.
 
 use crate::ast::arena::AstArena;
-use crate::ast::common::{Apply, ApplyKind, Ident, Literal, Select, This};
+use crate::ast::common::{Apply, ApplyKind, Ident, Literal, Select, This, TypeApply, TypeTree};
 use crate::ast::phase::Typed;
 use crate::ast::tree::{Tree, TreeKind};
 use crate::ids::{TreeId, TypeId};
@@ -118,6 +118,32 @@ impl<'a> TypedAstBuilder<'a> {
                 args,
                 kind,
             }),
+            position,
+            ty,
+        })
+    }
+
+    /// Allocates a typed explicit type application with its instantiated
+    /// semantic result type.
+    pub fn type_apply(
+        &mut self,
+        function: TreeId<Typed>,
+        args: Vec<TreeId<Typed>>,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        self.arena.alloc(Tree {
+            kind: TreeKind::TypeApply(TypeApply { function, args }),
+            position,
+            ty,
+        })
+    }
+
+    /// Reifies a projected source type as a typed type tree. Type trees carry
+    /// their meaning in `Tree::ty`; the source typer records the source mapping.
+    pub fn type_tree(&mut self, ty: TypeId, position: Option<SourceSpan>) -> TreeId<Typed> {
+        self.arena.alloc(Tree {
+            kind: TreeKind::TypeTree(TypeTree),
             position,
             ty,
         })
@@ -247,5 +273,37 @@ mod tests {
             })
         );
         assert_eq!(arena.get(this).ty, ty);
+    }
+
+    #[test]
+    fn type_apply_preserves_function_arguments_and_instantiated_type() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let function = builder.ident(
+            Name::new(NameId::new(1), Namespace::Term),
+            TypeId::new(2),
+            None,
+        );
+        let argument = builder.type_tree(TypeId::new(3), None);
+        let application = builder.type_apply(function, vec![argument], TypeId::new(4), None);
+
+        assert_eq!(arena.get(application).ty, TypeId::new(4));
+        let TreeKind::TypeApply(type_apply) = &arena.get(application).kind else {
+            panic!("expected TypeApply")
+        };
+        assert_eq!(type_apply.function, function);
+        assert_eq!(type_apply.args, vec![argument]);
+    }
+
+    #[test]
+    fn type_tree_carries_the_projected_type() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let ty = TypeId::new(7);
+
+        let tree = builder.type_tree(ty, None);
+
+        assert_eq!(arena.get(tree).ty, ty);
+        assert!(matches!(arena.get(tree).kind, TreeKind::TypeTree(TypeTree)));
     }
 }

@@ -3,9 +3,14 @@
 //! The typer consumes a parsed and named untyped source tree. It does not
 //! parse source, allocate declaration symbols, or load classpath entries.
 //! [`SourceTyper::type_expression`] builds typed AST nodes for literals, term
-//! identifiers, `this`, and unique member selections. Unsupported expression
-//! forms return typed errors. Semantic type trees and source-to-typed mappings
-//! are cached by source tree identity.
+//! identifiers, `this`, unique member selections, plain method applications,
+//! and explicit positional type applications for one polymorphic callee.
+//! Type arguments are projected in the expression's lexical context and
+//! represented by typed `TypeTree` nodes carrying their semantic `TypeId`;
+//! each source type-argument root maps to that node in `SourceTypedIndex`,
+//! while nested type syntax is retained in its projected semantic type.
+//! Unsupported expression forms return typed errors. Semantic type trees and
+//! source-to-typed mappings are cached by source tree identity.
 //!
 //! Qualified type references use `ThisType` for an enclosing class prefix and
 //! the canonical package `TypeRef` (with `no_prefix`) for package prefixes.
@@ -29,7 +34,8 @@ pub use source_type_index::SourceTypeIndex;
 pub use source_typed_index::{ConflictingTypedTree, SourceTypedIndex};
 pub use typer::{
     ExpressionContext, MAX_MEMBER_LOOKUP_DEPTH, MAX_TYPE_RELATION_DEPTH, MAX_TYPE_RELATION_VIEWS,
-    MemberCandidate, MemberLookupError, SourceTyper, TypeRelationError, TyperError,
+    MemberCandidate, MemberLookupError, SourceTyper, TypeArgumentBoundSide, TypeRelationError,
+    TyperError,
 };
 pub use types::{
     MAX_TYPE_NORMALIZATION_DEPTH, SymbolInfoState, TypeNormalizeError, TypeNormalizer,
