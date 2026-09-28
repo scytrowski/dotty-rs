@@ -7347,9 +7347,17 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_union_relations_return_an_explicit_error() {
+    fn minimal_union_relations_cover_left_and_right_union_rules() {
         let (arena, mut store, packages, definitions) = setup();
         let union = store.types.alloc(Type::Or {
+            left: definitions.int,
+            right: definitions.boolean,
+        });
+        let nested_union = store.types.alloc(Type::Or {
+            left: union,
+            right: definitions.boolean,
+        });
+        let intersection = store.types.alloc(Type::And {
             left: definitions.int,
             right: definitions.boolean,
         });
@@ -7358,10 +7366,53 @@ mod tests {
         let mut typer =
             SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
 
+        assert!(!typer.is_subtype(union, definitions.int).unwrap());
+        assert!(typer.is_subtype(union, definitions.any_type).unwrap());
+        assert!(typer.is_subtype(definitions.int, union).unwrap());
+        assert!(typer.is_subtype(definitions.boolean, union).unwrap());
         assert!(matches!(
-            typer.is_subtype(union, definitions.int),
-            Err(TypeRelationError::UnsupportedType { found, expected })
-                if found == union && expected == definitions.int
+            typer.is_subtype(intersection, definitions.any_type),
+            Err(TypeRelationError::UnsupportedType { .. })
+        ));
+        assert!(
+            typer
+                .is_subtype(nested_union, definitions.any_type)
+                .unwrap()
+        );
+        assert!(typer.is_subtype(definitions.int, nested_union).unwrap());
+    }
+
+    #[test]
+    fn union_relation_rejects_cycles_and_excessive_nesting() {
+        let (arena, mut store, packages, definitions) = setup();
+        let reserved = store.types.reserve();
+        let recursive_union = reserved.id();
+        store.types.fill(
+            reserved,
+            Type::Or {
+                left: recursive_union,
+                right: definitions.int,
+            },
+        );
+        let mut nested = definitions.int;
+        for _ in 0..MAX_TYPE_RELATION_DEPTH {
+            nested = store.types.alloc(Type::Or {
+                left: nested,
+                right: definitions.boolean,
+            });
+        }
+        let index = SourceSemanticIndex::new();
+        let source = SourceId::from_index(0);
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert!(matches!(
+            typer.is_subtype(recursive_union, definitions.any_type),
+            Err(TypeRelationError::UnsupportedType { .. })
+        ));
+        assert!(matches!(
+            typer.is_subtype(nested, definitions.any_type),
+            Err(TypeRelationError::TooDeep)
         ));
     }
 
