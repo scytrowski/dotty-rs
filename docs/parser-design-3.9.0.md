@@ -630,6 +630,7 @@ matrix:
 ```text
 given T = rhs                  -> ValDef
 given name: T = rhs            -> ValDef
+given name: T                  -> DefDef(rhs = None), at a statement boundary
 given [A] => T = rhs            -> DefDef
 given (using ctx: Ctx) => T = rhs -> DefDef
 given T => U = rhs              -> DefDef(using x$1: T)
@@ -649,10 +650,13 @@ structural bodies reuse the ordinary `Template` machinery. Given conditions
 support type parameters, named or anonymous `using` clauses, anonymous
 parenthesized context types, and `GivenType => GivenSig` chains. Context-type
 parameters use Dotty's deterministic synthetic `x$N` names and retain `Given`
-metadata. Structural givens preserve constructor applications and comma- or
-`with`-separated parent lists in the shared `Template`; semantic given
-synthesis, legacy migration syntax, and semantic resolution remain outside the
-parser.
+metadata. Old-style abstract named givens are parsed as `DefDef` nodes with
+`rhs = None` when they end at a statement boundary, matching Dotty's
+spanless `EmptyTree` RHS through the shared AST's optional RHS. Dotty's
+migration warning for this deprecated syntax is not currently modeled.
+Structural givens preserve constructor applications and comma- or
+`with`-separated parent lists in the shared `Template`; other legacy migration
+syntax and semantic resolution remain outside the parser.
 
 An extension is represented by the existing `UntypedNode::ExtensionMethods`
 wrapper. Its parameter clauses remain in source order: leading type parameters,
@@ -736,7 +740,7 @@ semantic `UnApply` lowering belongs to later phases. Quoted patterns preserve
 Dotty's parser-level `Quote` plus nested `SplicePattern` representation;
 `QuotePattern` construction and staging semantics remain later-phase work.
 `given` and XML patterns, remaining refined-type forms, remaining definition forms and full
-template semantics, legacy given syntax, remaining control flow (`do`/`while`),
+template semantics, other legacy given migration syntax, remaining control flow (`do`/`while`),
 macros, and staging semantics remain follow-up increments.
 
 The initial match layer parses braced and indented `case` regions, including

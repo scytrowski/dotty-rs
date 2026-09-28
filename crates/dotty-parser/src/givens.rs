@@ -17,7 +17,7 @@ struct GivenSignature {
     value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
     method_like: bool,
     tpt: TreeId<Untyped>,
-    rhs: TreeId<Untyped>,
+    rhs: Option<TreeId<Untyped>>,
     metadata: dotty_core::ast::Modifiers,
 }
 
@@ -40,7 +40,8 @@ where
         };
         self.expect(TokenKind::Keyword(HardKeyword::Given));
 
-        let name = if self.starts_named_given() {
+        let has_name = self.starts_named_given();
+        let name = if has_name {
             let name = self
                 .intern_current_term_name()
                 .unwrap_or_else(|_| anonymous_term_name(self.names));
@@ -161,6 +162,20 @@ where
         }
 
         if !self.current_is_bare_assignment() {
+            if has_name && is_abstract_named_given_boundary(self.current().kind) {
+                return self.alloc_given_definition(
+                    mark,
+                    GivenSignature {
+                        name,
+                        type_params,
+                        value_param_clauses,
+                        method_like: true,
+                        tpt,
+                        rhs: None,
+                        metadata,
+                    },
+                );
+            }
             self.report(
                 ParseDiagnosticKind::ExpectedToken,
                 "expected `=` after a given type",
@@ -174,7 +189,7 @@ where
                     value_param_clauses,
                     method_like,
                     tpt,
-                    rhs,
+                    rhs: Some(rhs),
                     metadata,
                 },
             );
@@ -197,7 +212,7 @@ where
                 value_param_clauses,
                 method_like,
                 tpt,
-                rhs,
+                rhs: Some(rhs),
                 metadata,
             },
         )
@@ -349,7 +364,7 @@ where
                 TreeKind::ValDef(ValDef {
                     name: signature.name,
                     tpt: signature.tpt,
-                    rhs: Some(signature.rhs),
+                    rhs: signature.rhs,
                     metadata: signature.metadata,
                 }),
             ))
@@ -361,7 +376,7 @@ where
                     type_params: signature.type_params,
                     value_param_clauses: signature.value_param_clauses,
                     tpt: signature.tpt,
-                    rhs: Some(signature.rhs),
+                    rhs: signature.rhs,
                     metadata: signature.metadata,
                 }),
             ))
@@ -445,6 +460,11 @@ where
             );
         }
     }
+}
+
+fn is_abstract_named_given_boundary(kind: TokenKind) -> bool {
+    crate::definitions::is_definition_boundary(kind)
+        || kind == TokenKind::Punctuation(Punctuation::RightParen)
 }
 
 #[cfg(test)]
@@ -606,6 +626,101 @@ mod tests {
             TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Parens(_))
         ));
         assert!(definition.rhs.is_some());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_abstract_named_given_at_a_statement_boundary() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given TreeMethods: TreeMethods",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 17),
+                token(TokenKind::Punctuation(Punctuation::Colon), 17, 18),
+                token(TokenKind::Identifier, 19, 30),
+                token(TokenKind::Eof, 30, 30),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_given_definition(Location::Elsewhere)
+        else {
+            panic!("expected an abstract given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected an abstract given method definition");
+        };
+        let name_id = definition.name.as_name().text();
+        assert!(definition.rhs.is_none());
+        assert!(definition.metadata.modifiers.contains(&Modifier::Given));
+        assert!(!definition.metadata.modifiers.contains(&Modifier::Final));
+        assert!(!definition.metadata.modifiers.contains(&Modifier::Lazy));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, 30).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        drop(parser);
+        assert_eq!(names.resolve(name_id), "TreeMethods");
+    }
+
+    #[test]
+    fn still_reports_a_missing_equals_before_a_non_boundary_token() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given config: Config]",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 12),
+                token(TokenKind::Punctuation(Punctuation::Colon), 12, 13),
+                token(TokenKind::Identifier, 14, 20),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_given_definition(Location::Elsewhere)
+        else {
+            panic!("expected a recoverable given definition");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("invalid alias syntax should retain its recovery tree");
+        };
+        assert!(definition.rhs.is_some());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(parser.diagnostics()[0].message().contains("expected `=`"));
+    }
+
+    #[test]
+    fn accepts_an_abstract_named_given_before_a_closing_parenthesis() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given config: Config)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 12),
+                token(TokenKind::Punctuation(Punctuation::Colon), 12, 13),
+                token(TokenKind::Identifier, 14, 20),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_given_definition(Location::Elsewhere)
+        else {
+            panic!("expected an abstract given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected an abstract given method definition");
+        };
+        assert!(definition.rhs.is_none());
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Punctuation(Punctuation::RightParen)
+        );
         assert!(parser.diagnostics().is_empty());
     }
 
