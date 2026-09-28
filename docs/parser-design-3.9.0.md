@@ -312,8 +312,8 @@ Final repeated parameter types (`T*`, including applied types such as
 diagnoses repeated parameters in `given`/legacy `implicit` clauses and those
 followed by another parameter in the same clause.
 Primary-constructor parameters preserve source annotations and the supported
-`private`/`protected` visibility, `override`, and `inline` modifiers in
-class-parameter contexts; explicit `val`/`var` accessor metadata remains
+`private`/`protected` visibility, `final`, `override`, and `inline` modifiers
+in class-parameter contexts; explicit `val`/`var` accessor metadata remains
 context-sensitive.
 Annotations on ordinary method parameters are also preserved. These prefixes
 are not treated as a blanket set of modifiers valid for every parameter kind.
