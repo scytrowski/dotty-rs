@@ -564,6 +564,12 @@ pub enum TyperError {
         tree_index: u32,
         expression_kind: &'static str,
     },
+    /// A block statement changes the local declaration or import environment.
+    LocalBlockDeclarationDeferred {
+        source: SourceId,
+        tree_index: u32,
+        kind: &'static str,
+    },
     /// The semantic type is not yet supported by expression widening.
     ExpressionTypeCannotBeWidened { ty: TypeId },
     /// A term reference designates a symbol category that is not widenable.
@@ -961,6 +967,7 @@ impl<'a> SourceTyper<'a> {
         let ast_checkpoint = self.typed_arena.checkpoint();
         let store_checkpoint = self.store.checkpoint();
         let type_index_checkpoint = self.type_index.checkpoint();
+        let expression_scope_checkpoint = self.expression_scopes.len();
         let mut info_journal = Vec::new();
         let mut new_mappings = Vec::new();
         let result =
@@ -976,6 +983,7 @@ impl<'a> SourceTyper<'a> {
                 self.typed_arena.rollback_to(ast_checkpoint);
                 self.store.rollback_to(store_checkpoint);
                 self.type_index.restore(type_index_checkpoint);
+                self.expression_scopes.truncate(expression_scope_checkpoint);
                 for (source, source_tree) in new_mappings.into_iter().rev() {
                     self.typed_index.remove(source, source_tree);
                 }
@@ -1492,6 +1500,48 @@ impl<'a> SourceTyper<'a> {
                     function,
                     typed_type_arguments,
                     instantiated.result,
+                    source_tree.position,
+                ))
+            }
+            TreeKind::Block(block) => {
+                let block_scope = self
+                    .store
+                    .scopes
+                    .alloc(dotty_core::Scope::new(Some(context.owner)));
+                let block_context = self.push_local_scope(context, block_scope)?;
+                let mut stats = Vec::with_capacity(block.stats.len());
+                for stat in block.stats {
+                    let Some(source_stat) = self.arena.try_get(stat) else {
+                        return Err(TyperError::TreeOutsideArena {
+                            source: self.source,
+                            tree_index: stat.index(),
+                        });
+                    };
+                    if let Some(kind) = local_block_declaration_kind(&source_stat.kind) {
+                        return Err(TyperError::LocalBlockDeclarationDeferred {
+                            source: self.source,
+                            tree_index: stat.index(),
+                            kind,
+                        });
+                    }
+                    stats.push(self.type_expression_inner(
+                        stat,
+                        block_context,
+                        info_journal,
+                        new_mappings,
+                    )?);
+                }
+                let expr = self.type_expression_inner(
+                    block.expr,
+                    block_context,
+                    info_journal,
+                    new_mappings,
+                )?;
+                let ty = self.typed_arena.get(expr).ty;
+                Ok(TypedAstBuilder::new(&mut self.typed_arena).block(
+                    stats,
+                    expr,
+                    ty,
                     source_tree.position,
                 ))
             }
@@ -5500,6 +5550,21 @@ fn tree_kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::ByNameTypeTree(_) => "by-name type tree",
         TreeKind::TypeBoundsTree(_) => "type bounds tree",
         _ => "expression or declaration tree",
+    }
+}
+
+fn local_block_declaration_kind(kind: &TreeKind<Untyped>) -> Option<&'static str> {
+    match kind {
+        TreeKind::ValDef(_) => Some("val/var definition"),
+        TreeKind::DefDef(_) => Some("method definition"),
+        TreeKind::TypeDef(_) => Some("type definition"),
+        TreeKind::PackageDef(_) => Some("package definition"),
+        TreeKind::Import(_) => Some("import"),
+        TreeKind::Export(_) => Some("export"),
+        TreeKind::PhaseSpecific(UntypedNode::PatDef(_)) => Some("pattern definition"),
+        TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(_)) => Some("extension methods"),
+        TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => Some("module definition"),
+        _ => None,
     }
 }
 
@@ -11803,6 +11868,279 @@ mod tests {
             typer.store().types.get(typer.typed_ast().get(typed).ty),
             Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == parameter
         ));
+    }
+
+    #[test]
+    fn expression_block_types_stats_and_preserves_its_final_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def block(x: Int): Int = { x; true; 1 } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "block");
+        let parameter = method_parameter_symbol(&parsed, &index, source, method, 0);
+        let source_position = parsed.ast.get(rhs).position;
+        let TreeKind::Block(source_block) = &parsed.ast.get(rhs).kind else {
+            panic!("method RHS should be a source block");
+        };
+        assert_eq!(source_block.stats.len(), 2);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let typed_node = typer.typed_ast().get(typed);
+        let TreeKind::Block(typed_block) = &typed_node.kind else {
+            panic!("source block should produce a typed block");
+        };
+        assert_eq!(typed_block.stats.len(), 2);
+        assert_eq!(typed_node.position, source_position);
+        assert_eq!(
+            typed_node.ty,
+            typer.typed_ast().get(typed_block.expr).ty,
+            "block type must be the final expression's own type"
+        );
+        assert!(matches!(
+            typer.store().types.get(typed_node.ty),
+            Type::Constant(dotty_core::Constant::Int(1))
+        ));
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_block.stats[0]).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == parameter
+        ));
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_block.stats[1]).ty),
+            Type::Constant(dotty_core::Constant::Boolean(true))
+        ));
+        assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed));
+        for source_stat in &source_block.stats {
+            assert!(
+                typer
+                    .source_typed_index()
+                    .get(source, *source_stat)
+                    .is_some()
+            );
+        }
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, source_block.expr)
+                .is_some()
+        );
+        assert_eq!(typer.expression_scopes.len(), 2);
+        assert_ne!(
+            typer.expression_scopes[0].scope,
+            typer.expression_scopes[1].scope
+        );
+        assert_eq!(
+            typer
+                .store()
+                .scopes
+                .get(typer.expression_scopes[1].scope)
+                .owner,
+            Some(method)
+        );
+        assert_eq!(typer.type_expression(rhs, context).unwrap(), typed);
+        assert_eq!(typer.expression_scopes.len(), 2);
+    }
+
+    #[test]
+    fn empty_unit_style_block_keeps_its_block_shape() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def empty: Unit = {} }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "empty");
+        let TreeKind::Block(source_block) = &parsed.ast.get(rhs).kind else {
+            panic!("empty braced expression should remain a source block");
+        };
+        assert!(source_block.stats.is_empty());
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed).kind else {
+            panic!("empty source block should still produce a typed block");
+        };
+        assert!(block.stats.is_empty());
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::Constant(dotty_core::Constant::Unit)
+        ));
+        assert_eq!(
+            typer.typed_ast().get(typed).ty,
+            typer.typed_ast().get(block.expr).ty
+        );
+    }
+
+    #[test]
+    fn expression_block_keeps_a_final_term_reference_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def block(x: Int): Int = { 1; x } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "block");
+        let parameter = method_parameter_symbol(&parsed, &index, source, method, 0);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed).kind else {
+            panic!("source block should produce a typed block");
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == parameter
+        ));
+        assert_eq!(
+            typer.typed_ast().get(typed).ty,
+            typer.typed_ast().get(block.expr).ty
+        );
+    }
+
+    #[test]
+    fn nested_expression_blocks_push_nested_scopes() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def block: Int = { { 1 }; 2 } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "block");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let method_scope = context.local_scopes.unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed).kind else {
+            panic!("outer source block should produce a typed block");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(block.stats[0]).kind,
+            TreeKind::Block(_)
+        ));
+        assert_eq!(typer.expression_scopes.len(), 3);
+        assert_eq!(typer.expression_scopes[1].parent, Some(method_scope));
+        assert_eq!(
+            typer.expression_scopes[2]
+                .parent
+                .map(ExpressionScopeId::index),
+            Some(1)
+        );
+        assert_ne!(
+            typer.expression_scopes[1].scope,
+            typer.expression_scopes[2].scope
+        );
+    }
+
+    #[test]
+    fn failed_block_typing_rolls_back_typed_nodes_mappings_and_scopes() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def block: Int = { 1; missing } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "block");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+        let expression_scope_checkpoint = typer.expression_scopes.len();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert_eq!(typer.typed_ast().iter().count(), 0);
+        assert!(typer.source_typed_index().is_empty());
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.expression_scopes.len(), expression_scope_checkpoint);
+    }
+
+    #[test]
+    fn block_declaration_statements_are_deferred_explicitly() {
+        let sources = [
+            (
+                "class C { def use: Int = { 1; val local: Int = 2; 3 } }",
+                "val/var definition",
+            ),
+            (
+                "class C { def use: Int = { 1; def local: Int = 2; 3 } }",
+                "method definition",
+            ),
+            (
+                "class C { def use: Int = { 1; type Local = Int; 3 } }",
+                "type definition",
+            ),
+            (
+                "class Lib { val item: Int = 1 }; class C { def use: Int = { 1; import Lib.item; 3 } }",
+                "import",
+            ),
+        ];
+
+        for (source_text, expected_kind) in sources {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+            let store_checkpoint = typer.store().checkpoint();
+            let expression_scope_checkpoint = typer.expression_scopes.len();
+
+            assert!(
+                matches!(
+                    typer.type_expression(rhs, context),
+                    Err(TyperError::LocalBlockDeclarationDeferred { kind, .. })
+                        if kind == expected_kind
+                ),
+                "expected `{expected_kind}` to be deferred for `{source_text}`"
+            );
+            assert_eq!(typer.typed_ast().iter().count(), 0);
+            assert!(typer.source_typed_index().is_empty());
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+            assert_eq!(typer.expression_scopes.len(), expression_scope_checkpoint);
+        }
     }
 
     #[test]
