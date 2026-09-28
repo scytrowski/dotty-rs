@@ -238,7 +238,8 @@ contextual identifier selectors remain identifiers; `.match` starts a match
 clause rather than forming a `Select`, and reserved operator tokens such as
 bare `=` are not accepted as selector names
 simple applications such as foo(42) and foo(1, 2)
-super, qualified super, and simple mixin-qualified super
+`this` and qualified `Outer.this` references, including selections from them;
+`super`, qualified super, and simple mixin-qualified super
 new with simple or qualified type names, constructor applications, ordered
 `with`-separated parent/mixin chains, and braced or indented anonymous
 template bodies after `new`
@@ -709,8 +710,9 @@ Pattern -> Pattern1 -> Pattern2 -> InfixPattern -> SimplePattern
 
 It covers identifiers and `_`, character/string/numeric literals including
 negative numbers,
-parentheses and tuples, syntactic selections including `this.member` and
-`super.member`, extractor-shaped `Apply`/`TypeApply` trees, `@` binders,
+parentheses and tuples, syntactic selections including `this.member`,
+`Outer.this.member`, and `super.member`, extractor-shaped `Apply`/`TypeApply`
+trees, `@` binders,
 typed patterns whose type uses the current `refinedType` subset (including
 qualified types with annotations such as `T @unchecked`), precedence-aware
 infix patterns, `|` alternatives, and named extractor arguments. A type
