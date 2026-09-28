@@ -55,7 +55,7 @@ where
             }
             body
         } else {
-            self.observe_arrow_indented();
+            self.observe_case_body_indented(mark.start);
             self.advance();
             self.parse_case_body(body_mark)
         };

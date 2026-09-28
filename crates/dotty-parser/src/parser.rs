@@ -310,9 +310,37 @@ where
         !already_indented && has_indentation_token(self)
     }
 
+    /// Requests a match-case region, which may use the same source indentation
+    /// as `match` when it is nested in a braced scope.
+    pub(crate) fn observe_match_cases_indented(&mut self) -> bool {
+        let mut lookahead = 1;
+        while matches!(
+            self.cursor.lookahead(lookahead).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            lookahead += 1;
+        }
+        let already_indented =
+            (1..=lookahead).any(|offset| self.cursor.lookahead(offset).kind == TokenKind::Indent);
+        self.observe(ScannerEvent::MatchCasesIndented);
+        let now_indented =
+            (1..=lookahead).any(|offset| self.cursor.lookahead(offset).kind == TokenKind::Indent);
+        !already_indented && now_indented
+    }
+
     /// Tells the scanner that an indented region was exited.
     pub fn observe_outdented(&mut self) {
         self.observe(ScannerEvent::Outdented);
+    }
+
+    /// Closes the parser-requested case region opened for a match clause.
+    pub(crate) fn observe_match_cases_outdented(&mut self) {
+        self.observe(ScannerEvent::MatchCasesOutdented);
+    }
+
+    /// Opens a case-body region relative to the source indentation of `case`.
+    pub(crate) fn observe_case_body_indented(&mut self, case_start: u32) {
+        self.observe(ScannerEvent::CaseBodyIndented { case_start });
     }
 
     /// Closes a feedback-opened layout region at a grammar delimiter without

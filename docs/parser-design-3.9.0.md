@@ -108,10 +108,18 @@ event through readable helpers. A self arrow suppresses a pending nested
 indentation region; layout classification remains owned by the scanner while
 grammar decisions remain in the parser.
 Match-case regions use the same feedback contract: when braced scopes prevent
-eager indentation, the parser requests the case-region indent after `match`
-and balances it before parsing the following sibling statement. If a matching
-parenthesis closes the case region first, the parser closes the feedback state
-without exposing an `Outdent` token inside the parenthesized expression.
+eager indentation, the parser requests a match-specific case-region indent
+after `match`. This also covers Dotty's same-indent `case` clauses inside a
+braced scope; the scanner distinguishes their boundary from outdents requested
+while parsing an individual case body. The parser balances the match region
+before parsing the following sibling statement. If a matching parenthesis
+closes the case region first, the parser closes the feedback state without
+exposing an `Outdent` token inside the parenthesized expression.
+Case-body feedback carries the source position of its `case` clause, so
+subsequent statements are compared with the clause indentation rather than
+the first body expression's indentation. If a nested feedback-opened region
+ends at a delimiter, its synthetic indent is marked closed so a later scan
+cannot mistake that consumed region for a still-open indentation level.
 Feedback-opened lambda and expression bodies follow Dotty's statement-sequence
 terminators as well: a closing parenthesis or nested brace may end the body
 before an `Outdent` is materialized. The parser balances that scanner region

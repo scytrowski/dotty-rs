@@ -17,7 +17,24 @@ pub struct ContextualScanner {
     tokens: Vec<Token>,
     position: usize,
     diagnostics: Vec<Diagnostic>,
-    feedback_regions: usize,
+    feedback_regions: Vec<FeedbackRegion>,
+    /// Synthetic indent tokens whose regions ended at a delimiter. They stay
+    /// in the consumed stream but must not be reused by a later outdent scan.
+    delimiter_closed_indents: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedbackRegionKind {
+    Indented,
+    MatchCases,
+    CaseBody,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FeedbackRegion {
+    kind: FeedbackRegionKind,
+    indent_offset: u32,
+    case_offset: Option<u32>,
 }
 
 impl ContextualScanner {
@@ -46,7 +63,8 @@ impl ContextualScanner {
             tokens,
             position: 0,
             diagnostics,
-            feedback_regions: 0,
+            feedback_regions: Vec::new(),
+            delimiter_closed_indents: Vec::new(),
         })
     }
 
@@ -116,6 +134,71 @@ impl ContextualScanner {
             ),
         );
         true
+    }
+
+    fn insert_match_case_indent_after_current(&mut self) -> bool {
+        let index = self.current_index();
+        if self.next_line_starts_same_indent_cases(index) {
+            let next = next_real_token(&self.tokens, index).expect("same-indent case exists");
+            let offset = next.span.start();
+            self.tokens.insert(
+                index + 1,
+                Token::new(
+                    TokenKind::Indent,
+                    TextRange::new(offset, offset).expect("synthetic range is valid"),
+                ),
+            );
+            true
+        } else {
+            self.insert_indent_after_current()
+        }
+    }
+
+    fn feedback_indent_offset_after_current(&self) -> u32 {
+        let index = self.current_index();
+        self.tokens[index + 1].span.start()
+    }
+
+    fn next_line_starts_same_indent_cases(&self, current_index: usize) -> bool {
+        let Some(current) = self.tokens.get(current_index) else {
+            return false;
+        };
+        if !matches!(
+            current.kind,
+            TokenKind::Keyword(HardKeyword::Match | HardKeyword::Catch)
+        ) {
+            return false;
+        }
+        let Some(next) = next_real_token(&self.tokens, current_index) else {
+            return false;
+        };
+        next.kind == TokenKind::Keyword(HardKeyword::Case)
+            && self.has_open_brace_before(current_index)
+            && has_source_line_break(&self.source, current.span.end(), next.span.start())
+            && line_indentation(&self.source, current.span.start())
+                == line_indentation(&self.source, next.span.start())
+    }
+
+    fn has_open_brace_before(&self, index: usize) -> bool {
+        self.tokens[..index]
+            .iter()
+            .fold(0usize, |depth, token| match token.kind {
+                TokenKind::Punctuation(Punctuation::LeftBrace) => depth.saturating_add(1),
+                TokenKind::Punctuation(Punctuation::RightBrace) => depth.saturating_sub(1),
+                _ => depth,
+            })
+            > 0
+    }
+
+    fn current_starts_match_case(&self) -> bool {
+        let index = self.current_index();
+        let kind = self.tokens[index].kind;
+        let next_kind = if is_layout_token(kind) {
+            next_real_token(&self.tokens, index).map(|token| token.kind)
+        } else {
+            Some(kind)
+        };
+        next_kind == Some(TokenKind::Keyword(HardKeyword::Case))
     }
 
     /// Restores statement separators inside an arrow body when the ordinary
@@ -188,7 +271,7 @@ impl ContextualScanner {
         }
     }
 
-    fn insert_outdent_before_current(&mut self) -> bool {
+    fn insert_outdent_before_current(&mut self, allow_same_indent: bool) -> bool {
         let index = self.current_index();
         if self
             .tokens
@@ -199,28 +282,34 @@ impl ContextualScanner {
         }
         if self.tokens[index].kind != TokenKind::Eof {
             let mut closed_regions = 0usize;
-            let indent_index =
-                self.tokens[..index]
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(token_index, token)| match token.kind {
-                        TokenKind::Outdent => {
-                            closed_regions = closed_regions.saturating_add(1);
-                            None
-                        }
-                        TokenKind::Indent if closed_regions > 0 => {
-                            closed_regions -= 1;
-                            None
-                        }
-                        TokenKind::Indent => Some(token_index),
-                        _ => None,
-                    });
+            let mut indent_index = None;
+            for (token_index, token) in self.tokens[..index].iter().enumerate().rev() {
+                match token.kind {
+                    TokenKind::Outdent => {
+                        closed_regions = closed_regions.saturating_add(1);
+                    }
+                    TokenKind::Indent if closed_regions > 0 => closed_regions -= 1,
+                    TokenKind::Indent
+                        if !self.delimiter_closed_indents.contains(&token.span.start()) =>
+                    {
+                        indent_index = Some(token_index);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
             let Some(indent_index) = indent_index else {
                 return false;
             };
-            let region_indent =
-                line_indentation(&self.source, self.tokens[indent_index].span.start());
+            let indent_offset = self.tokens[indent_index].span.start();
+            let region_offset = self
+                .feedback_regions
+                .iter()
+                .rev()
+                .find(|region| region.indent_offset == indent_offset)
+                .and_then(|region| region.case_offset)
+                .unwrap_or(indent_offset);
+            let region_indent = line_indentation(&self.source, region_offset);
             let current_offset = if is_layout_token(self.tokens[index].kind) {
                 next_real_token(&self.tokens, index)
                     .map_or(self.tokens[index].span.start(), |token| token.span.start())
@@ -228,10 +317,10 @@ impl ContextualScanner {
                 self.tokens[index].span.start()
             };
             let current_indent = line_indentation(&self.source, current_offset);
-            if !matches!(
-                current_indent.ordering(&region_indent),
-                IndentOrdering::Less
-            ) {
+            let ordering = current_indent.ordering(&region_indent);
+            if !matches!(ordering, IndentOrdering::Less)
+                && !(allow_same_indent && ordering == IndentOrdering::Equal)
+            {
                 return false;
             }
         }
@@ -338,20 +427,70 @@ impl TokenSource for ContextualScanner {
             }
             ScannerEvent::Indented => {
                 if self.insert_indent_after_current() {
-                    self.feedback_regions += 1;
+                    self.feedback_regions.push(FeedbackRegion {
+                        kind: FeedbackRegionKind::Indented,
+                        indent_offset: self.feedback_indent_offset_after_current(),
+                        case_offset: None,
+                    });
                 }
             }
-            ScannerEvent::Outdented => {
-                if self.feedback_regions > 0 && self.insert_outdent_before_current() {
-                    self.feedback_regions -= 1;
+            ScannerEvent::Outdented => match self.feedback_regions.last().map(|region| region.kind)
+            {
+                Some(FeedbackRegionKind::Indented) if self.insert_outdent_before_current(false) => {
+                    self.feedback_regions.pop();
+                }
+                Some(FeedbackRegionKind::MatchCases)
+                    if !self.current_starts_match_case()
+                        && self.insert_outdent_before_current(true) =>
+                {
+                    self.feedback_regions.pop();
+                }
+                Some(FeedbackRegionKind::CaseBody) if self.insert_outdent_before_current(true) => {
+                    self.feedback_regions.pop();
+                }
+                _ => {}
+            },
+            ScannerEvent::MatchCasesIndented => {
+                if self.insert_match_case_indent_after_current() {
+                    self.feedback_regions.push(FeedbackRegion {
+                        kind: FeedbackRegionKind::MatchCases,
+                        indent_offset: self.feedback_indent_offset_after_current(),
+                        case_offset: None,
+                    });
+                }
+            }
+            ScannerEvent::MatchCasesOutdented => {
+                if self.feedback_regions.last().map(|region| region.kind)
+                    == Some(FeedbackRegionKind::MatchCases)
+                    && self.insert_outdent_before_current(true)
+                {
+                    self.feedback_regions.pop();
+                }
+            }
+            ScannerEvent::CaseBodyIndented { case_start } => {
+                if self.insert_indent_after_current() {
+                    self.feedback_regions.push(FeedbackRegion {
+                        kind: FeedbackRegionKind::CaseBody,
+                        indent_offset: self.feedback_indent_offset_after_current(),
+                        case_offset: Some(case_start),
+                    });
+                    self.insert_arrow_body_separators();
                 }
             }
             ScannerEvent::OutdentedByDelimiter => {
-                self.feedback_regions = self.feedback_regions.saturating_sub(1);
+                if let Some(region) = self.feedback_regions.pop() {
+                    // No parser-visible Outdent is inserted at the delimiter,
+                    // so remember the indent token as logically closed.
+                    self.delimiter_closed_indents.push(region.indent_offset);
+                }
             }
             ScannerEvent::ArrowIndented => {
                 if self.current_is_arrow() && self.insert_indent_after_current() {
-                    self.feedback_regions += 1;
+                    self.feedback_regions.push(FeedbackRegion {
+                        kind: FeedbackRegionKind::Indented,
+                        indent_offset: self.feedback_indent_offset_after_current(),
+                        case_offset: None,
+                    });
                     self.insert_arrow_body_separators();
                 }
             }
@@ -2190,6 +2329,74 @@ mod tests {
     }
 
     #[test]
+    fn match_feedback_opens_same_indent_cases_inside_braces() {
+        let source = "{\n  value match\n  case A => first\n  case B => second\n  after\n}";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Match) {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::MatchCasesIndented);
+
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
+        assert_eq!(scanner.feedback_regions.len(), 1);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Indent);
+        scanner.advance();
+        assert_eq!(
+            scanner.current().kind,
+            TokenKind::Keyword(HardKeyword::Case)
+        );
+
+        let mut seen_cases = 1;
+        while seen_cases < 2 {
+            scanner.advance();
+            if scanner.current().kind == TokenKind::Keyword(HardKeyword::Case) {
+                seen_cases += 1;
+            }
+        }
+        scanner.observe(ScannerEvent::Outdented);
+        assert_eq!(
+            scanner.current().kind,
+            TokenKind::Keyword(HardKeyword::Case)
+        );
+        assert_eq!(scanner.feedback_regions.len(), 1);
+
+        let after = source.find("after").unwrap();
+        while (scanner.current().span.start() as usize) < after {
+            scanner.advance();
+        }
+        assert_eq!(scanner.current().span.start() as usize, after);
+        scanner.observe(ScannerEvent::Outdented);
+
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        assert!(scanner.feedback_regions.is_empty());
+    }
+
+    #[test]
+    fn match_feedback_does_not_open_same_indent_cases_outside_braces() {
+        let source = "value match\ncase A => first";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Match) {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::MatchCasesIndented);
+
+        assert_eq!(
+            scanner.current().kind,
+            TokenKind::Keyword(HardKeyword::Match)
+        );
+        assert_eq!(
+            next_real_token(&scanner.tokens, scanner.current_index())
+                .expect("case follows match")
+                .kind,
+            TokenKind::Keyword(HardKeyword::Case)
+        );
+        assert!(scanner.feedback_regions.is_empty());
+    }
+
+    #[test]
     fn delimiter_closes_feedback_region_without_emitting_outdent() {
         let source = "{\n  value match\n    case A => first\n    case _ => second)\n  after\n}";
         let mut scanner = ContextualScanner::new(source).expect("source scans");
@@ -2198,14 +2405,14 @@ mod tests {
         }
 
         scanner.observe(ScannerEvent::Indented);
-        assert_eq!(scanner.feedback_regions, 1);
+        assert_eq!(scanner.feedback_regions.len(), 1);
         while scanner.current().kind != TokenKind::Punctuation(Punctuation::RightParen) {
             scanner.advance();
         }
 
         scanner.observe(ScannerEvent::OutdentedByDelimiter);
 
-        assert_eq!(scanner.feedback_regions, 0);
+        assert!(scanner.feedback_regions.is_empty());
         assert_eq!(
             scanner.current().kind,
             TokenKind::Punctuation(Punctuation::RightParen)
