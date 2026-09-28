@@ -7,8 +7,8 @@ use dotty_core::ast::{
     UntypedNode,
 };
 use dotty_core::types::{
-    ClassInfo, MethodKind, MethodParamSpec, TermRefTarget, Type, TypeParamSpec, TypeRefTarget,
-    method_type_from_symbols, poly_type_from_symbols,
+    ClassInfo, MethodKind, MethodParamSpec, MethodType, TermRefTarget, Type, TypeParamSpec,
+    TypeRefTarget, method_type_from_symbols, poly_type_from_symbols,
 };
 use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
@@ -382,6 +382,32 @@ pub enum TyperError {
         expected: TypeId,
         error: Box<TypeRelationError>,
     },
+    /// Every overload rejected the supplied arguments; reasons are kept per candidate.
+    OverloadApplicationNoApplicable {
+        source: SourceId,
+        tree_index: u32,
+        candidates: Vec<(SymbolId, OverloadRejection)>,
+    },
+    /// Several supported candidates apply, but this increment has not selected a unique best one.
+    AmbiguousOverloadApplication {
+        source: SourceId,
+        tree_index: u32,
+        candidates: Vec<SymbolId>,
+    },
+    /// An unsupported overload could compete with supported candidates.
+    OverloadResolutionRequiresUnsupportedCandidate {
+        source: SourceId,
+        tree_index: u32,
+        candidate: SymbolId,
+    },
+    /// A method symbol has an incomplete or unsupported callable shape.
+    MalformedOverloadCandidate { symbol: SymbolId, callable: TypeId },
+    /// The application name bucket mixes methods and non-method terms.
+    MixedApplicationCandidateKinds {
+        source: SourceId,
+        tree_index: u32,
+        candidates: Vec<SymbolId>,
+    },
     /// A type selection is outside expression typing.
     TypeSelectionInExpression { source: SourceId, tree_index: u32 },
     /// Member discovery failed with a typed lookup error.
@@ -404,6 +430,21 @@ pub enum TyperError {
         tree_index: u32,
         qualifier_type: TypeId,
     },
+}
+
+/// Why one overload was excluded from an application candidate set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OverloadRejection {
+    WrongArity {
+        expected: usize,
+        actual: usize,
+    },
+    ArgumentNonConformance {
+        argument_index: usize,
+        actual: TypeId,
+        expected: TypeId,
+    },
+    UnsupportedSemantics,
 }
 
 impl fmt::Display for TyperError {
@@ -447,6 +488,55 @@ struct SourceTreeLocation {
 enum ImportSelection {
     Explicit,
     Wildcard,
+}
+
+#[derive(Clone, Copy)]
+struct ApplicationCandidate {
+    symbol: SymbolId,
+    callable: TypeId,
+    member: Option<MemberCandidate>,
+}
+
+#[derive(Clone, Copy)]
+struct TypedArgument {
+    typed: TreeId<Typed>,
+    own_type: TypeId,
+    widened_type: TypeId,
+}
+
+fn overload_arity_rejection(method: &MethodType, actual: usize) -> Option<usize> {
+    match method.params.iter().position(|parameter| parameter.varargs) {
+        Some(varargs_index) if varargs_index + 1 == method.params.len() => {
+            (actual < varargs_index).then_some(varargs_index)
+        }
+        Some(_) => None,
+        None => (actual != method.params.len()).then_some(method.params.len()),
+    }
+}
+
+fn supported_override_signature(method: &MethodType, store: &SemanticStore) -> bool {
+    method.kind == MethodKind::Plain
+        && method.params.iter().all(|parameter| {
+            !parameter.erased
+                && !parameter.varargs
+                && !matches!(store.types.try_get(parameter.ty), Some(Type::ByName { .. }))
+        })
+}
+
+struct ResolvedApplicationFunction {
+    typed: TreeId<Typed>,
+    callable: TypeId,
+    arguments: Vec<TypedArgument>,
+}
+
+#[derive(Clone, Copy)]
+enum ApplicationFunctionShape {
+    Ident(Ident),
+    Select {
+        selection: dotty_core::ast::Select<Untyped>,
+        qualifier: TreeId<Typed>,
+        receiver_type: TypeId,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -703,13 +793,21 @@ impl<'a> SourceTyper<'a> {
                     let candidates = self
                         .lookup_members_journaled(receiver, name, info_journal)
                         .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
-                    let candidate = candidates
+                    let candidate = match candidates
                         .into_iter()
                         .find(|candidate| candidate.symbol == symbol)
-                        .ok_or(TyperError::TermReferencePrefixMismatch {
-                            symbol,
-                            prefix: receiver,
-                        })?;
+                    {
+                        Some(candidate) => candidate,
+                        None => self
+                            .lookup_overload_members_journaled(receiver, name, info_journal)
+                            .map_err(|error| TyperError::MemberLookup(Box::new(error)))?
+                            .into_iter()
+                            .find(|candidate| candidate.symbol == symbol)
+                            .ok_or(TyperError::TermReferencePrefixMismatch {
+                                symbol,
+                                prefix: receiver,
+                            })?,
+                    };
                     self.member_type_on_journaled(&candidate, info_journal)
                 }
             }
@@ -797,15 +895,29 @@ impl<'a> SourceTyper<'a> {
                         tree_index: tree.index(),
                     });
                 }
-                let function = self.type_expression_inner(
+                let resolved_function = self.resolve_overloaded_application_function(
                     application.function,
+                    &application.args,
                     context,
+                    tree.index(),
                     info_journal,
                     new_mappings,
                 )?;
-                let function_type = self.typed_arena.get(function).ty;
-                let callable =
-                    self.widen_expression_type_journaled(function_type, info_journal, 0)?;
+                let (function, callable, typed_arguments) =
+                    if let Some(resolved) = resolved_function {
+                        (resolved.typed, resolved.callable, Some(resolved.arguments))
+                    } else {
+                        let function = self.type_expression_inner(
+                            application.function,
+                            context,
+                            info_journal,
+                            new_mappings,
+                        )?;
+                        let function_type = self.typed_arena.get(function).ty;
+                        let callable =
+                            self.widen_expression_type_journaled(function_type, info_journal, 0)?;
+                        (function, callable, None)
+                    };
                 let method = match self.store.types.try_get(callable) {
                     Some(Type::Method(method)) => method.clone(),
                     Some(Type::Poly(_)) => {
@@ -875,15 +987,25 @@ impl<'a> SourceTyper<'a> {
                 for (argument_index, (argument_tree, parameter)) in
                     application.args.iter().zip(&method.params).enumerate()
                 {
-                    let argument = self.type_expression_inner(
-                        *argument_tree,
-                        context,
-                        info_journal,
-                        new_mappings,
-                    )?;
-                    let argument_type = self.typed_arena.get(argument).ty;
-                    let actual =
-                        self.widen_expression_type_journaled(argument_type, info_journal, 0)?;
+                    let (argument, actual) = if let Some(typed_arguments) = &typed_arguments {
+                        let typed_argument = typed_arguments[argument_index];
+                        debug_assert_eq!(
+                            self.typed_arena.get(typed_argument.typed).ty,
+                            typed_argument.own_type
+                        );
+                        (typed_argument.typed, typed_argument.widened_type)
+                    } else {
+                        let argument = self.type_expression_inner(
+                            *argument_tree,
+                            context,
+                            info_journal,
+                            new_mappings,
+                        )?;
+                        let argument_type = self.typed_arena.get(argument).ty;
+                        let actual =
+                            self.widen_expression_type_journaled(argument_type, info_journal, 0)?;
+                        (argument, actual)
+                    };
                     match self.conforms(actual, parameter.ty) {
                         Ok(true) => {}
                         Ok(false) => {
@@ -1080,6 +1202,606 @@ impl<'a> SourceTyper<'a> {
         visit(self, root, binder, 0, &mut std::collections::HashSet::new())
     }
 
+    fn resolve_overloaded_application_function(
+        &mut self,
+        function_tree: TreeId<Untyped>,
+        argument_trees: &[TreeId<Untyped>],
+        context: ExpressionContext,
+        application_tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<Option<ResolvedApplicationFunction>, TyperError> {
+        let Some(function_node) = self.arena.try_get(function_tree).cloned() else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: function_tree.index(),
+            });
+        };
+        let (mut candidates, function_shape) = match function_node.kind {
+            TreeKind::Ident(ident) => {
+                let candidates = self.expression_term_candidates(
+                    ident.name,
+                    context.lexical,
+                    function_tree.index(),
+                    function_node.position,
+                )?;
+                if candidates.len() <= 1 {
+                    return Ok(None);
+                }
+                if candidates
+                    .iter()
+                    .any(|symbol| self.store.symbols.get(*symbol).kind != SymbolKind::Method)
+                {
+                    return Err(TyperError::MixedApplicationCandidateKinds {
+                        source: self.source,
+                        tree_index: application_tree_index,
+                        candidates,
+                    });
+                }
+                (
+                    candidates
+                        .into_iter()
+                        .map(|symbol| {
+                            let callable =
+                                self.completed_expression_symbol_info(symbol, info_journal)?;
+                            self.validate_overload_callable(symbol, callable)?;
+                            Ok(ApplicationCandidate {
+                                symbol,
+                                callable,
+                                member: None,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, TyperError>>()?,
+                    ApplicationFunctionShape::Ident(ident),
+                )
+            }
+            TreeKind::Select(selection) if selection.name.is_term() => {
+                let qualifier = self.type_expression_inner(
+                    selection.qualifier,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?;
+                let receiver_type = self.typed_arena.get(qualifier).ty;
+                self.require_stable_selection_prefix(receiver_type, function_tree.index())?;
+                let receiver =
+                    self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
+                let receiver_view = self.this_type_receiver_view(receiver)?;
+                let members = self
+                    .lookup_overload_members_journaled(receiver_view, selection.name, info_journal)
+                    .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+                if members.len() <= 1 {
+                    return Ok(None);
+                }
+                if members
+                    .iter()
+                    .any(|member| self.store.symbols.get(member.symbol).kind != SymbolKind::Method)
+                {
+                    return Err(TyperError::MixedApplicationCandidateKinds {
+                        source: self.source,
+                        tree_index: application_tree_index,
+                        candidates: members.iter().map(|member| member.symbol).collect(),
+                    });
+                }
+                let candidates = members
+                    .into_iter()
+                    .map(|member| {
+                        let callable = self.member_type_on_journaled(&member, info_journal)?;
+                        self.validate_overload_callable(member.symbol, callable)?;
+                        Ok(ApplicationCandidate {
+                            symbol: member.symbol,
+                            callable,
+                            member: Some(member),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, TyperError>>()?;
+                (
+                    candidates,
+                    ApplicationFunctionShape::Select {
+                        selection,
+                        qualifier,
+                        receiver_type,
+                    },
+                )
+            }
+            _ => return Ok(None),
+        };
+
+        let mut arguments = Vec::with_capacity(argument_trees.len());
+        for argument_tree in argument_trees {
+            let typed =
+                self.type_expression_inner(*argument_tree, context, info_journal, new_mappings)?;
+            let own_type = self.typed_arena.get(typed).ty;
+            let widened_type = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+            arguments.push(TypedArgument {
+                typed,
+                own_type,
+                widened_type,
+            });
+        }
+
+        let mut completed_relation_types = std::collections::HashSet::new();
+        for argument in &arguments {
+            self.complete_overload_relation_type(
+                argument.widened_type,
+                info_journal,
+                &mut completed_relation_types,
+                0,
+            )?;
+        }
+        for candidate in &candidates {
+            if let Some(Type::Method(method)) = self.store.types.try_get(candidate.callable) {
+                let parameter_types: Vec<_> = method.params.iter().map(|param| param.ty).collect();
+                for parameter_type in parameter_types {
+                    self.complete_overload_relation_type(
+                        parameter_type,
+                        info_journal,
+                        &mut completed_relation_types,
+                        0,
+                    )?;
+                }
+            }
+        }
+
+        self.remove_overridden_overload_candidates(&mut candidates, application_tree_index)?;
+
+        let winner =
+            self.choose_overload_candidate(&mut candidates, &arguments, application_tree_index)?;
+        let function_type = match function_shape {
+            ApplicationFunctionShape::Ident(ident) => {
+                let ty = self.expression_type_of_symbol(
+                    winner.symbol,
+                    context.owner,
+                    function_tree.index(),
+                    info_journal,
+                )?;
+                TypedAstBuilder::new(&mut self.typed_arena).ident_with_backquoted(
+                    ident.name,
+                    ident.backquoted,
+                    ty,
+                    function_node.position,
+                )
+            }
+            ApplicationFunctionShape::Select {
+                selection,
+                qualifier,
+                receiver_type,
+            } => {
+                if winner
+                    .member
+                    .is_some_and(|member| member.symbol != winner.symbol)
+                {
+                    return Err(TyperError::MalformedOverloadCandidate {
+                        symbol: winner.symbol,
+                        callable: winner.callable,
+                    });
+                }
+                let ty = self.store.types.alloc(Type::TermRef {
+                    prefix: receiver_type,
+                    target: TermRefTarget::Symbol(winner.symbol),
+                });
+                TypedAstBuilder::new(&mut self.typed_arena).select(
+                    qualifier,
+                    selection.name,
+                    selection.backquoted,
+                    ty,
+                    function_node.position,
+                )
+            }
+        };
+        self.typed_index
+            .insert(self.source, function_tree, function_type)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, function_tree));
+        Ok(Some(ResolvedApplicationFunction {
+            typed: function_type,
+            callable: winner.callable,
+            arguments,
+        }))
+    }
+
+    fn validate_overload_callable(
+        &self,
+        symbol: SymbolId,
+        callable: TypeId,
+    ) -> Result<(), TyperError> {
+        match self.store.types.try_get(callable) {
+            Some(Type::Method(_) | Type::Poly(_)) => Ok(()),
+            _ => Err(TyperError::MalformedOverloadCandidate { symbol, callable }),
+        }
+    }
+
+    fn complete_overload_relation_type(
+        &mut self,
+        ty: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        seen: &mut std::collections::HashSet<TypeId>,
+        depth: usize,
+    ) -> Result<(), TyperError> {
+        if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            return Err(TyperError::TypeNormalization(
+                crate::types::TypeNormalizeError::TooDeep,
+            ));
+        }
+        if !seen.insert(ty) {
+            return Ok(());
+        }
+        let Some(node) = self.store.types.try_get(ty).cloned() else {
+            return Err(TyperError::TypeNormalization(
+                if self.store.types.contains(ty) {
+                    crate::types::TypeNormalizeError::UnfilledType { ty }
+                } else {
+                    crate::types::TypeNormalizeError::InvalidType { ty }
+                },
+            ));
+        };
+        let mut children = Vec::new();
+        match node {
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                prefix,
+            } => {
+                if !self.store.symbols.contains(symbol) {
+                    return Err(TyperError::UnknownSymbol { symbol });
+                }
+                children.push(prefix);
+                if matches!(
+                    self.store.symbols.get(symbol).kind,
+                    SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                ) && self.is_current_source_symbol(symbol)
+                    && matches!(*self.store.symbols.info(symbol), SymbolInfo::Missing)
+                {
+                    self.complete_symbol_inner(symbol, info_journal)?;
+                }
+                if let SymbolInfo::Complete(info) = *self.store.symbols.info(symbol)
+                    && let Some(Type::ClassInfo(class_info)) = self.store.types.try_get(info)
+                {
+                    children.extend(class_info.parents.iter().copied());
+                }
+            }
+            Type::Applied { tycon, args } => {
+                children.push(tycon);
+                children.extend(args);
+            }
+            Type::TermRef { prefix, .. } => children.push(prefix),
+            Type::SuperType {
+                this_type,
+                super_type,
+            } => children.extend([this_type, super_type]),
+            Type::Bounds { low, high } => children.extend([low, high]),
+            Type::AliasingBounds { alias }
+            | Type::ByName { result: alias }
+            | Type::Flexible { underlying: alias }
+            | Type::Recursive { parent: alias }
+            | Type::Wildcard { bounds: alias }
+            | Type::JavaArray { element: alias }
+            | Type::Repeated { element: alias }
+            | Type::Annotated {
+                underlying: alias, ..
+            } => children.push(alias),
+            Type::And { left, right } | Type::Or { left, right } => {
+                children.extend([left, right]);
+            }
+            _ => {}
+        }
+        for child in children {
+            self.complete_overload_relation_type(child, info_journal, seen, depth + 1)?;
+        }
+        Ok(())
+    }
+
+    fn remove_overridden_overload_candidates(
+        &mut self,
+        candidates: &mut Vec<ApplicationCandidate>,
+        tree_index: u32,
+    ) -> Result<(), TyperError> {
+        let mut overridden = vec![false; candidates.len()];
+        for derived_index in 0..candidates.len() {
+            let Some(derived_member) = candidates[derived_index].member else {
+                continue;
+            };
+            let Some(Type::Method(derived_method)) = self
+                .store
+                .types
+                .try_get(candidates[derived_index].callable)
+                .cloned()
+            else {
+                continue;
+            };
+            if !supported_override_signature(&derived_method, self.store)
+                || self.type_contains_param_ref(
+                    derived_method.result,
+                    candidates[derived_index].callable,
+                )?
+            {
+                continue;
+            }
+
+            for base_index in 0..candidates.len() {
+                if base_index == derived_index || overridden[base_index] {
+                    continue;
+                }
+                let Some(base_member) = candidates[base_index].member else {
+                    continue;
+                };
+                if derived_member.declaring_class == base_member.declaring_class {
+                    continue;
+                }
+                let Some(Type::Method(base_method)) = self
+                    .store
+                    .types
+                    .try_get(candidates[base_index].callable)
+                    .cloned()
+                else {
+                    continue;
+                };
+                if !supported_override_signature(&base_method, self.store)
+                    || self.type_contains_param_ref(
+                        base_method.result,
+                        candidates[base_index].callable,
+                    )?
+                    || derived_method.params.len() != base_method.params.len()
+                {
+                    continue;
+                }
+
+                let mut same_parameters = true;
+                for (derived, base) in derived_method.params.iter().zip(&base_method.params) {
+                    let derived_subtype = self.is_subtype(derived.ty, base.ty).map_err(|_| {
+                        TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                            source: self.source,
+                            tree_index,
+                            candidate: candidates[derived_index].symbol,
+                        }
+                    })?;
+                    if !derived_subtype {
+                        same_parameters = false;
+                        break;
+                    }
+                    let base_subtype = self.is_subtype(base.ty, derived.ty).map_err(|_| {
+                        TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                            source: self.source,
+                            tree_index,
+                            candidate: candidates[base_index].symbol,
+                        }
+                    })?;
+                    if !base_subtype {
+                        same_parameters = false;
+                        break;
+                    }
+                }
+                if !same_parameters {
+                    continue;
+                }
+
+                let derived_view = derived_member.receiver_view;
+                let base_view = base_member.receiver_view;
+                let derived_is_subtype =
+                    self.is_subtype(derived_view, base_view).map_err(|_| {
+                        TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                            source: self.source,
+                            tree_index,
+                            candidate: candidates[derived_index].symbol,
+                        }
+                    })?;
+                if !derived_is_subtype {
+                    continue;
+                }
+                let base_is_subtype = self.is_subtype(base_view, derived_view).map_err(|_| {
+                    TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                        source: self.source,
+                        tree_index,
+                        candidate: candidates[base_index].symbol,
+                    }
+                })?;
+                if !base_is_subtype {
+                    overridden[base_index] = true;
+                }
+            }
+        }
+        let mut index = 0;
+        candidates.retain(|_| {
+            let keep = !overridden[index];
+            index += 1;
+            keep
+        });
+        Ok(())
+    }
+
+    fn choose_overload_candidate(
+        &mut self,
+        candidates: &mut [ApplicationCandidate],
+        arguments: &[TypedArgument],
+        tree_index: u32,
+    ) -> Result<ApplicationCandidate, TyperError> {
+        let mut applicable = Vec::new();
+        let mut rejected = Vec::new();
+        for candidate in candidates.iter().copied() {
+            let method = match self.store.types.try_get(candidate.callable) {
+                Some(Type::Method(method)) => method.clone(),
+                Some(Type::Poly(poly)) => {
+                    let rejection = match self.store.types.try_get(poly.result) {
+                        Some(Type::Method(method))
+                            if let Some(expected) =
+                                overload_arity_rejection(method, arguments.len()) =>
+                        {
+                            OverloadRejection::WrongArity {
+                                expected,
+                                actual: arguments.len(),
+                            }
+                        }
+                        _ => {
+                            return Err(
+                                TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                                    source: self.source,
+                                    tree_index,
+                                    candidate: candidate.symbol,
+                                },
+                            );
+                        }
+                    };
+                    rejected.push((candidate.symbol, rejection));
+                    continue;
+                }
+                _ => {
+                    return Err(TyperError::MalformedOverloadCandidate {
+                        symbol: candidate.symbol,
+                        callable: candidate.callable,
+                    });
+                }
+            };
+            if let Some(expected) = overload_arity_rejection(&method, arguments.len()) {
+                rejected.push((
+                    candidate.symbol,
+                    OverloadRejection::WrongArity {
+                        expected,
+                        actual: arguments.len(),
+                    },
+                ));
+                continue;
+            }
+            let mut argument_rejection = None;
+            let mut unsupported_relation = false;
+            for (argument_index, (argument, parameter)) in
+                arguments.iter().zip(&method.params).enumerate()
+            {
+                match self.conforms(argument.widened_type, parameter.ty) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        argument_rejection = Some(OverloadRejection::ArgumentNonConformance {
+                            argument_index,
+                            actual: argument.widened_type,
+                            expected: parameter.ty,
+                        });
+                        break;
+                    }
+                    Err(_) => {
+                        unsupported_relation = true;
+                        break;
+                    }
+                }
+            }
+            if let Some(rejection) = argument_rejection {
+                rejected.push((candidate.symbol, rejection));
+                continue;
+            }
+            if unsupported_relation {
+                return Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                    source: self.source,
+                    tree_index,
+                    candidate: candidate.symbol,
+                });
+            }
+            let unsupported = method.kind != MethodKind::Plain
+                || method.params.iter().any(|param| {
+                    param.erased
+                        || param.varargs
+                        || matches!(
+                            self.store.types.try_get(param.ty),
+                            Some(Type::ByName { .. })
+                        )
+                })
+                || self.type_contains_param_ref(method.result, candidate.callable)?;
+            if unsupported {
+                return Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                    source: self.source,
+                    tree_index,
+                    candidate: candidate.symbol,
+                });
+            }
+            applicable.push(candidate);
+        }
+        match applicable.as_slice() {
+            [candidate] => Ok(*candidate),
+            [] => Err(TyperError::OverloadApplicationNoApplicable {
+                source: self.source,
+                tree_index,
+                candidates: rejected,
+            }),
+            many => {
+                let mut most_specific = Vec::new();
+                for candidate in many {
+                    let Some(Type::Method(method)) = self.store.types.try_get(candidate.callable)
+                    else {
+                        return Err(TyperError::MalformedOverloadCandidate {
+                            symbol: candidate.symbol,
+                            callable: candidate.callable,
+                        });
+                    };
+                    let candidate_params: Vec<_> =
+                        method.params.iter().map(|parameter| parameter.ty).collect();
+                    let mut dominates_all = true;
+                    for other in many {
+                        if candidate.symbol == other.symbol {
+                            continue;
+                        }
+                        let Some(Type::Method(other_method)) =
+                            self.store.types.try_get(other.callable)
+                        else {
+                            return Err(TyperError::MalformedOverloadCandidate {
+                                symbol: other.symbol,
+                                callable: other.callable,
+                            });
+                        };
+                        let other_params: Vec<_> = other_method
+                            .params
+                            .iter()
+                            .map(|parameter| parameter.ty)
+                            .collect();
+                        let mut strictly_more_specific = false;
+                        for (candidate_parameter, other_parameter) in
+                            candidate_params.iter().zip(&other_params)
+                        {
+                            let candidate_is_subtype = self
+                                .is_subtype(*candidate_parameter, *other_parameter)
+                                .map_err(|_| {
+                                    TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                                        source: self.source,
+                                        tree_index,
+                                        candidate: candidate.symbol,
+                                    }
+                                })?;
+                            if !candidate_is_subtype {
+                                dominates_all = false;
+                                break;
+                            }
+                            let other_is_subtype = self
+                                .is_subtype(*other_parameter, *candidate_parameter)
+                                .map_err(|_| {
+                                    TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                                        source: self.source,
+                                        tree_index,
+                                        candidate: other.symbol,
+                                    }
+                                })?;
+                            strictly_more_specific |= !other_is_subtype;
+                        }
+                        if !dominates_all || !strictly_more_specific {
+                            dominates_all = false;
+                            break;
+                        }
+                    }
+                    if dominates_all {
+                        most_specific.push(*candidate);
+                    }
+                }
+                match most_specific.as_slice() {
+                    [candidate] => Ok(*candidate),
+                    _ => Err(TyperError::AmbiguousOverloadApplication {
+                        source: self.source,
+                        tree_index,
+                        candidates: many.iter().map(|candidate| candidate.symbol).collect(),
+                    }),
+                }
+            }
+        }
+    }
+
     fn enclosing_this_owner(
         &self,
         qualifier: Option<dotty_core::Name>,
@@ -1165,9 +1887,24 @@ impl<'a> SourceTyper<'a> {
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<SymbolId, TyperError> {
+        let candidates = self.expression_term_candidates(name, context, tree_index, position)?;
+        self.unique_expression_term(&candidates, name, tree_index, position)
+    }
+
+    /// Resolves the highest-precedence lexical/import bucket without choosing
+    /// among method overloads. Ordinary expression references continue to use
+    /// `resolve_expression_term` and defer when that bucket has several
+    /// methods; Apply uses the full bucket for applicability filtering.
+    fn expression_term_candidates(
+        &mut self,
+        name: dotty_core::Name,
+        context: SourceContextId,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<Vec<SymbolId>, TyperError> {
         let contexts = self.source_context_chain(context, tree_index)?;
-        for context_id in contexts {
-            let source_context = self.index.source_context(context_id);
+        for context_id in &contexts {
+            let source_context = self.index.source_context(*context_id);
             let candidates = self
                 .store
                 .scopes
@@ -1175,11 +1912,11 @@ impl<'a> SourceTyper<'a> {
                 .lookup_all(&name)
                 .to_vec();
             if !candidates.is_empty() {
-                return self.unique_expression_term(&candidates, name, tree_index, position);
+                return Ok(candidates);
             }
             for selection in [ImportSelection::Explicit, ImportSelection::Wildcard] {
-                match self.lookup_imports(
-                    &[context_id],
+                let candidates = self.lookup_import_candidates(
+                    &[*context_id],
                     name,
                     false,
                     selection,
@@ -1187,17 +1924,9 @@ impl<'a> SourceTyper<'a> {
                         tree_index,
                         position,
                     },
-                ) {
-                    Ok(Some(symbol)) => return Ok(symbol),
-                    Ok(None) => {}
-                    Err(TyperError::AmbiguousTypeName { .. }) => {
-                        return Err(TyperError::OverloadedReferenceDeferred {
-                            source: self.source,
-                            tree_index,
-                            name,
-                        });
-                    }
-                    Err(error) => return Err(error),
+                )?;
+                if !candidates.is_empty() {
+                    return Ok(candidates);
                 }
             }
         }
@@ -3367,14 +4096,14 @@ impl<'a> SourceTyper<'a> {
         Ok(contexts)
     }
 
-    fn lookup_imported_symbol(
+    fn lookup_imported_symbols(
         &mut self,
         source_import: SourceImport,
         wanted: dotty_core::Name,
         type_only: bool,
         selection: ImportSelection,
         location: SourceTreeLocation,
-    ) -> Result<Option<SymbolId>, TyperError> {
+    ) -> Result<Vec<SymbolId>, TyperError> {
         let Some(node) = self.arena.try_get(source_import.tree) else {
             return Err(TyperError::TreeOutsideArena {
                 source: self.source,
@@ -3447,7 +4176,7 @@ impl<'a> SourceTyper<'a> {
             }
         }
         if relevant.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         let qualifier_context = source_import.parent.unwrap_or(source_import.context);
@@ -3479,11 +4208,10 @@ impl<'a> SourceTyper<'a> {
                     let candidates = self.store.scopes.get(*scope).lookup_all(&name);
                     found_locally |= !candidates.is_empty();
                     matches.extend_from_slice(candidates);
-                } else if let Some(symbol) =
-                    self.unique_scoped_symbol(*scope, name, location.tree_index, location.position)?
-                {
-                    found_locally = true;
-                    matches.push(symbol);
+                } else {
+                    let candidates = self.scoped_symbols(*scope, name);
+                    found_locally |= !candidates.is_empty();
+                    matches.extend(candidates);
                 }
             }
             if !found_locally {
@@ -3513,9 +4241,12 @@ impl<'a> SourceTyper<'a> {
         matches.dedup();
         self.deduplicate_import_candidates(&mut matches, type_only);
         if type_only {
-            self.unique_type_candidate(&matches, wanted, location.tree_index, location.position)
+            Ok(self
+                .unique_type_candidate(&matches, wanted, location.tree_index, location.position)?
+                .into_iter()
+                .collect())
         } else {
-            self.unique_symbol_candidate(&matches, wanted, location.tree_index, location.position)
+            Ok(matches)
         }
     }
 
@@ -3576,6 +4307,26 @@ impl<'a> SourceTyper<'a> {
         selection: ImportSelection,
         location: SourceTreeLocation,
     ) -> Result<Option<SymbolId>, TyperError> {
+        let candidates =
+            self.lookup_import_candidates(contexts, name, type_only, selection, location)?;
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        if type_only {
+            self.unique_type_candidate(&candidates, name, location.tree_index, location.position)
+        } else {
+            self.unique_symbol_candidate(&candidates, name, location.tree_index, location.position)
+        }
+    }
+
+    fn lookup_import_candidates(
+        &mut self,
+        contexts: &[SourceContextId],
+        name: dotty_core::Name,
+        type_only: bool,
+        selection: ImportSelection,
+        location: SourceTreeLocation,
+    ) -> Result<Vec<SymbolId>, TyperError> {
         let mut scopes: Vec<(dotty_core::ScopeId, Vec<SourceImport>)> = Vec::new();
         for context_id in contexts {
             let source_context = self.index.source_context(*context_id);
@@ -3599,38 +4350,22 @@ impl<'a> SourceTyper<'a> {
         for (_, imports) in scopes {
             let mut candidates = Vec::new();
             for source_import in imports {
-                if let Some(symbol) = self.lookup_imported_symbol(
+                candidates.extend(self.lookup_imported_symbols(
                     source_import,
                     name,
                     type_only,
                     selection,
                     location,
-                )? {
-                    candidates.push(symbol);
-                }
+                )?);
             }
             candidates.sort_by_key(|symbol| symbol.index());
             candidates.dedup();
             self.deduplicate_import_candidates(&mut candidates, type_only);
             if !candidates.is_empty() {
-                return if type_only {
-                    self.unique_type_candidate(
-                        &candidates,
-                        name,
-                        location.tree_index,
-                        location.position,
-                    )
-                } else {
-                    self.unique_symbol_candidate(
-                        &candidates,
-                        name,
-                        location.tree_index,
-                        location.position,
-                    )
-                };
+                return Ok(candidates);
             }
         }
-        Ok(None)
+        Ok(Vec::new())
     }
 
     /// Returns the underlying symbol for a fully known chain of type aliases.
@@ -3690,9 +4425,14 @@ impl<'a> SourceTyper<'a> {
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
+        let candidates = self.scoped_symbols(scope, name);
+        self.unique_symbol_candidate(&candidates, name, tree_index, position)
+    }
+
+    fn scoped_symbols(&self, scope: dotty_core::ScopeId, name: dotty_core::Name) -> Vec<SymbolId> {
         let direct = self.store.scopes.get(scope).lookup_all(&name);
         if !direct.is_empty() {
-            return self.unique_symbol_candidate(direct, name, tree_index, position);
+            return direct.to_vec();
         }
         let alternate = dotty_core::Name::new(
             name.text(),
@@ -3701,12 +4441,7 @@ impl<'a> SourceTyper<'a> {
                 dotty_core::Namespace::Type => dotty_core::Namespace::Term,
             },
         );
-        self.unique_symbol_candidate(
-            self.store.scopes.get(scope).lookup_all(&alternate),
-            name,
-            tree_index,
-            position,
-        )
+        self.store.scopes.get(scope).lookup_all(&alternate).to_vec()
     }
 
     fn lookup_term_candidate_for_type_name(
@@ -10950,6 +11685,840 @@ mod tests {
             Err(TyperError::OverloadedReferenceDeferred { .. })
         ));
         assert!(typer.typed_ast().iter().next().is_none());
+    }
+
+    #[test]
+    fn application_lookup_retains_the_full_lexical_overload_bucket() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def method(x: Int): Int = x; def method(x: String): Int = 1; def use: Int = method }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(use_method).unwrap(),
+            owner: use_method,
+        };
+        let name = Name::new(store.names.get("method").unwrap(), Namespace::Term);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidates = typer
+            .expression_term_candidates(name, context.lexical, rhs.index(), None)
+            .unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert_ne!(candidates[0], candidates[1]);
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| typer.store().symbols.get(*candidate).kind == SymbolKind::Method)
+        );
+    }
+
+    #[test]
+    fn application_selects_the_overload_that_accepts_its_argument() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A {}; class B {}; class C { def method(x: A): Int = 1; def method(x: B): Int = 2; def use(b: B): Int = method(b) }",
+        );
+        let expected_class = class_symbol(&parsed, &store, &index, source, "B");
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let use_parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                if index.symbol_at(source, tree) != Some(use_method) {
+                    return None;
+                }
+                Some(
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap(),
+                )
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(use_parameter).unwrap(),
+            owner: use_method,
+        };
+        let overloads: Vec<_> = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "method")
+                    .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .collect();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let TreeKind::Apply(source_application) = &parsed.ast.get(rhs).kind else {
+            panic!("method RHS should be the source application")
+        };
+        let source_argument = source_application.args[0];
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let selected = overloads
+            .into_iter()
+            .find(|symbol| {
+                let Ok(info) = typer.complete_symbol(*symbol) else {
+                    return false;
+                };
+                matches!(
+                    typer.store().types.get(info),
+                    Type::Method(method)
+                        if method.params.len() == 1
+                            && matches!(typer.store().types.get(method.params[0].ty),
+                                Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }
+                                    if *class == expected_class)
+                )
+            })
+            .unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("overloaded invocation should produce a typed Apply")
+        };
+        assert_eq!(
+            typer
+                .typed_index
+                .get(source, source_argument)
+                .expect("source argument should have one typed mapping"),
+            application.args[0]
+        );
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == selected
+        ));
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+    }
+
+    #[test]
+    fn overload_application_reports_each_nonconforming_candidate() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def method(x: Int): Int = 1; def method(x: Boolean): Int = 2; def use(x: Byte): Int = method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let use_parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                if index.symbol_at(source, tree) != Some(use_method) {
+                    return None;
+                }
+                Some(
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap(),
+                )
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(use_parameter).unwrap(),
+            owner: use_method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed_count_before = typer.typed_arena.iter().count();
+        let mapping_count_before = typer.typed_index.len();
+        let result = typer.type_expression(rhs, context);
+        let Err(TyperError::OverloadApplicationNoApplicable { candidates, .. }) = result else {
+            panic!("unexpected overload result: {result:?}");
+        };
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|(_, rejection)| matches!(
+            rejection,
+            OverloadRejection::ArgumentNonConformance {
+                argument_index: 0,
+                ..
+            }
+        )));
+        assert_eq!(typer.typed_arena.iter().count(), typed_count_before);
+        assert_eq!(typer.typed_index.len(), mapping_count_before);
+    }
+
+    #[test]
+    fn overload_application_filters_candidates_with_the_wrong_arity() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A {}; class C { def method(x: A): Int = 1; def method(x: A, y: A): Int = 2; def use(a: A): Int = method(a, a) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let use_parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(use_parameter).unwrap(),
+            owner: use_method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("an applicable overload should produce an Apply")
+        };
+        let TreeKind::Ident(_) = &typer.typed_ast().get(application.function).kind else {
+            panic!("the selected method should remain an identifier")
+        };
+        let selected = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.function).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected a selected method reference, found {other:?}"),
+        };
+        let info = typer.complete_symbol(selected).unwrap();
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::Method(method) if method.params.len() == 2
+        ));
+    }
+
+    #[test]
+    fn overload_application_resolves_imported_method_candidates() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A {}; class B {}; object Lib { def method(x: A): Int = 1; def method(x: B): Int = 2 }; class Client { import Lib.*; def use(x: B): Int = method(x) }",
+        );
+        let expected_class = class_symbol(&parsed, &store, &index, source, "B");
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("imported overload should produce a typed Apply")
+        };
+        let selected = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.function).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected a selected imported overload, found {other:?}"),
+        };
+        let info = typer.complete_symbol(selected).unwrap();
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::Method(method)
+                if matches!(typer.store().types.get(method.params[0].ty),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == expected_class)
+        ));
+    }
+
+    #[test]
+    fn overload_application_rejects_mixed_method_and_value_candidates() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { val method: Int = 0; def method(x: Int): Int = x; def use: Int = method(1) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(use_method).unwrap(),
+            owner: use_method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::MixedApplicationCandidateKinds { candidates, .. })
+                if candidates.len() == 2
+        ));
+    }
+
+    #[test]
+    fn selected_overload_uses_the_receiver_adapted_candidate() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A {}; class B {}; class C { def method(x: A): Int = 1; def method(x: B): Int = 2 }; class Client { def use(c: C, b: B): Int = c.method(b) }",
+        );
+        let expected_class = class_symbol(&parsed, &store, &index, source, "B");
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let use_parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                if index.symbol_at(source, tree) != Some(use_method) {
+                    return None;
+                }
+                Some(
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][1])
+                        .unwrap(),
+                )
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(use_parameter).unwrap(),
+            owner: use_method,
+        };
+        let overloads: Vec<_> = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "method")
+                    .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .collect();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let selected = overloads
+            .into_iter()
+            .find(|symbol| {
+                let Ok(info) = typer.complete_symbol(*symbol) else {
+                    return false;
+                };
+                matches!(
+                    typer.store().types.get(info),
+                    Type::Method(method)
+                        if method.params.len() == 1
+                            && matches!(typer.store().types.get(method.params[0].ty),
+                                Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }
+                                    if *class == expected_class)
+                )
+            })
+            .unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("selected overload invocation should produce a typed Apply")
+        };
+        assert!(matches!(
+            typer.typed_ast().get(application.function).kind,
+            TreeKind::Select(_)
+        ));
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == selected
+        ));
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+    }
+
+    #[test]
+    fn overload_application_selects_the_unique_most_specific_of_three_candidates() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Parent {}; class Child extends Parent {}; class Grandchild extends Child {}; class C { def method(x: Parent): Int = 1; def method(x: Child): Int = 2; def method(x: Grandchild): Int = 3; def use(x: Grandchild): Int = method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let expected = class_symbol(&parsed, &store, &index, source, "Grandchild");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("the most specific overload should be applied")
+        };
+        let selected = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.function).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected selected method reference, found {other:?}"),
+        };
+        let info = typer.complete_symbol(selected).unwrap();
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::Method(method)
+                if matches!(typer.store().types.get(method.params[0].ty),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == expected)
+        ));
+    }
+
+    #[test]
+    fn unrelated_applicable_overloads_remain_ambiguous() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A {}; class B {}; class Both extends A, B {}; class C { def method(x: A): Int = 1; def method(x: B): Int = 2; def use(x: Both): Int = method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::AmbiguousOverloadApplication { candidates, .. })
+                if candidates.len() == 2
+        ));
+    }
+
+    #[test]
+    fn matching_arity_polymorphic_overload_blocks_monomorphic_selection() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A {}; class C { def method(x: A): Int = 1; def method[T](x: T): Int = 2; def use(x: A): Int = method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                candidate,
+                ..
+            }) if matches!(typer.store().symbols.get(candidate).info, SymbolInfo::Missing)
+                || matches!(typer.store().symbols.get(candidate).info, SymbolInfo::Complete(_))
+        ));
+    }
+
+    #[test]
+    fn potentially_applicable_repeated_parameter_overload_blocks_selection() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def method(x: Int, y: Int): Int = 1; def method(xs: Int*): Int = 2; def use(x: Int, y: Int): Int = method(x, y) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate { candidate, .. }) =
+            typer.type_expression(rhs, context)
+        else {
+            panic!("a potentially applicable repeated-parameter overload must block selection")
+        };
+        let info = typer.complete_symbol(candidate).unwrap();
+        assert!(matches!(
+            typer.store().types.get(info),
+            Type::Method(method) if method.params.len() == 1 && method.params[0].varargs
+        ));
+    }
+
+    #[test]
+    fn repeated_parameter_overload_with_too_few_arguments_is_filtered() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def method(): Int = 1; def method(prefix: Int, xs: Int*): Int = 2; def use(): Int = method() }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(use_method).unwrap(),
+            owner: use_method,
+        };
+        let expected_method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "method"
+                    && definition.value_param_clauses[0].is_empty())
+                .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("zero-argument overload should produce an Apply")
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == expected_method
+        ));
+    }
+
+    #[test]
+    fn wrong_arity_polymorphic_overload_does_not_block_monomorphic_selection() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A {}; class C { def method(x: A): Int = 1; def method[T](x: T, y: T): Int = 2; def use(x: A): Int = method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(typer.type_expression(rhs, context).is_ok());
+    }
+
+    #[test]
+    fn inherited_generic_overload_uses_the_receiver_adapted_signature() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Wider {}; class Text extends Wider {}; class Base[A] { def method(x: A): Int = 1 }; class Child extends Base[Text] { def method(x: Wider): Int = 2 }; class Client { def use(child: Child, x: Text): Int = child.method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][1])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let text_class = class_symbol(&parsed, &store, &index, source, "Text");
+        let base_method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "method"
+                    && store
+                        .symbols
+                        .get(index.symbol_at(source, tree).unwrap())
+                        .owner
+                        == Some(class_symbol(&parsed, &store, &index, source, "Base")))
+                .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer
+            .type_expression(rhs, context)
+            .unwrap_or_else(|error| panic!("typing inherited overload failed: {error:?}"));
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("inherited generic overload should produce an Apply")
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == base_method
+        ));
+        let function_type = typer.typed_ast().get(application.function).ty;
+        let widened = typer.widen_expression_type(function_type).unwrap();
+        assert!(matches!(
+            typer.store().types.get(widened),
+            Type::Method(method)
+                if matches!(typer.store().types.get(method.params[0].ty),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == text_class)
+        ));
+    }
+
+    #[test]
+    fn inherited_overload_competes_with_a_multi_method_local_bucket() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class ParentType {}; class ChildType extends ParentType {}; class Other {}; class Base { def method(x: ChildType): Int = 1 }; class C extends Base { def method(x: ParentType): Int = 2; def method(x: Other): Int = 3 }; class Client { def use(c: C, x: ChildType): Int = c.method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][1])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let base_class = class_symbol(&parsed, &store, &index, source, "Base");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("local overload bucket should produce an Apply")
+        };
+        let selected = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.function).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected selected method reference, found {other:?}"),
+        };
+        assert_eq!(typer.store().symbols.get(selected).owner, Some(base_class));
+    }
+
+    #[test]
+    fn exact_inherited_signature_is_suppressed_by_its_override() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A {}; class Base { def method(x: A): Int = 1 }; class C extends Base { def method(x: A): Int = 2 }; class Client { def use(c: C, x: A): Int = c.method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][1])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+        };
+        let receiver_class = class_symbol(&parsed, &store, &index, source, "C");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("overridden method should produce an Apply")
+        };
+        let selected = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.function).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected selected method reference, found {other:?}"),
+        };
+        assert_eq!(
+            typer.store().symbols.get(selected).owner,
+            Some(receiver_class)
+        );
     }
 
     #[test]

@@ -55,6 +55,17 @@ For the tested subset, source Typer completion currently supports:
   members, prefix, and explicit self type where supplied.
 - primary constructor signature normalization for a plain constructor.
 
+Expression typing currently includes typed identifiers, stable term selections,
+literal expressions, and plain monomorphic method applications. Application
+sites can resolve lexical, imported, and selected overload buckets for supported
+methods. Candidate filtering uses exact arity and nominal conformance; when
+several candidates apply, only a unique method whose formal types are strictly
+more specific than every other applicable candidate is selected. Selected
+members use receiver-adapted signatures, including inherited generic methods.
+Standalone overloaded identifiers and selections remain deferred. Generic
+overloads and matching-arity candidates with unsupported semantics return typed
+errors rather than being selected speculatively.
+
 Source and TASTy snapshots intentionally normalize adapter-specific identity
 and provenance. TASTy's package prefixes on the built-in Scala and
 `java.lang.Object` references normalize to the source Typer's canonical
@@ -70,7 +81,7 @@ parts remain deferred until their source semantic implementation and fixtures
 are ready:
 
 - expression typing and result-type inference;
-- typed AST construction;
+- result-type inference beyond the current explicit method signatures;
 - enum semantics, case-class synthetic APIs, and `derives`;
 - context-bound evidence synthesis;
 - default imports and general standard-library member lookup;
