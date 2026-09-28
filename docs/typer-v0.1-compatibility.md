@@ -61,13 +61,28 @@ For the tested subset, source Typer completion currently supports:
 Expression typing currently includes typed identifiers, stable term selections,
 literal expressions, plain method applications, and blocks with expressions
 and local `val`/`var` definitions with or without explicit types. It also
-supports expected-type conformance checks, source type ascriptions, and direct
-assignments to mutable locals and fields over that expression subset. Expected
-typing widens the expression type for the existing conformance relation
-without changing the child tree's own type; a typed ascription node carries the
-projected source type. Assignment requires an exact mutable symbol reference,
-checks the right-hand side through expected typing, and produces `Unit`.
-Selected field types are adapted to the receiver. An inferred local
+supports expected-type conformance checks, source type ascriptions, direct
+assignments to mutable locals and fields, and ordinary `if` expressions over
+that expression subset. Expected typing widens the expression type for the
+existing conformance relation without changing the child tree's own type; a
+typed ascription node carries the projected source type. Assignment requires
+an exact mutable symbol reference, checks the right-hand side through expected
+typing, and produces `Unit`. Selected field types are adapted to the receiver.
+
+An `if` condition is checked against canonical `Boolean`. Both branches are
+typed in the same lexical context and retain their own types in the typed AST.
+The join widens branch value types, chooses an equivalent/supertype branch
+when the supported nominal relation can prove it, and otherwise produces
+`Type::Or`. Union subtyping implements only the two recursive rules required by
+that join and is bounded by depth and comparison limits. Intersections and
+other advanced relations remain explicit unsupported cases. Scala 3.9.0's
+`TypeAssigner.assignType(If, ...)` combines the typed branch types with `|`
+([pinned source](https://github.com/scala/scala3/blob/3.9.0/compiler/src/dotty/tools/dotc/typer/TypeAssigner.scala#L428-L429));
+the focused tests pin this subset's literal widening, nominal supertype, and
+unrelated-class union behavior. An omitted source `else` uses the parser's
+synthetic Unit tree and follows the same branch typing and join path.
+
+An inferred local
 uses the already typed RHS and `widen_expression_type`; it does not repeat
 identifier, member, or application lookup. The pinned Scala 3.9.0 source, TASTy,
 and normalized typed-tree oracle are in
@@ -144,8 +159,9 @@ parts remain deferred until their source semantic implementation and fixtures
 are ready:
 
 - expression forms outside the supported identifier, selection, literal,
-  application, and block subset, including `if`, `match`, `try`, lambdas, and
-  other forms that are not currently handled by the expression typer;
+  application, block, and ordinary `if` subset, including `match`, `try`,
+  lambdas, and other forms that are not currently handled by the expression
+  typer;
 - local `def`, class, type, and pattern declarations, plus imports in block
   statements;
 - generic overload inference, `using`/implicit argument insertion, dependent

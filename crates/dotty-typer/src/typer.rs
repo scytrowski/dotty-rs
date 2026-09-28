@@ -17977,8 +17977,9 @@ mod tests {
     #[test]
     fn if_expression_joins_unrelated_classes_into_a_union() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class Left; class Right; def choose(flag: Boolean, left: Left, right: Right) = if flag then left else right",
+            "trait Parent; class Left extends Parent; class Right extends Parent; def choose(flag: Boolean, left: Left, right: Right) = if flag then left else right",
         );
+        let parent_class = class_symbol(&parsed, &store, &index, source, "Parent");
         let left_class = class_symbol(&parsed, &store, &index, source, "Left");
         let right_class = class_symbol(&parsed, &store, &index, source, "Right");
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "choose");
@@ -17990,6 +17991,7 @@ mod tests {
             definitions,
             &packages,
         );
+        typer.complete_symbol(parent_class).unwrap();
         typer.complete_symbol(left_class).unwrap();
         typer.complete_symbol(right_class).unwrap();
         let context = typer.expression_context_for(method).unwrap();
@@ -18003,7 +18005,122 @@ mod tests {
         };
         assert!(typer.is_subtype(left, joined_type).unwrap());
         assert!(typer.is_subtype(right, joined_type).unwrap());
-        assert!(typer.is_subtype(joined_type, definitions.any_type).unwrap());
+        let parent_prefix = typer.type_symbol_prefix(parent_class);
+        let parent_type = typer
+            .store
+            .types
+            .alloc(Type::type_ref(parent_prefix, parent_class));
+        assert!(typer.is_subtype(joined_type, parent_type).unwrap());
+    }
+
+    #[test]
+    fn type_parameter_branches_report_unsupported_join_relations() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "def choose[A, B](flag: Boolean, left: A, right: B) = if flag then left else right",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "choose");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::IfBranchJoinUnsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn type_parameter_if_condition_reports_unsupported_conformance() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def choose[A](condition: A) = if condition then 1 else 2");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "choose");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::IfConditionConformanceUnsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn if_join_leaves_intersections_explicitly_unsupported() {
+        let (arena, mut store, packages, definitions) = setup();
+        let intersection = store.types.alloc(Type::And {
+            left: definitions.int,
+            right: definitions.boolean,
+        });
+        let index = SourceSemanticIndex::new();
+        let source = SourceId::from_index(0);
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert!(matches!(
+            typer.join_expression_types(intersection, definitions.int),
+            Err(TypeRelationError::UnsupportedType { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_if_child_tree_has_a_focused_error() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def choose(flag: Boolean) = 1");
+        let (method, literal) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "choose");
+        let position = parsed.ast.get(literal).position;
+        let mut foreign_arena = AstArena::new();
+        let outside_tree = (0..=parsed.ast.iter().count() + 1)
+            .map(|_| {
+                foreign_arena.alloc(Tree {
+                    kind: TreeKind::Literal(dotty_core::ast::Literal {
+                        value: dotty_core::Constant::Int(0),
+                    }),
+                    position: None,
+                    ty: (),
+                })
+            })
+            .last()
+            .unwrap();
+        let if_tree = parsed.ast.alloc(Tree {
+            kind: TreeKind::If(dotty_core::ast::If {
+                cond: outside_tree,
+                then_branch: literal,
+                else_branch: literal,
+            }),
+            position,
+            ty: (),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(if_tree, context),
+            Err(TyperError::IfChildTreeOutsideArena {
+                child_tree_index,
+                role: "condition",
+                ..
+            }) if child_tree_index == outside_tree.index()
+        ));
     }
 
     #[test]
