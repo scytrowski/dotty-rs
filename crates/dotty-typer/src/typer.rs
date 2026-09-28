@@ -623,6 +623,13 @@ struct TypedArgument {
     widened_type: TypeId,
 }
 
+#[derive(Clone, Copy)]
+struct InferenceLocation {
+    tree_index: u32,
+    argument_index: usize,
+    depth: usize,
+}
+
 fn overload_arity_rejection(method: &MethodType, actual: usize) -> Option<usize> {
     match method.params.iter().position(|parameter| parameter.varargs) {
         Some(varargs_index) if varargs_index + 1 == method.params.len() => {
@@ -1069,11 +1076,7 @@ impl<'a> SourceTyper<'a> {
                     )?;
                     let instantiated =
                         dotty_core::types::instantiate_poly(self.store, callable, &type_arguments)
-                            .map_err(|error| TyperError::TypeRebinding {
-                                source: self.source,
-                                tree_index: tree.index(),
-                                error,
-                            })?;
+                            .map_err(TyperError::PolyInstantiation)?;
                     for (parameter_index, (argument, bounds)) in type_arguments
                         .iter()
                         .copied()
@@ -1552,10 +1555,12 @@ impl<'a> SourceTyper<'a> {
                 argument.widened_type,
                 binder,
                 &mut inferred,
-                tree_index,
-                argument_index,
+                InferenceLocation {
+                    tree_index,
+                    argument_index,
+                    depth: 0,
+                },
                 info_journal,
-                0,
             )?;
         }
         let mut type_arguments = Vec::with_capacity(poly.params.len());
@@ -1579,11 +1584,14 @@ impl<'a> SourceTyper<'a> {
         actual: TypeId,
         binder: TypeId,
         inferred: &mut [Option<TypeId>],
-        tree_index: u32,
-        argument_index: usize,
+        location: InferenceLocation,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
-        depth: usize,
     ) -> Result<(), TyperError> {
+        let InferenceLocation {
+            tree_index,
+            argument_index,
+            depth,
+        } = location;
         if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
             return Err(TyperError::UnsupportedInferenceShape {
                 source: self.source,
@@ -1607,76 +1615,26 @@ impl<'a> SourceTyper<'a> {
             binder: found,
             index,
         } = formal_node
+            && found == binder
         {
-            if found == binder {
-                let parameter_index = index as usize;
-                let Some(slot) = inferred.get_mut(parameter_index) else {
-                    return Err(TyperError::UnsupportedInferenceShape {
-                        source: self.source,
-                        tree_index,
-                        binder,
-                        parameter_index: Some(parameter_index),
-                        formal,
-                        actual,
-                    });
-                };
-                if let Some(previous) = *slot {
-                    let mut seen = std::collections::HashSet::new();
-                    self.complete_relation_type(previous, info_journal, &mut seen, 0)?;
-                    self.complete_relation_type(actual, info_journal, &mut seen, 0)?;
-                    let equivalent = match (
-                        self.conforms(previous, actual),
-                        self.conforms(actual, previous),
-                    ) {
-                        (Ok(true), Ok(true)) => true,
-                        (Ok(_), Ok(_)) => false,
-                        _ => {
-                            return Err(TyperError::UnsupportedInferenceShape {
-                                source: self.source,
-                                tree_index,
-                                binder,
-                                parameter_index: Some(parameter_index),
-                                formal,
-                                actual,
-                            });
-                        }
-                    };
-                    if !equivalent {
-                        return Err(TyperError::ConflictingInferenceConstraints {
-                            source: self.source,
-                            tree_index,
-                            binder,
-                            parameter_index,
-                            first: previous,
-                            second: actual,
-                        });
-                    }
-                } else {
-                    *slot = Some(actual);
-                }
-                return Ok(());
-            }
-        }
-
-        if let Type::Applied { tycon, args } = formal_node {
-            if self.type_contains_param_ref(formal, binder)? {
-                let Some(Type::Applied {
-                    tycon: actual_tycon,
-                    args: actual_args,
-                }) = self.store.types.try_get(actual).cloned()
-                else {
-                    return Err(TyperError::UnsupportedInferenceShape {
-                        source: self.source,
-                        tree_index,
-                        binder,
-                        parameter_index: None,
-                        formal,
-                        actual,
-                    });
-                };
-                let equivalent_constructor = match (
-                    self.conforms(tycon, actual_tycon),
-                    self.conforms(actual_tycon, tycon),
+            let parameter_index = index as usize;
+            let Some(slot) = inferred.get_mut(parameter_index) else {
+                return Err(TyperError::UnsupportedInferenceShape {
+                    source: self.source,
+                    tree_index,
+                    binder,
+                    parameter_index: Some(parameter_index),
+                    formal,
+                    actual,
+                });
+            };
+            if let Some(previous) = *slot {
+                let mut seen = std::collections::HashSet::new();
+                self.complete_relation_type(previous, info_journal, &mut seen, 0)?;
+                self.complete_relation_type(actual, info_journal, &mut seen, 0)?;
+                let equivalent = match (
+                    self.conforms(previous, actual),
+                    self.conforms(actual, previous),
                 ) {
                     (Ok(true), Ok(true)) => true,
                     (Ok(_), Ok(_)) => false,
@@ -1685,13 +1643,52 @@ impl<'a> SourceTyper<'a> {
                             source: self.source,
                             tree_index,
                             binder,
-                            parameter_index: None,
+                            parameter_index: Some(parameter_index),
                             formal,
                             actual,
                         });
                     }
                 };
-                if !equivalent_constructor || args.len() != actual_args.len() {
+                if !equivalent {
+                    return Err(TyperError::ConflictingInferenceConstraints {
+                        source: self.source,
+                        tree_index,
+                        binder,
+                        parameter_index,
+                        first: previous,
+                        second: actual,
+                    });
+                }
+            } else {
+                *slot = Some(actual);
+            }
+            return Ok(());
+        }
+
+        if let Type::Applied { tycon, args } = formal_node
+            && self.type_contains_param_ref(formal, binder)?
+        {
+            let Some(Type::Applied {
+                tycon: actual_tycon,
+                args: actual_args,
+            }) = self.store.types.try_get(actual).cloned()
+            else {
+                return Err(TyperError::UnsupportedInferenceShape {
+                    source: self.source,
+                    tree_index,
+                    binder,
+                    parameter_index: None,
+                    formal,
+                    actual,
+                });
+            };
+            let equivalent_constructor = match (
+                self.conforms(tycon, actual_tycon),
+                self.conforms(actual_tycon, tycon),
+            ) {
+                (Ok(true), Ok(true)) => true,
+                (Ok(_), Ok(_)) => false,
+                _ => {
                     return Err(TyperError::UnsupportedInferenceShape {
                         source: self.source,
                         tree_index,
@@ -1701,20 +1698,31 @@ impl<'a> SourceTyper<'a> {
                         actual,
                     });
                 }
-                for (formal_argument, actual_argument) in args.into_iter().zip(actual_args) {
-                    self.infer_type_constraints(
-                        formal_argument,
-                        actual_argument,
-                        binder,
-                        inferred,
-                        tree_index,
-                        argument_index,
-                        info_journal,
-                        depth + 1,
-                    )?;
-                }
-                return Ok(());
+            };
+            if !equivalent_constructor || args.len() != actual_args.len() {
+                return Err(TyperError::UnsupportedInferenceShape {
+                    source: self.source,
+                    tree_index,
+                    binder,
+                    parameter_index: None,
+                    formal,
+                    actual,
+                });
             }
+            for (formal_argument, actual_argument) in args.into_iter().zip(actual_args) {
+                self.infer_type_constraints(
+                    formal_argument,
+                    actual_argument,
+                    binder,
+                    inferred,
+                    InferenceLocation {
+                        depth: depth + 1,
+                        ..location
+                    },
+                    info_journal,
+                )?;
+            }
+            return Ok(());
         }
 
         if self.type_contains_param_ref(formal, binder)? {
