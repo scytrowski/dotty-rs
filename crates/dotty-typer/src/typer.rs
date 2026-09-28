@@ -1,6 +1,7 @@
 //! Source declaration completion driver.
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dotty_core::ast::{
     ApplyKind, Ident, NumberKind, NumberLiteral, TreeKind, TypeBoundsTree, TypedAstBuilder,
@@ -18,6 +19,16 @@ use dotty_core::{
 use dotty_namer::{SourceContextId, SourceDefinition, SourceSemanticIndex};
 
 use crate::{SourceTypeIndex, SourceTypedIndex};
+
+static NEXT_EXPRESSION_SCOPE_OWNER: AtomicU64 = AtomicU64::new(1);
+
+fn next_expression_scope_owner() -> u64 {
+    NEXT_EXPRESSION_SCOPE_OWNER
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+            next.checked_add(1)
+        })
+        .expect("expression scope owner identity space exhausted")
+}
 
 #[path = "lookup/mod.rs"]
 mod lookup;
@@ -65,8 +76,10 @@ pub enum TyperError {
     ExpressionOwnerDeclarationContextMissing { owner: SymbolId },
     /// A local expression scope is outside the semantic store's scope arena.
     ExpressionLocalScopeMissing { scope: dotty_core::ScopeId },
-    /// The typer-owned persistent local-scope stack is malformed or foreign.
+    /// A local-scope handle is malformed for this typer's stack.
     ExpressionLocalScopeStackMissing { stack: ExpressionScopeId },
+    /// A local-scope handle was created by a different `SourceTyper`.
+    ExpressionLocalScopeStackForeign { stack: ExpressionScopeId },
     /// The type name may come from an import form not supported by this pass.
     UnsupportedImportContext {
         source: SourceId,
@@ -611,12 +624,15 @@ pub struct ExpressionContext {
 
 /// Opaque head identity in one `SourceTyper`'s persistent local scope stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ExpressionScopeId(usize);
+pub struct ExpressionScopeId {
+    owner: u64,
+    index: usize,
+}
 
 impl ExpressionScopeId {
     /// Returns the stack-frame index backing this identity.
     pub const fn index(self) -> usize {
-        self.0
+        self.index
     }
 }
 
@@ -633,6 +649,7 @@ pub struct SourceTyper<'a> {
     typed_arena: AstArena<Typed>,
     typed_index: SourceTypedIndex,
     expression_scopes: Vec<ExpressionScopeFrame>,
+    expression_scope_owner: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -814,6 +831,7 @@ impl<'a> SourceTyper<'a> {
             typed_arena: AstArena::new(),
             typed_index: SourceTypedIndex::new(),
             expression_scopes: Vec::new(),
+            expression_scope_owner: next_expression_scope_owner(),
         }
     }
 
@@ -885,7 +903,10 @@ impl<'a> SourceTyper<'a> {
         if let Some(parent) = context.local_scopes {
             self.validate_expression_scope_stack(Some(parent))?;
         }
-        let stack = ExpressionScopeId(self.expression_scopes.len());
+        let stack = ExpressionScopeId {
+            owner: self.expression_scope_owner,
+            index: self.expression_scopes.len(),
+        };
         self.expression_scopes.push(ExpressionScopeFrame {
             scope,
             parent: context.local_scopes,
@@ -909,6 +930,9 @@ impl<'a> SourceTyper<'a> {
     ) -> Result<(), TyperError> {
         let mut seen = std::collections::HashSet::new();
         while let Some(id) = stack {
+            if id.owner != self.expression_scope_owner {
+                return Err(TyperError::ExpressionLocalScopeStackForeign { stack: id });
+            }
             if !seen.insert(id) {
                 return Err(TyperError::ExpressionLocalScopeStackMissing { stack: id });
             }
@@ -11990,6 +12014,44 @@ mod tests {
             .expression_term_candidates(name, block_context, rhs.index(), None)
             .unwrap();
         assert_eq!(candidates, vec![field]);
+    }
+
+    #[test]
+    fn expression_scope_contexts_are_bound_to_their_source_typer() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def first(x: Int): Int = x; def second(x: Boolean): Boolean = x }",
+        );
+        let (first, _) = method_definition_and_rhs(&parsed, &store, &index, source, "first");
+        let (second, second_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "second");
+        let first_context = {
+            let mut first_typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            first_typer.expression_context_for(first).unwrap()
+        };
+        let mut second_typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let second_context = second_typer.expression_context_for(second).unwrap();
+        assert_eq!(first_context.local_scopes.unwrap().index(), 0);
+        assert_eq!(second_context.local_scopes.unwrap().index(), 0);
+
+        assert!(matches!(
+            second_typer.type_expression(second_rhs, first_context),
+            Err(TyperError::ExpressionLocalScopeStackForeign { stack })
+                if stack == first_context.local_scopes.unwrap()
+        ));
     }
 
     #[test]
