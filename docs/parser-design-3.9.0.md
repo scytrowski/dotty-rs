@@ -115,6 +115,11 @@ while parsing an individual case body. The parser balances the match region
 before parsing the following sibling statement. If a matching parenthesis
 closes the case region first, the parser closes the feedback state without
 exposing an `Outdent` token inside the parenthesized expression.
+Case-body feedback carries the source position of its `case` clause, so
+subsequent statements are compared with the clause indentation rather than
+the first body expression's indentation. If a nested feedback-opened region
+ends at a delimiter, its synthetic indent is marked closed so a later scan
+cannot mistake that consumed region for a still-open indentation level.
 Feedback-opened lambda and expression bodies follow Dotty's statement-sequence
 terminators as well: a closing parenthesis or nested brace may end the body
 before an `Outdent` is materialized. The parser balances that scanner region

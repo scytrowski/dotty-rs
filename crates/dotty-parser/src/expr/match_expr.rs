@@ -185,7 +185,9 @@ mod tests {
                         Token::new(TokenKind::Indent, TextRange::new(offset, offset).unwrap()),
                     );
                 }
-                (ScannerEvent::ArrowIndented, TokenKind::Operator) if self.arrow_indents => {
+                (ScannerEvent::CaseBodyIndented { .. }, TokenKind::Operator)
+                    if self.arrow_indents =>
+                {
                     let offset = self.current().span.end();
                     self.tokens.insert(
                         self.index + 1,

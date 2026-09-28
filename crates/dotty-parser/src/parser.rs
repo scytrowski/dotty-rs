@@ -338,6 +338,11 @@ where
         self.observe(ScannerEvent::MatchCasesOutdented);
     }
 
+    /// Opens a case-body region relative to the source indentation of `case`.
+    pub(crate) fn observe_case_body_indented(&mut self, case_start: u32) {
+        self.observe(ScannerEvent::CaseBodyIndented { case_start });
+    }
+
     /// Closes a feedback-opened layout region at a grammar delimiter without
     /// asking the scanner to insert a parser-visible `Outdent` token.
     pub(crate) fn observe_outdented_by_delimiter(&mut self) {
