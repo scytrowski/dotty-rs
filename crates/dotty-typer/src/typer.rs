@@ -7,8 +7,8 @@ use dotty_core::ast::{
     UntypedNode,
 };
 use dotty_core::types::{
-    ClassInfo, MethodKind, MethodParamSpec, MethodType, TermRefTarget, Type, TypeParamSpec,
-    TypeRefTarget, method_type_from_symbols, poly_type_from_symbols,
+    ClassInfo, MethodKind, MethodParamSpec, MethodType, PolyType, TermRefTarget, Type,
+    TypeParamSpec, TypeRefTarget, method_type_from_symbols, poly_type_from_symbols,
 };
 use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
@@ -319,6 +319,51 @@ pub enum TyperError {
     },
     /// Applying a polymorphic method requires explicit application or inference.
     PolymorphicMethodApplicationDeferred { source: SourceId, tree_index: u32 },
+    /// A supported polymorphic application leaves one type parameter without
+    /// constraints from its term arguments.
+    UnconstrainedTypeParameter {
+        source: SourceId,
+        tree_index: u32,
+        binder: TypeId,
+        parameter_index: usize,
+    },
+    /// Two actual arguments constrain one Poly parameter to non-equivalent types.
+    ConflictingInferenceConstraints {
+        source: SourceId,
+        tree_index: u32,
+        binder: TypeId,
+        parameter_index: usize,
+        first: TypeId,
+        second: TypeId,
+    },
+    /// A generic application uses a formal/actual shape outside the structural
+    /// inference rules supported by this typer increment.
+    UnsupportedInferenceShape {
+        source: SourceId,
+        tree_index: u32,
+        binder: TypeId,
+        parameter_index: Option<usize>,
+        formal: TypeId,
+        actual: TypeId,
+    },
+    /// A unique polymorphic callee is not the supported one-clause Poly/Method form.
+    UnsupportedPolymorphicApplicationShape {
+        source: SourceId,
+        tree_index: u32,
+        binder: TypeId,
+    },
+    /// Candidate competition includes a polymorphic method and needs general
+    /// generic overload resolution.
+    GenericOverloadResolutionDeferred { source: SourceId, tree_index: u32 },
+    /// Inferred arguments violate the declared bounds of a Poly parameter.
+    InferredTypeArgumentBoundViolation {
+        source: SourceId,
+        tree_index: u32,
+        parameter_index: usize,
+        argument: TypeId,
+        bound: TypeId,
+        side: TypeArgumentBoundSide,
+    },
     /// An explicit type application callee does not widen to a Poly type.
     ExplicitTypeApplicationCalleeNotPoly {
         source: SourceId,
@@ -961,7 +1006,7 @@ impl<'a> SourceTyper<'a> {
                     info_journal,
                     new_mappings,
                 )?;
-                let (function, callable, typed_arguments) =
+                let (function, mut callable, mut typed_arguments) =
                     if let Some(resolved) = resolved_function {
                         (resolved.typed, resolved.callable, Some(resolved.arguments))
                     } else {
@@ -976,14 +1021,48 @@ impl<'a> SourceTyper<'a> {
                             self.widen_expression_type_journaled(function_type, info_journal, 0)?;
                         (function, callable, None)
                     };
+                if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
+                    let arguments = if let Some(arguments) = typed_arguments.take() {
+                        arguments
+                    } else {
+                        let mut arguments = Vec::with_capacity(application.args.len());
+                        for argument_tree in &application.args {
+                            let typed = self.type_expression_inner(
+                                *argument_tree,
+                                context,
+                                info_journal,
+                                new_mappings,
+                            )?;
+                            let own_type = self.typed_arena.get(typed).ty;
+                            let widened_type =
+                                self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+                            arguments.push(TypedArgument {
+                                typed,
+                                own_type,
+                                widened_type,
+                            });
+                        }
+                        arguments
+                    };
+                    let type_arguments = self.infer_poly_application_arguments(
+                        callable,
+                        &poly,
+                        &arguments,
+                        tree.index(),
+                        info_journal,
+                    )?;
+                    let instantiated =
+                        dotty_core::types::instantiate_poly(self.store, callable, &type_arguments)
+                            .map_err(|error| TyperError::TypeRebinding {
+                                source: self.source,
+                                tree_index: tree.index(),
+                                error,
+                            })?;
+                    callable = instantiated.result;
+                    typed_arguments = Some(arguments);
+                }
                 let method = match self.store.types.try_get(callable) {
                     Some(Type::Method(method)) => method.clone(),
-                    Some(Type::Poly(_)) => {
-                        return Err(TyperError::PolymorphicMethodApplicationDeferred {
-                            source: self.source,
-                            tree_index: tree.index(),
-                        });
-                    }
                     _ => {
                         return Err(TyperError::ApplicationCalleeNotMethod {
                             source: self.source,
@@ -1351,6 +1430,236 @@ impl<'a> SourceTyper<'a> {
         }
     }
 
+    fn infer_poly_application_arguments(
+        &mut self,
+        binder: TypeId,
+        poly: &PolyType,
+        arguments: &[TypedArgument],
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<TypeId>, TyperError> {
+        let Some(Type::Method(method)) = self.store.types.try_get(poly.result).cloned() else {
+            return Err(TyperError::UnsupportedPolymorphicApplicationShape {
+                source: self.source,
+                tree_index,
+                binder,
+            });
+        };
+        if method.kind != MethodKind::Plain
+            || method.params.len() != arguments.len()
+            || method.params.iter().any(|param| {
+                param.erased
+                    || param.varargs
+                    || matches!(
+                        self.store.types.try_get(param.ty),
+                        Some(Type::ByName { .. })
+                    )
+            })
+            || self.type_contains_param_ref(poly.result, poly.result)?
+        {
+            return Err(TyperError::UnsupportedPolymorphicApplicationShape {
+                source: self.source,
+                tree_index,
+                binder,
+            });
+        }
+
+        let mut inferred = vec![None; poly.params.len()];
+        for (parameter, argument) in method.params.iter().zip(arguments) {
+            self.infer_type_constraints(
+                parameter.ty,
+                argument.widened_type,
+                binder,
+                &mut inferred,
+                tree_index,
+                info_journal,
+                0,
+            )?;
+        }
+        let mut type_arguments = Vec::with_capacity(poly.params.len());
+        for (parameter_index, inferred_type) in inferred.into_iter().enumerate() {
+            let Some(inferred_type) = inferred_type else {
+                return Err(TyperError::UnconstrainedTypeParameter {
+                    source: self.source,
+                    tree_index,
+                    binder,
+                    parameter_index,
+                });
+            };
+            self.check_explicit_type_argument_bounds(
+                inferred_type,
+                poly.params[parameter_index].bounds,
+                parameter_index,
+                tree_index,
+                info_journal,
+            )
+            .map_err(|error| match error {
+                TyperError::ExplicitTypeArgumentBoundViolation {
+                    parameter_index,
+                    argument,
+                    bound,
+                    side,
+                    ..
+                } => TyperError::InferredTypeArgumentBoundViolation {
+                    source: self.source,
+                    tree_index,
+                    parameter_index,
+                    argument,
+                    bound,
+                    side,
+                },
+                error => error,
+            })?;
+            type_arguments.push(inferred_type);
+        }
+        Ok(type_arguments)
+    }
+
+    fn infer_type_constraints(
+        &mut self,
+        formal: TypeId,
+        actual: TypeId,
+        binder: TypeId,
+        inferred: &mut [Option<TypeId>],
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        depth: usize,
+    ) -> Result<(), TyperError> {
+        if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            return Err(TyperError::UnsupportedInferenceShape {
+                source: self.source,
+                tree_index,
+                binder,
+                parameter_index: None,
+                formal,
+                actual,
+            });
+        }
+        let Some(formal_node) = self.store.types.try_get(formal).cloned() else {
+            return Err(TyperError::TypeNormalization(
+                if self.store.types.contains(formal) {
+                    crate::types::TypeNormalizeError::UnfilledType { ty: formal }
+                } else {
+                    crate::types::TypeNormalizeError::InvalidType { ty: formal }
+                },
+            ));
+        };
+        if let Type::ParamRef {
+            binder: found,
+            index,
+        } = formal_node
+        {
+            if found == binder {
+                let parameter_index = index as usize;
+                let Some(slot) = inferred.get_mut(parameter_index) else {
+                    return Err(TyperError::UnsupportedInferenceShape {
+                        source: self.source,
+                        tree_index,
+                        binder,
+                        parameter_index: Some(parameter_index),
+                        formal,
+                        actual,
+                    });
+                };
+                if let Some(previous) = *slot {
+                    let mut seen = std::collections::HashSet::new();
+                    self.complete_relation_type(previous, info_journal, &mut seen, 0)?;
+                    self.complete_relation_type(actual, info_journal, &mut seen, 0)?;
+                    if !(self.conforms(previous, actual).unwrap_or(false)
+                        && self.conforms(actual, previous).unwrap_or(false))
+                    {
+                        return Err(TyperError::ConflictingInferenceConstraints {
+                            source: self.source,
+                            tree_index,
+                            binder,
+                            parameter_index,
+                            first: previous,
+                            second: actual,
+                        });
+                    }
+                } else {
+                    *slot = Some(actual);
+                }
+                return Ok(());
+            }
+        }
+
+        if let Type::Applied { tycon, args } = formal_node {
+            if self.type_contains_param_ref(formal, binder)? {
+                let Some(Type::Applied {
+                    tycon: actual_tycon,
+                    args: actual_args,
+                }) = self.store.types.try_get(actual).cloned()
+                else {
+                    return Err(TyperError::UnsupportedInferenceShape {
+                        source: self.source,
+                        tree_index,
+                        binder,
+                        parameter_index: None,
+                        formal,
+                        actual,
+                    });
+                };
+                let equivalent_constructor = self.conforms(tycon, actual_tycon).unwrap_or(false)
+                    && self.conforms(actual_tycon, tycon).unwrap_or(false);
+                if !equivalent_constructor || args.len() != actual_args.len() {
+                    return Err(TyperError::UnsupportedInferenceShape {
+                        source: self.source,
+                        tree_index,
+                        binder,
+                        parameter_index: None,
+                        formal,
+                        actual,
+                    });
+                }
+                for (formal_argument, actual_argument) in args.into_iter().zip(actual_args) {
+                    self.infer_type_constraints(
+                        formal_argument,
+                        actual_argument,
+                        binder,
+                        inferred,
+                        tree_index,
+                        info_journal,
+                        depth + 1,
+                    )?;
+                }
+                return Ok(());
+            }
+        }
+
+        if self.type_contains_param_ref(formal, binder)? {
+            return Err(TyperError::UnsupportedInferenceShape {
+                source: self.source,
+                tree_index,
+                binder,
+                parameter_index: None,
+                formal,
+                actual,
+            });
+        }
+        let mut seen = std::collections::HashSet::new();
+        self.complete_relation_type(formal, info_journal, &mut seen, 0)?;
+        self.complete_relation_type(actual, info_journal, &mut seen, 0)?;
+        match self.conforms(actual, formal) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(TyperError::ApplicationArgumentTypeMismatch {
+                source: self.source,
+                tree_index,
+                argument_index: 0,
+                actual,
+                expected: formal,
+            }),
+            Err(_) => Err(TyperError::UnsupportedInferenceShape {
+                source: self.source,
+                tree_index,
+                binder,
+                parameter_index: None,
+                formal,
+                actual,
+            }),
+        }
+    }
+
     fn type_contains_param_ref(&self, root: TypeId, binder: TypeId) -> Result<bool, TyperError> {
         fn visit(
             typer: &SourceTyper<'_>,
@@ -1588,6 +1897,18 @@ impl<'a> SourceTyper<'a> {
         }
 
         self.remove_overridden_overload_candidates(&mut candidates, application_tree_index)?;
+
+        if candidates.iter().any(|candidate| {
+            matches!(
+                self.store.types.try_get(candidate.callable),
+                Some(Type::Poly(_))
+            )
+        }) {
+            return Err(TyperError::GenericOverloadResolutionDeferred {
+                source: self.source,
+                tree_index: application_tree_index,
+            });
+        }
 
         let winner =
             self.choose_overload_candidate(&mut candidates, &arguments, application_tree_index)?;
@@ -14166,7 +14487,7 @@ mod tests {
     }
 
     #[test]
-    fn polymorphic_method_application_is_deferred() {
+    fn polymorphic_method_application_infers_from_argument() {
         let source_text = "class C { def id[A](x: A): A = x; def use: Int = id(1) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
@@ -14174,6 +14495,7 @@ mod tests {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
         };
+        let int = definitions.int;
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -14183,9 +14505,11 @@ mod tests {
             &packages,
         );
 
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert_eq!(typer.typed_ast().get(typed).ty, int);
         assert!(matches!(
-            typer.type_expression(rhs, context),
-            Err(TyperError::PolymorphicMethodApplicationDeferred { .. })
+            typer.typed_ast().get(typed).kind,
+            TreeKind::Apply(_)
         ));
     }
 
