@@ -2219,6 +2219,71 @@ fn parses_a_simple_type_ascription() {
 }
 
 #[test]
+fn parses_a_colon_followed_by_an_indented_lambda_as_an_argument() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo: cb =>\n  cb()",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::ColonFollow, 3, 4),
+            token(TokenKind::Identifier, 5, 7),
+            token(TokenKind::Operator, 8, 10),
+            token(TokenKind::Indent, 11, 11),
+            token(TokenKind::Identifier, 13, 15),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 15, 16),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+            token(TokenKind::Outdent, 17, 17),
+            token(TokenKind::Eof, 17, 17),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+        panic!(
+            "expected a colon argument application, got {:?}",
+            parser.ast().get(tree).kind
+        );
+    };
+    assert_eq!(application.args.len(), 1);
+    assert!(matches!(
+        parser.ast().get(application.args[0]).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Function(_))
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 17).unwrap()
+    );
+}
+
+#[test]
+fn recovers_from_a_colon_lambda_argument_without_a_body() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo: cb =>",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::ColonFollow, 3, 4),
+            token(TokenKind::Identifier, 5, 7),
+            token(TokenKind::Operator, 8, 10),
+            token(TokenKind::Eof, 10, 10),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    assert!(matches!(parser.ast().get(tree).kind, TreeKind::Apply(_)));
+    assert!(parser.diagnostics().iter().any(|diagnostic| {
+        diagnostic
+            .message()
+            .contains("expected an expression after lambda arrow")
+    }));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+}
+
+#[test]
 fn parses_a_literal_type_ascription() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

@@ -117,6 +117,10 @@ where
             return self.alloc_assign(lhs, rhs);
         }
 
+        if self.current().kind == TokenKind::ColonFollow && self.colon_followed_by_indented_lambda()
+        {
+            return self.parse_colon_lambda_argument(lhs);
+        }
         if self.current().kind == TokenKind::ColonFollow {
             self.observe_colon_eol(false);
         }
@@ -128,6 +132,80 @@ where
             return self.parse_colon_argument(lhs);
         }
         lhs
+    }
+
+    /// Matches Dotty's `followingIsLambdaAfterColon` for the lambda forms
+    /// supported by this parser. The lambda's own parser requests the layout
+    /// region after `=>`; the colon must not open a colon-EOL argument region.
+    fn colon_followed_by_indented_lambda(&mut self) -> bool {
+        let mut offset = 1usize;
+        match self.cursor.lookahead(offset).kind {
+            TokenKind::Identifier => offset += 1,
+            TokenKind::Punctuation(Punctuation::LeftParen)
+            | TokenKind::Punctuation(Punctuation::LeftBracket) => {
+                let (open, close) = match self.cursor.lookahead(offset).kind {
+                    TokenKind::Punctuation(Punctuation::LeftParen) => {
+                        (Punctuation::LeftParen, Punctuation::RightParen)
+                    }
+                    _ => (Punctuation::LeftBracket, Punctuation::RightBracket),
+                };
+                let mut depth = 0usize;
+                loop {
+                    match self.cursor.lookahead(offset).kind {
+                        TokenKind::Punctuation(kind) if kind == open => depth += 1,
+                        TokenKind::Punctuation(kind) if kind == close => {
+                            depth -= 1;
+                            offset += 1;
+                            if depth == 0 {
+                                break;
+                            }
+                            continue;
+                        }
+                        TokenKind::Eof => return false,
+                        _ => {}
+                    }
+                    offset += 1;
+                }
+            }
+            _ => return false,
+        }
+
+        let arrow = self.cursor.lookahead(offset).clone();
+        if arrow.kind != TokenKind::Operator
+            || !matches!(self.source.slice(arrow.span).ok(), Some("=>" | "?=>"))
+        {
+            return false;
+        }
+
+        self.cursor
+            .observe_at(offset, dotty_core::ScannerEvent::ArrowIndented);
+        matches!(
+            self.cursor.lookahead(offset + 1).kind,
+            TokenKind::Indent | TokenKind::Eof
+        )
+    }
+
+    fn parse_colon_lambda_argument(&mut self, function: TreeId<Untyped>) -> TreeId<Untyped> {
+        let start = self
+            .ast
+            .get(function)
+            .position
+            .map(|position| position.span().range().start())
+            .unwrap_or_else(|| self.mark().start());
+        let argument = self.parse_colon_lambda_body();
+        self.alloc_from(
+            crate::Mark { start },
+            TreeKind::Apply(dotty_core::ast::Apply {
+                function,
+                args: vec![argument],
+                kind: dotty_core::ast::ApplyKind::Regular,
+            }),
+        )
+    }
+
+    pub(super) fn parse_colon_lambda_body(&mut self) -> TreeId<Untyped> {
+        self.advance(); // ColonFollow
+        self.with_location(crate::Location::InColonArg, |parser| parser.expr())
     }
 
     pub(crate) fn current_is_bare_assignment(&mut self) -> bool {

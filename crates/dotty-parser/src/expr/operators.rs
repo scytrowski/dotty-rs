@@ -27,6 +27,12 @@ where
             if self.is_argument_vararg_splice() {
                 break;
             }
+            if self.current().kind == TokenKind::ColonFollow
+                && self.colon_followed_by_indented_lambda()
+            {
+                top = self.parse_colon_lambda_argument(top);
+                continue;
+            }
             if self.is_nonfinal_argument_spread() {
                 self.report(
                     crate::ParseDiagnosticKind::UnexpectedToken,
@@ -74,15 +80,21 @@ where
                 operator: operator.name,
                 offset: operator.offset,
             });
-            if self.current().kind == TokenKind::ColonFollow {
-                self.observe_colon_eol(false);
-            }
-            top = if self.current().kind == TokenKind::ColonEol {
-                self.parse_colon_argument_body()
+            if self.current().kind == TokenKind::ColonFollow
+                && self.colon_followed_by_indented_lambda()
+            {
+                top = self.parse_colon_lambda_body();
             } else {
-                self.consume_infix_newlines();
-                self.prefix_expr()
-            };
+                if self.current().kind == TokenKind::ColonFollow {
+                    self.observe_colon_eol(false);
+                }
+                top = if self.current().kind == TokenKind::ColonEol {
+                    self.parse_colon_argument_body()
+                } else {
+                    self.consume_infix_newlines();
+                    self.prefix_expr()
+                };
+            }
 
             if !self.cursor.progressed_since(checkpoint) {
                 self.report(
