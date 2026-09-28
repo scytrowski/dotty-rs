@@ -207,6 +207,19 @@ tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-411-scala3-3.9.0.json
 ```
 
+`parser-post-issue-436-scala3-3.9.0.json` reruns the corpus at parser revision
+`45191bc6a6336f045d6e8fa35e799785134dec42` (main after PRs #433–#435).
+It records 1,074 clean parses (86.89%), 162 recoverable files, and zero hard
+failures, panics, or hangs. The Scala oracle emitted all 1,236 files with 30
+exceptions. The comparison and interpretation are recorded in
+[`parser-v0.1-compatibility.md`](../../docs/parser-v0.1-compatibility.md).
+Recreate it with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-436-scala3-3.9.0.json
+```
+
 The existing `tools/scala-parser-oracle/compare.sh` remains the exact
 Scala/Rust differential gate for the checked-in fixture corpus. This report is
 the larger source-compatibility measurement and does not weaken that gate.
