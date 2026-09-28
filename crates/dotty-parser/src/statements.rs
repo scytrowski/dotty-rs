@@ -455,6 +455,14 @@ where
             StatementSequenceBoundary::FeedbackBlock(end) => {
                 self.current().kind == end
                     || self.current().kind == TokenKind::Eof
+                    // Dotty's statement-sequence end also includes a closing
+                    // parenthesis and nested delimiters. A feedback-opened
+                    // lambda body may end at its enclosing delimiter without
+                    // the scanner materializing a separate Outdent token.
+                    || matches!(
+                        self.current().kind,
+                        TokenKind::Punctuation(Punctuation::RightParen | Punctuation::RightBrace)
+                    )
                     || (self.context.case_body && self.is_case_body_terminator())
             }
         }
