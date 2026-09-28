@@ -49,6 +49,7 @@ fn types_a_synthetic_field_selection_through_the_public_pipeline() {
     let context = ExpressionContext {
         lexical: index.declaration_context_of(method).unwrap(),
         owner: method,
+        local_scopes: None,
     };
     let source_position = parsed.ast.get(rhs).position;
     let field = parsed
@@ -134,6 +135,7 @@ fn types_a_monomorphic_application_through_the_public_pipeline() {
     let context = ExpressionContext {
         lexical: index.declaration_context_of(method).unwrap(),
         owner: method,
+        local_scopes: None,
     };
     let source_position = parsed.ast.get(rhs).position;
     let mut typer = SourceTyper::new(
