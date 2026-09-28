@@ -4,7 +4,7 @@
 use crate::ast::arena::AstArena;
 use crate::ast::common::{
     Apply, ApplyKind, Assign, Block, Ident, If, Literal, Select, This, TypeApply, TypeTree,
-    TypedExpr,
+    TypedExpr, While,
 };
 use crate::ast::phase::Typed;
 use crate::ast::tree::{Tree, TreeKind};
@@ -217,6 +217,21 @@ impl<'a> TypedAstBuilder<'a> {
         })
     }
 
+    /// Allocates a typed loop with its already-determined result type.
+    pub fn while_expr(
+        &mut self,
+        cond: TreeId<Typed>,
+        body: TreeId<Typed>,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        self.arena.alloc(Tree {
+            kind: TreeKind::While(While { cond, body }),
+            position,
+            ty,
+        })
+    }
+
     /// Reifies a projected source type as a typed type tree. Type trees carry
     /// their meaning in `Tree::ty`; the source typer records the source mapping.
     pub fn type_tree(&mut self, ty: TypeId, position: Option<SourceSpan>) -> TreeId<Typed> {
@@ -378,6 +393,24 @@ mod tests {
         assert_eq!(if_expr.cond, condition);
         assert_eq!(if_expr.then_branch, then_branch);
         assert_eq!(if_expr.else_branch, else_branch);
+    }
+
+    #[test]
+    fn while_expr_references_condition_and_body_and_uses_result_type() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let condition = builder.literal(Constant::Boolean(true), TypeId::new(2), None);
+        let body = builder.literal(Constant::Int(1), TypeId::new(3), None);
+        let unit = TypeId::new(4);
+
+        let loop_tree = builder.while_expr(condition, body, unit, None);
+
+        assert_eq!(arena.get(loop_tree).ty, unit);
+        let TreeKind::While(while_expr) = arena.get(loop_tree).kind else {
+            panic!("expected a typed while expression");
+        };
+        assert_eq!(while_expr.cond, condition);
+        assert_eq!(while_expr.body, body);
     }
 
     #[test]
