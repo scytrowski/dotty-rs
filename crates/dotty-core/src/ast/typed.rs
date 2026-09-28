@@ -3,7 +3,8 @@
 
 use crate::ast::arena::AstArena;
 use crate::ast::common::{
-    Apply, ApplyKind, Assign, Block, Ident, Literal, Select, This, TypeApply, TypeTree, TypedExpr,
+    Apply, ApplyKind, Assign, Block, Ident, If, Literal, Select, This, TypeApply, TypeTree,
+    TypedExpr,
 };
 use crate::ast::phase::Typed;
 use crate::ast::tree::{Tree, TreeKind};
@@ -196,6 +197,26 @@ impl<'a> TypedAstBuilder<'a> {
         })
     }
 
+    /// Allocates a typed conditional with the caller-computed branch join type.
+    pub fn if_expr(
+        &mut self,
+        cond: TreeId<Typed>,
+        then_branch: TreeId<Typed>,
+        else_branch: TreeId<Typed>,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        self.arena.alloc(Tree {
+            kind: TreeKind::If(If {
+                cond,
+                then_branch,
+                else_branch,
+            }),
+            position,
+            ty,
+        })
+    }
+
     /// Reifies a projected source type as a typed type tree. Type trees carry
     /// their meaning in `Tree::ty`; the source typer records the source mapping.
     pub fn type_tree(&mut self, ty: TypeId, position: Option<SourceSpan>) -> TreeId<Typed> {
@@ -337,6 +358,26 @@ mod tests {
         };
         assert_eq!(assign.lhs, lhs);
         assert_eq!(assign.rhs, rhs);
+    }
+
+    #[test]
+    fn if_expr_references_all_three_children_and_uses_join_type() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let condition = builder.literal(Constant::Boolean(true), TypeId::new(2), None);
+        let then_branch = builder.literal(Constant::Int(1), TypeId::new(3), None);
+        let else_branch = builder.literal(Constant::Int(2), TypeId::new(4), None);
+        let joined_type = TypeId::new(5);
+
+        let conditional = builder.if_expr(condition, then_branch, else_branch, joined_type, None);
+
+        assert_eq!(arena.get(conditional).ty, joined_type);
+        let TreeKind::If(if_expr) = arena.get(conditional).kind else {
+            panic!("expected a typed if expression");
+        };
+        assert_eq!(if_expr.cond, condition);
+        assert_eq!(if_expr.then_branch, then_branch);
+        assert_eq!(if_expr.else_branch, else_branch);
     }
 
     #[test]
