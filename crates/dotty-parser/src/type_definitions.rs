@@ -131,9 +131,11 @@ where
                 }
             }
             TokenKind::Operator | TokenKind::ColonOp
-                if !["=", "=>", "=>>", "<-", "<:", ">:", "?=>", ":", "@", "#"]
-                    .iter()
-                    .any(|reserved| self.current_text_is(reserved)) =>
+                if ![
+                    "=", "=>", "=>>", "<-", "<:", "<%", ">:", "?=>", ":", "@", "#",
+                ]
+                .iter()
+                .any(|reserved| self.current_text_is(reserved)) =>
             {
                 match self.intern_current_type_name() {
                     Ok(name) => {
@@ -512,6 +514,39 @@ mod tests {
                 .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedType })
         );
         assert_eq!(parser.current().span, TextRange::new(5, 6).unwrap());
+    }
+
+    #[test]
+    fn rejects_view_bound_operator_as_a_type_alias_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "type <% = Int",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Operator, 5, 7),
+                token(TokenKind::Operator, 8, 9),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_type_definition(Location::Elsewhere)
+        else {
+            panic!("expected recoverable TypeDef");
+        };
+        let TreeKind::TypeDef(TypeDef { name, .. }) = parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+
+        assert_eq!(parser.names.resolve(name.as_name().text()), "$missing_type");
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedType })
+        );
+        assert_eq!(parser.current().span, TextRange::new(5, 7).unwrap());
     }
 
     #[test]
