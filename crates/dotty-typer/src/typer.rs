@@ -12006,6 +12006,38 @@ mod tests {
     }
 
     #[test]
+    fn failed_inferred_method_body_rolls_back_partial_typed_state() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def failed = { val local = 1; missing }");
+        let method_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::DefDef(_)).then_some(tree))
+            .unwrap();
+        let method = index.symbol_at(source, method_tree).unwrap();
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(method),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.local_symbols.is_empty());
+        assert!(typer.initializing_local_symbols.is_empty());
+        assert!(typer.inferred_method_results_in_progress.is_empty());
+    }
+
+    #[test]
     fn type_projection_rejects_a_context_from_another_naming_index() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C\nval x: C = 1");
