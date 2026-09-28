@@ -3,8 +3,8 @@
 
 use crate::ast::arena::AstArena;
 use crate::ast::common::{
-    Apply, ApplyKind, Assign, Block, Ident, If, Literal, Return, Select, This, TypeApply, TypeTree,
-    TypedExpr, While,
+    Apply, ApplyKind, Assign, Block, Ident, If, Literal, New, Return, Select, This, TypeApply,
+    TypeTree, TypedExpr, While,
 };
 use crate::ast::phase::Typed;
 use crate::ast::tree::{Tree, TreeKind};
@@ -137,6 +137,24 @@ impl<'a> TypedAstBuilder<'a> {
     ) -> TreeId<Typed> {
         self.arena.alloc(Tree {
             kind: TreeKind::TypeApply(TypeApply { function, args }),
+            position,
+            ty,
+        })
+    }
+
+    /// Allocates a typed `new` expression with its semantic instance type.
+    pub fn new_expr(
+        &mut self,
+        tpt: TreeId<Typed>,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        debug_assert!(
+            matches!(self.arena.get(tpt).kind, TreeKind::TypeTree(_)),
+            "a typed new expression must reference a typed type tree"
+        );
+        self.arena.alloc(Tree {
+            kind: TreeKind::New(New { tpt }),
             position,
             ty,
         })
@@ -540,5 +558,21 @@ mod tests {
 
         assert_eq!(arena.get(tree).ty, ty);
         assert!(matches!(arena.get(tree).kind, TreeKind::TypeTree(TypeTree)));
+    }
+
+    #[test]
+    fn new_references_a_typed_type_tree_and_keeps_the_instance_type() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let instance_type = TypeId::new(8);
+        let tpt = builder.type_tree(instance_type, None);
+
+        let tree = builder.new_expr(tpt, instance_type, None);
+
+        assert_eq!(arena.get(tree).ty, instance_type);
+        let TreeKind::New(new) = arena.get(tree).kind else {
+            panic!("expected New")
+        };
+        assert_eq!(new.tpt, tpt);
     }
 }

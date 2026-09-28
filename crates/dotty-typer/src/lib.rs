@@ -4,11 +4,14 @@
 //! parse source, allocate declaration symbols, or load classpath entries.
 //! [`SourceTyper::type_expression`] builds typed AST nodes for literals, term
 //! identifiers, `this`, unique member selections, plain method applications,
-//! explicit positional type applications for one polymorphic callee, and
-//! source type ascriptions, assignments to mutable references, ordinary `if`
-//! expressions with a bounded branch join, condition-bearing `while`
-//! expressions, and local `return` expressions in methods with explicit result
-//! types.
+//! typed `New` nodes, explicit positional type applications for one
+//! polymorphic callee, source type ascriptions, assignments to mutable
+//! references, ordinary `if` expressions with a bounded branch join,
+//! condition-bearing `while` expressions, and local `return` expressions in
+//! methods with explicit result types.
+//! Constructor candidates can be discovered from an instance type with
+//! [`SourceTyper::constructors_of`]; this does not apply arguments or select an
+//! overload.
 //! [`SourceTyper::type_expression_expected`] checks
 //! the widened expression type against a semantic expected type while keeping
 //! the expression node's own type unchanged.
@@ -40,9 +43,10 @@ mod types;
 pub use source_type_index::SourceTypeIndex;
 pub use source_typed_index::{ConflictingTypedTree, SourceTypedIndex};
 pub use typer::{
-    ExpressionContext, ExpressionScopeId, MAX_MEMBER_LOOKUP_DEPTH, MAX_TYPE_RELATION_DEPTH,
-    MAX_TYPE_RELATION_VIEWS, MAX_UNION_RELATION_COMPARISONS, MemberCandidate, MemberLookupError,
-    SourceTyper, TypeArgumentBoundSide, TypeRelationError, TyperError,
+    ConstructorCandidate, ExpressionContext, ExpressionScopeId, MAX_MEMBER_LOOKUP_DEPTH,
+    MAX_TYPE_RELATION_DEPTH, MAX_TYPE_RELATION_VIEWS, MAX_UNION_RELATION_COMPARISONS,
+    MemberCandidate, MemberLookupError, SourceTyper, TypeArgumentBoundSide, TypeRelationError,
+    TyperError,
 };
 pub use types::{
     MAX_TYPE_NORMALIZATION_DEPTH, SymbolInfoState, TypeNormalizeError, TypeNormalizer,

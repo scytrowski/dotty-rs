@@ -59,9 +59,9 @@ For the tested subset, source Typer completion currently supports:
 - primary constructor signature normalization for a plain constructor.
 
 Expression typing currently includes typed identifiers, stable term selections,
-literal expressions, plain method applications, and blocks with expressions
-and local `val`/`var` definitions with or without explicit types. It also
-supports expected-type conformance checks, source type ascriptions, direct
+literal expressions, plain method applications, `New` nodes, and blocks with
+expressions and local `val`/`var` definitions with or without explicit types.
+It also supports expected-type conformance checks, source type ascriptions, direct
 assignments to mutable locals and fields, ordinary `if` expressions over the
 supported expression subset, condition-bearing `while` expressions, and local
 `return` expressions in methods with an explicit result type.
@@ -70,6 +70,18 @@ relation without changing the child tree's own type; a typed ascription node
 carries the projected source type. Assignment requires an exact mutable symbol
 reference, checks the right-hand side through expected typing, and produces
 `Unit`. Selected field types are adapted to the receiver.
+
+An ordinary source `New` node projects and retains its exact instance type,
+including applied type arguments, and reifies its source type tree as a typed
+`TypeTree`. Only concrete ordinary classes can be instantiated: traits,
+abstract classes, module classes, packages, unresolved/non-class references,
+and type parameters are rejected explicitly. Simple aliases and the existing
+transparent wrappers are normalized only to discover the class symbol; the
+typed `New` keeps the unnormalized projected type. Anonymous-template `new`
+is deferred. Constructor discovery reads only the target class's declaration
+scope, returns every `<init>` constructor in insertion order, and never walks
+parent classes or selects an overload. The parser's surrounding constructor
+application is still deferred to the next typer increment.
 
 An `if` condition is checked against canonical `Boolean`. Both branches are
 typed in the same lexical context and retain their own types in the typed AST.
@@ -181,13 +193,15 @@ parts remain deferred until their source semantic implementation and fixtures
 are ready:
 
 - expression forms outside the supported identifier, selection, literal,
-  application, block, ordinary `if`, condition-bearing `while`, and local
+  application, `New`, block, ordinary `if`, condition-bearing `while`, and local
   `return` subset, including `match`, `try`, lambdas, and other forms that are
   not currently handled by the expression typer;
 - local `def`, class, type, and pattern declarations, plus imports in block
   statements;
 - generic overload inference, `using`/implicit argument insertion, dependent
   result application, and right-associative extension normalization;
+- applying constructor arguments, selecting a constructor overload, and
+  anonymous-class lowering;
 - enum semantics, case-class synthetic APIs, and `derives`;
 - context-bound evidence synthesis;
 - default imports and general standard-library member lookup;
