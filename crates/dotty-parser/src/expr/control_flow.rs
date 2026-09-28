@@ -377,10 +377,17 @@ where
         } else {
             self.parse_expression_block_body(TokenKind::Outdent)
         };
-        if feedback_outdent && !self.cursor.at(TokenKind::Outdent) {
+        let closed_by_delimiter = feedback_outdent
+            && matches!(
+                self.current().kind,
+                TokenKind::Punctuation(Punctuation::RightParen | Punctuation::RightBrace)
+            );
+        if closed_by_delimiter {
+            self.observe_outdented_by_delimiter();
+        } else if feedback_outdent && !self.cursor.at(TokenKind::Outdent) {
             self.observe_outdented();
         }
-        if !self.accept(TokenKind::Outdent) {
+        if !closed_by_delimiter && !self.accept(TokenKind::Outdent) {
             self.report(
                 crate::ParseDiagnosticKind::ExpectedToken,
                 "expected an outdent to close an indented block",

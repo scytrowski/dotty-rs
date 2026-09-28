@@ -112,6 +112,10 @@ eager indentation, the parser requests the case-region indent after `match`
 and balances it before parsing the following sibling statement. If a matching
 parenthesis closes the case region first, the parser closes the feedback state
 without exposing an `Outdent` token inside the parenthesized expression.
+Feedback-opened lambda and expression bodies follow Dotty's statement-sequence
+terminators as well: a closing parenthesis or nested brace may end the body
+before an `Outdent` is materialized. The parser balances that scanner region
+with `OutdentedByDelimiter` and leaves the delimiter for its enclosing grammar.
 
 For supported method/value-definition RHSs and `if`/`while` bodies, the parser
 likewise asks the scanner for an indentation region at `=`, `then`, `else`, or

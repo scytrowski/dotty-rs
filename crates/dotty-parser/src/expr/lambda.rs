@@ -383,6 +383,82 @@ mod tests {
     }
 
     #[test]
+    fn closes_a_feedback_lambda_body_at_its_enclosing_parenthesis() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x =>\n  y)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Newline, 4, 5),
+                token(TokenKind::Indent, 7, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
+        else {
+            panic!("expected a function literal");
+        };
+
+        assert!(matches!(
+            parser.ast().get(function.body).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Punctuation(Punctuation::RightParen)
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn closes_a_feedback_lambda_body_at_its_enclosing_brace() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x =>\n  y}",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Newline, 4, 5),
+                token(TokenKind::Indent, 7, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
+        else {
+            panic!("expected a function literal");
+        };
+
+        assert!(matches!(
+            parser.ast().get(function.body).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Punctuation(Punctuation::RightBrace)
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn parses_empty_parenthesized_function_parameters() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
