@@ -3138,6 +3138,32 @@ impl<'a> SourceTyper<'a> {
                 }
             }
         }
+        // Top-level source methods are owned by their synthetic package
+        // module class, while their recorded lexical context is the package
+        // wrapper. Include the owner's members as the final lexical lookup
+        // step so sibling methods (including the method being inferred) can
+        // resolve just as they do for class and object methods.
+        if self.store.symbols.contains(context.owner) {
+            let owner = self.store.symbols.get(context.owner).owner;
+            if let Some(owner) = owner.filter(|owner| {
+                self.store.symbols.contains(*owner)
+                    && matches!(
+                        self.store.symbols.get(*owner).kind,
+                        SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                    )
+            }) && let Some(scope) = self.index.scope_of(owner)
+            {
+                let scope_is_in_context_chain = contexts.iter().any(|context_id| {
+                    self.index.source_context(*context_id).lexical_scope == scope
+                });
+                if !scope_is_in_context_chain {
+                    let candidates = self.store.scopes.get(scope).lookup_all(&name).to_vec();
+                    if !candidates.is_empty() {
+                        return Ok(candidates);
+                    }
+                }
+            }
+        }
         Err(TyperError::TermNameNotFound {
             source: self.source,
             tree_index,
@@ -11989,9 +12015,6 @@ mod tests {
             definitions,
             &packages,
         );
-        // Exercise the reentrant completion path directly. The current namer
-        // does not index this source-level self reference as a method symbol.
-        typer.inferred_method_results_in_progress.insert(method);
 
         let completion = typer.complete_symbol(method);
         assert!(
@@ -12001,8 +12024,47 @@ mod tests {
         assert_eq!(typer.store().checkpoint(), before);
         assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
         assert!(typer.source_typed_index().is_empty());
-        assert!(typer.inferred_method_results_in_progress.contains(&method));
-        typer.inferred_method_results_in_progress.remove(&method);
+        assert!(typer.inferred_method_results_in_progress.is_empty());
+    }
+
+    #[test]
+    fn mutually_recursive_inferred_methods_fail_and_roll_back_typed_state() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("def first = second\ndef second = first");
+        let mut methods = HashMap::new();
+        for (tree, node) in parsed.ast.iter() {
+            if let TreeKind::DefDef(definition) = &node.kind {
+                let method = index.symbol_at(source, tree).unwrap();
+                methods.insert(
+                    store
+                        .names
+                        .resolve(definition.name.as_name().text())
+                        .to_owned(),
+                    method,
+                );
+            }
+        }
+        let first = methods["first"];
+        let second = methods["second"];
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(first),
+            Err(TyperError::RecursiveInferredMethodResult { symbol }) if symbol == first
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(*typer.store().symbols.info(first), SymbolInfo::Missing);
+        assert_eq!(*typer.store().symbols.info(second), SymbolInfo::Missing);
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.inferred_method_results_in_progress.is_empty());
     }
 
     #[test]

@@ -49,7 +49,8 @@ For the tested subset, source Typer completion currently supports:
 - method signatures with explicit parameter types and inferred result types,
   polymorphic binders, multiple term clauses, empty clauses, and `using`
   clauses. Inferred results come from the typed method body after expression
-  widening, and the typed body is retained for later consumers;
+  widening, and the typed body is retained for later consumers. Recursive
+  inferred results are rejected explicitly, including self and mutual cycles;
 - extension-method signatures whose receiver and declared signature are
   supported by the source Typer;
 - aliases and bounds represented by the current semantic type model;
