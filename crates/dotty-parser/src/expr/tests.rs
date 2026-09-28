@@ -2259,6 +2259,46 @@ fn parses_a_colon_followed_by_an_indented_lambda_as_an_argument() {
 }
 
 #[test]
+fn parses_a_backquoted_parameter_in_a_colon_lambda_argument() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo: `cb` =>\n  cb()",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::ColonFollow, 3, 4),
+            token(TokenKind::BackquotedIdentifier, 5, 9),
+            token(TokenKind::Operator, 10, 12),
+            token(TokenKind::Indent, 13, 13),
+            token(TokenKind::Identifier, 15, 17),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 17, 18),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 18, 19),
+            token(TokenKind::Outdent, 19, 19),
+            token(TokenKind::Eof, 19, 19),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+        panic!("expected a colon argument application");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::Function(function)) =
+        &parser.ast().get(application.args[0]).kind
+    else {
+        panic!("expected an indented lambda argument");
+    };
+    let [parameter] = function.params.as_slice() else {
+        panic!("expected one lambda parameter");
+    };
+    let TreeKind::ValDef(parameter) = &parser.ast().get(*parameter).kind else {
+        panic!("expected a lambda parameter definition");
+    };
+    assert_eq!(parser.names.resolve(parameter.name.as_name().text()), "cb");
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+}
+
+#[test]
 fn recovers_from_a_colon_lambda_argument_without_a_body() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

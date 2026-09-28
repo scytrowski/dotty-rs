@@ -140,7 +140,7 @@ where
     fn colon_followed_by_indented_lambda(&mut self) -> bool {
         let mut offset = 1usize;
         match self.cursor.lookahead(offset).kind {
-            TokenKind::Identifier => offset += 1,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier => offset += 1,
             TokenKind::Punctuation(Punctuation::LeftParen)
             | TokenKind::Punctuation(Punctuation::LeftBracket) => {
                 let (open, close) = match self.cursor.lookahead(offset).kind {
