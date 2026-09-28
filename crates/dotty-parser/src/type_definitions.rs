@@ -130,6 +130,19 @@ where
                     Err(_) => self.missing_type_definition_name(),
                 }
             }
+            TokenKind::Operator | TokenKind::ColonOp
+                if !["=", "=>", "=>>", "<-", "<:", ">:", "?=>", ":", "@", "#"]
+                    .iter()
+                    .any(|reserved| self.current_text_is(reserved)) =>
+            {
+                match self.intern_current_type_name() {
+                    Ok(name) => {
+                        self.advance();
+                        name
+                    }
+                    Err(_) => self.missing_type_definition_name(),
+                }
+            }
             _ => {
                 self.report(
                     ParseDiagnosticKind::ExpectedType,
@@ -378,6 +391,94 @@ mod tests {
             TextRange::new(0, 10).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_symbolic_type_alias_names_in_the_type_namespace() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "type == = Int",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Operator, 5, 7),
+                token(TokenKind::Operator, 8, 9),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_type_definition(Location::Elsewhere)
+        else {
+            panic!("expected symbolic type alias");
+        };
+        let TreeKind::TypeDef(TypeDef { name, .. }) = parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+
+        assert!(name.as_name().is_type());
+        assert_eq!(parser.names.resolve(name.as_name().text()), "==");
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_colon_operator_type_alias_names() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "type :: = Int",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::ColonOp, 5, 7),
+                token(TokenKind::Operator, 8, 9),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_type_definition(Location::Elsewhere)
+        else {
+            panic!("expected symbolic type alias");
+        };
+        let TreeKind::TypeDef(TypeDef { name, .. }) = parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+
+        assert!(name.as_name().is_type());
+        assert_eq!(parser.names.resolve(name.as_name().text()), "::");
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn does_not_consume_bare_equals_as_a_type_alias_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "type = Int",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_type_definition(Location::Elsewhere)
+        else {
+            panic!("expected recoverable TypeDef");
+        };
+        let TreeKind::TypeDef(TypeDef { name, .. }) = parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+
+        assert_eq!(parser.names.resolve(name.as_name().text()), "$missing_type");
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedType })
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
