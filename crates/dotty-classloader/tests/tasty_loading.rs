@@ -189,6 +189,35 @@ fn loads_animal_directly_as_an_interface_with_no_declared_interfaces() {
     );
 }
 
+#[test]
+fn enters_a_tasty_class_into_its_package_scope() {
+    let mut store = SemanticStore::new();
+    let (mut loader, _synthetic_jdk) =
+        class_loader_over_tasty_sample("tasty-package-scope", &mut store);
+
+    let animal = loader
+        .load_class(&BinaryName::from_internal(
+            "me/cytrowski/tastyfixtures/Animal",
+        ))
+        .expect("packaged Animal should load from its .tasty fixture");
+    let packages = loader.into_session().into_packages();
+    let package = store
+        .symbols
+        .get(animal)
+        .owner
+        .expect("Animal should have a package owner");
+    let package_scope = packages
+        .scope_of(package)
+        .expect("the package registry should retain the scope");
+    let animal_name = Name::new(store.symbols.get(animal).name.text(), Namespace::Type);
+
+    assert_eq!(
+        store.scopes.get(package_scope).lookup_all(&animal_name),
+        &[animal],
+        "a TASTy-loaded class should be discoverable through its package scope"
+    );
+}
+
 fn tasty_visibility_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_visibility")
 }

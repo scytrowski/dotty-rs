@@ -2660,6 +2660,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn loaded_classes_are_entered_once_in_their_package_scope() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/util/List"),
+            synthetic_class("java/util/List", Some("java/lang/Object")),
+        );
+        let mut loader = ClassLoader::with_definitions(
+            InMemoryClassPath(classes),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let list = loader
+            .load_class(&BinaryName::from_internal("java/util/List"))
+            .expect("List should load");
+        let session = loader.into_session();
+        let package = store
+            .symbols
+            .get(list)
+            .owner
+            .expect("List should have a package owner");
+        let list_name = Name::new(store.symbols.get(list).name.text(), Namespace::Type);
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/util/List"),
+            synthetic_class("java/util/List", Some("java/lang/Object")),
+        );
+        let mut next_loader = ClassLoader::with_definitions(
+            InMemoryClassPath(classes),
+            &mut store,
+            definitions,
+            session,
+        );
+        assert_eq!(
+            next_loader
+                .load_class(&BinaryName::from_internal("java/util/List"))
+                .expect("the next loader should reuse List"),
+            list
+        );
+        let packages = next_loader.into_session().into_packages();
+        let package_scope = packages
+            .scope_of(package)
+            .expect("the shared package registry should retain its scope");
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&list_name),
+            &[list],
+            "reusing a class should not duplicate its package-scope entry"
+        );
+    }
+
     /// The counterpart regression to the test above, for the opposite
     /// mistake: a `LoadingSession` must share only *positive* results.
     /// Loader A's own classpath does not contain `Extra` -- it correctly
