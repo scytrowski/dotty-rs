@@ -2830,7 +2830,8 @@ impl<'a> SourceTyper<'a> {
         else {
             return false;
         };
-        self.store.names.resolve(selection.name.text()) == "<init>"
+        !selection.backquoted
+            && self.store.names.resolve(selection.name.text()) == "<init>"
             && self
                 .arena
                 .try_get(selection.qualifier)
@@ -14309,6 +14310,39 @@ mod tests {
             panic!("constructor result should be the completed owner type")
         };
         assert_eq!(*result_class, class);
+    }
+
+    #[test]
+    fn backquoted_init_selection_is_not_the_constructor_marker() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C(value: Int); class Use { def make: C = new C(1) }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let TreeKind::Apply(application) = &parsed.ast.get(rhs).kind else {
+            panic!("constructor call should be an Apply")
+        };
+        let function = application.function;
+        let TreeKind::Select(mut selection) = parsed.ast.get(function).kind.clone() else {
+            panic!("constructor callee should be a Select")
+        };
+        // Model a backquoted source selection with the same New qualifier as
+        // the compiler marker. The parser-generated marker is not backquoted.
+        selection.backquoted = true;
+        parsed.ast.get_mut(function).kind = TreeKind::Select(selection);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        assert!(!typer.is_constructor_selection(function));
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::UnstableSelectionPrefix { .. })
+        ));
     }
 
     #[test]
