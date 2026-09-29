@@ -60,7 +60,8 @@ For the tested subset, source Typer completion currently supports:
 
 Expression typing currently includes typed identifiers, stable term selections,
 literal expressions, plain method applications, `New` nodes, and blocks with
-expressions and local `val`/`var` definitions with or without explicit types.
+expressions, local `val`/`var` definitions with or without explicit types, and
+plain local methods with explicit result types.
 It also supports expected-type conformance checks, source type ascriptions, direct
 assignments to mutable locals and fields, ordinary `if` expressions over the
 supported expression subset, condition-bearing `while` expressions, and local
@@ -170,7 +171,6 @@ order. A local method receives a typer-owned `Method` symbol and a distinct
 method-owned scope; the local method index retains its source tree, scope, and
 enclosing block expression context without modifying `SourceSemanticIndex`.
 This makes forward references and same-name overload buckets visible during
-name lookup. Local method signature and body typing remain deferred, so a block
 name lookup. Plain local methods with no type parameters, one ordinary term
 parameter clause (which may be empty), and an explicit result type complete a
 `Method` signature using the shared method-signature builder. Each parameter
@@ -179,14 +179,18 @@ source-tree identity and the declaration site's lexical type context retained
 without changing `SourceSemanticIndex`. Forward calls can complete and use
 these signatures on demand. Inferred or parameter-dependent result types,
 contextual, erased, by-name, or repeated parameters, multiple clauses, and type
-parameters remain explicitly deferred. Local method bodies are still deferred,
-so a block that reaches a local method definition can fail at that statement;
-the typed local `DefDef` is the next increment. Nested method headers are
+parameters remain explicitly deferred. For this supported signature shape, the
+body is typed in a method context that composes the declaration-site lexical
+context with the method-owned parameter scope. Its RHS is checked against the
+explicit result type, and the typed `DefDef`, typed parameter `ValDef`s, result
+`TypeTree`, and RHS are retained with source mappings. The definition tree type
+is a `TermRef` to the exact local `Method` symbol. Explicit recursion, forward
+calls, and reads of enclosing locals are supported. Nested method headers are
 indexed only by their own block. The block scope, local method and parameter
-symbols/scopes and metadata,
-typed nodes, local symbol mappings, and source mappings are rolled back when
-any part of the enclosing block fails. Failed signature completion also leaves
-the local method's pre-indexed scope and missing info intact. A local `val` or
+symbols/scopes and metadata, typed nodes, local symbol mappings, and source
+mappings are rolled back when any part of the enclosing block fails. Failed
+signature completion also leaves the local method's pre-indexed scope and
+missing info intact. A local `val` or
 `var` with a source-written type
 shadows outer bindings throughout the statement sequence, including its own
 initializer; a reference to the local while it is being initialized reports a
@@ -275,8 +279,8 @@ are ready:
   application, `New`, block, ordinary `if`, condition-bearing `while`, and local
   `return` subset, including `match`, `try`, lambdas, and other forms that are
   not currently handled by the expression typer;
-- local `def` signature/body typing (headers are pre-indexed), class, type, and
-  pattern declarations, plus imports in block statements;
+- other local `def` signature/body shapes, class, type, and pattern
+  declarations, plus imports in block statements;
 - generic overload inference outside the structural candidate-local subset,
   contextual/implicit argument insertion and search, dependent result
   application, and right-associative extension normalization;
