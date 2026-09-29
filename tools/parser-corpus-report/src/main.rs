@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -109,13 +109,14 @@ struct EnumIdentityAudit {
     definitions_encountered: usize,
     class_identities_materialized: usize,
     companion_identity_pairs_materialized: usize,
+    definitions_blocked_by_parser_recovery: usize,
     singleton_cases_encountered: usize,
     singleton_cases_materialized: usize,
     comma_group_singleton_cases_encountered: usize,
     comma_group_singleton_cases_materialized: usize,
     parameterized_cases_encountered: usize,
     parameterized_cases_materialized: usize,
-    case_clauses_blocked_by_parser_recovery: usize,
+    cases_blocked_by_parser_recovery: usize,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -745,6 +746,8 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
                             SourceId::from_index(0),
                             &index,
                             &store,
+                            source,
+                            !diagnostics.is_empty(),
                         ));
                         violations
                     },
@@ -854,10 +857,11 @@ fn collect_deferred_features(
         "enum_definitions_encountered",
         "enum_class_identities",
         "enum_companion_identity_pairs",
+        "enum_definitions_blocked_by_parser_recovery",
         "enum_singleton_cases",
         "enum_comma_group_singleton_cases",
         "enum_parameterized_cases",
-        "enum_case_clauses_blocked_by_parser_recovery",
+        "enum_cases_blocked_by_parser_recovery",
         "case_class_synthetic_apis",
         "context_bound_evidence_synthesis",
         "export_syntax_occurrences",
@@ -871,6 +875,14 @@ fn collect_deferred_features(
         features.entry(name.to_owned()).or_default();
     }
     let source = SourceId::from_index(0);
+    let template_members = arena
+        .iter()
+        .filter_map(|(_, tree)| match &tree.kind {
+            TreeKind::Template(template) => Some(template.body.iter().copied()),
+            _ => None,
+        })
+        .flatten()
+        .collect::<HashSet<_>>();
     let enum_case_ranges = arena
         .iter()
         .filter_map(|(_, tree)| {
@@ -956,6 +968,8 @@ fn collect_deferred_features(
         match &tree.kind {
             TreeKind::TypeDef(definition) => {
                 if definition.metadata.modifiers.contains(&Modifier::Enum) {
+                    let symbol_materialized =
+                        named.is_some_and(|(index, _)| index.symbol_at(source, tree_id).is_some());
                     let class_identity = named.is_some_and(|(index, store)| {
                         index.symbol_at(source, tree_id).is_some_and(|symbol| {
                             let semantic = store.symbols.get(symbol);
@@ -976,6 +990,61 @@ fn collect_deferred_features(
                     record(&mut features, "enum_companion_identity_pairs", 1, |_| {
                         companion_pair
                     });
+                    let parser_blocked = enum_identity_is_parser_blocked(
+                        !diagnostics.is_empty(),
+                        symbol_materialized,
+                        template_members.contains(&tree_id),
+                    ) && named.is_some();
+                    record(
+                        &mut features,
+                        "enum_definitions_blocked_by_parser_recovery",
+                        usize::from(parser_blocked),
+                        |_| false,
+                    );
+                    let blocked_case_count = if parser_blocked {
+                        match &arena.get(definition.rhs).kind {
+                            TreeKind::Template(template) => template
+                                .body
+                                .iter()
+                                .map(|member| match &arena.get(*member).kind {
+                                    TreeKind::TypeDef(case)
+                                        if case
+                                            .metadata
+                                            .modifiers
+                                            .contains(&Modifier::EnumCase) =>
+                                    {
+                                        1
+                                    }
+                                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(case))
+                                        if case
+                                            .metadata
+                                            .modifiers
+                                            .contains(&Modifier::EnumCase) =>
+                                    {
+                                        1
+                                    }
+                                    TreeKind::PhaseSpecific(UntypedNode::PatDef(case))
+                                        if case
+                                            .modifiers
+                                            .modifiers
+                                            .contains(&Modifier::EnumCase) =>
+                                    {
+                                        case.patterns.len()
+                                    }
+                                    _ => 0,
+                                })
+                                .sum(),
+                            _ => 0,
+                        }
+                    } else {
+                        0
+                    };
+                    record(
+                        &mut features,
+                        "enum_cases_blocked_by_parser_recovery",
+                        blocked_case_count,
+                        |_| false,
+                    );
                 }
                 if definition.metadata.modifiers.contains(&Modifier::EnumCase) {
                     record(&mut features, "enum_parameterized_cases", 1, |_| has_symbol);
@@ -1111,7 +1180,7 @@ fn collect_deferred_features(
     );
     record(
         &mut features,
-        "enum_case_clauses_blocked_by_parser_recovery",
+        "enum_cases_blocked_by_parser_recovery",
         blocked_enum_case_clauses,
         |_| false,
     );
@@ -1124,6 +1193,14 @@ fn collect_deferred_features(
     }
 
     features
+}
+
+fn enum_identity_is_parser_blocked(
+    parser_recovered: bool,
+    identity_materialized: bool,
+    is_template_member: bool,
+) -> bool {
+    parser_recovered && !identity_materialized && !is_template_member
 }
 
 fn enum_companion_identity_pair(
@@ -1179,11 +1256,36 @@ fn validate_namer_audit_invariants(
     source: SourceId,
     index: &SourceSemanticIndex,
     store: &SemanticStore,
+    source_text: &str,
+    parser_recovered: bool,
 ) -> Vec<String> {
     let mut violations = Vec::new();
+    let template_members = arena
+        .iter()
+        .filter_map(|(_, tree)| match &tree.kind {
+            TreeKind::Template(template) => Some(template.body.iter().copied()),
+            _ => None,
+        })
+        .flatten()
+        .collect::<HashSet<_>>();
+    let method_rhs_ranges = arena
+        .iter()
+        .filter_map(|(_, tree)| match &tree.kind {
+            TreeKind::DefDef(definition) => definition.rhs,
+            _ => None,
+        })
+        .filter_map(|rhs| arena.get(rhs).position.map(|span| span.span().range()))
+        .collect::<Vec<_>>();
     for (tree_id, tree) in arena.iter() {
+        let tree_is_inside_method_rhs = tree.position.is_some_and(|span| {
+            let position = span.span().range();
+            method_rhs_ranges
+                .iter()
+                .any(|rhs| rhs.start() <= position.start() && position.end() <= rhs.end())
+        });
         let TreeKind::TypeDef(definition) = &tree.kind else {
             if matches!(tree.kind, TreeKind::Export(_))
+                && !tree_is_inside_method_rhs
                 && index.export_site_at(source, tree_id).is_none()
             {
                 violations.push(format!(
@@ -1194,12 +1296,30 @@ fn validate_namer_audit_invariants(
             }
             continue;
         };
-        if !definition.metadata.modifiers.contains(&Modifier::Enum) {
+        if tree_is_inside_method_rhs || !definition.metadata.modifiers.contains(&Modifier::Enum) {
             continue;
         }
         let Some(enum_id) = index.symbol_at(source, tree_id) else {
+            let snippet = tree
+                .position
+                .and_then(|span| {
+                    let range = span.span().range();
+                    source_text.get(range.start() as usize..range.end() as usize)
+                })
+                .unwrap_or("")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if enum_identity_is_parser_blocked(
+                parser_recovered,
+                false,
+                template_members.contains(&tree_id),
+            ) {
+                continue;
+            }
+            let snippet = snippet.chars().take(180).collect::<String>();
             violations.push(format!(
-                "enum source {}/tree {} has no class identity",
+                "enum source {}/tree {} has no class identity for `{snippet}`",
                 source.index(),
                 tree_id.index()
             ));
@@ -1527,6 +1647,10 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
             let comma_group_cases = count("enum_comma_group_singleton_cases");
             let parameterized_cases = count("enum_parameterized_cases");
             namer.enum_identity_audit.definitions_encountered += definitions.occurrences;
+            namer
+                .enum_identity_audit
+                .definitions_blocked_by_parser_recovery +=
+                count("enum_definitions_blocked_by_parser_recovery").occurrences;
             namer.enum_identity_audit.class_identities_materialized += classes.materialized;
             namer
                 .enum_identity_audit
@@ -1543,10 +1667,8 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
                 parameterized_cases.occurrences;
             namer.enum_identity_audit.parameterized_cases_materialized +=
                 parameterized_cases.materialized;
-            namer
-                .enum_identity_audit
-                .case_clauses_blocked_by_parser_recovery +=
-                count("enum_case_clauses_blocked_by_parser_recovery").occurrences;
+            namer.enum_identity_audit.cases_blocked_by_parser_recovery +=
+                count("enum_cases_blocked_by_parser_recovery").occurrences;
 
             let export_syntax = count("export_syntax_occurrences");
             namer.export_handoff_audit.syntax_occurrences += export_syntax.occurrences;
@@ -1847,10 +1969,11 @@ fn print_summary(report: &Report) {
         }
         let enums = &namer.enum_identity_audit;
         println!(
-            "  enum identities: {} definitions; {} enum classes and {} companion object/module-class pairs materialized",
+            "  enum identities: {} definitions; {} enum classes and {} companion object/module-class pairs materialized; {} definitions blocked by parser recovery",
             enums.definitions_encountered,
             enums.class_identities_materialized,
-            enums.companion_identity_pairs_materialized
+            enums.companion_identity_pairs_materialized,
+            enums.definitions_blocked_by_parser_recovery
         );
         println!(
             "  enum cases: singleton {}/{}, comma-group singleton {}/{}, parameterized {}/{}; {} case clauses blocked by parser recovery",
@@ -1860,7 +1983,7 @@ fn print_summary(report: &Report) {
             enums.comma_group_singleton_cases_encountered,
             enums.parameterized_cases_materialized,
             enums.parameterized_cases_encountered,
-            enums.case_clauses_blocked_by_parser_recovery
+            enums.cases_blocked_by_parser_recovery
         );
         let exports = &namer.export_handoff_audit;
         println!(
@@ -2066,11 +2189,19 @@ mod tests {
     }
 
     #[test]
+    fn enum_identity_audit_only_classifies_recovered_orphans_as_parser_blocked() {
+        assert!(enum_identity_is_parser_blocked(true, false, false));
+        assert!(!enum_identity_is_parser_blocked(false, false, false));
+        assert!(!enum_identity_is_parser_blocked(true, true, false));
+        assert!(!enum_identity_is_parser_blocked(true, false, true));
+    }
+
+    #[test]
     fn enum_audit_counts_case_syntax_lost_during_parser_recovery() {
         let parsed = parse_source("enum Color { case }", "Color.scala", true);
         let blocked = parsed
             .deferred_features
-            .get("enum_case_clauses_blocked_by_parser_recovery")
+            .get("enum_cases_blocked_by_parser_recovery")
             .expect("parser-blocked enum case clause counted");
         assert_eq!(blocked.occurrences, 1);
     }
