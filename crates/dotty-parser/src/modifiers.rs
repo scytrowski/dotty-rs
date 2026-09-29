@@ -477,7 +477,7 @@ mod tests {
         drop(parser);
         assert!(matches!(
             qualifier,
-            Some(name) if names.resolve(name.text()) == "pkg"
+            Some(name) if name.is_type() && names.resolve(name.text()) == "pkg"
         ));
     }
 

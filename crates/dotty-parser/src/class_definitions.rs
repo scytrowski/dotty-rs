@@ -2599,6 +2599,7 @@ mod tests {
         else {
             panic!("expected private[this] visibility");
         };
+        assert!(qualifier.is_term());
         assert_eq!(parser.names.resolve(qualifier.text()), "this");
         assert!(matches!(
             parser.ast().get(template.body[1]).kind,
