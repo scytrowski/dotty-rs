@@ -1830,6 +1830,65 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_using_modifier_reports_once_and_preserves_the_next_method() {
+        let mut names = NameInterner::new();
+        let result = parser_for(
+            "def f(using private ctx: Ctx): Unit = ()\ndef g = ()",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 5, 6),
+                token(TokenKind::Identifier, 6, 11),
+                token(TokenKind::Keyword(HardKeyword::Private), 12, 19),
+                token(TokenKind::Identifier, 20, 23),
+                token(TokenKind::ColonFollow, 23, 24),
+                token(TokenKind::Identifier, 25, 28),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 28, 29),
+                token(TokenKind::ColonFollow, 29, 30),
+                token(TokenKind::Identifier, 31, 35),
+                token(TokenKind::Operator, 36, 37),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 38, 39),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 39, 40),
+                token(TokenKind::Newline, 40, 41),
+                token(TokenKind::Keyword(HardKeyword::Def), 41, 44),
+                token(TokenKind::Identifier, 45, 46),
+                token(TokenKind::Operator, 47, 48),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 49, 50),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 50, 51),
+                token(TokenKind::Eof, 51, 51),
+            ],
+            &mut names,
+        )
+        .compilation_unit();
+
+        let TreeKind::Block(block) = &result.ast.get(result.root).kind else {
+            panic!("expected block root");
+        };
+        assert_eq!(block.stats.len(), 2);
+        let TreeKind::DefDef(first) = &result.ast.get(block.stats[0]).kind else {
+            panic!("expected first method definition");
+        };
+        let TreeKind::ValDef(parameter) = &result.ast.get(first.value_param_clauses[0][0]).kind
+        else {
+            panic!("expected the named parameter to survive recovery");
+        };
+        assert_eq!(names.resolve(parameter.name.as_name().text()), "ctx");
+        let TreeKind::DefDef(second) = &result.ast.get(block.stats[1]).kind else {
+            panic!("expected the following method definition");
+        };
+        assert_eq!(names.resolve(second.name.as_name().text()), "g");
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+        assert_eq!(
+            result.diagnostics[0].message(),
+            "hard modifiers are not allowed on a named `using` parameter for this owner"
+        );
+    }
+
+    #[test]
     fn method_and_parameter_spans_cover_only_their_source_ranges() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
