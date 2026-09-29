@@ -14629,6 +14629,12 @@ mod tests {
             &packages,
         );
         let context = typer.expression_context_for(method).unwrap();
+        let original_constructor_signature = typer.complete_symbol(constructor).unwrap();
+        let original_constructor_type = typer
+            .store()
+            .types
+            .get(original_constructor_signature)
+            .clone();
 
         let typed = typer.type_expression(rhs, context).unwrap();
 
@@ -14680,6 +14686,360 @@ mod tests {
             panic!("completed constructor should retain its semantic callable");
         };
         assert!(matches!(typer.store().types.get(callable), Type::Poly(_)));
+        assert_eq!(callable, original_constructor_signature);
+        assert_eq!(
+            typer.store().types.get(callable),
+            &original_constructor_type
+        );
+    }
+
+    #[test]
+    fn generic_primary_constructor_instantiates_type_parameters_in_binder_order() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Pair[A, B](first: A, second: B); class Use { def make: Pair[Int, Boolean] = new Pair[Int, Boolean](1, true) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "Pair");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let Type::Applied { tycon, args } =
+            typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("generic constructor result should be applied");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), class);
+        assert_eq!(args, &[definitions.int, definitions.boolean]);
+    }
+
+    #[test]
+    fn generic_primary_constructor_preserves_nested_explicit_type_arguments() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Box[A](); class Use { def make: Box[Box[Int]] = new Box[Box[Int]]() }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "Box");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let Type::Applied { tycon, args } =
+            typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("outer constructor result should be applied");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), class);
+        let [inner] = args.as_slice() else {
+            panic!("outer constructor should have one explicit type argument");
+        };
+        let Type::Applied { tycon, args } = typer.store().types.get(*inner) else {
+            panic!("nested type argument should remain applied");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), class);
+        assert_eq!(args, &[definitions.int]);
+    }
+
+    #[test]
+    fn explicit_generic_primary_constructor_accepts_upper_and_lower_bounds() {
+        for source_text in [
+            "class Box[A <: Int](value: A); class Use { def make: Box[Int] = new Box[Int](1) }",
+            "class Box[A >: Int](value: A); class Use { def make: Box[Any] = new Box[Any](1) }",
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+
+            typer.type_expression(rhs, context).unwrap();
+        }
+    }
+
+    #[test]
+    fn explicit_generic_primary_constructor_rejects_upper_and_lower_bound_violations() {
+        for (source_text, expected_side) in [
+            (
+                "class Box[A <: Int](value: A); class Use { def make: Box[Boolean] = new Box[Boolean](true) }",
+                TypeArgumentBoundSide::Upper,
+            ),
+            (
+                "class Box[A >: Int](value: A); class Use { def make: Box[Boolean] = new Box[Boolean](true) }",
+                TypeArgumentBoundSide::Lower,
+            ),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+            let store_checkpoint = typer.store().checkpoint();
+            let typed_count = typer.typed_ast().iter().count();
+
+            assert!(matches!(
+                typer.type_expression(rhs, context),
+                Err(TyperError::ConstructorTypeArgumentBoundViolation {
+                    parameter_index: 0,
+                    side,
+                    ..
+                }) if side == expected_side
+            ));
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+            assert_eq!(typer.typed_ast().iter().count(), typed_count);
+            assert!(typer.source_typed_index().get(source, rhs).is_none());
+        }
+    }
+
+    #[test]
+    fn generic_primary_constructor_poly_arity_mismatch_is_focused_and_atomic() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Pair[A, B](first: A, second: B); class Use { def make: Pair[Int, Boolean] = new Pair[Int, Boolean](1, true) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "Pair");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructor = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup(&constructor_name)
+            .unwrap();
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let callable = typer.complete_symbol(constructor).unwrap();
+        let Type::Poly(mut poly) = typer.store().types.get(callable).clone() else {
+            panic!("generic primary constructor should complete to a Poly");
+        };
+        poly.params.pop();
+        let malformed_callable = typer.store.types.alloc(Type::Poly(poly));
+        typer
+            .store
+            .symbols
+            .set_info(constructor, SymbolInfo::Complete(malformed_callable));
+        let context = typer.expression_context_for(method).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ConstructorTypeArgumentArityMismatch {
+                constructor: actual_constructor,
+                expected: 1,
+                actual: 2,
+                ..
+            }) if actual_constructor == constructor
+        ));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
+    }
+
+    #[test]
+    fn generic_primary_constructor_rejects_too_many_poly_parameters() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Pair[A, B](first: A, second: B); class Use { def make: Pair[Int, Boolean] = new Pair[Int, Boolean](1, true) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "Pair");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructor = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup(&constructor_name)
+            .unwrap();
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let callable = typer.complete_symbol(constructor).unwrap();
+        let Type::Poly(mut poly) = typer.store().types.get(callable).clone() else {
+            panic!("generic primary constructor should complete to a Poly");
+        };
+        poly.params.push(poly.params[0]);
+        let malformed_callable = typer.store.types.alloc(Type::Poly(poly));
+        typer
+            .store
+            .symbols
+            .set_info(constructor, SymbolInfo::Complete(malformed_callable));
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ConstructorTypeArgumentArityMismatch {
+                constructor: actual_constructor,
+                expected: 3,
+                actual: 2,
+                ..
+            }) if actual_constructor == constructor
+        ));
+    }
+
+    #[test]
+    fn explicit_type_arguments_require_a_polymorphic_primary_constructor() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Box[A](value: A); class Use { def make: Box[Int] = new Box[Int](1) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "Box");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructor = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup(&constructor_name)
+            .unwrap();
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let callable = typer.complete_symbol(constructor).unwrap();
+        let Type::Poly(poly) = typer.store().types.get(callable).clone() else {
+            panic!("generic primary constructor should complete to a Poly");
+        };
+        typer
+            .store
+            .symbols
+            .set_info(constructor, SymbolInfo::Complete(poly.result));
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ConstructorCallableNotPolymorphic {
+                constructor: actual_constructor,
+                ..
+            }) if actual_constructor == constructor
+        ));
+    }
+
+    #[test]
+    fn generic_primary_constructor_rejects_unsupported_poly_bounds() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Box[A](value: A); class Use { def make: Box[Int] = new Box[Int](1) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "Box");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructor = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup(&constructor_name)
+            .unwrap();
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let callable = typer.complete_symbol(constructor).unwrap();
+        let Type::Poly(mut poly) = typer.store().types.get(callable).clone() else {
+            panic!("generic primary constructor should complete to a Poly");
+        };
+        poly.params[0].bounds = definitions.any_type;
+        let malformed_callable = typer.store.types.alloc(Type::Poly(poly));
+        typer
+            .store
+            .symbols
+            .set_info(constructor, SymbolInfo::Complete(malformed_callable));
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::UnsupportedConstructorTypeArgumentBounds {
+                constructor: actual_constructor,
+                parameter_index: 0,
+                ..
+            }) if actual_constructor == constructor
+        ));
+    }
+
+    #[test]
+    fn generic_primary_constructor_result_must_match_the_new_instance_class() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Box[A](value: A); class Other; class Use { def make: Box[Int] = new Box[Int](1) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "Box");
+        let other = class_symbol(&parsed, &store, &index, source, "Other");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructor = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup(&constructor_name)
+            .unwrap();
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let callable = typer.complete_symbol(constructor).unwrap();
+        let Type::Poly(mut poly) = typer.store().types.get(callable).clone() else {
+            panic!("generic primary constructor should complete to a Poly");
+        };
+        let Type::Method(mut method_type) = typer.store().types.get(poly.result).clone() else {
+            panic!("constructor Poly should contain a Method");
+        };
+        method_type.result = nominal_type_ref(typer.store, definitions, other);
+        poly.result = typer.store.types.alloc(Type::Method(method_type));
+        let malformed_callable = typer.store.types.alloc(Type::Poly(poly));
+        typer
+            .store
+            .symbols
+            .set_info(constructor, SymbolInfo::Complete(malformed_callable));
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ConstructorResultTypeMismatch {
+                constructor: actual_constructor,
+                ..
+            }) if actual_constructor == constructor
+        ));
     }
 
     #[test]
