@@ -580,6 +580,7 @@ fn build_tokens(
             RawItem::Token(raw) => {
                 let has_line_break = trivia_has_line_break(source, &trivia);
                 let blank_line = trivia_line_breaks(source, &trivia) > 1;
+                let has_blank_line = has_blank_line(source, previous_end, raw.span.start());
                 let indentation = line_indentation(source, raw.span.start());
                 let previous_indentation = line_indentation(source, previous_end.saturating_sub(1));
                 let continues_previous_region = previous_opens_indentation
@@ -599,7 +600,7 @@ fn build_tokens(
                     items,
                     item_index,
                     previous_kind,
-                    blank_line,
+                    has_blank_line,
                     previous_end,
                 );
                 let case_guard_candidate = raw.kind == RawTokenKind::Keyword(HardKeyword::If)
@@ -1114,8 +1115,7 @@ fn is_leading_infix_tokens(
         current.kind,
         TokenKind::Operator | TokenKind::BackquotedIdentifier
     ) || !can_end_statement(Some(previous.kind))
-        || count_line_breaks(&source[previous.span.end() as usize..current.span.start() as usize])
-            > 1
+        || has_blank_line(source, previous.span.end(), current.span.start())
     {
         return false;
     }
@@ -1364,6 +1364,37 @@ fn trivia_line_breaks(source: &str, trivia: &[&Trivia]) -> usize {
             count_line_breaks(&source[item.span.start() as usize..item.span.end() as usize])
         })
         .sum()
+}
+
+fn has_blank_line(source: &str, start: u32, end: u32) -> bool {
+    let Some(text) = source.get(start as usize..end as usize) else {
+        return false;
+    };
+
+    let mut previous_break_end = None;
+    let mut characters = text.char_indices().peekable();
+    while let Some((offset, character)) = characters.next() {
+        if !is_line_break_char(character) {
+            continue;
+        }
+
+        if previous_break_end.is_some_and(|previous_end| {
+            text[previous_end..offset]
+                .chars()
+                .all(|character| matches!(character, ' ' | '\t'))
+        }) {
+            return true;
+        }
+
+        let mut break_end = offset + character.len_utf8();
+        if character == '\r' && characters.peek().is_some_and(|(_, next)| *next == '\n') {
+            let (next_offset, next) = characters.next().expect("peeked line-feed exists");
+            break_end = next_offset + next.len_utf8();
+        }
+        previous_break_end = Some(break_end);
+    }
+
+    false
 }
 
 fn count_line_breaks(text: &str) -> usize {
@@ -3217,6 +3248,33 @@ mod tests {
                 TokenKind::Operator,
                 TokenKind::Identifier,
                 TokenKind::Newlines,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_a_leading_infix_operator_after_comment_lines() {
+        assert_eq!(
+            kinds("value // explanation\n  // continued below\n  && other"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn still_separates_a_leading_infix_operator_after_a_real_blank_line_and_comment() {
+        assert_eq!(
+            kinds("value\n\n  // separate statement\n  + other"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newlines,
+                TokenKind::Operator,
                 TokenKind::Identifier,
                 TokenKind::Eof,
             ]
