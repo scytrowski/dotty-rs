@@ -1560,7 +1560,7 @@ mod tests {
     }
 
     #[test]
-    fn deferred_inventory_distinguishes_enum_identities_from_unmaterialized_cases() {
+    fn deferred_inventory_counts_materialized_enum_case_identities() {
         let parsed = parse_source("enum Color { case Red, Green }", "Color.scala", true);
         let enum_definition = parsed
             .deferred_features
@@ -1574,7 +1574,7 @@ mod tests {
         assert_eq!(enum_definition.occurrences, 1);
         assert_eq!(enum_definition.materialized, 1);
         assert_eq!(enum_cases.occurrences, 2);
-        assert_eq!(enum_cases.materialized, 0);
+        assert_eq!(enum_cases.materialized, 2);
     }
 
     #[test]

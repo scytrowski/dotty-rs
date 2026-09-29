@@ -1749,24 +1749,50 @@ impl Namer<'_> {
 
         let mut nested_headers = Vec::new();
         let mut active_source_context = class_source_context;
+        let is_enum_class = self
+            .store
+            .symbols
+            .get(symbol)
+            .flags
+            .contains(SymbolFlags::ENUM);
         for member in &template.body {
             if *member == template.constructor {
                 continue;
             }
-            let is_enum_case = match &self.arena.get(*member).kind {
-                TreeKind::TypeDef(definition) => {
-                    definition.metadata.modifiers.contains(&Modifier::EnumCase)
+            match &self.arena.get(*member).kind {
+                TreeKind::TypeDef(definition)
+                    if definition.metadata.modifiers.contains(&Modifier::EnumCase) =>
+                {
+                    // Parameterized enum cases are still deferred.
+                    continue;
                 }
-                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) => {
-                    definition.metadata.modifiers.contains(&Modifier::EnumCase)
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition))
+                    if definition.metadata.modifiers.contains(&Modifier::EnumCase) =>
+                {
+                    if is_enum_class {
+                        self.enter_enum_singleton_case(
+                            *member,
+                            &definition.metadata,
+                            symbol,
+                            active_source_context,
+                        )?;
+                    }
+                    continue;
                 }
-                TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
-                    definition.modifiers.modifiers.contains(&Modifier::EnumCase)
+                TreeKind::PhaseSpecific(UntypedNode::PatDef(definition))
+                    if definition.modifiers.modifiers.contains(&Modifier::EnumCase) =>
+                {
+                    if is_enum_class {
+                        self.enter_enum_case_pattern_definition(
+                            *member,
+                            definition,
+                            symbol,
+                            active_source_context,
+                        )?;
+                    }
+                    continue;
                 }
-                _ => false,
-            };
-            if is_enum_case {
-                continue;
+                _ => {}
             }
             if matches!(self.arena.get(*member).kind, TreeKind::Import(_)) {
                 active_source_context = self.context_after_import(active_source_context, *member);
@@ -1885,6 +1911,121 @@ impl Namer<'_> {
             self.scan_entered_header(header)?;
         }
         Ok(())
+    }
+
+    fn enter_enum_singleton_case(
+        &mut self,
+        tree: TreeId<Untyped>,
+        metadata: &Modifiers,
+        enum_symbol: SymbolId,
+        declaration_context: SourceContextId,
+    ) -> Result<(), NamerError> {
+        let module_class =
+            self.enum_companion_module_class(enum_symbol)
+                .ok_or(NamerError::MalformedAstShape {
+                    tree_index: tree.index(),
+                    expected: "enum companion module class",
+                })?;
+        let scope = self
+            .index
+            .scope_of(module_class)
+            .ok_or(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "enum companion module-class scope",
+            })?;
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) =
+            &self.arena.get(tree).kind
+        else {
+            return Err(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "singleton enum case ModuleDef",
+            });
+        };
+        let spec = self.source_symbol_spec(tree, metadata, module_class, SymbolKind::Object)?;
+        let case = self.enter_symbol(
+            tree,
+            *dotty_core::TermName::new(definition.name.as_name().text()).as_name(),
+            module_class,
+            scope,
+            spec,
+        )?;
+        self.index
+            .record_declaration_context(case, declaration_context)?;
+        Ok(())
+    }
+
+    fn enter_enum_case_pattern_definition(
+        &mut self,
+        tree: TreeId<Untyped>,
+        definition: &dotty_core::ast::PatDef,
+        enum_symbol: SymbolId,
+        declaration_context: SourceContextId,
+    ) -> Result<(), NamerError> {
+        let module_class =
+            self.enum_companion_module_class(enum_symbol)
+                .ok_or(NamerError::MalformedAstShape {
+                    tree_index: tree.index(),
+                    expected: "enum companion module class",
+                })?;
+        let scope = self
+            .index
+            .scope_of(module_class)
+            .ok_or(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "enum companion module-class scope",
+            })?;
+        let spec = self.source_symbol_spec(
+            tree,
+            &definition.modifiers,
+            module_class,
+            SymbolKind::Object,
+        )?;
+        for pattern in &definition.patterns {
+            let TreeKind::Ident(identifier) = &self.arena.get(*pattern).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: pattern.index(),
+                    expected: "enum case identifier pattern",
+                });
+            };
+            let case = self.enter_symbol(
+                *pattern,
+                *dotty_core::TermName::new(identifier.name.text()).as_name(),
+                module_class,
+                scope,
+                spec,
+            )?;
+            self.index
+                .record_declaration_context(case, declaration_context)?;
+        }
+        Ok(())
+    }
+
+    fn enum_companion_module_class(&mut self, enum_symbol: SymbolId) -> Option<SymbolId> {
+        let enum_class = self.store.symbols.get(enum_symbol);
+        let owner = enum_class.owner?;
+        let owner_scope = self.index.scope_of(owner)?;
+        let module_class_name = *TypeName::new(self.store.names.intern(&format!(
+            "{}$",
+            self.store.names.resolve(enum_class.name.text())
+        )))
+        .as_name();
+        let mut candidates = self
+            .store
+            .scopes
+            .get(owner_scope)
+            .lookup_all(&module_class_name)
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                let symbol = self.store.symbols.get(*candidate);
+                symbol.kind == SymbolKind::ModuleClass
+                    && symbol.owner == Some(owner)
+                    && (symbol.origin == SymbolOrigin::Synthetic
+                        || symbol.origin == SymbolOrigin::Source(self.source))
+                    && self.index.scope_of(*candidate).is_some()
+            });
+        let candidate = candidates.next()?;
+        candidates.next().is_none().then_some(candidate)
     }
 
     fn enter_method_header(
