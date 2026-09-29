@@ -9,9 +9,9 @@ use dotty_core::ast::{
 };
 use dotty_core::{
     AstArena, Packages, Scope, ScopeId, SemanticStore, SourceContext, SourceContextId,
-    SourceDefinition, SourceId, SourceSemanticIndex, SourceSemanticIndexError, SourceSpan, Symbol,
-    SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TreeId, TreeKind,
-    TypeName, Untyped, Visibility,
+    SourceDefinition, SourceExportSite, SourceId, SourceSemanticIndex, SourceSemanticIndexError,
+    SourceSpan, Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin,
+    TreeId, TreeKind, TypeName, Untyped, Visibility,
 };
 
 /// Internal structural error encountered while indexing a source tree.
@@ -35,6 +35,8 @@ pub enum NamerError {
     },
     /// An extension method was assigned prefix-clause metadata more than once.
     DuplicateExtensionPrefixClauses { method: SymbolId },
+    /// An export source tree was registered more than once.
+    DuplicateSourceExportSite { source: SourceId, tree_index: u32 },
     /// A semantic owner was assigned more than one declaration scope.
     DuplicateDeclarationScope { symbol: SymbolId },
     /// A declaration symbol was assigned two different source contexts.
@@ -108,6 +110,11 @@ impl fmt::Display for NamerError {
                 f,
                 "method symbol {} already has extension prefix clauses",
                 method.index()
+            ),
+            Self::DuplicateSourceExportSite { source, tree_index } => write!(
+                f,
+                "source {} tree {tree_index} already has an export site",
+                source.index()
             ),
             Self::DuplicateDeclarationScope { symbol } => {
                 write!(
@@ -203,6 +210,9 @@ impl From<SourceSemanticIndexError> for NamerError {
             },
             SourceSemanticIndexError::DuplicateExtensionPrefixClauses { method } => {
                 Self::DuplicateExtensionPrefixClauses { method }
+            }
+            SourceSemanticIndexError::DuplicateSourceExportSite { source, tree_index } => {
+                Self::DuplicateSourceExportSite { source, tree_index }
             }
         }
     }
@@ -583,6 +593,23 @@ struct Namer<'a> {
 }
 
 impl Namer<'_> {
+    fn record_export_site(
+        &mut self,
+        tree: TreeId<Untyped>,
+        owner: SymbolId,
+        context: SourceContextId,
+        extension: Option<&ExtensionMethods>,
+    ) -> Result<(), NamerError> {
+        self.index.record_export_site(SourceExportSite {
+            source: self.source,
+            tree,
+            owner,
+            context,
+            extension_prefix_clauses: extension.map(|extension| extension.param_clauses.clone()),
+        })?;
+        Ok(())
+    }
+
     fn index(&mut self, tree: TreeId<Untyped>) -> Result<(), NamerError> {
         self.expand(tree, &[], true)
     }
@@ -933,7 +960,10 @@ impl Namer<'_> {
                     context.scope,
                     stat.source_context,
                 ),
-            TreeKind::Export(_) => Ok(Vec::new()),
+            TreeKind::Export(_) => {
+                self.record_export_site(tree, context.owner, stat.source_context, None)?;
+                Ok(Vec::new())
+            }
             TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => self
                 .enter_extension_method_headers(
                     extension,
@@ -1815,6 +1845,9 @@ impl Namer<'_> {
             let mut member_context = class_context.clone();
             member_context.source_context = active_source_context;
             match &self.arena.get(*member).kind {
+                TreeKind::Export(_) => {
+                    self.record_export_site(*member, symbol, active_source_context, None)?;
+                }
                 TreeKind::TypeDef(definition) => {
                     let definition = definition.clone();
                     if matches!(self.arena.get(definition.rhs).kind, TreeKind::Template(_)) {
@@ -2163,7 +2196,9 @@ impl Namer<'_> {
                     Some(&extension.param_clauses),
                     declaration_context,
                 )?),
-                TreeKind::Export(_) => {}
+                TreeKind::Export(_) => {
+                    self.record_export_site(*method, owner, declaration_context, Some(extension))?
+                }
                 _ => {
                     return Err(NamerError::MalformedAstShape {
                         tree_index: method.index(),

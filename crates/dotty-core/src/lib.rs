@@ -73,7 +73,8 @@ pub use source::{
     is_line_break_char,
 };
 pub use source_semantics::{
-    SourceContext, SourceContextId, SourceDefinition, SourceSemanticIndex, SourceSemanticIndexError,
+    SourceContext, SourceContextId, SourceDefinition, SourceExportSite, SourceSemanticIndex,
+    SourceSemanticIndexError,
 };
 pub use store::{SemanticStore, StoreCheckpoint};
 pub use symbols::{

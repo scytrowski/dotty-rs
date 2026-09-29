@@ -37,6 +37,8 @@ pub enum SourceSemanticIndexError {
     },
     /// An extension method was assigned prefix-clause metadata more than once.
     DuplicateExtensionPrefixClauses { method: SymbolId },
+    /// An export source tree was registered more than once.
+    DuplicateSourceExportSite { source: SourceId, tree_index: u32 },
 }
 
 impl fmt::Display for SourceSemanticIndexError {
@@ -100,6 +102,25 @@ pub struct SourceContext {
     pub import: Option<TreeId<Untyped>>,
 }
 
+/// Source export site handed from naming to later typed export synthesis.
+///
+/// The export tree remains the source of truth for its qualifier and
+/// selectors. Extension exports retain the surrounding extension prefix
+/// clauses without introducing a synthetic method identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceExportSite {
+    /// Compilation source containing the export tree.
+    pub source: SourceId,
+    /// Export syntax retained in the untyped AST.
+    pub tree: TreeId<Untyped>,
+    /// Semantic owner where future export forwarders would be entered.
+    pub owner: SymbolId,
+    /// Lexical source context active at this export site.
+    pub context: SourceContextId,
+    /// Extension prefix clauses for an export inside an extension group.
+    pub extension_prefix_clauses: Option<Vec<Vec<TreeId<Untyped>>>>,
+}
+
 /// Canonical and owner-specific derived identities associated with source
 /// trees in compilation units.
 ///
@@ -115,6 +136,8 @@ pub struct SourceSemanticIndex {
     extension_prefix_clauses_by_method: HashMap<SymbolId, Vec<Vec<TreeId<Untyped>>>>,
     source_contexts: Vec<SourceContext>,
     declaration_contexts_by_symbol: HashMap<SymbolId, SourceContextId>,
+    export_sites_by_tree: HashMap<(SourceId, TreeId<Untyped>), SourceExportSite>,
+    export_sites_by_owner: HashMap<SymbolId, Vec<SourceExportSite>>,
 }
 
 impl SourceSemanticIndex {
@@ -219,6 +242,53 @@ impl SourceSemanticIndex {
     /// Returns the source declaration context recorded for `symbol`.
     pub fn declaration_context_of(&self, symbol: SymbolId) -> Option<SourceContextId> {
         self.declaration_contexts_by_symbol.get(&symbol).copied()
+    }
+
+    /// Returns the export site represented by a source tree.
+    pub fn export_site_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<&SourceExportSite> {
+        self.export_sites_by_tree.get(&(source, tree))
+    }
+
+    /// Returns export sites in source registration order for one owner.
+    pub fn export_sites_for_owner(&self, owner: SymbolId) -> &[SourceExportSite] {
+        self.export_sites_by_owner
+            .get(&owner)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Returns the lexical source context recorded for an export tree.
+    pub fn export_context_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SourceContextId> {
+        self.export_site_at(source, tree).map(|site| site.context)
+    }
+
+    /// Records one source export site. A source tree can only be registered
+    /// once, and a duplicate leaves the original site and owner ordering
+    /// unchanged.
+    pub fn record_export_site(
+        &mut self,
+        site: SourceExportSite,
+    ) -> Result<(), SourceSemanticIndexError> {
+        let key = (site.source, site.tree);
+        if self.export_sites_by_tree.contains_key(&key) {
+            return Err(SourceSemanticIndexError::DuplicateSourceExportSite {
+                source: site.source,
+                tree_index: site.tree.index(),
+            });
+        }
+        self.export_sites_by_owner
+            .entry(site.owner)
+            .or_default()
+            .push(site.clone());
+        self.export_sites_by_tree.insert(key, site);
+        Ok(())
     }
 
     /// Checks the source index and the semantic objects it refers to.
@@ -377,6 +447,25 @@ impl SourceSemanticIndex {
                     "declaration symbol {} refers to missing source context {}",
                     symbol.index(),
                     context.index()
+                ));
+            }
+        }
+
+        for site in self.export_sites_by_tree.values() {
+            if !store.symbols.contains(site.owner) {
+                violations.push(format!(
+                    "export source {}/tree {} has missing owner {}",
+                    site.source.index(),
+                    site.tree.index(),
+                    site.owner.index()
+                ));
+            }
+            if self.try_source_context(site.context).is_none() {
+                violations.push(format!(
+                    "export source {}/tree {} refers to missing source context {}",
+                    site.source.index(),
+                    site.tree.index(),
+                    site.context.index()
                 ));
             }
         }
@@ -1221,5 +1310,77 @@ mod tests {
             index.extension_prefix_clauses(method),
             Some(first_clauses.as_slice())
         );
+    }
+
+    #[test]
+    fn export_sites_are_indexed_by_tree_and_owner_with_context_and_prefix() {
+        let mut store = SemanticStore::new();
+        let owner = symbol(&mut store);
+        let context = SourceContextId(0);
+        let first_tree = tree_id();
+        let second_tree = TreeId::new(first_tree.index() + 1);
+        let source = SourceId::from_index(17);
+        let site = SourceExportSite {
+            source,
+            tree: first_tree,
+            owner,
+            context,
+            extension_prefix_clauses: Some(vec![vec![second_tree]]),
+        };
+        let mut index = SourceSemanticIndex::new();
+
+        index.record_export_site(site.clone()).unwrap();
+        index
+            .record_export_site(SourceExportSite {
+                source,
+                tree: second_tree,
+                owner,
+                context,
+                extension_prefix_clauses: None,
+            })
+            .unwrap();
+
+        assert_eq!(index.export_site_at(source, first_tree), Some(&site));
+        assert_eq!(index.export_context_at(source, first_tree), Some(context));
+        assert_eq!(index.export_sites_for_owner(owner).len(), 2);
+        assert_eq!(index.export_sites_for_owner(owner)[0], site);
+        assert_eq!(
+            index.export_sites_for_owner(owner)[1].extension_prefix_clauses,
+            None
+        );
+    }
+
+    #[test]
+    fn duplicate_export_site_registration_is_rejected_without_replacement() {
+        let mut store = SemanticStore::new();
+        let owner = symbol(&mut store);
+        let attempted_owner = symbol(&mut store);
+        let source = SourceId::from_index(18);
+        let tree = tree_id();
+        let context = SourceContextId(0);
+        let first = SourceExportSite {
+            source,
+            tree,
+            owner,
+            context,
+            extension_prefix_clauses: None,
+        };
+        let attempted = SourceExportSite {
+            owner: attempted_owner,
+            ..first.clone()
+        };
+        let mut index = SourceSemanticIndex::new();
+
+        index.record_export_site(first.clone()).unwrap();
+        assert_eq!(
+            index.record_export_site(attempted),
+            Err(SourceSemanticIndexError::DuplicateSourceExportSite {
+                source,
+                tree_index: tree.index()
+            })
+        );
+        assert_eq!(index.export_site_at(source, tree), Some(&first));
+        assert_eq!(index.export_sites_for_owner(owner), &[first]);
+        assert!(index.export_sites_for_owner(attempted_owner).is_empty());
     }
 }
