@@ -300,6 +300,14 @@ pub enum TyperError {
         constructor: SymbolId,
         parameter_index: usize,
     },
+    /// A raw generic `New` selected a secondary constructor whose owner type
+    /// parameters cannot yet be inferred by overload resolution.
+    UnsupportedRawGenericSecondaryConstructorInference {
+        source: SourceId,
+        tree_index: u32,
+        constructor: SymbolId,
+        owner: SymbolId,
+    },
     /// Constructor arguments constrain one Poly parameter to non-equivalent types.
     ConflictingConstructorInferenceConstraints {
         source: SourceId,
@@ -3572,6 +3580,26 @@ impl<'a> SourceTyper<'a> {
                 symbol: winner_symbol,
                 callable: winner.callable,
             })?;
+        if qualifier.is_none()
+            && type_arguments.is_empty()
+            && self
+                .constructor_target_class_arity(class)?
+                .is_some_and(|arity| arity > 0)
+            && self
+                .owner_primary_constructor_tree(selected_candidate.symbol, class)?
+                .is_none_or(|tree| {
+                    self.index.symbol_at(self.source, tree) != Some(selected_candidate.symbol)
+                })
+        {
+            return Err(
+                TyperError::UnsupportedRawGenericSecondaryConstructorInference {
+                    source: self.source,
+                    tree_index,
+                    constructor: selected_candidate.symbol,
+                    owner: class,
+                },
+            );
+        }
         let selected_callable = self.constructor_overload_callable(
             selected_candidate,
             instance_type,
@@ -17403,6 +17431,56 @@ mod tests {
             panic!("raw generic New should retain its inferred class type arguments")
         };
         assert_eq!(args, &[definitions.boolean]);
+    }
+
+    #[test]
+    fn raw_generic_secondary_constructor_rejects_uninferred_owner_arguments() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C[A](value: A, count: Int) { def this(flag: Boolean) = this(1, 1) }; class Use { def make = new C(true) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructors = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&constructor_name)
+            .to_vec();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let secondary = constructors
+            .into_iter()
+            .find(|constructor| {
+                let callable = typer.complete_symbol(*constructor).unwrap();
+                matches!(typer.store().types.get(callable), Type::Method(_))
+            })
+            .unwrap();
+
+        let error = typer.type_expression(rhs, context).unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                TyperError::UnsupportedRawGenericSecondaryConstructorInference {
+                    source: found_source,
+                    tree_index,
+                    constructor,
+                    owner,
+                } if found_source == source
+                    && tree_index == rhs.index()
+                    && constructor == secondary
+                    && owner == class
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert!(typer.typed_index.get(source, rhs).is_none());
     }
 
     #[test]
