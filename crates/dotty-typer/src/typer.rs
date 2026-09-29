@@ -1251,7 +1251,6 @@ enum ImportSelection {
 struct ApplicationCandidate {
     symbol: SymbolId,
     callable: TypeId,
-    is_generic: bool,
     member: Option<MemberCandidate>,
     rejection: Option<OverloadRejection>,
 }
@@ -3789,7 +3788,6 @@ impl<'a> SourceTyper<'a> {
             application_candidates.push(ApplicationCandidate {
                 symbol: candidate.symbol,
                 callable,
-                is_generic: matches!(self.store.types.try_get(callable), Some(Type::Poly(_))),
                 member: None,
                 rejection,
             });
@@ -3896,7 +3894,6 @@ impl<'a> SourceTyper<'a> {
         let mut selected_application = [ApplicationCandidate {
             symbol: winner_symbol,
             callable: selected_callable,
-            is_generic: winner.is_generic,
             member: None,
             rejection: None,
         }];
@@ -6038,10 +6035,6 @@ impl<'a> SourceTyper<'a> {
                             Ok(ApplicationCandidate {
                                 symbol,
                                 callable,
-                                is_generic: matches!(
-                                    self.store.types.try_get(callable),
-                                    Some(Type::Poly(_))
-                                ),
                                 member: None,
                                 rejection: None,
                             })
@@ -6086,10 +6079,6 @@ impl<'a> SourceTyper<'a> {
                         Ok(ApplicationCandidate {
                             symbol: member.symbol,
                             callable,
-                            is_generic: matches!(
-                                self.store.types.try_get(callable),
-                                Some(Type::Poly(_))
-                            ),
                             member: Some(member),
                             rejection: None,
                         })
@@ -6839,7 +6828,7 @@ impl<'a> SourceTyper<'a> {
                             .iter()
                             .map(|parameter| parameter.ty)
                             .collect();
-                        let mut strictly_more_specific = !candidate.is_generic && other.is_generic;
+                        let mut strictly_more_specific = false;
                         for (candidate_parameter, other_parameter) in
                             candidate_params.iter().zip(&other_params)
                         {
@@ -20848,7 +20837,7 @@ mod tests {
     }
 
     #[test]
-    fn local_generic_overload_uses_shared_application_resolution() {
+    fn local_generic_and_monomorphic_overloads_compete_through_shared_resolver() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def outer: Int = { def pick[A](value: A): Int = 1; def pick(value: Int): Int = 2; pick(1) } }",
         );
@@ -20857,8 +20846,7 @@ mod tests {
         let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
             panic!("outer body should be a block");
         };
-        let (generic_tree, monomorphic_tree, call_tree) =
-            (block.stats[0], block.stats[1], block.expr);
+        let (generic_tree, monomorphic_tree) = (block.stats[0], block.stats[1]);
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -20868,33 +20856,21 @@ mod tests {
             &packages,
         );
         let context = typer.expression_context_for(outer).unwrap();
-        typer.type_expression(block_tree, context).unwrap();
-
+        preindex_block_for_test(&mut typer, block_tree, context);
         let generic = typer.local_method_symbol_at(source, generic_tree).unwrap();
         let monomorphic = typer
             .local_method_symbol_at(source, monomorphic_tree)
             .unwrap();
-        let selected_symbol = |call_tree| {
-            let typed_call = typer.source_typed_index().get(source, call_tree).unwrap();
-            let TreeKind::Apply(application) = &typer.typed_ast().get(typed_call).kind else {
-                panic!("local overload call should produce an Apply");
-            };
-            let mut function = application.function;
-            loop {
-                match &typer.typed_ast().get(function).kind {
-                    TreeKind::TypeApply(application) => function = application.function,
-                    _ => break,
-                }
-            }
-            match typer.store().types.get(typer.typed_ast().get(function).ty) {
-                Type::TermRef {
-                    target: TermRefTarget::Symbol(symbol),
-                    ..
-                } => *symbol,
-                other => panic!("expected selected local method, got {other:?}"),
-            }
-        };
-        assert_eq!(selected_symbol(call_tree), monomorphic);
+        let result = typer.type_expression(block_tree, context);
+        assert!(
+            matches!(
+                &result,
+                Err(TyperError::AmbiguousOverloadApplication { candidates, .. })
+                    if candidates.len() == 2
+            ),
+            "unexpected generic overload result: {result:?}"
+        );
+
         assert_ne!(generic, monomorphic);
     }
 
@@ -20924,7 +20900,7 @@ mod tests {
     #[test]
     fn losing_generic_local_overload_probe_rolls_back_speculative_state() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class C { def outer: Int = { def pick[A](value: A): Int = 1; def pick(value: Int): Int = 2; pick(1) } }",
+            "class C { def outer: Int = { def pick[A](value: A, extra: Any): Int = 1; def pick(value: Int, extra: Int): Int = 2; pick(1, 1) } }",
         );
         let (outer, block_tree) =
             method_definition_and_rhs(&parsed, &store, &index, source, "outer");
@@ -20937,7 +20913,7 @@ mod tests {
         let TreeKind::Apply(call) = &parsed.ast.get(call_tree).kind else {
             panic!("call should be an Apply");
         };
-        let argument_tree = call.args[0];
+        let argument_trees = call.args.clone();
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -20954,30 +20930,33 @@ mod tests {
             .unwrap();
         let generic_callable = typer.complete_symbol(generic).unwrap();
         let monomorphic_callable = typer.complete_symbol(monomorphic).unwrap();
-        let typed_argument = typer.type_expression(argument_tree, block_context).unwrap();
-        let own_type = typer.typed_ast().get(typed_argument).ty;
-        let widened_type = typer.widen_expression_type(own_type).unwrap();
+        let arguments = argument_trees
+            .into_iter()
+            .map(|argument_tree| {
+                let typed = typer.type_expression(argument_tree, block_context).unwrap();
+                let own_type = typer.typed_ast().get(typed).ty;
+                let widened_type = typer.widen_expression_type(own_type).unwrap();
+                TypedArgument {
+                    typed,
+                    own_type,
+                    widened_type,
+                }
+            })
+            .collect::<Vec<_>>();
         let mut candidates = [
             ApplicationCandidate {
                 symbol: generic,
                 callable: generic_callable,
-                is_generic: true,
                 member: None,
                 rejection: None,
             },
             ApplicationCandidate {
                 symbol: monomorphic,
                 callable: monomorphic_callable,
-                is_generic: false,
                 member: None,
                 rejection: None,
             },
         ];
-        let arguments = [TypedArgument {
-            typed: typed_argument,
-            own_type,
-            widened_type,
-        }];
         let store_checkpoint = typer.store.checkpoint();
         let type_index_checkpoint = typer.type_index.checkpoint();
         let mut info_journal = Vec::new();
