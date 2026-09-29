@@ -6,8 +6,8 @@
 //! mapped; a modifier that needs semantic interpretation (variance, accessor
 //! roles, ...) is left for the milestone that owns it and listed below.
 //!
-//! Modifiers deliberately **not** mapped yet: `ENUM`, `ARTIFACT`,
-//! `INLINEPROXY`, `MACRO`, `EXPORTED`, `OPEN`, `INFIX`, `INVISIBLE`,
+//! Modifiers deliberately **not** mapped yet: `ARTIFACT`,
+//! `INLINEPROXY`, `MACRO`, `OPEN`, `INFIX`, `INVISIBLE`,
 //! `TRACKED`, `INTO` (no matching core flag), `COVARIANT`/`CONTRAVARIANT`
 //! (variance belongs to type-parameter completion), and the accessor roles
 //! `FIELDACCESSOR`, `CASEACCESSOR`, `PARAMSETTER`, `PARAMALIAS`,
@@ -18,15 +18,19 @@
 //! fresh reader at offset 0) — the addresses pass 1 indexes for Milestone 5e1
 //! come from the AST's own child edges instead (`enter::annotation_children`),
 //! exactly like every other structural child a definition's tail is not.
+//!
+//! `ENUM` and `EXPORTED` are mapped to shared core flags. This preserves the
+//! identity markers without naming enum cases or synthesizing export forwarders.
 
 use dotty_core::names::Namespace;
 use dotty_core::symbols::{SymbolFlags, SymbolKind, Visibility};
 use dotty_tasty::tasty::{
-    ABSTRACT_TAG, CASE_TAG, DEFDEF_TAG, DefinitionTail, ERASED_TAG, EXTENSION_TAG, FINAL_TAG,
-    GIVEN_TAG, IMPLICIT_TAG, INLINE_TAG, LAZY_TAG, LOCAL_TAG, MUTABLE_TAG, OBJECT_TAG, OPAQUE_TAG,
-    OVERRIDE_TAG, PACKAGE_TAG, PARAM_TAG, PRIVATE_TAG, PROTECTED_TAG, PROTECTEDQUALIFIED_TAG,
-    RawTree, SEALED_TAG, SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG, TRAIT_TAG, TRANSPARENT_TAG,
-    TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TermValue, VALDEF_TAG,
+    ABSTRACT_TAG, CASE_TAG, DEFDEF_TAG, DefinitionTail, ENUM_TAG, ERASED_TAG, EXPORTED_TAG,
+    EXTENSION_TAG, FINAL_TAG, GIVEN_TAG, IMPLICIT_TAG, INLINE_TAG, LAZY_TAG, LOCAL_TAG,
+    MUTABLE_TAG, OBJECT_TAG, OPAQUE_TAG, OVERRIDE_TAG, PACKAGE_TAG, PARAM_TAG, PRIVATE_TAG,
+    PROTECTED_TAG, PROTECTEDQUALIFIED_TAG, RawTree, SEALED_TAG, SHAREDTYPE_TAG, STATIC_TAG,
+    SYNTHETIC_TAG, TRAIT_TAG, TRANSPARENT_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFPKG_TAG,
+    TYPEREFSYMBOL_TAG, TermValue, VALDEF_TAG,
 };
 
 use crate::error::UnpickleError;
@@ -182,6 +186,8 @@ fn flag_for(tag: u8) -> Option<SymbolFlags> {
         SYNTHETIC_TAG => SymbolFlags::SYNTHETIC,
         ERASED_TAG => SymbolFlags::ERASED,
         OVERRIDE_TAG => SymbolFlags::OVERRIDE,
+        ENUM_TAG => SymbolFlags::ENUM,
+        EXPORTED_TAG => SymbolFlags::EXPORTED,
         _ => return None,
     })
 }
@@ -484,6 +490,8 @@ mod tests {
             (SYNTHETIC_TAG, SymbolFlags::SYNTHETIC),
             (ERASED_TAG, SymbolFlags::ERASED),
             (OVERRIDE_TAG, SymbolFlags::OVERRIDE),
+            (ENUM_TAG, SymbolFlags::ENUM),
+            (EXPORTED_TAG, SymbolFlags::EXPORTED),
         ];
 
         for (tag, flag) in cases {
@@ -493,11 +501,15 @@ mod tests {
 
     #[test]
     fn several_modifiers_combine_their_flags() {
-        let flags = modifiers(&[FINAL_TAG, CASE_TAG, SEALED_TAG]).flags;
+        let flags = modifiers(&[FINAL_TAG, CASE_TAG, SEALED_TAG, ENUM_TAG, EXPORTED_TAG]).flags;
 
         assert_eq!(
             flags,
-            SymbolFlags::FINAL | SymbolFlags::CASE | SymbolFlags::SEALED
+            SymbolFlags::FINAL
+                | SymbolFlags::CASE
+                | SymbolFlags::SEALED
+                | SymbolFlags::ENUM
+                | SymbolFlags::EXPORTED
         );
     }
 
@@ -510,10 +522,10 @@ mod tests {
     }
 
     #[test]
-    fn a_modifier_without_a_core_flag_is_skipped() {
-        use dotty_tasty::tasty::{COVARIANT_TAG, ENUM_TAG, FIELDACCESSOR_TAG};
+    fn modifiers_without_core_flags_are_skipped() {
+        use dotty_tasty::tasty::{COVARIANT_TAG, FIELDACCESSOR_TAG};
 
-        for tag in [ENUM_TAG, FIELDACCESSOR_TAG, COVARIANT_TAG] {
+        for tag in [FIELDACCESSOR_TAG, COVARIANT_TAG] {
             assert_eq!(modifiers(&[tag]), DeclaredModifiers::NONE, "tag {tag}");
         }
     }
