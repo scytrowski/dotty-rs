@@ -48,11 +48,17 @@ pub use subtype::{
 #[derive(Debug)]
 pub enum TyperError {
     /// A symbol is not present in the semantic store.
-    UnknownSymbol { symbol: SymbolId },
+    UnknownSymbol {
+        symbol: SymbolId,
+    },
     /// The namer did not retain source provenance for this symbol.
-    SourceProvenanceMissing { symbol: SymbolId },
+    SourceProvenanceMissing {
+        symbol: SymbolId,
+    },
     /// A declaration that needs lexical lookup has no namer context.
-    DeclarationContextMissing { symbol: SymbolId },
+    DeclarationContextMissing {
+        symbol: SymbolId,
+    },
     /// A source context ID is outside the naming result that produced it.
     SourceContextMissing {
         source: SourceId,
@@ -60,11 +66,18 @@ pub enum TyperError {
         context_index: u32,
     },
     /// The requested expression-context owner is not present in the semantic store.
-    ExpressionOwnerMissing { owner: SymbolId },
+    ExpressionOwnerMissing {
+        owner: SymbolId,
+    },
     /// This declaration kind cannot own an expression body context.
-    ExpressionOwnerKindUnsupported { owner: SymbolId, kind: SymbolKind },
+    ExpressionOwnerKindUnsupported {
+        owner: SymbolId,
+        kind: SymbolKind,
+    },
     /// A method or constructor has no indexed lexical scope for its body.
-    ExpressionMethodScopeMissing { owner: SymbolId },
+    ExpressionMethodScopeMissing {
+        owner: SymbolId,
+    },
     /// The recorded method body scope is owned by a different symbol.
     ExpressionMethodScopeOwnerMismatch {
         owner: SymbolId,
@@ -77,13 +90,21 @@ pub enum TyperError {
         context: SourceContextId,
     },
     /// The namer did not record a source context for this expression owner.
-    ExpressionOwnerDeclarationContextMissing { owner: SymbolId },
+    ExpressionOwnerDeclarationContextMissing {
+        owner: SymbolId,
+    },
     /// A local expression scope is outside the semantic store's scope arena.
-    ExpressionLocalScopeMissing { scope: dotty_core::ScopeId },
+    ExpressionLocalScopeMissing {
+        scope: dotty_core::ScopeId,
+    },
     /// A local-scope handle is malformed for this typer's stack.
-    ExpressionLocalScopeStackMissing { stack: ExpressionScopeId },
+    ExpressionLocalScopeStackMissing {
+        stack: ExpressionScopeId,
+    },
     /// A local-scope handle was created by a different `SourceTyper`.
-    ExpressionLocalScopeStackForeign { stack: ExpressionScopeId },
+    ExpressionLocalScopeStackForeign {
+        stack: ExpressionScopeId,
+    },
     /// The type name may come from an import form not supported by this pass.
     UnsupportedImportContext {
         source: SourceId,
@@ -101,38 +122,88 @@ pub enum TyperError {
         import_tree_index: u32,
     },
     /// Completion for this semantic declaration category is not implemented.
-    UnsupportedSymbolCompletion { symbol: SymbolId, kind: SymbolKind },
+    UnsupportedSymbolCompletion {
+        symbol: SymbolId,
+        kind: SymbolKind,
+    },
     /// A source class-like declaration has no declaration scope from naming.
-    MissingClassScope { symbol: SymbolId },
+    MissingClassScope {
+        symbol: SymbolId,
+    },
     /// A class-like symbol already contains an incompatible complete type.
-    MalformedClassInfo { symbol: SymbolId, info: TypeId },
+    MalformedClassInfo {
+        symbol: SymbolId,
+        info: TypeId,
+    },
     /// A `new` type tree is a template; anonymous-class lowering is deferred.
-    AnonymousClassInstantiationDeferred { source: SourceId, tree_index: u32 },
+    AnonymousClassInstantiationDeferred {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// The projected type does not resolve to a named class-like symbol.
-    NewTargetNotClass { ty: TypeId },
+    NewTargetNotClass {
+        ty: TypeId,
+    },
     /// Traits cannot be instantiated with `new`.
-    TraitInstantiation { symbol: SymbolId },
+    TraitInstantiation {
+        symbol: SymbolId,
+    },
     /// Abstract classes cannot be instantiated with `new`.
-    AbstractClassInstantiation { symbol: SymbolId },
+    AbstractClassInstantiation {
+        symbol: SymbolId,
+    },
     /// Module classes and objects cannot be instantiated with `new`.
-    ModuleInstantiation { symbol: SymbolId },
+    ModuleInstantiation {
+        symbol: SymbolId,
+    },
     /// Packages cannot be instantiated with `new`.
-    PackageInstantiation { symbol: SymbolId },
+    PackageInstantiation {
+        symbol: SymbolId,
+    },
     /// A type parameter is not proven to be an instantiable concrete class.
-    TypeParameterInstantiation { symbol: SymbolId },
+    TypeParameterInstantiation {
+        symbol: SymbolId,
+    },
     /// Class metadata needed for construction is absent or incomplete.
-    NewClassInfoUnavailable { symbol: SymbolId },
+    NewClassInfoUnavailable {
+        symbol: SymbolId,
+    },
     /// Constructor lookup normalization failed or exceeded its bound.
     ConstructorLookupNormalization {
         ty: TypeId,
         error: crate::types::TypeNormalizeError,
     },
     /// The exact `<init>` scope bucket contains a non-constructor or invalid symbol.
-    MalformedConstructorBucket { class: SymbolId, symbol: SymbolId },
+    MalformedConstructorBucket {
+        class: SymbolId,
+        symbol: SymbolId,
+    },
     /// A constructor bucket entry has a non-callable or invalid completed type.
-    MalformedConstructorCandidate { symbol: SymbolId, callable: TypeId },
+    MalformedConstructorCandidate {
+        symbol: SymbolId,
+        callable: TypeId,
+    },
     /// A template parent is not a type or a supported constructor-call shape.
-    MalformedClassParent { source: SourceId, tree_index: u32 },
+    /// Constructor application found no constructor candidate for its class.
+    ConstructorApplicationUnavailable {
+        class: SymbolId,
+    },
+    /// Constructor application has multiple candidates; overload selection is deferred.
+    ConstructorOverloadResolutionDeferred {
+        source: SourceId,
+        tree_index: u32,
+        class: SymbolId,
+        candidates: Vec<SymbolId>,
+    },
+    /// Generic constructor application is deferred to explicit/inferred type arguments.
+    ConstructorPolymorphicApplicationDeferred {
+        source: SourceId,
+        tree_index: u32,
+    },
+    MalformedClassParent {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// A projected parent does not resolve to a class or trait declaration.
     UnresolvedParentClassKind {
         source: SourceId,
@@ -140,9 +211,15 @@ pub enum TyperError {
         symbol: Option<SymbolId>,
     },
     /// Higher-kinded source type parameter completion is deferred.
-    HigherKindedTypeParameterDeferred { symbol: SymbolId, tree_index: u32 },
+    HigherKindedTypeParameterDeferred {
+        symbol: SymbolId,
+        tree_index: u32,
+    },
     /// Higher-kinded source type alias completion is deferred.
-    HigherKindedTypeAliasDeferred { symbol: SymbolId, tree_index: u32 },
+    HigherKindedTypeAliasDeferred {
+        symbol: SymbolId,
+        tree_index: u32,
+    },
     /// A type alias RHS cannot be represented by source alias bounds.
     InvalidCompletedBounds {
         source: SourceId,
@@ -150,11 +227,19 @@ pub enum TyperError {
         ty: TypeId,
     },
     /// Opaque alias completion is deferred until opaque visibility is modeled.
-    OpaqueAliasDeferred { symbol: SymbolId, tree_index: u32 },
+    OpaqueAliasDeferred {
+        symbol: SymbolId,
+        tree_index: u32,
+    },
     /// The inferred-result method is already being completed through its RHS.
-    RecursiveInferredMethodResult { symbol: SymbolId },
+    RecursiveInferredMethodResult {
+        symbol: SymbolId,
+    },
     /// An inferred-result method has no body from which to obtain a result.
-    InferredMethodResultRightHandSideMissing { symbol: SymbolId, tree_index: u32 },
+    InferredMethodResultRightHandSideMissing {
+        symbol: SymbolId,
+        tree_index: u32,
+    },
     /// The typed method body widened to a type that cannot be a method result.
     InvalidInferredMethodResult {
         symbol: SymbolId,
@@ -162,7 +247,10 @@ pub enum TyperError {
         inferred: TypeId,
     },
     /// Extension signature normalization for right-associative methods is deferred.
-    RightAssociativeExtensionDeferred { symbol: SymbolId, tree_index: u32 },
+    RightAssociativeExtensionDeferred {
+        symbol: SymbolId,
+        tree_index: u32,
+    },
     /// A source method parameter tree has no symbol for this method owner.
     MethodParameterSymbolMissing {
         method: SymbolId,
@@ -174,7 +262,9 @@ pub enum TyperError {
         parameter_tree_index: u32,
     },
     /// Extension method prefix parameter metadata is absent from the source index.
-    ExtensionPrefixClausesMissing { method: SymbolId },
+    ExtensionPrefixClausesMissing {
+        method: SymbolId,
+    },
     /// A method clause has malformed parameter kinds or inconsistent flags.
     MalformedMethodClause {
         method: SymbolId,
@@ -205,11 +295,17 @@ pub enum TyperError {
         owner: SymbolId,
     },
     /// Secondary-constructor type parameters do not yet have source symbols.
-    SecondaryConstructorTypeParametersDeferred { constructor: SymbolId },
+    SecondaryConstructorTypeParametersDeferred {
+        constructor: SymbolId,
+    },
     /// A deferred completion belongs to a future completion engine.
-    DeferredSymbolCompletion { symbol: SymbolId },
+    DeferredSymbolCompletion {
+        symbol: SymbolId,
+    },
     /// A previous fatal semantic failure has already been recorded.
-    SymbolAlreadyErrored { symbol: SymbolId },
+    SymbolAlreadyErrored {
+        symbol: SymbolId,
+    },
     /// A source type-tree form is not supported yet.
     UnsupportedTypeTree {
         source: SourceId,
@@ -237,7 +333,10 @@ pub enum TyperError {
         kind: SymbolKind,
     },
     /// A referenced tree ID is outside the supplied arena.
-    TreeOutsideArena { source: SourceId, tree_index: u32 },
+    TreeOutsideArena {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// A simple type identifier did not resolve in its declaration scope.
     TypeNameNotFound {
         source: SourceId,
@@ -282,12 +381,20 @@ pub enum TyperError {
     },
     /// A source class has no canonical AST provenance from which to recover
     /// its class type-parameter order.
-    SourceClassTypeParametersProvenanceMissing { symbol: SymbolId },
+    SourceClassTypeParametersProvenanceMissing {
+        symbol: SymbolId,
+    },
     /// The source class, template, or primary constructor has an invalid AST
     /// shape for class type-parameter recovery.
-    MalformedSourceClassTypeParameters { class: SymbolId, tree_index: u32 },
+    MalformedSourceClassTypeParameters {
+        class: SymbolId,
+        tree_index: u32,
+    },
     /// A class type-parameter tree has no canonical symbol mapping.
-    ClassTypeParameterSymbolMissing { class: SymbolId, tree_index: u32 },
+    ClassTypeParameterSymbolMissing {
+        class: SymbolId,
+        tree_index: u32,
+    },
     /// A receiver's nominal constructor differs from the expected class.
     ReceiverDoesNotDenoteExpectedClass {
         expected: SymbolId,
@@ -306,11 +413,18 @@ pub enum TyperError {
         actual: usize,
     },
     /// A generic source class was used without receiver type arguments.
-    RawGenericSourceReceiverUnsupported { class: SymbolId, expected: usize },
+    RawGenericSourceReceiverUnsupported {
+        class: SymbolId,
+        expected: usize,
+    },
     /// External generic argument order is not modeled yet.
-    ExternalGenericInstantiationDeferred { class: SymbolId },
+    ExternalGenericInstantiationDeferred {
+        class: SymbolId,
+    },
     /// A completed member info could not be obtained for adaptation.
-    MemberTypeUnavailable { symbol: SymbolId },
+    MemberTypeUnavailable {
+        symbol: SymbolId,
+    },
     /// The bounded, symbol-exact semantic substitution failed.
     TypeSubstitution(dotty_core::TypeRebindError),
     /// Receiver normalization failed before a nominal view could be read.
@@ -323,9 +437,15 @@ pub enum TyperError {
         attempted: u32,
     },
     /// String constants do not have a canonical source type in this session yet.
-    StringLiteralTypingDeferred { source: SourceId, tree_index: u32 },
+    StringLiteralTypingDeferred {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// Null constants do not have a canonical source type in this session yet.
-    NullLiteralTypingDeferred { source: SourceId, tree_index: u32 },
+    NullLiteralTypingDeferred {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// An integer spelling is invalid or outside the supported Scala Int range.
     IntegerLiteralOutOfRange {
         source: SourceId,
@@ -346,7 +466,10 @@ pub enum TyperError {
         owner: SymbolId,
     },
     /// The semantic owner chain used by `this` contains a cycle.
-    ThisOwnerCycle { source: SourceId, owner: SymbolId },
+    ThisOwnerCycle {
+        source: SourceId,
+        owner: SymbolId,
+    },
     /// No term declaration named this expression was visible.
     TermNameNotFound {
         source: SourceId,
@@ -374,7 +497,9 @@ pub enum TyperError {
         symbol: SymbolId,
     },
     /// A source object has no matching derived ModuleClass identity.
-    ObjectModuleClassUnavailable { object: SymbolId },
+    ObjectModuleClassUnavailable {
+        object: SymbolId,
+    },
     /// The resolved term symbol kind is outside the supported value subset.
     UnsupportedTermReference {
         source: SourceId,
@@ -436,7 +561,10 @@ pub enum TyperError {
     },
     /// Candidate competition includes a polymorphic method and needs general
     /// generic overload resolution.
-    GenericOverloadResolutionDeferred { source: SourceId, tree_index: u32 },
+    GenericOverloadResolutionDeferred {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// Inferred arguments violate the declared bounds of a Poly parameter.
     InferredTypeArgumentBoundViolation {
         source: SourceId,
@@ -504,7 +632,10 @@ pub enum TyperError {
         error: Box<TypeRelationError>,
     },
     /// Type application on an overloaded callee remains deferred.
-    OverloadedTypeApplicationDeferred { source: SourceId, tree_index: u32 },
+    OverloadedTypeApplicationDeferred {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// Binder-exact semantic Poly instantiation failed.
     PolyInstantiation(dotty_core::TypeRebindError),
     /// A projected source type form cannot be represented as a typed type tree.
@@ -526,7 +657,10 @@ pub enum TyperError {
         kind: MethodKind,
     },
     /// `using` application requires contextual argument insertion.
-    UsingApplicationDeferred { source: SourceId, tree_index: u32 },
+    UsingApplicationDeferred {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// The application supplies a different number of arguments than the method.
     ApplicationArityMismatch {
         source: SourceId,
@@ -760,7 +894,10 @@ pub enum TyperError {
         candidate: SymbolId,
     },
     /// A method symbol has an incomplete or unsupported callable shape.
-    MalformedOverloadCandidate { symbol: SymbolId, callable: TypeId },
+    MalformedOverloadCandidate {
+        symbol: SymbolId,
+        callable: TypeId,
+    },
     /// The application name bucket mixes methods and non-method terms.
     MixedApplicationCandidateKinds {
         source: SourceId,
@@ -768,7 +905,10 @@ pub enum TyperError {
         candidates: Vec<SymbolId>,
     },
     /// A type selection is outside expression typing.
-    TypeSelectionInExpression { source: SourceId, tree_index: u32 },
+    TypeSelectionInExpression {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// Member discovery failed with a typed lookup error.
     MemberLookup(Box<MemberLookupError>),
     /// The source expression form is outside this issue's supported subset.
@@ -790,7 +930,10 @@ pub enum TyperError {
         inferred: TypeId,
     },
     /// A local value declaration has no initializer.
-    LocalValueRightHandSideMissing { source: SourceId, tree_index: u32 },
+    LocalValueRightHandSideMissing {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// A local value initializer refers to the local value currently being initialized.
     RecursiveLocalValueInitializer {
         source: SourceId,
@@ -798,7 +941,10 @@ pub enum TyperError {
         symbol: SymbolId,
     },
     /// Local value declarations are only supported as statements in a block.
-    LocalValueOutsideBlock { source: SourceId, tree_index: u32 },
+    LocalValueOutsideBlock {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// Two local values with the same name occur in one block scope.
     DuplicateLocalValue {
         source: SourceId,
@@ -821,11 +967,19 @@ pub enum TyperError {
         error: Box<TypeRelationError>,
     },
     /// The semantic type is not yet supported by expression widening.
-    ExpressionTypeCannotBeWidened { ty: TypeId },
+    ExpressionTypeCannotBeWidened {
+        ty: TypeId,
+    },
     /// A term reference designates a symbol category that is not widenable.
-    TermReferenceCannotBeWidened { symbol: SymbolId, kind: SymbolKind },
+    TermReferenceCannotBeWidened {
+        symbol: SymbolId,
+        kind: SymbolKind,
+    },
     /// The receiver prefix does not contain the referenced member symbol.
-    TermReferencePrefixMismatch { symbol: SymbolId, prefix: TypeId },
+    TermReferencePrefixMismatch {
+        symbol: SymbolId,
+        prefix: TypeId,
+    },
     /// A selection qualifier cannot be preserved as a stable reference path.
     UnstableSelectionPrefix {
         source: SourceId,
@@ -2124,16 +2278,29 @@ impl<'a> SourceTyper<'a> {
                         tree_index: tree.index(),
                     });
                 }
-                let resolved_function = self.resolve_overloaded_application_function(
+                let constructor_function = self.resolve_constructor_application_function(
                     application.function,
-                    &application.args,
                     context,
                     tree.index(),
                     info_journal,
                     new_mappings,
                 )?;
+                let resolved_function = if constructor_function.is_some() {
+                    None
+                } else {
+                    self.resolve_overloaded_application_function(
+                        application.function,
+                        &application.args,
+                        context,
+                        tree.index(),
+                        info_journal,
+                        new_mappings,
+                    )?
+                };
                 let (function, mut callable, mut typed_arguments) =
-                    if let Some(resolved) = resolved_function {
+                    if let Some((function, callable)) = constructor_function {
+                        (function, callable, None)
+                    } else if let Some(resolved) = resolved_function {
                         (resolved.typed, resolved.callable, Some(resolved.arguments))
                     } else {
                         let function = self.type_expression_inner(
@@ -2585,58 +2752,199 @@ impl<'a> SourceTyper<'a> {
         instance_type: TypeId,
     ) -> Result<Vec<ConstructorCandidate>, TyperError> {
         self.run_atomic(|typer, info_journal| {
-            let class = typer.instantiable_class_of_type(instance_type, info_journal)?;
-            let class_info = typer.ensure_constructor_class_info(class, info_journal)?;
-            let declarations = match typer.store.types.try_get(class_info) {
-                Some(Type::ClassInfo(info)) if info.class == class => info.declarations,
-                _ => {
-                    return Err(TyperError::MalformedClassInfo {
-                        symbol: class,
-                        info: class_info,
-                    });
-                }
-            };
-            if !typer.store.scopes.contains(declarations) {
-                return Err(TyperError::NewClassInfoUnavailable { symbol: class });
-            }
-            let constructor_name = dotty_core::Name::new(
-                typer.store.names.intern("<init>"),
-                dotty_core::Namespace::Term,
-            );
-            let bucket = typer
-                .store
-                .scopes
-                .get(declarations)
-                .lookup_all(&constructor_name)
-                .to_vec();
-            let mut candidates = Vec::with_capacity(bucket.len());
-            for symbol in bucket {
-                if !typer.store.symbols.contains(symbol)
-                    || typer.store.symbols.get(symbol).kind != SymbolKind::Constructor
-                    || typer.store.symbols.get(symbol).owner != Some(class)
-                {
-                    return Err(TyperError::MalformedConstructorBucket { class, symbol });
-                }
-                let callable = match *typer.store.symbols.info(symbol) {
-                    SymbolInfo::Complete(callable) => callable,
-                    SymbolInfo::Missing if typer.index.definition_of(symbol).is_some() => {
-                        typer.complete_symbol_inner(symbol, info_journal)?
-                    }
-                    SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => {
-                        return Err(TyperError::DeferredSymbolCompletion { symbol });
-                    }
-                };
-                if !typer.is_constructor_callable(callable) {
-                    return Err(TyperError::MalformedConstructorCandidate { symbol, callable });
-                }
-                candidates.push(ConstructorCandidate {
-                    symbol,
-                    callable,
-                    owner: class,
+            typer.constructors_of_inner(instance_type, info_journal)
+        })
+    }
+
+    fn constructors_of_inner(
+        &mut self,
+        instance_type: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<ConstructorCandidate>, TyperError> {
+        let class = self.instantiable_class_of_type(instance_type, info_journal)?;
+        self.constructor_candidates_for_class(class, info_journal)
+    }
+
+    fn constructor_candidates_for_class(
+        &mut self,
+        class: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<ConstructorCandidate>, TyperError> {
+        let class_info = self.ensure_constructor_class_info(class, info_journal)?;
+        let declarations = match self.store.types.try_get(class_info) {
+            Some(Type::ClassInfo(info)) if info.class == class => info.declarations,
+            _ => {
+                return Err(TyperError::MalformedClassInfo {
+                    symbol: class,
+                    info: class_info,
                 });
             }
-            Ok(candidates)
-        })
+        };
+        if !self.store.scopes.contains(declarations) {
+            return Err(TyperError::NewClassInfoUnavailable { symbol: class });
+        }
+        let constructor_name = dotty_core::Name::new(
+            self.store.names.intern("<init>"),
+            dotty_core::Namespace::Term,
+        );
+        let bucket = self
+            .store
+            .scopes
+            .get(declarations)
+            .lookup_all(&constructor_name)
+            .to_vec();
+        let mut candidates = Vec::with_capacity(bucket.len());
+        for symbol in bucket {
+            if !self.store.symbols.contains(symbol)
+                || self.store.symbols.get(symbol).kind != SymbolKind::Constructor
+                || self.store.symbols.get(symbol).owner != Some(class)
+            {
+                return Err(TyperError::MalformedConstructorBucket { class, symbol });
+            }
+            let callable = match *self.store.symbols.info(symbol) {
+                SymbolInfo::Complete(callable) => callable,
+                SymbolInfo::Missing if self.index.definition_of(symbol).is_some() => {
+                    self.complete_symbol_inner(symbol, info_journal)?
+                }
+                SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => {
+                    return Err(TyperError::DeferredSymbolCompletion { symbol });
+                }
+            };
+            if !self.is_constructor_callable(callable) {
+                return Err(TyperError::MalformedConstructorCandidate { symbol, callable });
+            }
+            candidates.push(ConstructorCandidate {
+                symbol,
+                callable,
+                owner: class,
+            });
+        }
+        Ok(candidates)
+    }
+
+    fn is_constructor_selection(&self, tree: TreeId<Untyped>) -> bool {
+        let Some(Tree {
+            kind: TreeKind::Select(selection),
+            ..
+        }) = self.arena.try_get(tree)
+        else {
+            return false;
+        };
+        self.store.names.resolve(selection.name.text()) == "<init>"
+            && self
+                .arena
+                .try_get(selection.qualifier)
+                .is_some_and(|qualifier| matches!(qualifier.kind, TreeKind::New(_)))
+    }
+
+    fn resolve_constructor_application_function(
+        &mut self,
+        function_tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        application_tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<Option<(TreeId<Typed>, TypeId)>, TyperError> {
+        if !self.is_constructor_selection(function_tree) {
+            return Ok(None);
+        }
+        let Some(function_node) = self.arena.try_get(function_tree).cloned() else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: function_tree.index(),
+            });
+        };
+        let TreeKind::Select(selection) = function_node.kind else {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index: function_tree.index(),
+                expression_kind: tree_kind_name(&function_node.kind),
+            });
+        };
+        let qualifier =
+            self.type_expression_inner(selection.qualifier, context, info_journal, new_mappings)?;
+        let instance_type = self.typed_arena.get(qualifier).ty;
+        let class = self.instantiable_class_of_type(instance_type, info_journal)?;
+        let candidates = self.constructor_candidates_for_class(class, info_journal)?;
+        let candidate = match candidates.as_slice() {
+            [] => return Err(TyperError::ConstructorApplicationUnavailable { class }),
+            [candidate] => candidate,
+            _ => {
+                return Err(TyperError::ConstructorOverloadResolutionDeferred {
+                    source: self.source,
+                    tree_index: application_tree_index,
+                    class,
+                    candidates: candidates
+                        .iter()
+                        .map(|candidate| candidate.symbol)
+                        .collect(),
+                });
+            }
+        };
+        self.validate_constructor_application_callable(
+            candidate.symbol,
+            candidate.callable,
+            application_tree_index,
+        )?;
+        let ty = self.store.types.alloc(Type::TermRef {
+            prefix: instance_type,
+            target: TermRefTarget::Symbol(candidate.symbol),
+        });
+        let typed = TypedAstBuilder::new(&mut self.typed_arena).select(
+            qualifier,
+            selection.name,
+            selection.backquoted,
+            ty,
+            function_node.position,
+        );
+        self.typed_index
+            .insert(self.source, function_tree, typed)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, function_tree));
+        Ok(Some((typed, candidate.callable)))
+    }
+
+    fn validate_constructor_application_callable(
+        &self,
+        symbol: SymbolId,
+        callable: TypeId,
+        tree_index: u32,
+    ) -> Result<(), TyperError> {
+        let mut current = callable;
+        let mut visited = HashSet::new();
+        for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            if !visited.insert(current) {
+                return Err(TyperError::MalformedConstructorCandidate { symbol, callable });
+            }
+            match self.store.types.try_get(current) {
+                Some(Type::Poly(_)) => {
+                    return Err(TyperError::ConstructorPolymorphicApplicationDeferred {
+                        source: self.source,
+                        tree_index,
+                    });
+                }
+                Some(Type::Method(method)) => {
+                    if method.kind != MethodKind::Plain {
+                        return Err(TyperError::UnsupportedApplicationMethodKind {
+                            source: self.source,
+                            tree_index,
+                            kind: method.kind,
+                        });
+                    }
+                    current = method.result;
+                }
+                Some(_) => return Ok(()),
+                None => {
+                    return Err(TyperError::MalformedConstructorCandidate { symbol, callable });
+                }
+            }
+        }
+        Err(TyperError::MalformedConstructorCandidate { symbol, callable })
     }
 
     fn instantiable_class_of_type(
@@ -13935,6 +14243,319 @@ mod tests {
         };
         assert_eq!(type_symbol(typer.store(), *tycon), box_class);
         assert_eq!(args, &[definitions.int]);
+    }
+
+    #[test]
+    fn primary_constructor_application_reuses_plain_application_and_preserves_identity() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Point(x: Int, y: Int); class Use { def make: Point = new Point(1, 2) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "Point");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructor = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup(&constructor_name)
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("constructor call should remain an Apply")
+        };
+        assert_eq!(application.args.len(), 2);
+        let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind else {
+            panic!("constructor callee should remain a Select")
+        };
+        assert_eq!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty),
+            &Type::TermRef {
+                prefix: typer.typed_ast().get(selection.qualifier).ty,
+                target: TermRefTarget::Symbol(constructor),
+            }
+        );
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.args[0]).ty),
+            Type::Constant(dotty_core::Constant::Int(1))
+        ));
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.args[1]).ty),
+            Type::Constant(dotty_core::Constant::Int(2))
+        ));
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(result_class),
+            ..
+        } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("constructor result should be the completed owner type")
+        };
+        assert_eq!(*result_class, class);
+    }
+
+    #[test]
+    fn zero_argument_and_parameter_argument_constructors_share_application_typing() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Empty(); class Box(value: Int); class Use { def make(value: Int): Box = new Box(value); def empty: Empty = new Empty() }",
+        );
+        let (make, make_rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let (empty, empty_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "empty");
+        let parameter = method_parameter_symbol(&parsed, &index, source, make, 0);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let make_context = typer.expression_context_for(make).unwrap();
+        let typed_make = typer.type_expression(make_rhs, make_context).unwrap();
+        let TreeKind::Apply(make_application) = &typer.typed_ast().get(typed_make).kind else {
+            panic!("one-argument constructor call should be an Apply")
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(make_application.args[0]).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == parameter
+        ));
+
+        let empty_context = typer.expression_context_for(empty).unwrap();
+        let typed_empty = typer.type_expression(empty_rhs, empty_context).unwrap();
+        let TreeKind::Apply(empty_application) = &typer.typed_ast().get(typed_empty).kind else {
+            panic!("zero-argument constructor call should retain its Apply")
+        };
+        assert!(empty_application.args.is_empty());
+    }
+
+    #[test]
+    fn constructor_application_reports_argument_errors_and_rolls_back() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Pair(first: Int, second: Int); class Use { def wrongArity: Pair = new Pair(1); def wrongType: Pair = new Pair(1, true) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "Pair");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructor = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup(&constructor_name)
+            .unwrap();
+        let (wrong_arity_method, wrong_arity_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "wrongArity");
+        let (wrong_type_method, wrong_type_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "wrongType");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for (method, rhs, error_check) in [
+            (wrong_arity_method, wrong_arity_rhs, 0usize),
+            (wrong_type_method, wrong_type_rhs, 1usize),
+        ] {
+            let context = typer.expression_context_for(method).unwrap();
+            let store_checkpoint = typer.store().checkpoint();
+            let typed_count = typer.typed_ast().iter().count();
+            let error = typer.type_expression(rhs, context).unwrap_err();
+            if error_check == 0 {
+                assert!(matches!(
+                    error,
+                    TyperError::ApplicationArityMismatch {
+                        expected: 2,
+                        actual: 1,
+                        ..
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    error,
+                    TyperError::ApplicationArgumentTypeMismatch {
+                        argument_index: 1,
+                        ..
+                    }
+                ));
+            }
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+            assert_eq!(typer.typed_ast().iter().count(), typed_count);
+            assert!(typer.source_typed_index().get(source, rhs).is_none());
+            assert!(matches!(
+                typer.store().symbols.info(class),
+                SymbolInfo::Missing
+            ));
+            assert!(matches!(
+                typer.store().symbols.info(constructor),
+                SymbolInfo::Missing
+            ));
+        }
+    }
+
+    #[test]
+    fn curried_constructor_applications_consume_nested_plain_methods() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Curried(first: Int)(second: Int); class Use { def make: Curried = new Curried(1)(2) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "Curried");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(outer) = &typer.typed_ast().get(typed).kind else {
+            panic!("curried constructor call should have an outer Apply")
+        };
+        let TreeKind::Apply(inner) = &typer.typed_ast().get(outer.function).kind else {
+            panic!("curried constructor call should have an inner Apply")
+        };
+        assert_eq!(inner.args.len(), 1);
+        assert_eq!(outer.args.len(), 1);
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(outer.function).ty),
+            Type::Method(_)
+        ));
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(result_class),
+            ..
+        } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("curried constructor result should be the owner class")
+        };
+        assert_eq!(*result_class, class);
+    }
+
+    #[test]
+    fn overloaded_constructor_application_is_explicitly_deferred() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Text; class C(value: Int) { def this(value: Text) = this(1) }; class Use { def make: C = new C(1) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let error = typer.type_expression(rhs, context).unwrap_err();
+        assert!(
+            matches!(
+            &error,
+            TyperError::ConstructorOverloadResolutionDeferred {
+                class: error_class,
+                candidates,
+                ..
+            } if *error_class == class && candidates.len() == 2
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn contextual_constructor_application_remains_unsupported() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C(using value: Int); class Use { def make: C = new C(1) }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::UnsupportedApplicationMethodKind {
+                kind: MethodKind::Contextual,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn polymorphic_constructor_application_is_deferred() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C(value: Int); class Use { def make: C = new C(1) }");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructor = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup(&constructor_name)
+            .unwrap();
+        let class_type = nominal_type_ref(&mut store, definitions, class);
+        let method = store.types.alloc(Type::Method(dotty_core::MethodType {
+            params: Vec::new(),
+            result: class_type,
+            kind: MethodKind::Plain,
+        }));
+        let polymorphic = store.types.alloc(Type::Poly(dotty_core::PolyType {
+            params: Vec::new(),
+            result: method,
+        }));
+        store
+            .symbols
+            .set_info(constructor, SymbolInfo::Complete(polymorphic));
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ConstructorPolymorphicApplicationDeferred { .. })
+        ));
     }
 
     #[test]
