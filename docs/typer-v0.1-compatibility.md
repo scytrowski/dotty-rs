@@ -172,12 +172,18 @@ inferred locals are entered with one stable symbol identity; a later failure in
 the block rolls back local symbols, source mappings, and typed nodes.
 
 Application sites can resolve lexical, imported, and selected overload buckets
-for supported monomorphic methods. Candidate filtering uses exact arity and
-nominal conformance; when several candidates apply, only a unique method whose
-formal types are strictly more specific than every other applicable candidate
-is selected. Selected members use receiver-adapted signatures, including
-inherited generic methods. Standalone overloaded identifiers and selections
-remain deferred. Generic overload competition remains deferred.
+for supported monomorphic methods and `Poly -> Method` candidates. Generic
+candidates infer type arguments from the already typed and widened arguments
+using the same direct `ParamRef` and nested `Applied` rules as a single generic
+callee. Inferred arguments are checked against ordinary bounds before generic
+and monomorphic candidates enter the same applicability and specificity
+selection. Only a unique method whose instantiated formal types are strictly
+more specific than every other applicable candidate is selected. Selected
+members use receiver-adapted signatures, including inherited generic methods.
+Arguments are typed once per overload set. Candidate-local inference conflicts,
+argument mismatches, and bound violations reject that candidate; unsupported
+inference or conformance shapes remain conservative when they could compete.
+Standalone overloaded identifiers and selections remain deferred.
 
 `SourceTyper::expression_context_for` builds a method or constructor body
 context from its indexed source declaration context and owned scope. Term
@@ -202,11 +208,11 @@ binder/index based and supports direct `ParamRef` formals and matching nested
 `Applied` type constructors. Repeated equivalent constraints are accepted;
 conflicts do not compute a least upper bound. Concrete formal fragments still
 require conformance, and inferred arguments are checked against instantiated
-ordinary bounds. Unconstrained parameters, unsupported shapes, and generic
-overload competition return typed errors. Expected-result inference, variance
-solving, inherited-constructor matching, unions/intersections, wildcard capture,
-match-type reduction, type-lambda unification, implicit search, and numeric
-weak conformance remain deferred.
+ordinary bounds. Unconstrained parameters and unsupported shapes return typed
+errors. Expected-result inference, variance solving, inherited-constructor
+matching, unions/intersections, wildcard capture, match-type reduction,
+type-lambda unification, implicit search, and numeric weak conformance remain
+deferred.
 
 Source and TASTy snapshots intentionally normalize adapter-specific identity
 and provenance. TASTy's package prefixes on the built-in Scala and
@@ -228,8 +234,9 @@ are ready:
   not currently handled by the expression typer;
 - local `def`, class, type, and pattern declarations, plus imports in block
   statements;
-- generic overload inference, `using`/implicit argument insertion, dependent
-  result application, and right-associative extension normalization;
+- generic overload inference outside the structural candidate-local subset,
+  `using`/implicit argument insertion, dependent result application, and
+  right-associative extension normalization;
 - expected-type-driven constructor inference, selecting constructor overloads, and
   anonymous-class lowering;
 - enum semantics, case-class synthetic APIs, and `derives`;
