@@ -2397,6 +2397,7 @@ impl<'a> SourceTyper<'a> {
                     info_journal,
                     new_mappings,
                 )?;
+                let is_constructor_application = constructor_function.is_some();
                 let resolved_function = if constructor_function.is_some() {
                     None
                 } else {
@@ -2602,6 +2603,14 @@ impl<'a> SourceTyper<'a> {
                     };
                     match self.conforms(actual, parameter.ty) {
                         Ok(true) => {}
+                        Ok(false)
+                            if is_constructor_application
+                                && self.constructor_argument_types_equivalent(
+                                    actual,
+                                    parameter.ty,
+                                    info_journal,
+                                    0,
+                                )? => {}
                         Ok(false) => {
                             return Err(TyperError::ApplicationArgumentTypeMismatch {
                                 source: self.source,
@@ -4379,17 +4388,8 @@ impl<'a> SourceTyper<'a> {
                 self.conforms(actual_tycon, tycon),
             ) {
                 (Ok(true), Ok(true)) => true,
-                (Ok(_), Ok(_)) => false,
-                _ => {
-                    return Err(TyperError::UnsupportedInferenceShape {
-                        source: self.source,
-                        tree_index,
-                        binder,
-                        parameter_index: None,
-                        formal,
-                        actual,
-                    });
-                }
+                (Ok(_), Ok(_)) => self.same_top_level_type_constructor(tycon, actual_tycon),
+                _ => self.same_top_level_type_constructor(tycon, actual_tycon),
             };
             if !equivalent_constructor || args.len() != actual_args.len() {
                 return Err(TyperError::UnsupportedInferenceShape {
@@ -4448,6 +4448,92 @@ impl<'a> SourceTyper<'a> {
                 actual,
             }),
         }
+    }
+
+    fn same_top_level_type_constructor(&self, left: TypeId, right: TypeId) -> bool {
+        let (
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(left),
+                ..
+            }),
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(right),
+                ..
+            }),
+        ) = (
+            self.store.types.try_get(left),
+            self.store.types.try_get(right),
+        )
+        else {
+            return false;
+        };
+        if left != right || !self.store.symbols.contains(*left) {
+            return false;
+        }
+        let owner = self.store.symbols.get(*left).owner;
+        owner.is_some_and(|owner| {
+            self.store.symbols.contains(owner)
+                && self.store.symbols.get(owner).kind == SymbolKind::Package
+        })
+    }
+
+    fn constructor_argument_types_equivalent(
+        &mut self,
+        left: TypeId,
+        right: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        depth: usize,
+    ) -> Result<bool, TyperError> {
+        if left == right {
+            return Ok(true);
+        }
+        if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            return Ok(false);
+        }
+        let (
+            Some(Type::Applied {
+                tycon: left_tycon,
+                args: left_args,
+            }),
+            Some(Type::Applied {
+                tycon: right_tycon,
+                args: right_args,
+            }),
+        ) = (
+            self.store.types.try_get(left).cloned(),
+            self.store.types.try_get(right).cloned(),
+        )
+        else {
+            return Ok(false);
+        };
+        if left_args.len() != right_args.len()
+            || !self.same_top_level_type_constructor(left_tycon, right_tycon)
+        {
+            return Ok(false);
+        }
+        for (left_arg, right_arg) in left_args.into_iter().zip(right_args) {
+            if left_arg == right_arg {
+                continue;
+            }
+            let mut seen = HashSet::new();
+            self.complete_relation_type(left_arg, info_journal, &mut seen, 0)?;
+            self.complete_relation_type(right_arg, info_journal, &mut seen, 0)?;
+            match (
+                self.conforms(left_arg, right_arg),
+                self.conforms(right_arg, left_arg),
+            ) {
+                (Ok(true), Ok(true)) => {}
+                (Ok(false), Ok(false))
+                    if self.constructor_argument_types_equivalent(
+                        left_arg,
+                        right_arg,
+                        info_journal,
+                        depth + 1,
+                    )? => {}
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
     }
 
     fn type_contains_param_ref(&self, root: TypeId, binder: TypeId) -> Result<bool, TyperError> {
@@ -15077,6 +15163,124 @@ mod tests {
         };
         assert_eq!(type_symbol(typer.store(), *tycon), class);
         assert_eq!(args, &[parameter_type]);
+    }
+
+    #[test]
+    fn generic_primary_constructor_infers_nested_applied_formal_arguments() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Inner[A](value: A); class Wrap[A](value: Inner[A]); class Use { def make = new Wrap(new Inner(1)) }",
+        );
+        let inner_class = class_symbol(&parsed, &store, &index, source, "Inner");
+        let wrap_class = class_symbol(&parsed, &store, &index, source, "Wrap");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        if let TreeKind::Apply(app) = &typer.typed_ast().get(typed).kind {
+            eprintln!(
+                "outer arg {:?}",
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(app.args[0]).ty)
+            );
+        }
+
+        let Type::Applied { tycon, args } =
+            typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("outer constructor result should be applied")
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), wrap_class);
+        assert_eq!(args, &[definitions.int]);
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            unreachable!()
+        };
+        let Type::Applied { tycon, args } = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.args[0]).ty)
+        else {
+            panic!("constructor argument should retain its applied type")
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), inner_class);
+        assert_eq!(args, &[definitions.int]);
+    }
+
+    #[test]
+    fn generic_primary_constructor_inference_errors_are_focused_and_atomic() {
+        let cases = [
+            (
+                "class Pair[A](first: A, second: A); class Use { def make = new Pair(1, true) }",
+                0_u8,
+            ),
+            (
+                "class Pair[A, B](first: A); class Use { def make = new Pair(1) }",
+                1,
+            ),
+            (
+                "class Box[A <: Int](value: A); class Use { def make = new Box(true) }",
+                2,
+            ),
+        ];
+        for (source_text, expected_error) in cases {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+            let raw_new = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| matches!(node.kind, TreeKind::New(_)).then_some(tree))
+                .unwrap();
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+            let store_checkpoint = typer.store().checkpoint();
+            let typed_count = typer.typed_ast().iter().count();
+            let error = typer.type_expression(rhs, context).unwrap_err();
+            match (expected_error, error) {
+                (
+                    0,
+                    TyperError::ConflictingConstructorInferenceConstraints {
+                        parameter_index: 0,
+                        ..
+                    },
+                ) => {}
+                (
+                    1,
+                    TyperError::UnconstrainedConstructorTypeParameter {
+                        parameter_index: 1, ..
+                    },
+                ) => {}
+                (
+                    2,
+                    TyperError::ConstructorTypeArgumentBoundViolation {
+                        side: TypeArgumentBoundSide::Upper,
+                        ..
+                    },
+                ) => {}
+                (expected, actual) => {
+                    panic!("case {expected} returned unexpected error: {actual:?}")
+                }
+            }
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+            assert_eq!(typer.typed_ast().iter().count(), typed_count);
+            assert!(typer.source_typed_index().get(source, raw_new).is_none());
+        }
     }
 
     #[test]
