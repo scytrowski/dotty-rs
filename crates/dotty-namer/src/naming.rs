@@ -1100,12 +1100,6 @@ impl Namer<'_> {
             return Ok(None);
         };
         let template = template.clone();
-        // Enum identity has its own later naming step. Never misclassify it
-        // as a class or require class-header constructor data from this pass.
-        if definition.metadata.modifiers.contains(&Modifier::Enum) {
-            return Ok(None);
-        }
-
         let TreeKind::DefDef(constructor) = &self.arena.get(template.constructor).kind else {
             return Err(NamerError::MalformedAstShape {
                 tree_index: template.constructor.index(),
@@ -1148,7 +1142,10 @@ impl Namer<'_> {
             &definition.metadata,
             GivenNameInput::Template(definition.rhs),
         )?;
-        let kind = if definition.metadata.modifiers.contains(&Modifier::Trait) {
+        let is_enum = definition.metadata.modifiers.contains(&Modifier::Enum);
+        let kind = if is_enum {
+            SymbolKind::Class
+        } else if definition.metadata.modifiers.contains(&Modifier::Trait) {
             SymbolKind::Trait
         } else {
             SymbolKind::Class
@@ -1348,7 +1345,7 @@ impl Namer<'_> {
             } => {
                 let object_name = self.store.symbols.get(object_symbol).name;
                 if let Some(class) = self.source_companion_class(object_name, enclosing_scope) {
-                    self.companion_links.push((class, object_symbol));
+                    self.queue_companion_link(class, object_symbol);
                 }
                 return self.scan_template_body(
                     template,
@@ -1390,6 +1387,9 @@ impl Namer<'_> {
         let TreeKind::TypeDef(definition) = &self.arena.get(tree).kind else {
             return Ok(());
         };
+        if definition.metadata.modifiers.contains(&Modifier::Enum) {
+            self.ensure_enum_companion(tree, symbol, declaration_context)?;
+        }
         self.scan_template_body(
             definition.rhs,
             symbol,
@@ -1415,10 +1415,140 @@ impl Namer<'_> {
             .filter(|symbol| {
                 let symbol = self.store.symbols.get(*symbol);
                 matches!(symbol.kind, SymbolKind::Class | SymbolKind::Trait)
-                    && matches!(symbol.origin, SymbolOrigin::Source(_))
+                    && symbol.origin == SymbolOrigin::Source(self.source)
             });
         let candidate = candidates.next()?;
         candidates.next().is_none().then_some(candidate)
+    }
+
+    fn queue_companion_link(&mut self, class: SymbolId, object: SymbolId) {
+        if !self.companion_links.contains(&(class, object)) {
+            self.companion_links.push((class, object));
+        }
+    }
+
+    fn ensure_enum_companion(
+        &mut self,
+        tree: TreeId<Untyped>,
+        enum_symbol: SymbolId,
+        declaration_context: SourceContextId,
+    ) -> Result<(), NamerError> {
+        let enum_name = self.store.symbols.get(enum_symbol).name;
+        let enum_text = self.store.names.resolve(enum_name.text()).to_owned();
+        let owner =
+            self.store
+                .symbols
+                .get(enum_symbol)
+                .owner
+                .ok_or(NamerError::MalformedAstShape {
+                    tree_index: tree.index(),
+                    expected: "enum class with a semantic owner",
+                })?;
+        let owner_scope = self
+            .index
+            .scope_of(owner)
+            .ok_or(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "enum owner with a declaration scope",
+            })?;
+        let term_name = *dotty_core::TermName::new(enum_name.text()).as_name();
+        let explicit_objects = self
+            .store
+            .scopes
+            .get(owner_scope)
+            .lookup_all(&term_name)
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                let candidate = self.store.symbols.get(*candidate);
+                candidate.kind == SymbolKind::Object
+                    && candidate.origin == SymbolOrigin::Source(self.source)
+            })
+            .collect::<Vec<_>>();
+
+        if let [object] = explicit_objects.as_slice() {
+            let module_class_text = format!("{enum_text}$");
+            let module_class_name =
+                *TypeName::new(self.store.names.intern(&module_class_text)).as_name();
+            let module_class = match self.index.definition_of(*object) {
+                Some(SourceDefinition::Canonical { source, tree }) if source == self.source => {
+                    self.index.derived_symbol_at(owner, source, tree)
+                }
+                _ => None,
+            };
+            if module_class.is_some_and(|module_class| {
+                let symbol = self.store.symbols.get(module_class);
+                symbol.kind == SymbolKind::ModuleClass
+                    && symbol.owner == Some(owner)
+                    && symbol.origin == SymbolOrigin::Source(self.source)
+                    && self
+                        .store
+                        .scopes
+                        .get(owner_scope)
+                        .lookup_all(&module_class_name)
+                        .contains(&module_class)
+            }) {
+                self.queue_companion_link(enum_symbol, *object);
+                return Ok(());
+            }
+            return Err(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "explicit enum companion with one module class",
+            });
+        }
+        if !explicit_objects.is_empty() {
+            return Err(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "unique explicit enum companion object",
+            });
+        }
+
+        let module_class_text = format!("{enum_text}$");
+        let module_class_name =
+            *TypeName::new(self.store.names.intern(&module_class_text)).as_name();
+        let object = self.store.symbols.alloc(Symbol {
+            name: term_name,
+            owner: Some(owner),
+            kind: SymbolKind::Object,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        self.store
+            .scopes
+            .get_mut(owner_scope)
+            .enter(term_name, object);
+        self.scope_insertions.push((owner_scope, object));
+
+        let module_class = self.store.symbols.alloc(Symbol {
+            name: module_class_name,
+            owner: Some(owner),
+            kind: SymbolKind::ModuleClass,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        self.store
+            .scopes
+            .get_mut(owner_scope)
+            .enter(module_class_name, module_class);
+        self.scope_insertions.push((owner_scope, module_class));
+        let module_scope = self.store.scopes.alloc(Scope::new(Some(module_class)));
+        self.index.record_scope(module_class, module_scope)?;
+        self.index
+            .record_declaration_context(object, declaration_context)?;
+        self.index
+            .record_declaration_context(module_class, declaration_context)?;
+        self.queue_companion_link(enum_symbol, object);
+        Ok(())
     }
 
     fn scan_template_body(
@@ -1621,6 +1751,21 @@ impl Namer<'_> {
         let mut active_source_context = class_source_context;
         for member in &template.body {
             if *member == template.constructor {
+                continue;
+            }
+            let is_enum_case = match &self.arena.get(*member).kind {
+                TreeKind::TypeDef(definition) => {
+                    definition.metadata.modifiers.contains(&Modifier::EnumCase)
+                }
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) => {
+                    definition.metadata.modifiers.contains(&Modifier::EnumCase)
+                }
+                TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
+                    definition.modifiers.modifiers.contains(&Modifier::EnumCase)
+                }
+                _ => false,
+            };
+            if is_enum_case {
                 continue;
             }
             if matches!(self.arena.get(*member).kind, TreeKind::Import(_)) {
@@ -2071,7 +2216,9 @@ impl Namer<'_> {
                     Modifier::Opaque => SymbolFlags::OPAQUE,
                     Modifier::Extension => SymbolFlags::EXTENSION,
                     Modifier::Erased => SymbolFlags::ERASED,
-                    Modifier::Enum => SymbolFlags::ENUM,
+                    Modifier::Enum => {
+                        SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SEALED
+                    }
                     Modifier::EnumCase => SymbolFlags::ENUM | SymbolFlags::CASE,
                     _ => SymbolFlags::EMPTY,
                 };
@@ -2431,8 +2578,11 @@ mod tests {
     }
 
     #[test]
-    fn source_enum_modifier_maps_to_enum_flag() {
-        assert_eq!(Namer::source_flags(&[Modifier::Enum]), SymbolFlags::ENUM);
+    fn source_enum_modifier_maps_to_enum_semantics() {
+        assert_eq!(
+            Namer::source_flags(&[Modifier::Enum]),
+            SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SEALED
+        );
     }
 
     #[test]
@@ -4628,7 +4778,7 @@ mod tests {
     }
 
     #[test]
-    fn enum_template_is_not_entered_as_an_ordinary_class() {
+    fn enum_template_is_entered_as_a_class_with_implied_enum_flags() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let enumeration = class_definition(
@@ -4644,9 +4794,111 @@ mod tests {
 
         let index = name_package(&arena, root, 17, &mut store, &mut packages).unwrap();
         let owner = packages.get(&["enums"]).unwrap();
+        let symbol = type_symbol(&mut store, owner.scope, "Color").unwrap();
 
-        assert_eq!(type_symbol(&mut store, owner.scope, "Color"), None);
-        assert_eq!(index.symbol_at(SourceId::from_index(17), enumeration), None);
+        assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Class);
+        assert!(
+            store
+                .symbols
+                .get(symbol)
+                .flags
+                .contains(SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SEALED)
+        );
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(17), enumeration),
+            Some(symbol)
+        );
+        assert!(index.scope_of(symbol).is_some());
+    }
+
+    #[test]
+    fn enum_without_a_source_object_gets_a_synthetic_companion_pair() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let enumeration = class_definition(
+            &mut arena,
+            &mut store,
+            "Color",
+            vec![Modifier::Enum],
+            vec![],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "enums", vec![enumeration]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 18, &mut store, &mut packages).unwrap();
+        let package_scope = packages.get(&["enums"]).unwrap().scope;
+        let enum_symbol = type_symbol(&mut store, package_scope, "Color").unwrap();
+        let object_symbol = term_symbol(&mut store, package_scope, "Color").unwrap();
+        let module_class = type_symbol(&mut store, package_scope, "Color$").unwrap();
+
+        assert_eq!(
+            store.symbols.get(enum_symbol).links.companion,
+            Some(object_symbol)
+        );
+        assert_eq!(
+            store.symbols.get(object_symbol).links.companion,
+            Some(enum_symbol)
+        );
+        assert_eq!(
+            store.symbols.get(module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            store.symbols.get(module_class).owner,
+            packages.symbol(&["enums"])
+        );
+        assert_eq!(
+            store.symbols.get(object_symbol).origin,
+            SymbolOrigin::Synthetic
+        );
+        assert_eq!(
+            store.symbols.get(module_class).origin,
+            SymbolOrigin::Synthetic
+        );
+        assert!(index.scope_of(module_class).is_some());
+        assert!(index.declaration_context_of(object_symbol).is_some());
+        assert!(index.declaration_context_of(module_class).is_some());
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(18), enumeration),
+            Some(enum_symbol)
+        );
+    }
+
+    #[test]
+    fn failed_enum_body_scan_rolls_back_its_synthetic_companion() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let invalid_parameter = type_parameter(&mut arena, &mut store, "NotAValue", None);
+        let malformed_constructor = method_definition(
+            &mut arena,
+            &mut store,
+            "<init>",
+            vec![],
+            vec![vec![invalid_parameter]],
+            None,
+        );
+        let enumeration = class_definition(
+            &mut arena,
+            &mut store,
+            "BrokenEnum",
+            vec![Modifier::Enum],
+            vec![malformed_constructor],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "enumrollback", vec![enumeration]);
+        let before = store.checkpoint();
+        let mut packages = Packages::new();
+
+        assert_eq!(
+            name_package(&arena, root, 19, &mut store, &mut packages).unwrap_err(),
+            NamerError::MalformedAstShape {
+                tree_index: invalid_parameter.index(),
+                expected: "ValDef secondary constructor value parameter",
+            }
+        );
+        assert_eq!(store.checkpoint(), before);
+        assert!(packages.is_empty());
     }
 
     #[test]
