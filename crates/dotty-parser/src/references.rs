@@ -131,19 +131,39 @@ where
     }
 
     fn current_reference_name(&mut self, namespace: ReferenceNamespace) -> Option<(Name, bool)> {
-        if !matches!(
-            self.current().kind,
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier
-        ) {
+        let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
+        let is_name = match namespace {
+            ReferenceNamespace::Term => matches!(
+                self.current().kind,
+                TokenKind::Identifier | TokenKind::BackquotedIdentifier
+            ),
+            ReferenceNamespace::Type => {
+                matches!(
+                    self.current().kind,
+                    TokenKind::Identifier | TokenKind::BackquotedIdentifier
+                ) || self.current_is_symbolic_type_name()
+            }
+        };
+        if !is_name {
             return None;
         }
 
-        let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
         let name = match namespace {
             ReferenceNamespace::Term => *self.intern_current_term_name().ok()?.as_name(),
             ReferenceNamespace::Type => *self.intern_current_type_name().ok()?.as_name(),
         };
         Some((name, backquoted))
+    }
+
+    fn current_is_symbolic_type_name(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Operator | TokenKind::ColonOp
+        ) && ![
+            "=", "=>", "=>>", "<-", "<:", "<%", ">:", "?=>", ":", "@", "#",
+        ]
+        .iter()
+        .any(|reserved| self.current_text_is(reserved))
     }
 }
 
@@ -203,5 +223,52 @@ mod tests {
             TreeKind::Ident(ident) if ident.name.is_type()
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn qualified_type_references_accept_symbolic_names_in_the_type_namespace() {
+        for (source, kind) in [("::", TokenKind::ColonOp), ("=:=", TokenKind::Operator)] {
+            let mut names = NameInterner::new();
+            let end = source.len() as u32;
+            let mut parser = parser_for(
+                source,
+                vec![token(kind, 0, end), token(TokenKind::Eof, end, end)],
+                &mut names,
+            );
+
+            let reference = parser
+                .parse_qualified_reference(ReferenceNamespace::Type)
+                .expect("symbolic spelling should be accepted as a type name");
+            let TreeKind::Ident(ident) = parser.ast().get(reference).kind else {
+                panic!("expected a type identifier");
+            };
+            assert!(ident.name.is_type());
+            let name = ident.name;
+            assert!(parser.diagnostics().is_empty());
+            drop(parser);
+            assert_eq!(names.resolve(name.text()), source);
+        }
+    }
+
+    #[test]
+    fn qualified_type_references_do_not_accept_reserved_operators_as_names() {
+        for source in ["=", "<:", ">:", "@", "#"] {
+            let mut names = NameInterner::new();
+            let end = source.len() as u32;
+            let mut parser = parser_for(
+                source,
+                vec![
+                    token(TokenKind::Operator, 0, end),
+                    token(TokenKind::Eof, end, end),
+                ],
+                &mut names,
+            );
+
+            assert_eq!(
+                parser.parse_qualified_reference(ReferenceNamespace::Type),
+                Err(QualifiedReferenceError::MissingInitial),
+                "reserved spelling {source:?} must stay in its grammar"
+            );
+        }
     }
 }
