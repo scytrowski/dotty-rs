@@ -3743,15 +3743,7 @@ impl<'a> SourceTyper<'a> {
                 )
             }) =>
             {
-                return Err(TyperError::GenericConstructorOverloadResolutionDeferred {
-                    source: self.source,
-                    tree_index: root.index(),
-                    class,
-                    candidates: candidates
-                        .iter()
-                        .map(|candidate| candidate.symbol)
-                        .collect(),
-                });
+                return Ok(());
             }
             _ => {
                 return Err(TyperError::ConstructorOverloadResolutionDeferred {
@@ -17324,6 +17316,121 @@ mod tests {
                 target: TermRefTarget::Symbol(selected),
                 ..
             } if *selected == secondary
+        ));
+    }
+
+    #[test]
+    fn raw_generic_constructor_overload_infers_the_winning_instance_type() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C[A](value: A) { def this(value: Int) = this(value) }; class Use { def make = new C(true) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructors = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&constructor_name)
+            .to_vec();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let mut primary = None;
+        for constructor in constructors.iter().copied() {
+            let callable = typer.complete_symbol(constructor).unwrap();
+            if matches!(typer.store().types.get(callable), Type::Poly(_)) {
+                primary = Some(constructor);
+            }
+        }
+        let primary = primary.unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = typer.typed_ast().get(typed).kind.clone() else {
+            panic!("constructor call should remain an Apply")
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(selected),
+                ..
+            } if *selected == primary
+        ));
+        let TreeKind::Select(selection) = typer.typed_ast().get(application.function).kind.clone()
+        else {
+            panic!("constructor application should select its winner")
+        };
+        assert!(matches!(
+            typer.typed_ast().get(selection.qualifier).kind,
+            TreeKind::New(_)
+        ));
+        let Type::Applied { args, .. } = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(selection.qualifier).ty)
+        else {
+            panic!("raw generic New should retain its inferred class type arguments")
+        };
+        assert_eq!(args, &[definitions.boolean]);
+    }
+
+    #[test]
+    fn curried_raw_constructor_keeps_the_first_clause_winner() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C[A](value: A)(other: Int) { def this(value: Int)(other: Int) = this(value)(other) }; class Use { def make = new C(true)(1) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructors = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&constructor_name)
+            .to_vec();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let mut primary = None;
+        for constructor in constructors.iter().copied() {
+            let callable = typer.complete_symbol(constructor).unwrap();
+            if matches!(typer.store().types.get(callable), Type::Poly(_)) {
+                primary = Some(constructor);
+            }
+        }
+        let primary = primary.unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(outer) = typer.typed_ast().get(typed).kind.clone() else {
+            panic!("curried constructor call should retain its outer Apply")
+        };
+        let TreeKind::Apply(inner) = typer.typed_ast().get(outer.function).kind.clone() else {
+            panic!("curried constructor call should retain its constructor Apply")
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(inner.function).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(selected),
+                ..
+            } if *selected == primary
         ));
     }
 
