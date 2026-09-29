@@ -1213,6 +1213,8 @@ struct TypedArgument {
     widened_type: TypeId,
 }
 
+type ConstructorApplicationFunction = (TreeId<Typed>, TypeId, Option<Vec<TypedArgument>>);
+
 #[derive(Clone, Copy)]
 struct ExpressionScopeFrame {
     scope: dotty_core::ScopeId,
@@ -2970,7 +2972,7 @@ impl<'a> SourceTyper<'a> {
         application_tree_index: u32,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
-    ) -> Result<Option<(TreeId<Typed>, TypeId, Option<Vec<TypedArgument>>)>, TyperError> {
+    ) -> Result<Option<ConstructorApplicationFunction>, TyperError> {
         if !self.is_constructor_selection(function_tree) {
             return Ok(None);
         }
@@ -3322,7 +3324,7 @@ impl<'a> SourceTyper<'a> {
         reversed_clauses.reverse();
         let candidates = self.constructor_candidates_for_class(class, info_journal)?;
         let candidate = match candidates.as_slice() {
-            [candidate] => candidate.clone(),
+            [candidate] => *candidate,
             [] => return Err(TyperError::ConstructorApplicationUnavailable { class }),
             _ if candidates.iter().any(|candidate| {
                 matches!(
