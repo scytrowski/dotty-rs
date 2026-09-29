@@ -1937,6 +1937,106 @@ fn parsed_enum_reuses_explicit_companion_without_entering_cases_as_members() {
 }
 
 #[test]
+fn parsed_enum_uses_ordinary_class_constructor_and_member_identities() {
+    use dotty_core::SymbolKind;
+
+    let named = named_source("enum Box[A](val value: A):\n  def get: A = value", 490);
+    let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let enum_tree = package.stats[0];
+    let TreeKind::TypeDef(definition) = &named.parsed.ast.get(enum_tree).kind else {
+        panic!("enum should use the shared TypeDef representation");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(definition.rhs).kind else {
+        panic!("enum RHS should be a Template");
+    };
+    let TreeKind::DefDef(constructor) = &named.parsed.ast.get(template.constructor).kind else {
+        panic!("enum should have the ordinary primary constructor shape");
+    };
+    let TreeKind::ValDef(value_parameter) = &named
+        .parsed
+        .ast
+        .get(constructor.value_param_clauses[0][0])
+        .kind
+    else {
+        panic!("enum constructor parameter should be a ValDef");
+    };
+    let method_tree = template.body[0];
+
+    let enum_symbol = named.index.symbol_at(named.source, enum_tree).unwrap();
+    let class_scope = named.index.scope_of(enum_symbol).unwrap();
+    let type_parameter_tree = constructor.type_params[0];
+    let type_parameter_name = match &named.parsed.ast.get(type_parameter_tree).kind {
+        TreeKind::TypeDef(parameter) => *parameter.name.as_name(),
+        _ => panic!("class type parameter should be a TypeDef"),
+    };
+    let type_parameter = named
+        .store
+        .scopes
+        .get(class_scope)
+        .lookup(&type_parameter_name)
+        .unwrap();
+    let constructor_symbol = named
+        .index
+        .symbol_at(named.source, template.constructor)
+        .unwrap();
+    let constructor_copy = named
+        .index
+        .derived_symbol_at(constructor_symbol, named.source, type_parameter_tree)
+        .unwrap();
+    let parameter_tree = constructor.value_param_clauses[0][0];
+    let field = named.index.symbol_at(named.source, parameter_tree).unwrap();
+    let constructor_parameter = named
+        .index
+        .derived_symbol_at(constructor_symbol, named.source, parameter_tree)
+        .unwrap();
+    let method = named.index.symbol_at(named.source, method_tree).unwrap();
+
+    assert_eq!(named.store.symbols.get(enum_symbol).kind, SymbolKind::Class);
+    assert!(
+        named
+            .store
+            .symbols
+            .get(enum_symbol)
+            .flags
+            .contains(SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SEALED)
+    );
+    assert_eq!(
+        named.store.symbols.get(type_parameter).owner,
+        Some(enum_symbol)
+    );
+    assert_eq!(
+        named.store.symbols.get(constructor_copy).owner,
+        Some(constructor_symbol)
+    );
+    assert_eq!(
+        named.store.symbols.get(constructor_symbol).kind,
+        SymbolKind::Constructor
+    );
+    assert_eq!(named.store.symbols.get(field).kind, SymbolKind::Field);
+    assert_eq!(named.store.symbols.get(field).owner, Some(enum_symbol));
+    assert_eq!(
+        named.store.symbols.get(constructor_parameter).kind,
+        SymbolKind::Parameter
+    );
+    assert_eq!(
+        named.store.symbols.get(constructor_parameter).owner,
+        Some(constructor_symbol)
+    );
+    assert_eq!(named.store.symbols.get(method).kind, SymbolKind::Method);
+    assert_eq!(named.store.symbols.get(method).owner, Some(enum_symbol));
+    assert!(
+        named
+            .store
+            .scopes
+            .get(class_scope)
+            .lookup(value_parameter.name.as_name())
+            .is_some()
+    );
+}
+
+#[test]
 fn parsed_pattern_val_binders_are_fields_of_the_source_wrapper() {
     use dotty_core::ast::UntypedNode;
     use dotty_core::{SymbolKind, TermName};

@@ -4863,6 +4863,42 @@ mod tests {
     }
 
     #[test]
+    fn failed_enum_body_scan_rolls_back_its_synthetic_companion() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let invalid_parameter = type_parameter(&mut arena, &mut store, "NotAValue", None);
+        let malformed_constructor = method_definition(
+            &mut arena,
+            &mut store,
+            "<init>",
+            vec![],
+            vec![vec![invalid_parameter]],
+            None,
+        );
+        let enumeration = class_definition(
+            &mut arena,
+            &mut store,
+            "BrokenEnum",
+            vec![Modifier::Enum],
+            vec![malformed_constructor],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "enumrollback", vec![enumeration]);
+        let before = store.checkpoint();
+        let mut packages = Packages::new();
+
+        assert_eq!(
+            name_package(&arena, root, 19, &mut store, &mut packages).unwrap_err(),
+            NamerError::MalformedAstShape {
+                tree_index: invalid_parameter.index(),
+                expected: "ValDef secondary constructor value parameter",
+            }
+        );
+        assert_eq!(store.checkpoint(), before);
+        assert!(packages.is_empty());
+    }
+
+    #[test]
     fn class_type_parameters_are_owned_and_entered_in_class_scope() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
