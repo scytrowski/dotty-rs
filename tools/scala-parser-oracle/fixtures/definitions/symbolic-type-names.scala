@@ -1,6 +1,7 @@
 {
   type ::[+A] = List[A]
   type =:=[A, B] = (A, B)
+  sealed abstract class <:<[-From, +To] extends (From => To) with Serializable
 
   val cons: ::[Int] = ???
   val equality: =:=[Int, Int] = ???

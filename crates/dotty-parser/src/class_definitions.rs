@@ -1362,24 +1362,18 @@ where
     }
 
     fn parse_type_name(&mut self) -> TypeName {
-        match self.current().kind {
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
-                match self.intern_current_type_name() {
-                    Ok(name) => {
-                        self.advance();
-                        name
-                    }
-                    Err(_) => self.missing_type_name(),
-                }
-            }
-            _ => {
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "expected a type name after class or trait",
-                );
-                self.missing_type_name()
+        if self.current_is_type_reference_name() {
+            if let Ok(name) = self.intern_current_type_name() {
+                self.advance();
+                return name;
             }
         }
+
+        self.report(
+            ParseDiagnosticKind::ExpectedType,
+            "expected a type name after class or trait",
+        );
+        self.missing_type_name()
     }
 
     fn parse_object_name(&mut self) -> TermName {
@@ -1724,6 +1718,34 @@ mod tests {
         assert!(template.parents.is_empty());
         assert!(template.body.is_empty());
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_operator_spelled_class_name_in_the_type_namespace() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class <:<",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Operator, 6, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a class definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a TypeDef");
+        };
+        assert!(definition.name.as_name().is_type());
+        let class_name = definition.name.as_name();
+        assert!(parser.diagnostics().is_empty());
+        let class_name = *class_name;
+        drop(parser);
+        assert_eq!(names.resolve(class_name.text()), "<:<");
     }
 
     #[test]
