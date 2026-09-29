@@ -1100,12 +1100,6 @@ impl Namer<'_> {
             return Ok(None);
         };
         let template = template.clone();
-        // Enum identity has its own later naming step. Never misclassify it
-        // as a class or require class-header constructor data from this pass.
-        if definition.metadata.modifiers.contains(&Modifier::Enum) {
-            return Ok(None);
-        }
-
         let TreeKind::DefDef(constructor) = &self.arena.get(template.constructor).kind else {
             return Err(NamerError::MalformedAstShape {
                 tree_index: template.constructor.index(),
@@ -1148,7 +1142,10 @@ impl Namer<'_> {
             &definition.metadata,
             GivenNameInput::Template(definition.rhs),
         )?;
-        let kind = if definition.metadata.modifiers.contains(&Modifier::Trait) {
+        let is_enum = definition.metadata.modifiers.contains(&Modifier::Enum);
+        let kind = if is_enum {
+            SymbolKind::Class
+        } else if definition.metadata.modifiers.contains(&Modifier::Trait) {
             SymbolKind::Trait
         } else {
             SymbolKind::Class
@@ -1623,6 +1620,18 @@ impl Namer<'_> {
             if *member == template.constructor {
                 continue;
             }
+            let is_enum_case = match &self.arena.get(*member).kind {
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) => {
+                    definition.metadata.modifiers.contains(&Modifier::EnumCase)
+                }
+                TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
+                    definition.modifiers.modifiers.contains(&Modifier::EnumCase)
+                }
+                _ => false,
+            };
+            if is_enum_case {
+                continue;
+            }
             if matches!(self.arena.get(*member).kind, TreeKind::Import(_)) {
                 active_source_context = self.context_after_import(active_source_context, *member);
                 continue;
@@ -2071,7 +2080,9 @@ impl Namer<'_> {
                     Modifier::Opaque => SymbolFlags::OPAQUE,
                     Modifier::Extension => SymbolFlags::EXTENSION,
                     Modifier::Erased => SymbolFlags::ERASED,
-                    Modifier::Enum => SymbolFlags::ENUM,
+                    Modifier::Enum => {
+                        SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SEALED
+                    }
                     Modifier::EnumCase => SymbolFlags::ENUM | SymbolFlags::CASE,
                     _ => SymbolFlags::EMPTY,
                 };
@@ -2431,8 +2442,11 @@ mod tests {
     }
 
     #[test]
-    fn source_enum_modifier_maps_to_enum_flag() {
-        assert_eq!(Namer::source_flags(&[Modifier::Enum]), SymbolFlags::ENUM);
+    fn source_enum_modifier_maps_to_enum_semantics() {
+        assert_eq!(
+            Namer::source_flags(&[Modifier::Enum]),
+            SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SEALED
+        );
     }
 
     #[test]
@@ -4628,7 +4642,7 @@ mod tests {
     }
 
     #[test]
-    fn enum_template_is_not_entered_as_an_ordinary_class() {
+    fn enum_template_is_entered_as_a_class_with_implied_enum_flags() {
         let mut store = SemanticStore::new();
         let mut arena = AstArena::<Untyped>::new();
         let enumeration = class_definition(
@@ -4644,9 +4658,21 @@ mod tests {
 
         let index = name_package(&arena, root, 17, &mut store, &mut packages).unwrap();
         let owner = packages.get(&["enums"]).unwrap();
+        let symbol = type_symbol(&mut store, owner.scope, "Color").unwrap();
 
-        assert_eq!(type_symbol(&mut store, owner.scope, "Color"), None);
-        assert_eq!(index.symbol_at(SourceId::from_index(17), enumeration), None);
+        assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Class);
+        assert!(
+            store
+                .symbols
+                .get(symbol)
+                .flags
+                .contains(SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SEALED)
+        );
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(17), enumeration),
+            Some(symbol)
+        );
+        assert!(index.scope_of(symbol).is_some());
     }
 
     #[test]
