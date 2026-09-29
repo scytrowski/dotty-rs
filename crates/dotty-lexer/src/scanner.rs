@@ -247,10 +247,17 @@ impl ContextualScanner {
                 .any(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines));
             let starts_unspaced_prefix_expr =
                 is_unspaced_prefix_expr(&self.source, &self.tokens, current_index);
+            let starts_symbolic_operator = current.kind == TokenKind::Operator
+                && self
+                    .source
+                    .get(current.span.start() as usize..current.span.end() as usize)
+                    != Some("@");
             if has_line_break
                 && !has_separator
                 && can_end_statement(Some(previous.kind))
-                && (can_start_statement_kind(current.kind) || starts_unspaced_prefix_expr)
+                && (can_start_statement_kind(current.kind)
+                    || starts_unspaced_prefix_expr
+                    || starts_symbolic_operator)
                 && !suppresses_statement_separator_kind(current.kind)
                 && !is_leading_infix_tokens(
                     &self.source,
@@ -1125,7 +1132,7 @@ fn is_leading_infix_tokens(
     let starts_prefix_rhs = next.kind == TokenKind::Operator
         && is_prefix_operator(source, next.span)
         && next_real_token(tokens, current_index + 1).is_some_and(|operand| {
-            can_start_statement_kind(operand.kind)
+            can_start_simple_expr_kind(operand.kind)
                 && !has_source_line_break(source, next.span.end(), operand.span.start())
         });
     // Dotty only treats a leading symbolic/backquoted name as an infix
@@ -1159,7 +1166,63 @@ fn is_unspaced_prefix_expr(source: &str, tokens: &[Token], operator_index: usize
         return false;
     };
     source[operator.span.end() as usize..operand.span.start() as usize].is_empty()
-        && can_start_statement_kind(operand.kind)
+        && can_start_simple_expr_kind(operand.kind)
+}
+
+fn can_start_simple_expr_kind(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Identifier
+            | TokenKind::BackquotedIdentifier
+            | TokenKind::Quote
+            | TokenKind::XmlStart
+            | TokenKind::CharLiteral
+            | TokenKind::IntegerLiteral
+            | TokenKind::DecimalLiteral
+            | TokenKind::ExponentLiteral
+            | TokenKind::LongLiteral
+            | TokenKind::FloatLiteral
+            | TokenKind::DoubleLiteral
+            | TokenKind::StringLiteral
+            | TokenKind::InterpolationId
+            | TokenKind::Keyword(
+                HardKeyword::This
+                    | HardKeyword::Null
+                    | HardKeyword::New
+                    | HardKeyword::Super
+                    | HardKeyword::True
+                    | HardKeyword::False
+            )
+            | TokenKind::Punctuation(Punctuation::LeftParen | Punctuation::LeftBrace)
+    )
+}
+
+fn can_start_simple_expr_raw(kind: RawTokenKind) -> bool {
+    matches!(
+        kind,
+        RawTokenKind::Identifier
+            | RawTokenKind::BackquotedIdentifier
+            | RawTokenKind::Quote
+            | RawTokenKind::XmlStart
+            | RawTokenKind::CharLiteral
+            | RawTokenKind::IntegerLiteral
+            | RawTokenKind::DecimalLiteral
+            | RawTokenKind::ExponentLiteral
+            | RawTokenKind::LongLiteral
+            | RawTokenKind::FloatLiteral
+            | RawTokenKind::DoubleLiteral
+            | RawTokenKind::StringLiteral
+            | RawTokenKind::InterpolationId
+            | RawTokenKind::Keyword(
+                HardKeyword::This
+                    | HardKeyword::Null
+                    | HardKeyword::New
+                    | HardKeyword::Super
+                    | HardKeyword::True
+                    | HardKeyword::False
+            )
+            | RawTokenKind::Punctuation(Punctuation::LeftParen | Punctuation::LeftBrace)
+    )
 }
 
 fn suppresses_statement_separator(kind: RawTokenKind) -> bool {
@@ -1203,7 +1266,7 @@ fn is_leading_infix(
     let starts_prefix_rhs = next.kind == RawTokenKind::Operator
         && is_prefix_operator(source, next.span)
         && next_raw_token(items, next_index).is_some_and(|operand| {
-            can_start_statement(operand.kind)
+            can_start_simple_expr_raw(operand.kind)
                 && !has_source_line_break(source, next.span.end(), operand.span.start())
         });
     if !can_start_statement(next.kind) && !starts_prefix_rhs {
@@ -3323,6 +3386,49 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn declaration_keyword_does_not_start_a_prefix_rhs_for_leading_infix() {
+        let source = "value\n  && ! val next = 1";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+        let operator_index = scanner
+            .tokens()
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Operator
+                    && &source[token.span.start() as usize..token.span.end() as usize] == "&&"
+            })
+            .expect("leading infix token exists");
+        assert!(!is_leading_infix_tokens(
+            source,
+            scanner.tokens(),
+            0,
+            operator_index
+        ));
+    }
+
+    #[test]
+    fn arrow_indented_feedback_does_not_join_a_leading_infix_with_a_keyword_prefix_rhs() {
+        let source = "(case A =>\n  value\n  && ! val next = 1\n  finish)";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while !(scanner.current().kind == TokenKind::Operator
+            && &source
+                [scanner.current().span.start() as usize..scanner.current().span.end() as usize]
+                == "=>")
+        {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::ArrowIndented);
+
+        let value_end = source.find("value").unwrap() as u32 + "value".len() as u32;
+        let operator_start = source.find("&&").unwrap() as u32;
+        assert!(scanner.tokens().iter().any(|token| {
+            token.kind == TokenKind::Newline
+                && token.span.start() == value_end
+                && token.span.end() == operator_start
+        }));
     }
 
     #[test]
