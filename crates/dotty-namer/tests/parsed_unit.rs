@@ -4787,6 +4787,154 @@ fn extension_export_children_are_deferred_without_method_symbols() {
     .expect("extension exports are deferred by naming");
 
     assert_eq!(index.symbol_at(source, *export), None);
+    let site = index
+        .export_site_at(source, *export)
+        .expect("extension export should reach the semantic handoff");
+    assert_eq!(
+        site.extension_prefix_clauses,
+        Some(extension.param_clauses.clone())
+    );
+    assert_eq!(index.export_sites_for_owner(site.owner), &[site.clone()]);
+}
+
+#[test]
+fn top_level_exports_keep_wrapper_owner_and_preceding_import_context() {
+    let named = named_source(
+        "import util.*\nexport service.foo\nexport service.{foo, bar as baz}\nexport service.*",
+        208,
+    );
+    let package_stats = package_stat_trees(&named);
+    let exports = package_stats
+        .iter()
+        .copied()
+        .filter(|tree| matches!(named.parsed.ast.get(*tree).kind, TreeKind::Export(_)))
+        .collect::<Vec<_>>();
+    assert_eq!(exports.len(), 3);
+
+    let sites = exports
+        .iter()
+        .map(|tree| {
+            named
+                .index
+                .export_site_at(named.source, *tree)
+                .expect("parsed export should be recorded")
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    let wrapper = sites[0].owner;
+    assert_eq!(
+        named.store.symbols.get(wrapper).kind,
+        dotty_core::SymbolKind::ModuleClass
+    );
+    assert!(sites.iter().all(|site| site.owner == wrapper));
+    assert_eq!(
+        named.index.export_sites_for_owner(wrapper),
+        sites.as_slice()
+    );
+    assert!(
+        sites
+            .iter()
+            .all(|site| site.extension_prefix_clauses.is_none())
+    );
+
+    let import_tree = package_stats
+        .iter()
+        .copied()
+        .find(|tree| matches!(named.parsed.ast.get(*tree).kind, TreeKind::Import(_)))
+        .expect("source should contain the leading import");
+    let mut context = Some(sites[0].context);
+    let mut found_import = false;
+    while let Some(context_id) = context {
+        let source_context = named.index.source_context(context_id);
+        found_import |= source_context.import == Some(import_tree);
+        context = source_context.parent;
+    }
+    assert!(
+        found_import,
+        "export context should retain its preceding import"
+    );
+}
+
+#[test]
+fn class_member_exports_are_owned_by_the_class_and_remain_distinct() {
+    let named = named_source(
+        "class Service { export backend.read; export backend.write }",
+        209,
+    );
+    let class_tree = package_stat_trees(&named)[0];
+    let TreeKind::TypeDef(definition) = &named.parsed.ast.get(class_tree).kind else {
+        panic!("source class should remain a TypeDef");
+    };
+    let TreeKind::Template(template) = &named.parsed.ast.get(definition.rhs).kind else {
+        panic!("class body should remain a Template");
+    };
+    let exports = template
+        .body
+        .iter()
+        .copied()
+        .filter(|tree| matches!(named.parsed.ast.get(*tree).kind, TreeKind::Export(_)))
+        .collect::<Vec<_>>();
+    assert_eq!(exports.len(), 2);
+    let owner = named.index.symbol_at(named.source, class_tree).unwrap();
+    let sites = exports
+        .iter()
+        .map(|tree| {
+            named
+                .index
+                .export_site_at(named.source, *tree)
+                .expect("class export should be recorded")
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    assert!(sites.iter().all(|site| site.owner == owner));
+    assert_ne!(sites[0].tree, sites[1].tree);
+    assert_eq!(named.index.export_sites_for_owner(owner), sites.as_slice());
+}
+
+#[test]
+fn duplicate_export_registration_rolls_back_naming_transaction() {
+    let (mut parsed, source, mut store) =
+        parsed_source("class Service { export backend.read }", 210);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(definition) = &parsed.ast.get(package.stats[0]).kind else {
+        panic!("source class should remain a TypeDef");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+        panic!("class body should remain a Template");
+    };
+    let export = template
+        .body
+        .iter()
+        .copied()
+        .find(|tree| matches!(parsed.ast.get(*tree).kind, TreeKind::Export(_)))
+        .expect("class body should contain an export");
+    let TreeKind::Template(template) = &mut parsed.ast.get_mut(definition.rhs).kind else {
+        unreachable!();
+    };
+    template.body.push(export);
+
+    let before = store.checkpoint();
+    let mut packages = Packages::new();
+    let error = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "DuplicateExport.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect_err("a source export tree cannot be registered twice");
+    assert_eq!(
+        error,
+        NamerError::DuplicateSourceExportSite {
+            source,
+            tree_index: export.index(),
+        }
+    );
+    assert_eq!(store.checkpoint(), before);
+    assert!(packages.is_empty());
 }
 
 #[test]
