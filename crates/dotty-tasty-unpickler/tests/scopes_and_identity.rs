@@ -229,6 +229,10 @@ fn an_objects_module_class_is_a_third_symbol_named_with_a_dollar() {
 
     assert_eq!(entered.kind(module_class), SymbolKind::ModuleClass);
     assert_eq!(entered.owner(module_class), Some(package));
+    assert_eq!(
+        entered.store.symbols.get(module_class).links.companion,
+        None
+    );
 }
 
 #[test]
@@ -263,6 +267,15 @@ fn an_object_without_a_class_companion_stays_unlinked() {
     let object = entered.only(package, "CtorObj", Namespace::Term);
 
     assert_eq!(entered.store.symbols.get(object).links.companion, None);
+}
+
+#[test]
+fn a_class_without_an_object_companion_stays_unlinked() {
+    let mut entered = enter(PLAIN);
+    let package = entered.package();
+    let class = entered.only(package, "Plain", Namespace::Type);
+
+    assert_eq!(entered.store.symbols.get(class).links.companion, None);
 }
 
 // --- overloads ---

@@ -293,6 +293,9 @@ symbol returns `UnpickleError::ConflictingCompanion`. Since link publication is
 the final step of pass 1, a failed entry leaves links from earlier units
 unchanged.
 
+The pinned library/compiler corpus counts and forward/reverse order survey are
+recorded in [`tasty-companion-audit-3.9.0.md`](tasty-companion-audit-3.9.0.md).
+
 The caller owns the session and passes the store's `Definitions` (bootstrapped
 once) to `new`/`with_packages`. The unpickler never bootstraps, and every
 reference without a prefix (`TYPEREFdirect`, `TERMREFdirect`, `TYPEREFpkg`,

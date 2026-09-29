@@ -177,7 +177,7 @@ impl TastySemanticIndex {
     }
 
     /// Symbols entered for this unit, in deterministic address order.
-    pub(crate) fn entered_symbols(&self) -> Vec<SymbolId> {
+    pub fn entered_symbols(&self) -> Vec<SymbolId> {
         let mut entries: Vec<_> = self.symbols.iter().collect();
         entries.sort_unstable_by_key(|(address, _)| **address);
         entries.into_iter().map(|(_, symbol)| *symbol).collect()
