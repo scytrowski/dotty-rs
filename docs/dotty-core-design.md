@@ -842,6 +842,7 @@ pub struct Modifiers {
 pub enum Modifier {
     Trait,
     Enum,
+    EnumCase,
     Abstract,
     Final,
     Sealed,
@@ -869,7 +870,9 @@ distinction between `trait T` and `class T` when both use the shared
 `TypeDef`/`Template` tree family; enum definitions use the same family rather
 than a dedicated tree kind. These flags must not be inferred from constructor
 shape or body contents. Later source flags such as `Case` can compose with
-this metadata without changing the phase boundary.
+this metadata without changing the phase boundary. The namer maps `Enum` to
+`SymbolFlags::ENUM` and `EnumCase` to `SymbolFlags::ENUM | SymbolFlags::CASE`;
+enum identity does not require a new `SymbolKind`.
 
 `Var` is attached to the existing untyped `PatDef`, matching Scala's
 parser: `var` is a modifier on a `PatDef`, not a separate `VarDef` payload.
@@ -1450,6 +1453,8 @@ bitflags! {
         const JAVA_DEFINED = ...;
         const ERASED       = ...;
         const OVERRIDE     = ...;
+        const ENUM         = ...;
+        const EXPORTED     = ...;
     }
 }
 ```

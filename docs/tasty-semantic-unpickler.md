@@ -191,8 +191,12 @@ Names are `Term` for packages, `VALDEF`, `DEFDEF` and `PARAM`, and `Type` for
 `TYPEDEF` and `TYPEPARAM`, so a module's term and its module class never share
 an identity.
 
-Not mapped yet: `ENUM`, `ARTIFACT`, `INLINEPROXY`, `MACRO`, `EXPORTED`,
-`OPEN`, `INFIX`, `INVISIBLE`, `TRACKED`, `INTO` (no core flag),
+`ENUM` maps to `SymbolFlags::ENUM`, and `EXPORTED` maps to
+`SymbolFlags::EXPORTED`. These flags preserve the modifier facts only; this
+does not name enum cases or synthesize export forwarders.
+
+Not mapped yet: `ARTIFACT`, `INLINEPROXY`, `MACRO`, `OPEN`, `INFIX`,
+`INVISIBLE`, `TRACKED`, `INTO` (no core flag),
 `COVARIANT`/`CONTRAVARIANT` (variance is set when type parameters are
 completed), the accessor roles `FIELDACCESSOR`, `CASEACCESSOR`,
 `PARAMSETTER`, `PARAMALIAS`, `HASDEFAULT`, `STABLE`, and annotations.
