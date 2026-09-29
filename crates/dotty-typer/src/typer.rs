@@ -1996,6 +1996,9 @@ impl<'a> SourceTyper<'a> {
                 tree_index: tree.index(),
             });
         };
+        if matches!(source_tree.kind, TreeKind::Apply(_)) {
+            self.prepare_raw_generic_constructor_chain(tree, context, info_journal, new_mappings)?;
+        }
         let typed = match source_tree.kind {
             TreeKind::New(new) => {
                 let Some(type_tree) = self.arena.try_get(new.tpt) else {
@@ -3261,6 +3264,9 @@ impl<'a> SourceTyper<'a> {
         tree: TreeId<Untyped>,
         context: ExpressionContext,
     ) -> Result<Option<(SymbolId, TypeId)>, TyperError> {
+        if self.typed_index.get(self.source, tree).is_some() {
+            return Ok(None);
+        }
         let Some(TreeKind::New(new)) = self.arena.try_get(tree).map(|node| &node.kind) else {
             return Err(TyperError::UnsupportedExpression {
                 source: self.source,
@@ -3279,6 +3285,179 @@ impl<'a> SourceTyper<'a> {
             Some(arity) if arity > 0 => Ok(Some((class, raw_type))),
             _ => Ok(None),
         }
+    }
+
+    fn prepare_raw_generic_constructor_chain(
+        &mut self,
+        root: TreeId<Untyped>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<(), TyperError> {
+        let mut reversed_clauses = Vec::new();
+        let mut current = root;
+        loop {
+            let Some(node) = self.arena.try_get(current) else {
+                return Ok(());
+            };
+            let TreeKind::Apply(application) = &node.kind else {
+                break;
+            };
+            reversed_clauses.push(application.args.clone());
+            current = application.function;
+        }
+        let Some(node) = self.arena.try_get(current) else {
+            return Ok(());
+        };
+        let TreeKind::Select(selection) = &node.kind else {
+            return Ok(());
+        };
+        if self.store.names.resolve(selection.name.text()) != "<init>" || selection.backquoted {
+            return Ok(());
+        }
+        let Some((class, _raw_type)) = self.raw_generic_new_class(selection.qualifier, context)?
+        else {
+            return Ok(());
+        };
+        reversed_clauses.reverse();
+        let candidates = self.constructor_candidates_for_class(class, info_journal)?;
+        let candidate = match candidates.as_slice() {
+            [candidate] => candidate.clone(),
+            [] => return Err(TyperError::ConstructorApplicationUnavailable { class }),
+            _ if candidates.iter().any(|candidate| {
+                matches!(
+                    self.store.types.try_get(candidate.callable),
+                    Some(Type::Poly(_))
+                )
+            }) =>
+            {
+                return Err(TyperError::GenericConstructorOverloadResolutionDeferred {
+                    source: self.source,
+                    tree_index: root.index(),
+                    class,
+                    candidates: candidates
+                        .iter()
+                        .map(|candidate| candidate.symbol)
+                        .collect(),
+                });
+            }
+            _ => {
+                return Err(TyperError::ConstructorOverloadResolutionDeferred {
+                    source: self.source,
+                    tree_index: root.index(),
+                    class,
+                    candidates: candidates
+                        .iter()
+                        .map(|candidate| candidate.symbol)
+                        .collect(),
+                });
+            }
+        };
+        let Some(Type::Poly(poly)) = self.store.types.try_get(candidate.callable).cloned() else {
+            return Err(TyperError::UnableToFinalizeRawGenericNewInstanceType {
+                source: self.source,
+                tree_index: root.index(),
+                constructor: candidate.symbol,
+                result: candidate.callable,
+            });
+        };
+        let mut method_type = poly.result;
+        let mut typed_clauses = Vec::with_capacity(reversed_clauses.len());
+        for clause in reversed_clauses {
+            let Some(Type::Method(method)) = self.store.types.try_get(method_type).cloned() else {
+                return Err(TyperError::ApplicationCalleeNotMethod {
+                    source: self.source,
+                    tree_index: root.index(),
+                    ty: method_type,
+                });
+            };
+            if method.kind != MethodKind::Plain {
+                return Err(TyperError::UnsupportedApplicationMethodKind {
+                    source: self.source,
+                    tree_index: root.index(),
+                    kind: method.kind,
+                });
+            }
+            if method.params.len() != clause.len() {
+                return Err(TyperError::ApplicationArityMismatch {
+                    source: self.source,
+                    tree_index: root.index(),
+                    expected: method.params.len(),
+                    actual: clause.len(),
+                });
+            }
+            let mut typed_arguments = Vec::with_capacity(clause.len());
+            for argument_tree in clause {
+                let typed =
+                    self.type_expression_inner(argument_tree, context, info_journal, new_mappings)?;
+                let own_type = self.typed_arena.get(typed).ty;
+                let widened_type =
+                    self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+                if self.typed_index.get(self.source, argument_tree).is_none() {
+                    self.typed_index
+                        .insert(self.source, argument_tree, typed)
+                        .map_err(|error| TyperError::ConflictingTypedExpression {
+                            source: error.source,
+                            tree_index: error.untyped.index(),
+                            existing: error.existing.index(),
+                            attempted: error.attempted.index(),
+                        })?;
+                    new_mappings.push((self.source, argument_tree));
+                }
+                typed_arguments.push(TypedArgument {
+                    typed,
+                    own_type,
+                    widened_type,
+                });
+            }
+            method_type = method.result;
+            typed_clauses.push((method, typed_arguments));
+        }
+        let type_arguments = self.infer_constructor_poly_clauses(
+            candidate.symbol,
+            candidate.callable,
+            &poly,
+            &typed_clauses,
+            root.index(),
+            info_journal,
+        )?;
+        let instantiated =
+            dotty_core::types::instantiate_poly(self.store, candidate.callable, &type_arguments)
+                .map_err(|error| TyperError::ConstructorPolyInstantiationFailed {
+                    constructor: candidate.symbol,
+                    error,
+                })?;
+        for (parameter_index, (argument, bounds)) in type_arguments
+            .iter()
+            .copied()
+            .zip(instantiated.bounds.iter().copied())
+            .enumerate()
+        {
+            self.check_constructor_type_argument_bounds(
+                candidate.symbol,
+                argument,
+                bounds,
+                parameter_index,
+                root.index(),
+                info_journal,
+            )?;
+        }
+        let result = self.validate_constructor_application_callable(
+            candidate.symbol,
+            instantiated.result,
+            root.index(),
+        )?;
+        let instance_type =
+            self.constructor_result_instance_type(result, candidate.symbol, root.index())?;
+        self.finalize_raw_generic_new(
+            selection.qualifier,
+            instance_type,
+            candidate.symbol,
+            context,
+            info_journal,
+            new_mappings,
+        )?;
+        Ok(())
     }
 
     fn finalize_raw_generic_new(
@@ -3428,6 +3607,109 @@ impl<'a> SourceTyper<'a> {
                 }
                 other => other,
             })
+    }
+
+    fn infer_constructor_poly_clauses(
+        &mut self,
+        constructor: SymbolId,
+        binder: TypeId,
+        poly: &PolyType,
+        clauses: &[(MethodType, Vec<TypedArgument>)],
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<TypeId>, TyperError> {
+        let mut inferred = vec![None; poly.params.len()];
+        for (method, arguments) in clauses {
+            if method.params.len() != arguments.len() {
+                return Err(TyperError::ApplicationArityMismatch {
+                    source: self.source,
+                    tree_index,
+                    expected: method.params.len(),
+                    actual: arguments.len(),
+                });
+            }
+            for (argument_index, (parameter, argument)) in
+                method.params.iter().zip(arguments).enumerate()
+            {
+                if parameter.erased
+                    || parameter.varargs
+                    || matches!(
+                        self.store.types.try_get(parameter.ty),
+                        Some(Type::ByName { .. })
+                    )
+                {
+                    return Err(TyperError::UnsupportedConstructorInferenceShape {
+                        source: self.source,
+                        tree_index,
+                        constructor,
+                        parameter_index: None,
+                        formal: parameter.ty,
+                        actual: argument.widened_type,
+                    });
+                }
+                self.infer_type_constraints(
+                    parameter.ty,
+                    argument.widened_type,
+                    binder,
+                    &mut inferred,
+                    InferenceLocation {
+                        tree_index,
+                        argument_index,
+                        depth: 0,
+                    },
+                    info_journal,
+                )
+                .map_err(|error| match error {
+                    TyperError::UnconstrainedTypeParameter {
+                        parameter_index, ..
+                    } => TyperError::UnconstrainedConstructorTypeParameter {
+                        source: self.source,
+                        tree_index,
+                        constructor,
+                        parameter_index,
+                    },
+                    TyperError::ConflictingInferenceConstraints {
+                        parameter_index,
+                        first,
+                        second,
+                        ..
+                    } => TyperError::ConflictingConstructorInferenceConstraints {
+                        source: self.source,
+                        tree_index,
+                        constructor,
+                        parameter_index,
+                        first,
+                        second,
+                    },
+                    TyperError::UnsupportedInferenceShape {
+                        parameter_index,
+                        formal,
+                        actual,
+                        ..
+                    } => TyperError::UnsupportedConstructorInferenceShape {
+                        source: self.source,
+                        tree_index,
+                        constructor,
+                        parameter_index,
+                        formal,
+                        actual,
+                    },
+                    other => other,
+                })?;
+            }
+        }
+        inferred
+            .into_iter()
+            .enumerate()
+            .map(|(parameter_index, ty)| {
+                ty.ok_or(TyperError::UnconstrainedConstructorTypeParameter {
+                    source: self.source,
+                    tree_index,
+                    constructor,
+                    parameter_index,
+                })
+            })
+            .collect()
     }
 
     fn check_constructor_type_argument_bounds(
@@ -15280,6 +15562,92 @@ mod tests {
             assert_eq!(typer.store().checkpoint(), store_checkpoint);
             assert_eq!(typer.typed_ast().iter().count(), typed_count);
             assert!(typer.source_typed_index().get(source, raw_new).is_none());
+        }
+    }
+
+    #[test]
+    fn generic_primary_constructor_infers_across_curried_clauses() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Pair[A, B](first: A)(second: B); class Use { def make = new Pair(1)(true) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "Pair");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let new_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::New(_)).then_some(tree))
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(outer) = &typer.typed_ast().get(typed).kind else {
+            panic!("curried generic constructor should produce an outer Apply")
+        };
+        let TreeKind::Apply(inner) = &typer.typed_ast().get(outer.function).kind else {
+            panic!("curried generic constructor should produce an inner Apply")
+        };
+        assert_eq!(inner.args.len(), 1);
+        assert_eq!(outer.args.len(), 1);
+        let Type::Method(next_clause) = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(outer.function).ty)
+        else {
+            panic!("first constructor clause should leave the second clause")
+        };
+        assert_eq!(next_clause.params[0].ty, definitions.boolean);
+        let TreeKind::Select(selection) = &typer.typed_ast().get(inner.function).kind else {
+            panic!("constructor function should remain a Select")
+        };
+        for actual_type in [
+            typer.typed_ast().get(selection.qualifier).ty,
+            typer.typed_ast().get(typed).ty,
+        ] {
+            let Type::Applied { tycon, args } = typer.store().types.get(actual_type) else {
+                panic!("curried generic constructor result should be applied")
+            };
+            assert_eq!(type_symbol(typer.store(), *tycon), class);
+            assert_eq!(args, &[definitions.int, definitions.boolean]);
+        }
+        assert!(typer.source_typed_index().get(source, new_tree).is_some());
+    }
+
+    #[test]
+    fn generic_primary_constructor_accepts_repeated_constraints_and_inferred_bounds() {
+        for source_text in [
+            "class Pair[A](first: A, second: A); class Use { def make = new Pair(1, 2) }",
+            "class Box[A <: Int](value: A); class Use { def make = new Box(1) }",
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+
+            let typed = typer.type_expression(rhs, context).unwrap();
+
+            let Type::Applied { args, .. } =
+                typer.store().types.get(typer.typed_ast().get(typed).ty)
+            else {
+                panic!("inferred result should preserve its applied type")
+            };
+            assert_eq!(args, &[definitions.int]);
         }
     }
 
