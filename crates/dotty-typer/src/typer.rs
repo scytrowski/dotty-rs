@@ -8224,6 +8224,41 @@ impl<'a> SourceTyper<'a> {
         definition: &dotty_core::ast::DefDef<Untyped>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        let method_scope = self.method_scope(method)?;
+        let existing_symbols = self
+            .store
+            .scopes
+            .get(method_scope)
+            .entered_symbols()
+            .collect::<HashSet<_>>();
+        let result = self.complete_local_method_signature_inner(
+            method,
+            method_tree_index,
+            definition,
+            info_journal,
+        );
+        if result.is_err() {
+            let new_symbols = self
+                .store
+                .scopes
+                .get(method_scope)
+                .entered_symbols()
+                .filter(|symbol| !existing_symbols.contains(symbol))
+                .collect::<Vec<_>>();
+            for symbol in new_symbols {
+                self.store.scopes.get_mut(method_scope).remove(symbol);
+            }
+        }
+        result
+    }
+
+    fn complete_local_method_signature_inner(
+        &mut self,
+        method: SymbolId,
+        method_tree_index: u32,
+        definition: &dotty_core::ast::DefDef<Untyped>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
         let deferred = |feature| TyperError::LocalMethodSignatureDeferred {
             symbol: method,
             tree_index: method_tree_index,
@@ -20625,7 +20660,7 @@ mod tests {
     #[test]
     fn failed_local_signature_completion_rolls_back_parameters_and_types() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class C { def outer: Int = { def broken(value: MissingType): Int = 1; 0 } }",
+            "class C { def outer: Int = { def broken[A](value: MissingType): A = value; 0 } }",
         );
         let (outer, block_tree) =
             method_definition_and_rhs(&parsed, &store, &index, source, "outer");
@@ -20633,8 +20668,11 @@ mod tests {
             panic!("outer body should be a block")
         };
         let method_tree = block.stats[0];
-        let parameter_tree = match &parsed.ast.get(method_tree).kind {
-            TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+        let (type_parameter_tree, parameter_tree) = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => (
+                definition.type_params[0],
+                definition.value_param_clauses[0][0],
+            ),
             _ => panic!("local declaration should be a DefDef"),
         };
         let mut typer = SourceTyper::new(
@@ -20665,6 +20703,17 @@ mod tests {
                 .get(method_scope)
                 .lookup_all(&match &parsed.ast.get(parameter_tree).kind {
                     TreeKind::ValDef(parameter) => *parameter.name.as_name(),
+                    _ => unreachable!(),
+                })
+                .is_empty()
+        );
+        assert!(
+            typer
+                .store
+                .scopes
+                .get(method_scope)
+                .lookup_all(&match &parsed.ast.get(type_parameter_tree).kind {
+                    TreeKind::TypeDef(parameter) => *parameter.name.as_name(),
                     _ => unreachable!(),
                 })
                 .is_empty()
