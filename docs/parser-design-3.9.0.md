@@ -114,6 +114,10 @@ braced scope; the scanner distinguishes their boundary from outdents requested
 while parsing an individual case body. Indented `match` case regions also
 retain their ownership when opened by eager layout, so a same-indentation
 `catch` closes the match cases before the enclosing `try` parses its handler.
+At a known case/body boundary, the parser can request closure of the named
+innermost layout region regardless of whether eager scanning or parser
+feedback opened it; ordinary outdent feedback remains restricted to
+parser-opened regions.
 The parser balances the match region before parsing the following sibling
 statement. If a matching parenthesis closes the case region first, the parser
 closes the feedback state without exposing an `Outdent` token inside the
