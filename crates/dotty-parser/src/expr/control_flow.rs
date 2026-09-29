@@ -9,10 +9,11 @@ where
     S: dotty_core::TokenSource,
 {
     pub(super) fn parse_if_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let condition_feedback = self.observe_indented_body();
         self.advance();
         let parenthesized_condition =
             self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen);
-        let cond = self.parse_control_condition(dotty_core::HardKeyword::Then);
+        let cond = self.parse_control_condition(dotty_core::HardKeyword::Then, condition_feedback);
         let then_body_feedback =
             if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Then) {
                 let feedback = self.observe_indented_body();
@@ -77,10 +78,11 @@ where
     }
 
     pub(super) fn parse_while_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let condition_feedback = self.observe_indented_body();
         self.advance();
         let parenthesized_condition =
             self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen);
-        let cond = self.parse_control_condition(dotty_core::HardKeyword::Do);
+        let cond = self.parse_control_condition(dotty_core::HardKeyword::Do, condition_feedback);
         let body_feedback =
             if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Do) {
                 let feedback = self.observe_indented_body();
@@ -546,7 +548,19 @@ where
     pub(super) fn parse_control_condition(
         &mut self,
         terminator: dotty_core::HardKeyword,
+        feedback_opened: bool,
     ) -> TreeId<Untyped> {
+        if feedback_opened || self.control_condition_starts_with_indent() {
+            self.consume_control_newlines();
+            if self.current().kind == TokenKind::Indent {
+                return if feedback_opened {
+                    self.parse_feedback_indented_block()
+                } else {
+                    self.parse_indented_block()
+                };
+            }
+        }
+
         if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
             return self.expr();
         }
@@ -575,6 +589,17 @@ where
         }
 
         tree
+    }
+
+    fn control_condition_starts_with_indent(&mut self) -> bool {
+        let mut lookahead = 0;
+        while matches!(
+            self.cursor.lookahead(lookahead).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            lookahead += 1;
+        }
+        self.cursor.lookahead(lookahead).kind == TokenKind::Indent
     }
 
     fn parenthesized_condition_should_continue(
