@@ -588,7 +588,7 @@ fn build_tokens(
                 let case_guard_candidate = raw.kind == RawTokenKind::Keyword(HardKeyword::If)
                     && indentation_stack
                         .last()
-                        .is_some_and(|region| region.owner == LayoutRegionOwner::SameIndentCases)
+                        .is_some_and(|region| region.owner == LayoutRegionOwner::MatchCases)
                     && !current_case_has_arrow(source, &tokens);
 
                 if has_line_break && layout_enabled {
@@ -728,7 +728,7 @@ fn build_tokens(
 enum LayoutRegionOwner {
     Root,
     Implicit,
-    SameIndentCases,
+    MatchCases,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -798,10 +798,10 @@ impl LayoutRegion {
         }
     }
 
-    fn same_indent_cases(indentation: &IndentWidth) -> Self {
+    fn match_cases(indentation: &IndentWidth) -> Self {
         Self {
             indentation: indentation.clone(),
-            owner: LayoutRegionOwner::SameIndentCases,
+            owner: LayoutRegionOwner::MatchCases,
         }
     }
 }
@@ -836,8 +836,8 @@ fn adjust_indentation(
         .map(|region| region.indentation.clone())
         .unwrap_or_else(IndentWidth::empty);
     if current == *indentation {
-        if opens_same_indent_case_region(previous_kind, current_kind) {
-            stack.push(LayoutRegion::same_indent_cases(indentation));
+        if opens_match_case_region(previous_kind, current_kind) {
+            stack.push(LayoutRegion::match_cases(indentation));
             tokens.push(Token::new(
                 TokenKind::Indent,
                 TextRange::new(offset, offset)?,
@@ -846,7 +846,7 @@ fn adjust_indentation(
             && !case_guard_candidate
             && stack
                 .last()
-                .is_some_and(|region| region.owner == LayoutRegionOwner::SameIndentCases)
+                .is_some_and(|region| region.owner == LayoutRegionOwner::MatchCases)
         {
             stack.pop();
             tokens.push(Token::new(
@@ -865,7 +865,11 @@ fn adjust_indentation(
     if current.is_prefix_of(indentation)
         && opens_indentation(previous_kind, previous_opens_indentation)
     {
-        stack.push(LayoutRegion::implicit(indentation));
+        stack.push(if opens_match_case_region(previous_kind, current_kind) {
+            LayoutRegion::match_cases(indentation)
+        } else {
+            LayoutRegion::implicit(indentation)
+        });
         tokens.push(Token::new(
             TokenKind::Indent,
             TextRange::new(offset, offset)?,
@@ -884,7 +888,7 @@ fn adjust_indentation(
                 && !case_guard_candidate
                 && stack
                     .last()
-                    .is_some_and(|region| region.owner == LayoutRegionOwner::SameIndentCases)
+                    .is_some_and(|region| region.owner == LayoutRegionOwner::MatchCases)
             {
                 stack.pop();
                 tokens.push(Token::new(
@@ -905,10 +909,7 @@ fn adjust_indentation(
     Ok(closed_same_indent_case)
 }
 
-fn opens_same_indent_case_region(
-    previous_kind: Option<TokenKind>,
-    current_kind: RawTokenKind,
-) -> bool {
+fn opens_match_case_region(previous_kind: Option<TokenKind>, current_kind: RawTokenKind) -> bool {
     matches!(
         (previous_kind, current_kind),
         (
@@ -3903,6 +3904,17 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn closes_indented_match_cases_before_catch_at_case_indentation() {
+        let token_kinds = kinds(
+            "try value match\n  case 0 => first\n  case _ => second\n  catch case ex: Error => fallback",
+        );
+
+        assert!(token_kinds.windows(2).any(|tokens| {
+            tokens == [TokenKind::Outdent, TokenKind::Keyword(HardKeyword::Catch)]
+        }));
     }
 
     #[test]
