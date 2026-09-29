@@ -466,7 +466,16 @@ where
     fn current_is_anonymous_using_type(&mut self) -> bool {
         self.current().kind != TokenKind::Punctuation(Punctuation::RightParen)
             && !is_parameter_colon_at(self, 1)
-            && !self.current_is_inline_parameter_modifier()
+            && !self.current_is_named_using_parameter_prefix()
+    }
+
+    fn current_is_named_using_parameter_prefix(&mut self) -> bool {
+        (self.current().kind == TokenKind::Operator && self.current_text_is("@"))
+            || matches!(
+                self.current().kind,
+                TokenKind::Keyword(dotty_core::HardKeyword::Val | dotty_core::HardKeyword::Var)
+            )
+            || self.current_is_modifier()
     }
 
     fn parse_anonymous_using_types(
@@ -2333,6 +2342,74 @@ mod tests {
         };
         assert_eq!(parser.names.resolve(name.as_name().text()), "x$1");
         assert_eq!(metadata.modifiers, vec![Modifier::Given, Modifier::Param]);
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_an_annotation_prefixed_named_using_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(using @A ctx: Ctx)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::ColonFollow, 13, 14),
+                token(TokenKind::Identifier, 15, 18),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a named using parameter");
+        };
+        assert_eq!(parser.names.resolve(parameter.name.as_name().text()), "ctx");
+        assert_eq!(parameter.metadata.annotations.len(), 1);
+        assert_eq!(
+            parameter.metadata.modifiers,
+            vec![Modifier::Given, Modifier::Param]
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_val_prefixed_named_using_constructor_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(using val ctx: Ctx)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Val), 7, 10),
+                token(TokenKind::Identifier, 11, 14),
+                token(TokenKind::ColonFollow, 14, 15),
+                token(TokenKind::Identifier, 16, 19),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 19, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Class);
+
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a named using constructor parameter");
+        };
+        assert_eq!(parser.names.resolve(parameter.name.as_name().text()), "ctx");
+        assert!(
+            parameter
+                .metadata
+                .modifiers
+                .contains(&Modifier::ParamAccessor)
+        );
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
