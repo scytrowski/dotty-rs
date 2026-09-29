@@ -39,7 +39,7 @@ where
                 );
             }
         }
-        if wrapped {
+        if wrapped && self.for_body_keyword_follows_newlines() {
             self.consume_for_newlines();
         }
 
@@ -264,6 +264,20 @@ where
     fn at_for_body_keyword(&self) -> bool {
         matches!(
             self.current().kind,
+            TokenKind::Keyword(HardKeyword::Yield | HardKeyword::Do)
+        )
+    }
+
+    fn for_body_keyword_follows_newlines(&mut self) -> bool {
+        let mut offset = 0;
+        while matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            offset += 1;
+        }
+        matches!(
+            self.cursor.lookahead(offset).kind,
             TokenKind::Keyword(HardKeyword::Yield | HardKeyword::Do)
         )
     }
@@ -544,6 +558,64 @@ mod tests {
             parser.ast().get(tree).kind,
             TreeKind::PhaseSpecific(UntypedNode::ForYield(_))
         ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_parenthesized_for_body_with_indented_local_definitions() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "for (x <- xs)\n  def result = x\n  result\nafter",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::For), 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 4, 5),
+                token(TokenKind::Identifier, 5, 6),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: dotty_core::TextRange::new(7, 9).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 10, 12),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 12, 13),
+                token(TokenKind::Newline, 13, 14),
+                token(TokenKind::Indent, 16, 16),
+                token(TokenKind::Keyword(HardKeyword::Def), 16, 19),
+                token(TokenKind::Identifier, 20, 26),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: dotty_core::TextRange::new(27, 28).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 29, 30),
+                token(TokenKind::Newline, 30, 31),
+                token(TokenKind::Identifier, 33, 39),
+                token(TokenKind::Newline, 39, 40),
+                token(TokenKind::Outdent, 40, 40),
+                token(TokenKind::Identifier, 40, 45),
+                token(TokenKind::Eof, 45, 45),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::ForDo(ref for_tree)) = parser.ast().get(tree).kind
+        else {
+            panic!("expected a for-do tree");
+        };
+        let TreeKind::Block(ref body) = parser.ast().get(for_tree.body).kind else {
+            panic!("expected an indented statement-sequence body");
+        };
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(body.stats[0]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(body.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Identifier);
+        assert_eq!(parser.source.slice(parser.current().span).unwrap(), "after");
         assert!(parser.diagnostics().is_empty());
     }
 
