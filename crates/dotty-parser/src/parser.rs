@@ -313,25 +313,21 @@ where
     }
 
     fn observe_indented_body_region_with(&mut self, event: ScannerEvent) -> Option<u32> {
+        let already_indented = self.next_indented_region_offset().is_some();
+        self.observe(event);
+        if already_indented {
+            return None;
+        }
+        self.next_indented_region_offset()
+    }
+
+    fn next_indented_region_offset(&mut self) -> Option<u32> {
         let mut lookahead = 1;
         while matches!(
             self.cursor.lookahead(lookahead).kind,
             TokenKind::Newline | TokenKind::Newlines
         ) {
             lookahead += 1;
-        }
-        let has_indentation_token = |parser: &mut Self| {
-            (1..=lookahead).any(|offset| parser.cursor.lookahead(offset).kind == TokenKind::Indent)
-        };
-        let existing_indent = (1..=lookahead)
-            .find(|offset| self.cursor.lookahead(*offset).kind == TokenKind::Indent)
-            .map(|offset| self.cursor.lookahead(offset).span.start());
-        if let Some(indent_offset) = existing_indent {
-            return Some(indent_offset);
-        }
-        self.observe(event);
-        if !has_indentation_token(self) {
-            return None;
         }
         (1..=lookahead)
             .find(|offset| self.cursor.lookahead(*offset).kind == TokenKind::Indent)
@@ -347,23 +343,12 @@ where
     /// Identifies the match-case indentation, requesting parser feedback only
     /// when the scanner has not already emitted the region's `Indent`.
     pub(crate) fn observe_match_cases_indented(&mut self) -> Option<(u32, bool)> {
-        let mut lookahead = 1;
-        while matches!(
-            self.cursor.lookahead(lookahead).kind,
-            TokenKind::Newline | TokenKind::Newlines
-        ) {
-            lookahead += 1;
-        }
-        let existing_indent = (1..=lookahead)
-            .find(|offset| self.cursor.lookahead(*offset).kind == TokenKind::Indent)
-            .map(|offset| self.cursor.lookahead(offset).span.start());
-        if let Some(indent_offset) = existing_indent {
+        if let Some(indent_offset) = self.next_indented_region_offset() {
             return Some((indent_offset, false));
         }
         self.observe(ScannerEvent::MatchCasesIndented);
-        (1..=lookahead)
-            .find(|offset| self.cursor.lookahead(*offset).kind == TokenKind::Indent)
-            .map(|offset| (self.cursor.lookahead(offset).span.start(), true))
+        self.next_indented_region_offset()
+            .map(|indent_offset| (indent_offset, true))
     }
 
     /// Tells the scanner that an indented region was exited.
@@ -373,7 +358,10 @@ where
 
     /// Opens a case-body region relative to the source indentation of `case`.
     pub(crate) fn observe_case_body_indented(&mut self, case_start: u32) -> Option<u32> {
-        self.observe_indented_body_region_with(ScannerEvent::CaseBodyIndented { case_start })
+        let existing_indent = self.next_indented_region_offset();
+        let feedback_indent =
+            self.observe_indented_body_region_with(ScannerEvent::CaseBodyIndented { case_start });
+        existing_indent.or(feedback_indent)
     }
 
     /// Closes a feedback-opened layout region at a grammar delimiter without
