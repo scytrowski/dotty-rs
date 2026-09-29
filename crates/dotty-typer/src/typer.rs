@@ -299,6 +299,12 @@ pub enum TyperError {
         expected: usize,
         actual: usize,
     },
+    /// The applied target of constructor discovery has the wrong class arity.
+    ConstructorTargetGenericArityMismatch {
+        class: SymbolId,
+        expected: usize,
+        actual: usize,
+    },
     /// A generic source class was used without receiver type arguments.
     RawGenericSourceReceiverUnsupported { class: SymbolId, expected: usize },
     /// External generic argument order is not modeled yet.
@@ -2639,9 +2645,9 @@ impl<'a> SourceTyper<'a> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<SymbolId, TyperError> {
         let normalized = self.normalize_constructor_target(instance_type, info_journal)?;
-        let tycon = match self.store.types.try_get(normalized) {
-            Some(Type::Applied { tycon, .. }) => *tycon,
-            _ => normalized,
+        let (tycon, actual_arity) = match self.store.types.try_get(normalized) {
+            Some(Type::Applied { tycon, args }) => (*tycon, args.len()),
+            _ => (normalized, 0),
         };
         let target = self.normalize_constructor_target(tycon, info_journal)?;
         let symbol = match self.store.types.try_get(target) {
@@ -2659,6 +2665,21 @@ impl<'a> SourceTyper<'a> {
         let semantic = self.store.symbols.get(symbol);
         match semantic.kind {
             SymbolKind::Class => {
+                match self.constructor_target_class_arity(symbol)? {
+                    Some(expected_arity) if actual_arity != expected_arity => {
+                        return Err(TyperError::ConstructorTargetGenericArityMismatch {
+                            class: symbol,
+                            expected: expected_arity,
+                            actual: actual_arity,
+                        });
+                    }
+                    None if actual_arity > 0 => {
+                        return Err(TyperError::ExternalGenericInstantiationDeferred {
+                            class: symbol,
+                        });
+                    }
+                    Some(_) | None => {}
+                }
                 if semantic.flags.contains(SymbolFlags::ABSTRACT) {
                     return Err(TyperError::AbstractClassInstantiation { symbol });
                 }
@@ -2672,6 +2693,90 @@ impl<'a> SourceTyper<'a> {
             SymbolKind::TypeParameter => Err(TyperError::TypeParameterInstantiation { symbol }),
             _ => Err(TyperError::NewTargetNotClass { ty: instance_type }),
         }
+    }
+
+    fn constructor_target_class_arity(&self, class: SymbolId) -> Result<Option<usize>, TyperError> {
+        let Some(definition) = self.index.definition_of(class) else {
+            return Ok(None);
+        };
+        let SourceDefinition::Canonical { source, tree } = definition else {
+            return Err(TyperError::SourceClassTypeParametersProvenanceMissing { symbol: class });
+        };
+        if source != self.source {
+            return Err(TyperError::SourceClassTypeParametersProvenanceMissing { symbol: class });
+        }
+        let Some(class_node) = self.arena.try_get(tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source,
+                tree_index: tree.index(),
+            });
+        };
+        let TreeKind::TypeDef(class_definition) = &class_node.kind else {
+            return Err(TyperError::MalformedSourceClassTypeParameters {
+                class,
+                tree_index: tree.index(),
+            });
+        };
+        let Some(template_node) = self.arena.try_get(class_definition.rhs) else {
+            return Err(TyperError::TreeOutsideArena {
+                source,
+                tree_index: class_definition.rhs.index(),
+            });
+        };
+        let TreeKind::Template(template) = &template_node.kind else {
+            return Err(TyperError::MalformedSourceClassTypeParameters {
+                class,
+                tree_index: class_definition.rhs.index(),
+            });
+        };
+        let Some(constructor_node) = self.arena.try_get(template.constructor) else {
+            return Err(TyperError::TreeOutsideArena {
+                source,
+                tree_index: template.constructor.index(),
+            });
+        };
+        let TreeKind::DefDef(constructor) = &constructor_node.kind else {
+            return Err(TyperError::MalformedSourceClassTypeParameters {
+                class,
+                tree_index: template.constructor.index(),
+            });
+        };
+        let constructor_symbol = self.index.symbol_at(source, template.constructor).ok_or(
+            TyperError::MalformedSourceClassTypeParameters {
+                class,
+                tree_index: template.constructor.index(),
+            },
+        )?;
+        for parameter_tree in &constructor.type_params {
+            let Some(parameter_node) = self.arena.try_get(*parameter_tree) else {
+                return Err(TyperError::TreeOutsideArena {
+                    source,
+                    tree_index: parameter_tree.index(),
+                });
+            };
+            if !matches!(parameter_node.kind, TreeKind::TypeDef(_)) {
+                return Err(TyperError::MalformedSourceClassTypeParameters {
+                    class,
+                    tree_index: parameter_tree.index(),
+                });
+            }
+            let parameter = self
+                .index
+                .derived_symbol_at(constructor_symbol, source, *parameter_tree)
+                .ok_or(TyperError::ClassTypeParameterSymbolMissing {
+                    class,
+                    tree_index: parameter_tree.index(),
+                })?;
+            if !self.store.symbols.contains(parameter)
+                || self.store.symbols.get(parameter).kind != SymbolKind::TypeParameter
+            {
+                return Err(TyperError::MalformedSourceClassTypeParameters {
+                    class,
+                    tree_index: parameter_tree.index(),
+                });
+            }
+        }
+        Ok(Some(constructor.type_params.len()))
     }
 
     fn normalize_constructor_target(
@@ -13921,6 +14026,50 @@ mod tests {
         assert!(candidates.iter().all(|candidate| {
             matches!(typer.store().types.get(candidate.callable), Type::Method(_))
         }));
+    }
+
+    #[test]
+    fn constructor_discovery_validates_source_class_type_argument_arity() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Box[A]; class Plain");
+        let box_class = class_symbol(&parsed, &store, &index, source, "Box");
+        let plain_class = class_symbol(&parsed, &store, &index, source, "Plain");
+        let wrong_box_arity = applied_class_type(
+            &mut store,
+            definitions,
+            box_class,
+            &[definitions.int, definitions.boolean],
+        );
+        let wrong_plain_arity =
+            applied_class_type(&mut store, definitions, plain_class, &[definitions.int]);
+        let raw_box = nominal_type_ref(&mut store, definitions, box_class);
+        let valid_box = applied_class_type(&mut store, definitions, box_class, &[definitions.int]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for (target, expected_class, expected, actual) in [
+            (wrong_box_arity, box_class, 1, 2),
+            (raw_box, box_class, 1, 0),
+            (wrong_plain_arity, plain_class, 0, 1),
+        ] {
+            assert!(matches!(
+                typer.constructors_of(target),
+                Err(TyperError::ConstructorTargetGenericArityMismatch {
+                    class,
+                    expected: error_expected,
+                    actual: error_actual,
+                }) if class == expected_class
+                    && error_expected == expected
+                    && error_actual == actual
+            ));
+        }
+        assert_eq!(typer.constructors_of(valid_box).unwrap().len(), 1);
     }
 
     #[test]
