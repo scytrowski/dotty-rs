@@ -203,12 +203,25 @@ where
         }
 
         let qualifier = match self.current().kind {
-            TokenKind::Identifier
-            | TokenKind::BackquotedIdentifier
-            | TokenKind::Keyword(HardKeyword::This) => self
+            TokenKind::Keyword(HardKeyword::This) => self
                 .intern_current_term_name()
                 .ok()
                 .map(|name| *name.as_name()),
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier => self
+                .intern_current_term_name()
+                .ok()
+                .map(|name| *name.as_name()),
+            TokenKind::Operator | TokenKind::ColonOp
+                if ![
+                    "=", "=>", "=>>", "<-", "<:", "<%", ">:", "?=>", ":", "@", "#",
+                ]
+                .iter()
+                .any(|reserved| self.current_text_is(reserved)) =>
+            {
+                self.intern_current_term_name()
+                    .ok()
+                    .map(|name| *name.as_name())
+            }
             _ => {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
@@ -464,8 +477,117 @@ mod tests {
         drop(parser);
         assert!(matches!(
             qualifier,
-            Some(name) if names.resolve(name.text()) == "pkg"
+            Some(name) if name.is_term() && names.resolve(name.text()) == "pkg"
         ));
+    }
+
+    #[test]
+    fn parses_symbolic_access_qualifiers_and_preserves_name_representation() {
+        for (source, keyword, name_kind, qualifier, keyword_end, name_end) in [
+            (
+                "private[::] val",
+                HardKeyword::Private,
+                TokenKind::ColonOp,
+                "::",
+                7,
+                10,
+            ),
+            (
+                "protected[=:=] def",
+                HardKeyword::Protected,
+                TokenKind::Operator,
+                "=:=",
+                9,
+                13,
+            ),
+        ] {
+            let mut names = NameInterner::new();
+            let bracket_start = keyword_end;
+            let name_start = bracket_start + 1;
+            let close_start = name_end;
+            let definition_start = close_start + 2;
+            let definition_keyword = if keyword == HardKeyword::Private {
+                HardKeyword::Val
+            } else {
+                HardKeyword::Def
+            };
+            let definition_end = source.len() as u32;
+            let mut parser = parser_for(
+                source,
+                vec![
+                    token(TokenKind::Keyword(keyword), 0, keyword_end),
+                    token(
+                        TokenKind::Punctuation(Punctuation::LeftBracket),
+                        bracket_start,
+                        name_start,
+                    ),
+                    token(name_kind, name_start, name_end),
+                    token(
+                        TokenKind::Punctuation(Punctuation::RightBracket),
+                        close_start,
+                        close_start + 1,
+                    ),
+                    token(
+                        TokenKind::Keyword(definition_keyword),
+                        definition_start,
+                        definition_end,
+                    ),
+                    token(TokenKind::Eof, definition_end, definition_end),
+                ],
+                &mut names,
+            );
+
+            let prefix = parser.parse_definition_prefix();
+            let qualifier_name = match prefix.metadata.visibility {
+                Some(dotty_core::ast::VisibilitySyntax::Private { qualifier })
+                | Some(dotty_core::ast::VisibilitySyntax::Protected { qualifier }) => {
+                    qualifier.expect("expected an access qualifier")
+                }
+                None => panic!("expected a visibility modifier"),
+            };
+            assert!(qualifier_name.is_term());
+            assert_eq!(
+                parser.current().kind,
+                TokenKind::Keyword(definition_keyword)
+            );
+            assert!(
+                parser.diagnostics().is_empty(),
+                "{:?}",
+                parser.diagnostics()
+            );
+            drop(parser);
+            assert_eq!(names.resolve(qualifier_name.text()), qualifier);
+        }
+    }
+
+    #[test]
+    fn does_not_treat_assignment_as_a_symbolic_access_qualifier() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "private[=] val",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Private), 0, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 7, 8),
+                token(TokenKind::Operator, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 9, 10),
+                token(TokenKind::Keyword(HardKeyword::Val), 11, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let prefix = parser.parse_definition_prefix();
+        assert!(matches!(
+            prefix.metadata.visibility,
+            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Operator);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.message() == "expected a visibility qualifier")
+        );
     }
 
     #[test]

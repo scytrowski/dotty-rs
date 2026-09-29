@@ -360,6 +360,12 @@ is attached to the existing `ModuleDef`, `PatDef`, or `TypeDef` shape without
 introducing a new enum-case node. Annotations or modifiers after the case name,
 and semantic visibility checks, remain deferred.
 
+Qualified `private[...]` and `protected[...]` access modifiers accept ordinary,
+backquoted, and non-reserved symbolic identifier names. Qualifier spellings
+remain in the current source-metadata name representation, with `[this]`
+preserved distinctly; this syntax support does not change namer visibility
+resolution or the shared `VisibilitySyntax` contract.
+
 `package object name` is parsed as the existing `ModuleDef(Template(...))`
 shape, with a parser-generated `Modifier::PackageObject` preserving the source
 distinction Dotty records with its package flag. Its members use the same
