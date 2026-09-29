@@ -1,10 +1,51 @@
 //! Source-tree to semantic identity mappings produced by naming.
 
 use std::collections::HashMap;
+use std::error::Error;
+use std::fmt;
 
-use dotty_core::{Packages, ScopeId, SemanticStore, SourceId, SymbolId, TreeId, Untyped};
+use crate::ast::Untyped;
+use crate::ids::{ScopeId, SourceId, SymbolId, TreeId};
+use crate::packages::Packages;
+use crate::store::SemanticStore;
+use crate::symbols::SymbolKind;
 
-use crate::NamerError;
+/// A source semantic index invariant was violated during registration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceSemanticIndexError {
+    /// A source tree was assigned more than one canonical semantic symbol.
+    DuplicateSourceTreeSymbol { source: SourceId, tree_index: u32 },
+    /// A source tree was assigned more than one derived symbol for one owner.
+    DuplicateDerivedSourceTreeSymbol {
+        owner: SymbolId,
+        source: SourceId,
+        tree_index: u32,
+    },
+    /// A semantic symbol was assigned conflicting canonical/derived source definitions.
+    ConflictingSourceProvenance {
+        symbol: SymbolId,
+        existing: SourceDefinition,
+        attempted: SourceDefinition,
+    },
+    /// A semantic owner was assigned more than one declaration scope.
+    DuplicateDeclarationScope { symbol: SymbolId },
+    /// A declaration symbol was assigned two different source contexts.
+    DuplicateDeclarationContext {
+        symbol: SymbolId,
+        existing: SourceContextId,
+        attempted: SourceContextId,
+    },
+    /// An extension method was assigned prefix-clause metadata more than once.
+    DuplicateExtensionPrefixClauses { method: SymbolId },
+}
+
+impl fmt::Display for SourceSemanticIndexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl Error for SourceSemanticIndexError {}
 
 /// Source tree that introduced a semantic identity.
 ///
@@ -63,8 +104,8 @@ pub struct SourceContext {
 /// trees in compilation units.
 ///
 /// Tree IDs are arena-relative, so lookups use both the source identity and
-/// the tree ID. This index belongs to one naming result; persistent symbols
-/// and scopes remain in [`dotty_core::SemanticStore`].
+/// the tree ID. This index belongs to one source compilation result;
+/// persistent symbols and scopes remain in [`SemanticStore`].
 #[derive(Debug, Default)]
 pub struct SourceSemanticIndex {
     symbols_by_tree: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
@@ -126,10 +167,10 @@ impl SourceSemanticIndex {
         source: SourceId,
         tree: TreeId<Untyped>,
         symbol: SymbolId,
-    ) -> Result<(), NamerError> {
+    ) -> Result<(), SourceSemanticIndexError> {
         let key = (owner, source, tree);
         if self.derived_symbols_by_owner_and_tree.contains_key(&key) {
-            return Err(NamerError::DuplicateDerivedSourceTreeSymbol {
+            return Err(SourceSemanticIndexError::DuplicateDerivedSourceTreeSymbol {
                 owner,
                 source,
                 tree_index: tree.index(),
@@ -200,9 +241,7 @@ impl SourceSemanticIndex {
             let semantic = store.symbols.get(*symbol);
             if matches!(
                 semantic.kind,
-                dotty_core::SymbolKind::Class
-                    | dotty_core::SymbolKind::Trait
-                    | dotty_core::SymbolKind::ModuleClass
+                SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
             ) && !self.scopes_by_owner.contains_key(symbol)
             {
                 violations.push(format!(
@@ -210,7 +249,7 @@ impl SourceSemanticIndex {
                     symbol.index()
                 ));
             }
-            if semantic.kind == dotty_core::SymbolKind::Package {
+            if semantic.kind == SymbolKind::Package {
                 let indexed_scope = self.scopes_by_owner.get(symbol).copied();
                 match (packages.scope_of(*symbol), indexed_scope) {
                     (Some(package_scope), Some(indexed_scope))
@@ -347,7 +386,7 @@ impl SourceSemanticIndex {
 
     /// Records one immutable source context node and returns its index-local
     /// identity.
-    pub(crate) fn alloc_source_context(&mut self, context: SourceContext) -> SourceContextId {
+    pub fn alloc_source_context(&mut self, context: SourceContext) -> SourceContextId {
         let id = SourceContextId(
             u32::try_from(self.source_contexts.len())
                 .unwrap_or_else(|_| panic!("source context arena exceeded u32::MAX entries")),
@@ -361,14 +400,14 @@ impl SourceSemanticIndex {
     /// Repeating the same association is idempotent. Assigning a different
     /// context to the same symbol is an internal naming error and preserves
     /// the original association.
-    pub(crate) fn record_declaration_context(
+    pub fn record_declaration_context(
         &mut self,
         symbol: SymbolId,
         context: SourceContextId,
-    ) -> Result<(), NamerError> {
+    ) -> Result<(), SourceSemanticIndexError> {
         match self.declaration_contexts_by_symbol.get(&symbol) {
             Some(existing) if *existing == context => Ok(()),
-            Some(existing) => Err(NamerError::DuplicateDeclarationContext {
+            Some(existing) => Err(SourceSemanticIndexError::DuplicateDeclarationContext {
                 symbol,
                 existing: *existing,
                 attempted: context,
@@ -389,12 +428,12 @@ impl SourceSemanticIndex {
         &mut self,
         method: SymbolId,
         clauses: &[Vec<TreeId<Untyped>>],
-    ) -> Result<(), NamerError> {
+    ) -> Result<(), SourceSemanticIndexError> {
         if self
             .extension_prefix_clauses_by_method
             .contains_key(&method)
         {
-            return Err(NamerError::DuplicateExtensionPrefixClauses { method });
+            return Err(SourceSemanticIndexError::DuplicateExtensionPrefixClauses { method });
         }
         self.extension_prefix_clauses_by_method
             .insert(method, clauses.to_vec());
@@ -410,10 +449,10 @@ impl SourceSemanticIndex {
         source: SourceId,
         tree: TreeId<Untyped>,
         symbol: SymbolId,
-    ) -> Result<(), NamerError> {
+    ) -> Result<(), SourceSemanticIndexError> {
         let key = (source, tree);
         if self.symbols_by_tree.contains_key(&key) {
-            return Err(NamerError::DuplicateSourceTreeSymbol {
+            return Err(SourceSemanticIndexError::DuplicateSourceTreeSymbol {
                 source,
                 tree_index: tree.index(),
             });
@@ -428,15 +467,15 @@ impl SourceSemanticIndex {
     /// Records a shared package identity without assigning it reverse source
     /// provenance. Package symbols may be reached from multiple package
     /// clauses and compilation units, so no one clause is authoritative.
-    pub(crate) fn record_package_symbol(
+    pub fn record_package_symbol(
         &mut self,
         source: SourceId,
         tree: TreeId<Untyped>,
         symbol: SymbolId,
-    ) -> Result<(), NamerError> {
+    ) -> Result<(), SourceSemanticIndexError> {
         let key = (source, tree);
         if self.symbols_by_tree.contains_key(&key) {
-            return Err(NamerError::DuplicateSourceTreeSymbol {
+            return Err(SourceSemanticIndexError::DuplicateSourceTreeSymbol {
                 source,
                 tree_index: tree.index(),
             });
@@ -449,11 +488,11 @@ impl SourceSemanticIndex {
         &self,
         symbol: SymbolId,
         attempted: SourceDefinition,
-    ) -> Result<(), NamerError> {
+    ) -> Result<(), SourceSemanticIndexError> {
         if let Some(existing) = self.definitions_by_symbol.get(&symbol)
             && *existing != attempted
         {
-            return Err(NamerError::ConflictingSourceProvenance {
+            return Err(SourceSemanticIndexError::ConflictingSourceProvenance {
                 symbol,
                 existing: *existing,
                 attempted,
@@ -466,10 +505,14 @@ impl SourceSemanticIndex {
     ///
     /// Duplicate scope registration is an internal naming error and leaves
     /// the existing mapping intact.
-    pub fn record_scope(&mut self, symbol: SymbolId, scope: ScopeId) -> Result<(), NamerError> {
+    pub fn record_scope(
+        &mut self,
+        symbol: SymbolId,
+        scope: ScopeId,
+    ) -> Result<(), SourceSemanticIndexError> {
         match self.scopes_by_owner.get(&symbol) {
             Some(existing) if *existing == scope => Ok(()),
-            Some(_) => Err(NamerError::DuplicateDeclarationScope { symbol }),
+            Some(_) => Err(SourceSemanticIndexError::DuplicateDeclarationScope { symbol }),
             None => {
                 self.scopes_by_owner.insert(symbol, scope);
                 Ok(())
@@ -480,6 +523,7 @@ impl SourceSemanticIndex {
 
 #[cfg(test)]
 mod tests {
+    use crate as dotty_core;
     use dotty_core::ast::{ErrorNode, ErrorNodeKind, UntypedNode};
     use dotty_core::{
         Scope, SemanticStore, SourceId, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks,
@@ -564,7 +608,7 @@ mod tests {
 
         assert_eq!(
             index.record_symbol(attempted_source, tree, symbol),
-            Err(NamerError::ConflictingSourceProvenance {
+            Err(SourceSemanticIndexError::ConflictingSourceProvenance {
                 symbol,
                 existing: SourceDefinition::Canonical {
                     source: first_source,
@@ -619,7 +663,7 @@ mod tests {
 
         assert_eq!(
             index.record_derived_symbol(owner, source, tree, symbol),
-            Err(NamerError::ConflictingSourceProvenance {
+            Err(SourceSemanticIndexError::ConflictingSourceProvenance {
                 symbol,
                 existing: SourceDefinition::Canonical { source, tree },
                 attempted: SourceDefinition::Derived { source, tree },
@@ -899,7 +943,7 @@ mod tests {
 
         assert_eq!(
             index.record_declaration_context(declaration, second),
-            Err(NamerError::DuplicateDeclarationContext {
+            Err(SourceSemanticIndexError::DuplicateDeclarationContext {
                 symbol: declaration,
                 existing: first,
                 attempted: second,
@@ -920,7 +964,7 @@ mod tests {
         index.record_symbol(source, tree, first).unwrap();
         assert!(matches!(
             index.record_symbol(source, tree, second),
-            Err(NamerError::DuplicateSourceTreeSymbol {
+            Err(SourceSemanticIndexError::DuplicateSourceTreeSymbol {
                 source: duplicate_source,
                 tree_index: 0
             }) if duplicate_source == source
@@ -943,7 +987,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             index.record_derived_symbol(owner, source, tree, second),
-            Err(NamerError::DuplicateDerivedSourceTreeSymbol {
+            Err(SourceSemanticIndexError::DuplicateDerivedSourceTreeSymbol {
                 owner: duplicate_owner,
                 source: duplicate_source,
                 tree_index: 0
@@ -1105,7 +1149,7 @@ mod tests {
         index.record_scope(owner, first_scope).unwrap();
         assert!(matches!(
             index.record_scope(owner, second_scope),
-            Err(NamerError::DuplicateDeclarationScope { symbol }) if symbol == owner
+            Err(SourceSemanticIndexError::DuplicateDeclarationScope { symbol }) if symbol == owner
         ));
         assert_eq!(index.scope_of(owner), Some(first_scope));
     }
@@ -1171,7 +1215,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             index.record_extension_prefix_clauses(method, &second_clauses),
-            Err(NamerError::DuplicateExtensionPrefixClauses { method })
+            Err(SourceSemanticIndexError::DuplicateExtensionPrefixClauses { method })
         );
         assert_eq!(
             index.extension_prefix_clauses(method),

@@ -8,13 +8,11 @@ use dotty_core::ast::{
     ExtensionMethods, Modifier, Modifiers, Select, UntypedNode, VisibilitySyntax,
 };
 use dotty_core::{
-    AstArena, Packages, Scope, ScopeId, SemanticStore, SourceId, SourceSpan, Symbol, SymbolFlags,
-    SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TreeId, TreeKind, TypeName,
-    Untyped, Visibility,
+    AstArena, Packages, Scope, ScopeId, SemanticStore, SourceContext, SourceContextId,
+    SourceDefinition, SourceId, SourceSemanticIndex, SourceSemanticIndexError, SourceSpan, Symbol,
+    SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TreeId, TreeKind,
+    TypeName, Untyped, Visibility,
 };
-
-use crate::SourceSemanticIndex;
-use crate::source_index::{SourceContext, SourceContextId, SourceDefinition};
 
 /// Internal structural error encountered while indexing a source tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,6 +164,49 @@ impl fmt::Display for NamerError {
 }
 
 impl Error for NamerError {}
+
+impl From<SourceSemanticIndexError> for NamerError {
+    fn from(error: SourceSemanticIndexError) -> Self {
+        match error {
+            SourceSemanticIndexError::DuplicateSourceTreeSymbol { source, tree_index } => {
+                Self::DuplicateSourceTreeSymbol { source, tree_index }
+            }
+            SourceSemanticIndexError::DuplicateDerivedSourceTreeSymbol {
+                owner,
+                source,
+                tree_index,
+            } => Self::DuplicateDerivedSourceTreeSymbol {
+                owner,
+                source,
+                tree_index,
+            },
+            SourceSemanticIndexError::ConflictingSourceProvenance {
+                symbol,
+                existing,
+                attempted,
+            } => Self::ConflictingSourceProvenance {
+                symbol,
+                existing,
+                attempted,
+            },
+            SourceSemanticIndexError::DuplicateDeclarationScope { symbol } => {
+                Self::DuplicateDeclarationScope { symbol }
+            }
+            SourceSemanticIndexError::DuplicateDeclarationContext {
+                symbol,
+                existing,
+                attempted,
+            } => Self::DuplicateDeclarationContext {
+                symbol,
+                existing,
+                attempted,
+            },
+            SourceSemanticIndexError::DuplicateExtensionPrefixClauses { method } => {
+                Self::DuplicateExtensionPrefixClauses { method }
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct UnsupportedGivenNameTree {

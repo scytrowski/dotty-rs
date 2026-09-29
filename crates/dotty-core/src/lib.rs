@@ -19,6 +19,7 @@ pub mod names;
 pub mod packages;
 pub mod resolution;
 pub mod source;
+pub mod source_semantics;
 pub mod store;
 pub mod symbols;
 pub mod token;
@@ -44,6 +45,7 @@ pub mod core {
     pub use super::resolution::*;
     pub use super::source;
     pub use super::source::*;
+    pub use super::source_semantics::*;
     pub use super::store;
     pub use super::store::*;
     pub use super::symbols;
@@ -69,6 +71,9 @@ pub use resolution::{
 pub use source::{
     LineIndex, SourceSpan, SourceText, SourceTextError, Span, SpanError, TextRange, TextRangeError,
     is_line_break_char,
+};
+pub use source_semantics::{
+    SourceContext, SourceContextId, SourceDefinition, SourceSemanticIndex, SourceSemanticIndexError,
 };
 pub use store::{SemanticStore, StoreCheckpoint};
 pub use symbols::{
