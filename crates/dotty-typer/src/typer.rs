@@ -5009,7 +5009,7 @@ impl<'a> SourceTyper<'a> {
                     }
                 };
                 let typed_tpt =
-                    self.reify_type_argument(parameter.tpt, parameter_type, new_mappings)?;
+                    self.reify_constructor_type_tree(parameter.tpt, parameter_type, new_mappings)?;
                 let typed_parameter = self.typed_arena.alloc(Tree {
                     kind: TreeKind::ValDef(ValDef {
                         name: parameter.name,
@@ -5034,7 +5034,8 @@ impl<'a> SourceTyper<'a> {
             typed_clauses.push(typed_parameters);
         }
 
-        let typed_result = self.reify_type_argument(definition.tpt, result, new_mappings)?;
+        let typed_result =
+            self.reify_constructor_type_tree(definition.tpt, result, new_mappings)?;
         let rhs = definition
             .rhs
             .ok_or(TyperError::LocalBlockDeclarationDeferred {
@@ -19339,12 +19340,8 @@ mod tests {
     }
 
     #[test]
-    fn block_declaration_statements_are_deferred_explicitly() {
+    fn unsupported_block_declaration_statements_are_deferred_explicitly() {
         let sources = [
-            (
-                "class C { def use: Int = { 1; def local: Int = 2; 3 } }",
-                "method definition",
-            ),
             (
                 "class C { def use: Int = { 1; type Local = Int; 3 } }",
                 "type definition",
@@ -20273,6 +20270,132 @@ mod tests {
     }
 
     #[test]
+    fn local_method_bodies_support_forward_calls_and_explicit_recursion() {
+        for source_code in [
+            "class C { def outer: Int = { val answer: Int = inc(1); def inc(n: Int): Int = n; answer } }",
+            "class C { def outer: Int = { def loop(n: Int): Int = if true then loop(n) else n; loop(1) } }",
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_code);
+            let (outer, block_tree) =
+                method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(outer).unwrap();
+
+            typer.type_expression(block_tree, context).unwrap();
+
+            let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+                unreachable!()
+            };
+            for method_tree in block
+                .stats
+                .iter()
+                .filter(|tree| matches!(parsed.ast.get(**tree).kind, TreeKind::DefDef(_)))
+            {
+                let typed = typer
+                    .source_typed_index()
+                    .get(source, *method_tree)
+                    .expect("local method should have a typed replacement");
+                assert!(matches!(
+                    typer.typed_ast().get(typed).kind,
+                    TreeKind::DefDef(_)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn local_method_body_captures_outer_local_and_respects_nested_shadowing() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { val base: Int = 1; def captured(): Int = base; def nested(): Int = { val base: Int = 2; base }; captured() } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        typer.type_expression(block_tree, context).unwrap();
+
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            unreachable!()
+        };
+        let outer_base = typer.local_symbol_at(source, block.stats[0]).unwrap();
+        assert_eq!(
+            block
+                .stats
+                .iter()
+                .filter(|tree| matches!(parsed.ast.get(**tree).kind, TreeKind::DefDef(_)))
+                .count(),
+            2
+        );
+        for method_tree in block
+            .stats
+            .iter()
+            .filter(|tree| matches!(parsed.ast.get(**tree).kind, TreeKind::DefDef(_)))
+        {
+            assert!(
+                typer
+                    .source_typed_index()
+                    .get(source, *method_tree)
+                    .is_some()
+            );
+        }
+        let method_bodies = block
+            .stats
+            .iter()
+            .copied()
+            .filter_map(|tree| match &parsed.ast.get(tree).kind {
+                TreeKind::DefDef(definition) => Some(definition.rhs.unwrap()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let captured_rhs = typer
+            .source_typed_index()
+            .get(source, method_bodies[0])
+            .unwrap();
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(captured_rhs).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == outer_base
+        ));
+        let nested_source_rhs = method_bodies[1];
+        let TreeKind::Block(nested_source) = &parsed.ast.get(nested_source_rhs).kind else {
+            unreachable!()
+        };
+        let nested_base = typer
+            .local_symbol_at(source, nested_source.stats[0])
+            .unwrap();
+        let typed_nested_rhs = typer
+            .source_typed_index()
+            .get(source, nested_source_rhs)
+            .unwrap();
+        let TreeKind::Block(nested_typed) = &typer.typed_ast().get(typed_nested_rhs).kind else {
+            panic!("nested local method should retain its typed block body");
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(nested_typed.expr).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == nested_base
+        ));
+        assert_ne!(outer_base, nested_base);
+    }
+
+    #[test]
     fn local_method_body_mismatch_rolls_back_signature_and_typed_mappings() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def outer: Int = { def invalid(): Boolean = 1; 0 } }");
@@ -20311,13 +20434,13 @@ mod tests {
     #[test]
     fn failed_block_typing_rolls_back_preentered_local_methods_and_scopes() {
         let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("class C { def outer: Int = { 1; foo(); def foo(): Int = 2; 3 } }");
+            parse_and_name("class C { def outer: Int = { def foo(): Int = 2; foo(); missing } }");
         let (outer, block_tree) =
             method_definition_and_rhs(&parsed, &store, &index, source, "outer");
         let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
             panic!("outer body should be a block")
         };
-        let local_method_tree = block.stats[2];
+        let local_method_tree = block.stats[0];
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -20333,16 +20456,7 @@ mod tests {
 
         let error = typer.type_expression(block_tree, context).unwrap_err();
 
-        assert!(
-            matches!(
-                error,
-                TyperError::LocalBlockDeclarationDeferred {
-                    kind: "method definition",
-                    ..
-                }
-            ),
-            "unexpected block typing error: {error:?}"
-        );
+        assert!(matches!(error, TyperError::TermNameNotFound { .. }));
         assert_eq!(typer.store().checkpoint(), store_checkpoint);
         assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
         assert_eq!(typer.expression_scopes.len(), scope_checkpoint);
