@@ -79,6 +79,13 @@ where
             .map(|name| (*name.as_name(), backquoted))
     }
 
+    pub(crate) fn current_is_type_reference_name(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) || self.current_is_symbolic_type_name()
+    }
+
     /// Parses `id { '.' id }`, preserving the requested name namespace and
     /// the source-level backquoted marker on every segment.
     pub(crate) fn parse_qualified_reference(
@@ -137,12 +144,7 @@ where
                 self.current().kind,
                 TokenKind::Identifier | TokenKind::BackquotedIdentifier
             ),
-            ReferenceNamespace::Type => {
-                matches!(
-                    self.current().kind,
-                    TokenKind::Identifier | TokenKind::BackquotedIdentifier
-                ) || self.current_is_symbolic_type_name()
-            }
+            ReferenceNamespace::Type => self.current_is_type_reference_name(),
         };
         if !is_name {
             return None;

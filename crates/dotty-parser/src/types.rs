@@ -1905,6 +1905,9 @@ where
             | TokenKind::Keyword(HardKeyword::This | HardKeyword::Super) => {
                 return self.simple_type();
             }
+            TokenKind::Operator | TokenKind::ColonOp if self.current_is_type_reference_name() => {
+                return self.simple_type();
+            }
             TokenKind::Punctuation(Punctuation::LeftParen) => {
                 return self.parse_parenthesized_type(mark);
             }
@@ -4305,6 +4308,78 @@ mod tests {
         let name = ident.name;
         drop(parser);
         assert_eq!(names.resolve(name.text()), "Value");
+    }
+
+    #[test]
+    fn parses_colon_operator_as_an_applied_type_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "::[A]",
+            vec![
+                token(TokenKind::ColonOp, 0, 2),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 2, 3),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.type_expr();
+        let TreeKind::AppliedTypeTree(applied) = &parser.ast().get(tree).kind else {
+            panic!("expected an applied symbolic type");
+        };
+        let TreeKind::Ident(identifier) = parser.ast().get(applied.tpt).kind else {
+            panic!("expected the symbolic type name");
+        };
+        assert!(identifier.name.is_type());
+        let type_name = identifier.name;
+        assert_eq!(applied.args.len(), 1);
+        assert!(matches!(
+            parser.ast().get(applied.args[0]).kind,
+            TreeKind::Ident(ident) if ident.name.is_type()
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        drop(parser);
+        assert_eq!(names.resolve(type_name.text()), "::");
+    }
+
+    #[test]
+    fn parses_equals_colon_equals_as_an_applied_type_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "=:= [A, B]",
+            vec![
+                token(TokenKind::Operator, 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::Comma), 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.type_expr();
+        let TreeKind::AppliedTypeTree(applied) = &parser.ast().get(tree).kind else {
+            panic!("expected an applied symbolic type");
+        };
+        let TreeKind::Ident(identifier) = parser.ast().get(applied.tpt).kind else {
+            panic!("expected the symbolic type name");
+        };
+        assert!(identifier.name.is_type());
+        let type_name = identifier.name;
+        assert_eq!(applied.args.len(), 2);
+        assert!(applied.args.iter().all(|arg| matches!(
+            parser.ast().get(*arg).kind,
+            TreeKind::Ident(ident) if ident.name.is_type()
+        )));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        drop(parser);
+        assert_eq!(names.resolve(type_name.text()), "=:=");
     }
 
     #[test]
