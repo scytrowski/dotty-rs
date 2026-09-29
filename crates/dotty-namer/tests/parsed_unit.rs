@@ -2030,6 +2030,131 @@ fn parsed_singleton_enum_case_is_entered_in_companion_module_class_scope() {
 }
 
 #[test]
+fn parameterized_enum_case_reuses_class_and_constructor_naming() {
+    use dotty_core::{SymbolKind, SymbolOrigin, TypeName};
+
+    let mut named = named_source("enum Result:\n  case Success(value: Int)", 506);
+    let enum_tree = package_stat_trees(&named)[0];
+    let TreeKind::TypeDef(enum_definition) = &named.parsed.ast.get(enum_tree).kind else {
+        panic!("enum should be a TypeDef");
+    };
+    let TreeKind::Template(enum_template) = &named.parsed.ast.get(enum_definition.rhs).kind else {
+        panic!("enum should have a Template");
+    };
+    let case_tree = enum_template.body[0];
+    let TreeKind::TypeDef(case_definition) = &named.parsed.ast.get(case_tree).kind else {
+        panic!("parameterized enum case should be a TypeDef");
+    };
+    let TreeKind::Template(case_template) = &named.parsed.ast.get(case_definition.rhs).kind else {
+        panic!("parameterized enum case should have a Template");
+    };
+    let TreeKind::DefDef(case_constructor) = &named.parsed.ast.get(case_template.constructor).kind
+    else {
+        panic!("parameterized enum case should have a primary constructor");
+    };
+    let parameter_tree = case_constructor.value_param_clauses[0][0];
+    let enum_symbol = named.index.symbol_at(named.source, enum_tree).unwrap();
+    let enum_scope = named.index.scope_of(enum_symbol).unwrap();
+    let owner = named.store.symbols.get(enum_symbol).owner.unwrap();
+    let owner_scope = named.index.scope_of(owner).unwrap();
+    let companion_name = TypeName::new(named.store.names.intern("Result$"));
+    let companion_class = named
+        .store
+        .scopes
+        .get(owner_scope)
+        .lookup(companion_name.as_name())
+        .unwrap();
+    let companion_scope = named.index.scope_of(companion_class).unwrap();
+    let case_symbol = named.index.symbol_at(named.source, case_tree).unwrap();
+    let constructor_symbol = named
+        .index
+        .symbol_at(named.source, case_template.constructor)
+        .unwrap();
+    let field_symbol = named.index.symbol_at(named.source, parameter_tree).unwrap();
+    let constructor_parameter = named
+        .index
+        .derived_symbol_at(constructor_symbol, named.source, parameter_tree)
+        .unwrap();
+    let case_name = TypeName::new(case_definition.name.as_name().text());
+
+    assert_eq!(
+        named.store.symbols.get(companion_class).kind,
+        SymbolKind::ModuleClass
+    );
+    assert_eq!(named.store.symbols.get(case_symbol).kind, SymbolKind::Class);
+    assert_eq!(
+        named.store.symbols.get(case_symbol).owner,
+        Some(companion_class)
+    );
+    assert_eq!(
+        named.store.symbols.get(case_symbol).origin,
+        SymbolOrigin::Source(named.source)
+    );
+    assert!(
+        named
+            .store
+            .symbols
+            .get(case_symbol)
+            .flags
+            .contains(SymbolFlags::CASE | SymbolFlags::ENUM | SymbolFlags::FINAL)
+    );
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(companion_scope)
+            .lookup(case_name.as_name()),
+        Some(case_symbol)
+    );
+    assert!(
+        named
+            .store
+            .scopes
+            .get(enum_scope)
+            .lookup_all(case_name.as_name())
+            .is_empty()
+    );
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(named.index.scope_of(case_symbol).unwrap())
+            .owner,
+        Some(case_symbol)
+    );
+    assert_eq!(
+        named.store.symbols.get(constructor_symbol).kind,
+        SymbolKind::Constructor
+    );
+    assert_eq!(
+        named.store.symbols.get(constructor_symbol).owner,
+        Some(case_symbol)
+    );
+    assert_eq!(
+        named.store.symbols.get(field_symbol).kind,
+        SymbolKind::Field
+    );
+    assert_eq!(
+        named.store.symbols.get(field_symbol).owner,
+        Some(case_symbol)
+    );
+    assert_eq!(
+        named.store.symbols.get(constructor_parameter).kind,
+        SymbolKind::Parameter
+    );
+    assert_eq!(
+        named.store.symbols.get(constructor_parameter).owner,
+        Some(constructor_symbol)
+    );
+    assert!(matches!(
+        named.index.definition_of(case_symbol),
+        Some(SourceDefinition::Canonical { source, tree })
+            if source == named.source && tree == case_tree
+    ));
+    assert!(named.index.declaration_context_of(case_symbol).is_some());
+}
+
+#[test]
 fn parsed_comma_group_enum_cases_get_ordered_distinct_identities() {
     use dotty_core::SymbolKind;
     use dotty_core::ast::UntypedNode;
