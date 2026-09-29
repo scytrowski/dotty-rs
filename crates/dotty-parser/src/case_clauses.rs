@@ -92,7 +92,7 @@ where
             if self.current().kind == TokenKind::Keyword(HardKeyword::Case)
                 && let Some(indent_offset) = region_indent_offset
             {
-                self.observe_outdented_region(indent_offset);
+                self.observe_outdented_layout_region(indent_offset);
             }
             if self.current().kind != TokenKind::Keyword(HardKeyword::Case) {
                 break;
@@ -176,7 +176,7 @@ where
             if !self.cursor.at(TokenKind::Outdent)
                 && let Some(indent_offset) = body_indent_offset
             {
-                self.observe_outdented_region(indent_offset);
+                self.observe_outdented_layout_region(indent_offset);
             } else if !self.cursor.at(TokenKind::Outdent) {
                 self.observe_outdented();
             }

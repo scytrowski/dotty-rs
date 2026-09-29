@@ -450,7 +450,7 @@ where
             if !self.cursor.at(TokenKind::Outdent)
                 && let Some((indent_offset, _)) = case_region
             {
-                self.observe_outdented_region(indent_offset);
+                self.observe_outdented_layout_region(indent_offset);
             } else if !self.cursor.at(TokenKind::Outdent) {
                 self.observe_outdented();
             }

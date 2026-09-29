@@ -102,7 +102,7 @@ where
                 } else if !self.cursor.at(TokenKind::Outdent)
                     && let Some((indent_offset, _)) = case_region
                 {
-                    self.observe_outdented_region(indent_offset);
+                    self.observe_outdented_layout_region(indent_offset);
                 } else if !self.cursor.at(TokenKind::Outdent) {
                     self.observe_outdented();
                 }
@@ -204,7 +204,8 @@ mod tests {
                 self.closed_feedback_by_delimiter.set(true);
                 self.feedback_regions.pop();
             }
-            if let ScannerEvent::OutdentedRegion { indent_offset } = event
+            if let ScannerEvent::OutdentedRegion { indent_offset }
+            | ScannerEvent::OutdentedLayoutRegion { indent_offset } = event
                 && self
                     .feedback_regions
                     .last()

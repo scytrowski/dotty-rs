@@ -340,6 +340,12 @@ where
         self.observe(ScannerEvent::OutdentedRegion { indent_offset });
     }
 
+    /// Requests closure of a grammar-owned case/body region. Unlike ordinary
+    /// parser feedback, this may refer to an eager scanner `Indent`.
+    pub(crate) fn observe_outdented_layout_region(&mut self, indent_offset: u32) {
+        self.observe(ScannerEvent::OutdentedLayoutRegion { indent_offset });
+    }
+
     /// Identifies the match-case indentation, requesting parser feedback only
     /// when the scanner has not already emitted the region's `Indent`.
     pub(crate) fn observe_match_cases_indented(&mut self) -> Option<(u32, bool)> {

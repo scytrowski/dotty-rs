@@ -13,8 +13,13 @@ pub enum ScannerEvent {
         reference_offset: u32,
     },
     Outdented,
-    /// Closes a specific active indentation region, if still active.
+    /// Closes a specific parser-opened indentation region, if still active.
     OutdentedRegion {
+        indent_offset: u32,
+    },
+    /// Closes the named innermost layout region, whether it was emitted by
+    /// eager scanning or opened through parser feedback.
+    OutdentedLayoutRegion {
         indent_offset: u32,
     },
     /// Opens the case region following a `match`, including same-indent cases
