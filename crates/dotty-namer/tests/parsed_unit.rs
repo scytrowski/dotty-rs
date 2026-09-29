@@ -1937,6 +1937,94 @@ fn parsed_enum_reuses_explicit_companion_without_entering_cases_as_members() {
 }
 
 #[test]
+fn parsed_singleton_enum_case_is_entered_in_companion_module_class_scope() {
+    use dotty_core::ast::UntypedNode;
+    use dotty_core::{SymbolKind, SymbolOrigin, TermName};
+
+    let named = named_source(
+        "enum Color:\n  case Red\n\nobject Color:\n  def helper = 1",
+        501,
+    );
+    let enum_tree = package_stat_trees(&named)[0];
+    let TreeKind::TypeDef(enum_definition) = &named.parsed.ast.get(enum_tree).kind else {
+        panic!("enum should be a TypeDef");
+    };
+    let TreeKind::Template(enum_template) = &named.parsed.ast.get(enum_definition.rhs).kind else {
+        panic!("enum should have a Template");
+    };
+    let case_tree = enum_template.body[0];
+    let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(case_definition)) =
+        &named.parsed.ast.get(case_tree).kind
+    else {
+        panic!("singleton enum case should be a ModuleDef");
+    };
+    let enum_symbol = named.index.symbol_at(named.source, enum_tree).unwrap();
+    let case_symbol = named.index.symbol_at(named.source, case_tree).unwrap();
+    let module_class = named
+        .store
+        .symbols
+        .get(enum_symbol)
+        .links
+        .companion
+        .and_then(|object| named.index.definition_of(object))
+        .and_then(|definition| match definition {
+            SourceDefinition::Canonical { source, tree } => named.index.derived_symbol_at(
+                named.store.symbols.get(enum_symbol).owner.unwrap(),
+                source,
+                tree,
+            ),
+            _ => None,
+        })
+        .unwrap();
+    let enum_scope = named.index.scope_of(enum_symbol).unwrap();
+    let module_scope = named.index.scope_of(module_class).unwrap();
+    let case_name = *TermName::new(case_definition.name.as_name().text()).as_name();
+
+    assert_eq!(
+        named.store.symbols.get(case_symbol).kind,
+        SymbolKind::Object
+    );
+    assert_eq!(
+        named.store.symbols.get(case_symbol).owner,
+        Some(module_class)
+    );
+    assert_eq!(
+        named.store.symbols.get(case_symbol).origin,
+        SymbolOrigin::Source(named.source)
+    );
+    assert!(
+        named
+            .store
+            .symbols
+            .get(case_symbol)
+            .flags
+            .contains(SymbolFlags::CASE)
+    );
+    assert!(
+        named
+            .store
+            .symbols
+            .get(case_symbol)
+            .flags
+            .contains(SymbolFlags::ENUM)
+    );
+    assert_eq!(
+        named.store.scopes.get(module_scope).lookup(&case_name),
+        Some(case_symbol)
+    );
+    assert!(
+        named
+            .store
+            .scopes
+            .get(enum_scope)
+            .lookup_all(&case_name)
+            .is_empty()
+    );
+    assert!(named.index.declaration_context_of(case_symbol).is_some());
+    assert!(named.index.definition_of(case_symbol).is_some());
+}
+
+#[test]
 fn parsed_enum_uses_ordinary_class_constructor_and_member_identities() {
     use dotty_core::SymbolKind;
 
