@@ -1225,6 +1225,7 @@ pub struct SourceTyper<'a> {
     type_index: SourceTypeIndex,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     local_methods: LocalMethodIndex,
+    active_local_type_scopes: Vec<(SourceContextId, ScopeId)>,
     initializing_local_symbols: HashSet<SymbolId>,
     inferred_method_results_in_progress: HashSet<SymbolId>,
     typed_arena: AstArena<Typed>,
@@ -1328,6 +1329,9 @@ struct LocalMethodIndex {
     parameter_symbols_by_tree: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     parameter_definitions: HashMap<SymbolId, (SourceId, TreeId<Untyped>)>,
     parameter_contexts: HashMap<SymbolId, SourceContextId>,
+    type_parameter_symbols_by_tree: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
+    type_parameter_definitions: HashMap<SymbolId, (SourceId, TreeId<Untyped>)>,
+    type_parameter_contexts: HashMap<SymbolId, SourceContextId>,
 }
 
 impl LocalMethodIndex {
@@ -1389,6 +1393,38 @@ impl LocalMethodIndex {
 
     fn parameter_context(&self, symbol: SymbolId) -> Option<SourceContextId> {
         self.parameter_contexts.get(&symbol).copied()
+    }
+
+    fn insert_type_parameter(
+        &mut self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+        symbol: SymbolId,
+        context: SourceContextId,
+    ) {
+        self.type_parameter_symbols_by_tree
+            .insert((source, tree), symbol);
+        self.type_parameter_definitions
+            .insert(symbol, (source, tree));
+        self.type_parameter_contexts.insert(symbol, context);
+    }
+
+    fn type_parameter_symbol_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        self.type_parameter_symbols_by_tree
+            .get(&(source, tree))
+            .copied()
+    }
+
+    fn type_parameter_definition(&self, symbol: SymbolId) -> Option<(SourceId, TreeId<Untyped>)> {
+        self.type_parameter_definitions.get(&symbol).copied()
+    }
+
+    fn type_parameter_context(&self, symbol: SymbolId) -> Option<SourceContextId> {
+        self.type_parameter_contexts.get(&symbol).copied()
     }
 }
 
@@ -1538,6 +1574,7 @@ impl<'a> SourceTyper<'a> {
             type_index: SourceTypeIndex::default(),
             local_symbols: HashMap::new(),
             local_methods: LocalMethodIndex::default(),
+            active_local_type_scopes: Vec::new(),
             initializing_local_symbols: HashSet::new(),
             inferred_method_results_in_progress: HashSet::new(),
             typed_arena: AstArena::new(),
@@ -1560,6 +1597,7 @@ impl<'a> SourceTyper<'a> {
         self.local_methods
             .definition(symbol)
             .or_else(|| self.local_methods.parameter_definition(symbol))
+            .or_else(|| self.local_methods.type_parameter_definition(symbol))
             .or_else(|| {
                 self.index
                     .definition_of(symbol)
@@ -1592,6 +1630,7 @@ impl<'a> SourceTyper<'a> {
     fn parameter_source_context(&self, parameter: SymbolId) -> Option<SourceContextId> {
         self.local_methods
             .parameter_context(parameter)
+            .or_else(|| self.local_methods.type_parameter_context(parameter))
             .or_else(|| self.index.declaration_context_of(parameter))
     }
 
@@ -7320,6 +7359,7 @@ impl<'a> SourceTyper<'a> {
                 let context = self
                     .index
                     .declaration_context_of(symbol)
+                    .or_else(|| self.local_methods.type_parameter_context(symbol))
                     .ok_or(TyperError::DeclarationContextMissing { symbol })?;
                 self.complete_type_parameter(symbol, rhs, context, info_journal)
             }
@@ -8013,12 +8053,6 @@ impl<'a> SourceTyper<'a> {
             tree_index: method_tree_index,
             feature,
         };
-        if !definition.type_params.is_empty() {
-            return Err(deferred("type parameters"));
-        }
-        if definition.value_param_clauses.len() != 1 {
-            return Err(deferred("term parameter clause count"));
-        }
         if self
             .store
             .symbols
@@ -8048,55 +8082,19 @@ impl<'a> SourceTyper<'a> {
             .ok_or(TyperError::DeclarationContextMissing { symbol: method })?;
         let method_scope = self.method_scope(method)?;
         let mut parameters_to_enter = Vec::new();
-        for parameter_tree in &definition.value_param_clauses[0] {
-            let parameter_node =
-                self.arena
-                    .try_get(*parameter_tree)
-                    .ok_or(TyperError::TreeOutsideArena {
-                        source: self.source,
-                        tree_index: parameter_tree.index(),
-                    })?;
-            let TreeKind::ValDef(parameter) = &parameter_node.kind else {
-                return Err(deferred("non-value parameter"));
+        for type_parameter_tree in &definition.type_params {
+            let Some(parameter_node) = self.arena.try_get(*type_parameter_tree) else {
+                return Err(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: type_parameter_tree.index(),
+                });
             };
-            if parameter
-                .metadata
-                .modifiers
-                .iter()
-                .any(|modifier| matches!(modifier, Modifier::Given | Modifier::Implicit))
-            {
-                return Err(deferred("contextual parameters"));
-            }
-            if parameter.metadata.modifiers.contains(&Modifier::Erased) {
-                return Err(deferred("erased parameters"));
-            }
-            if parameter
-                .metadata
-                .modifiers
-                .iter()
-                .any(|modifier| *modifier != Modifier::Param)
-            {
-                return Err(deferred("parameter modifiers"));
-            }
-            let parameter_type =
-                self.arena
-                    .try_get(parameter.tpt)
-                    .ok_or(TyperError::TreeOutsideArena {
-                        source: self.source,
-                        tree_index: parameter.tpt.index(),
-                    })?;
-            if matches!(parameter_type.kind, TreeKind::ByNameTypeTree(_))
-                || matches!(
-                    &parameter_type.kind,
-                    TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix))
-                        if self.store.names.resolve(postfix.op.text()) == "*"
-                )
-            {
-                return Err(deferred("by-name or repeated parameters"));
-            }
+            let TreeKind::TypeDef(parameter) = &parameter_node.kind else {
+                return Err(deferred("non-type parameter"));
+            };
             if self
                 .local_methods
-                .parameter_symbol_at(self.source, *parameter_tree)
+                .type_parameter_symbol_at(self.source, *type_parameter_tree)
                 .is_some()
             {
                 continue;
@@ -8104,7 +8102,7 @@ impl<'a> SourceTyper<'a> {
             let symbol = self.store.symbols.alloc(dotty_core::Symbol {
                 name: *parameter.name.as_name(),
                 owner: Some(method),
-                kind: SymbolKind::Parameter,
+                kind: SymbolKind::TypeParameter,
                 flags: SymbolFlags::EMPTY,
                 visibility: dotty_core::Visibility::Public,
                 info: SymbolInfo::Missing,
@@ -8113,13 +8111,82 @@ impl<'a> SourceTyper<'a> {
                 position: parameter_node.position,
                 links: dotty_core::SymbolLinks::default(),
             });
-            parameters_to_enter.push((*parameter.name.as_name(), symbol));
-            self.local_methods.insert_parameter(
+            self.store
+                .scopes
+                .get_mut(method_scope)
+                .enter(*parameter.name.as_name(), symbol);
+            self.local_methods.insert_type_parameter(
                 self.source,
-                *parameter_tree,
+                *type_parameter_tree,
                 symbol,
                 declaration_context.lexical,
             );
+        }
+        for clause in &definition.value_param_clauses {
+            for parameter_tree in clause {
+                let Some(parameter_node) = self.arena.try_get(*parameter_tree) else {
+                    return Err(TyperError::TreeOutsideArena {
+                        source: self.source,
+                        tree_index: parameter_tree.index(),
+                    });
+                };
+                let TreeKind::ValDef(parameter) = &parameter_node.kind else {
+                    return Err(deferred("non-value parameter"));
+                };
+                if parameter.metadata.modifiers.contains(&Modifier::Erased) {
+                    return Err(deferred("erased parameters"));
+                }
+                if parameter.metadata.modifiers.iter().any(|modifier| {
+                    !matches!(
+                        modifier,
+                        Modifier::Param | Modifier::Given | Modifier::Implicit
+                    )
+                }) {
+                    return Err(deferred("parameter modifiers"));
+                }
+                let parameter_type =
+                    self.arena
+                        .try_get(parameter.tpt)
+                        .ok_or(TyperError::TreeOutsideArena {
+                            source: self.source,
+                            tree_index: parameter.tpt.index(),
+                        })?;
+                if matches!(parameter_type.kind, TreeKind::ByNameTypeTree(_))
+                    || matches!(
+                        &parameter_type.kind,
+                        TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix))
+                            if self.store.names.resolve(postfix.op.text()) == "*"
+                    )
+                {
+                    return Err(deferred("by-name or repeated parameters"));
+                }
+                if self
+                    .local_methods
+                    .parameter_symbol_at(self.source, *parameter_tree)
+                    .is_some()
+                {
+                    continue;
+                }
+                let symbol = self.store.symbols.alloc(dotty_core::Symbol {
+                    name: *parameter.name.as_name(),
+                    owner: Some(method),
+                    kind: SymbolKind::Parameter,
+                    flags: source_method_flags(&parameter.metadata.modifiers),
+                    visibility: dotty_core::Visibility::Public,
+                    info: SymbolInfo::Missing,
+                    origin: SymbolOrigin::Source(self.source),
+                    annotations: Vec::new(),
+                    position: parameter_node.position,
+                    links: dotty_core::SymbolLinks::default(),
+                });
+                parameters_to_enter.push((*parameter.name.as_name(), symbol));
+                self.local_methods.insert_parameter(
+                    self.source,
+                    *parameter_tree,
+                    symbol,
+                    declaration_context.lexical,
+                );
+            }
         }
         let parameter_names = parameters_to_enter
             .iter()
@@ -8128,20 +8195,23 @@ impl<'a> SourceTyper<'a> {
         if self.local_result_depends_on_parameters(definition.tpt, &parameter_names) {
             return Err(deferred("dependent result types"));
         }
-        let signature = self.complete_method_signature_body(
-            method,
-            method_tree_index,
-            definition,
-            false,
-            info_journal,
-        )?;
         for (name, parameter) in parameters_to_enter {
             self.store
                 .scopes
                 .get_mut(method_scope)
                 .enter(name, parameter);
         }
-        Ok(signature)
+        self.active_local_type_scopes
+            .push((declaration_context.lexical, method_scope));
+        let signature = self.complete_method_signature_body(
+            method,
+            method_tree_index,
+            definition,
+            false,
+            info_journal,
+        );
+        self.active_local_type_scopes.pop();
+        signature
     }
 
     fn local_result_depends_on_parameters(
@@ -8811,7 +8881,8 @@ impl<'a> SourceTyper<'a> {
             self.index.derived_symbol_at(method, self.source, tree)
         } else {
             self.local_methods
-                .parameter_symbol_at(self.source, tree)
+                .type_parameter_symbol_at(self.source, tree)
+                .or_else(|| self.local_methods.parameter_symbol_at(self.source, tree))
                 .or_else(|| self.index.symbol_at(self.source, tree))
         };
         symbol.ok_or(TyperError::MethodParameterSymbolMissing {
@@ -9278,6 +9349,23 @@ impl<'a> SourceTyper<'a> {
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
+        for (local_context, scope) in self.active_local_type_scopes.iter().rev() {
+            if *local_context != context {
+                continue;
+            }
+            let candidates = self
+                .store
+                .scopes
+                .get(*scope)
+                .lookup_all(&name)
+                .iter()
+                .copied()
+                .filter(|symbol| self.store.symbols.get(*symbol).kind == SymbolKind::TypeParameter)
+                .collect::<Vec<_>>();
+            if !candidates.is_empty() {
+                return self.unique_type_candidate(&candidates, name, tree_index, position);
+            }
+        }
         let contexts = self.source_context_chain(context, tree_index)?;
         let mut package_candidates = Vec::new();
         for context_id in &contexts {
@@ -9906,6 +9994,15 @@ impl<'a> SourceTyper<'a> {
         tree: TreeId<Untyped>,
     ) -> Option<SymbolId> {
         self.local_methods.parameter_symbol_at(source, tree)
+    }
+
+    /// Returns the typer-owned type parameter symbol for a local method tree.
+    pub fn local_method_type_parameter_symbol_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        self.local_methods.type_parameter_symbol_at(source, tree)
     }
 
     /// Exposes the package registry used by this driver.
@@ -19830,6 +19927,135 @@ mod tests {
     }
 
     #[test]
+    fn generic_local_method_signature_uses_owned_type_parameter_binders() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def identity[A](value: A): A = value; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let method_tree = match &parsed.ast.get(block_tree).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("outer body should be a block"),
+        };
+        let (type_parameter_tree, value_parameter_tree) = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => (
+                definition.type_params[0],
+                definition.value_param_clauses[0][0],
+            ),
+            _ => panic!("local declaration should be a DefDef"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let type_parameter = typer
+            .local_method_type_parameter_symbol_at(source, type_parameter_tree)
+            .unwrap();
+        let value_parameter = typer
+            .local_method_parameter_symbol_at(source, value_parameter_tree)
+            .unwrap();
+        let Type::Poly(poly) = typer.store().types.get(signature) else {
+            panic!("generic local method should have a Poly signature");
+        };
+        assert_eq!(poly.params.len(), 1);
+        assert_eq!(
+            poly.params[0].name,
+            match &parsed.ast.get(type_parameter_tree).kind {
+                TreeKind::TypeDef(definition) => definition.name,
+                _ => unreachable!(),
+            }
+        );
+        let Type::Method(method_type) = typer.store().types.get(poly.result) else {
+            panic!("generic local method should have a term clause");
+        };
+        assert_eq!(method_type.params.len(), 1);
+        assert!(matches!(
+            typer.store().types.get(method_type.params[0].ty),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+        assert!(matches!(
+            typer.store().types.get(method_type.result),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+        assert_eq!(
+            typer.store().symbols.get(type_parameter).owner,
+            Some(method)
+        );
+        assert_eq!(
+            typer.store().symbols.get(value_parameter).owner,
+            Some(method)
+        );
+        let SymbolInfo::Complete(parameter_info) = *typer.store().symbols.info(value_parameter)
+        else {
+            panic!("local parameter should have a completed type");
+        };
+        assert!(matches!(
+            typer.store().types.get(parameter_info),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == type_parameter
+        ));
+    }
+
+    #[test]
+    fn local_method_signature_preserves_curried_and_contextual_clauses() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def local[A](first: A)(using context: Int)(last: A): A = last; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let method_tree = match &parsed.ast.get(block_tree).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("outer body should be a block"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Poly(poly) = typer.store().types.get(signature) else {
+            panic!("local method should preserve its type parameter clause");
+        };
+        let Type::Method(first_clause) = typer.store().types.get(poly.result) else {
+            panic!("first term clause should be a Method");
+        };
+        assert_eq!(first_clause.kind, MethodKind::Plain);
+        let Type::Method(contextual_clause) = typer.store().types.get(first_clause.result) else {
+            panic!("contextual term clause should remain nested");
+        };
+        assert_eq!(contextual_clause.kind, MethodKind::Contextual);
+        let Type::Method(last_clause) = typer.store().types.get(contextual_clause.result) else {
+            panic!("final term clause should remain nested");
+        };
+        assert_eq!(last_clause.kind, MethodKind::Plain);
+        assert!(matches!(
+            typer.store().types.get(last_clause.params[0].ty),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+        assert!(matches!(
+            typer.store().types.get(last_clause.result),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+    }
+
+    #[test]
     fn forward_local_method_call_completes_its_preentered_signature() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def outer: Int = { local(1); def local(value: Int): Int = value; 0 } }",
@@ -19968,7 +20194,6 @@ mod tests {
     fn local_methods_defer_inferred_and_unsupported_signature_shapes() {
         let cases = [
             ("def local(value: Int) = value", "result"),
-            ("def local[A](value: Int): Int = value", "type parameters"),
             (
                 "def local(value: => Int): Int = value",
                 "by-name or repeated parameters",
