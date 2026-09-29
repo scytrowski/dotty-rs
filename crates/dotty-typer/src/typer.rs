@@ -15468,15 +15468,6 @@ mod tests {
         let context = typer.expression_context_for(method).unwrap();
 
         let typed = typer.type_expression(rhs, context).unwrap();
-        if let TreeKind::Apply(app) = &typer.typed_ast().get(typed).kind {
-            eprintln!(
-                "outer arg {:?}",
-                typer
-                    .store()
-                    .types
-                    .get(typer.typed_ast().get(app.args[0]).ty)
-            );
-        }
 
         let Type::Applied { tycon, args } =
             typer.store().types.get(typer.typed_ast().get(typed).ty)
