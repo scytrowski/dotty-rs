@@ -97,9 +97,13 @@ parameters are errors, without a `Nothing`/`Any` fallback or LUB. The inferred
 arguments pass through the same bounds checker and Poly instantiator as other
 generic calls. The typed `New` is finalized only after inference succeeds, so
 it and the final constructor application retain the same applied instance
-type. No synthetic source `TypeApply` is introduced. Constructor overload
-competition, expected-type inference, and contextual constructor applications
-remain explicit deferrals.
+type. No synthetic source `TypeApply` is introduced. Monomorphic primary and
+secondary constructors participate in direct overload resolution: candidates
+are filtered by arity and argument conformance, then the unique most-specific
+applicable signature is selected. Ambiguity and no-applicable errors retain the
+candidate identities and rejection reasons. Generic constructor competition,
+expected-type inference, and contextual constructor applications remain
+explicit deferrals.
 
 An `if` condition is checked against canonical `Boolean`. Both branches are
 typed in the same lexical context and retain their own types in the typed AST.

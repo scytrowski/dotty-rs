@@ -195,6 +195,27 @@ pub enum TyperError {
         class: SymbolId,
         candidates: Vec<SymbolId>,
     },
+    /// No direct constructor candidate accepts the current argument list.
+    ConstructorApplicationNoApplicable {
+        source: SourceId,
+        tree_index: u32,
+        class: SymbolId,
+        candidates: Vec<(SymbolId, OverloadRejection)>,
+    },
+    /// Several direct constructors apply, but no unique most-specific candidate exists.
+    AmbiguousConstructorApplication {
+        source: SourceId,
+        tree_index: u32,
+        class: SymbolId,
+        candidates: Vec<SymbolId>,
+    },
+    /// An unsupported direct constructor could compete with otherwise applicable candidates.
+    ConstructorOverloadResolutionRequiresUnsupportedCandidate {
+        source: SourceId,
+        tree_index: u32,
+        class: SymbolId,
+        candidate: SymbolId,
+    },
     /// Generic constructor application is deferred to explicit/inferred type arguments.
     ConstructorPolymorphicApplicationDeferred {
         source: SourceId,
@@ -1111,6 +1132,7 @@ pub enum OverloadRejection {
         actual: TypeId,
         expected: TypeId,
     },
+    IncompleteSignature,
     UnsupportedSemantics,
 }
 
@@ -1204,6 +1226,26 @@ pub struct ConstructorCandidate {
     pub callable: TypeId,
     /// Class that directly declares the constructor.
     pub owner: SymbolId,
+}
+
+#[derive(Default)]
+struct ConstructorApplicationCandidates {
+    applicable_signatures: Vec<ConstructorCandidate>,
+    rejected_incomplete: Vec<(SymbolId, OverloadRejection)>,
+    generic_deferred: bool,
+}
+
+struct ConstructorOverloadRequest<'a> {
+    function_tree: TreeId<Untyped>,
+    argument_trees: &'a [TreeId<Untyped>],
+    context: ExpressionContext,
+    tree_index: u32,
+    class: SymbolId,
+    instance_type: TypeId,
+    qualifier: Option<TreeId<Typed>>,
+    candidates: &'a [ConstructorCandidate],
+    rejected_incomplete: &'a [(SymbolId, OverloadRejection)],
+    generic_deferred: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -2896,6 +2938,87 @@ impl<'a> SourceTyper<'a> {
         class: SymbolId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<ConstructorCandidate>, TyperError> {
+        let bucket = self.constructor_symbols_for_class(class, info_journal)?;
+        let mut candidates = Vec::with_capacity(bucket.len());
+        for symbol in bucket {
+            let callable = match *self.store.symbols.info(symbol) {
+                SymbolInfo::Complete(callable) => callable,
+                SymbolInfo::Missing if self.index.definition_of(symbol).is_some() => {
+                    self.complete_symbol_inner(symbol, info_journal)?
+                }
+                SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => {
+                    return Err(TyperError::DeferredSymbolCompletion { symbol });
+                }
+            };
+            if !self.is_constructor_callable(callable) {
+                return Err(TyperError::MalformedConstructorCandidate { symbol, callable });
+            }
+            candidates.push(ConstructorCandidate {
+                symbol,
+                callable,
+                owner: class,
+            });
+        }
+        Ok(candidates)
+    }
+
+    fn constructor_application_candidates_for_class(
+        &mut self,
+        class: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<ConstructorApplicationCandidates, TyperError> {
+        let bucket = self.constructor_symbols_for_class(class, info_journal)?;
+        let mut result = ConstructorApplicationCandidates::default();
+        for symbol in bucket {
+            let callable = match *self.store.symbols.info(symbol) {
+                SymbolInfo::Complete(callable) => Some(callable),
+                SymbolInfo::Missing if self.index.definition_of(symbol).is_some() => {
+                    match self.complete_symbol_inner(symbol, info_journal) {
+                        Ok(callable) => Some(callable),
+                        Err(TyperError::GenericSecondaryConstructorDeferred { .. })
+                        | Err(TyperError::SecondaryConstructorTypeParametersDeferred { .. }) => {
+                            result.generic_deferred = true;
+                            result
+                                .rejected_incomplete
+                                .push((symbol, OverloadRejection::IncompleteSignature));
+                            None
+                        }
+                        Err(TyperError::DeferredSymbolCompletion { .. }) => {
+                            result
+                                .rejected_incomplete
+                                .push((symbol, OverloadRejection::IncompleteSignature));
+                            None
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => {
+                    result
+                        .rejected_incomplete
+                        .push((symbol, OverloadRejection::IncompleteSignature));
+                    None
+                }
+            };
+            let Some(callable) = callable else {
+                continue;
+            };
+            if !self.is_constructor_callable(callable) {
+                return Err(TyperError::MalformedConstructorCandidate { symbol, callable });
+            }
+            result.applicable_signatures.push(ConstructorCandidate {
+                symbol,
+                callable,
+                owner: class,
+            });
+        }
+        Ok(result)
+    }
+
+    fn constructor_symbols_for_class(
+        &mut self,
+        class: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<SymbolId>, TyperError> {
         let class_info = self.ensure_constructor_class_info(class, info_journal)?;
         let declarations = match self.store.types.try_get(class_info) {
             Some(Type::ClassInfo(info)) if info.class == class => info.declarations,
@@ -2919,33 +3042,15 @@ impl<'a> SourceTyper<'a> {
             .get(declarations)
             .lookup_all(&constructor_name)
             .to_vec();
-        let mut candidates = Vec::with_capacity(bucket.len());
-        for symbol in bucket {
+        for &symbol in &bucket {
             if !self.store.symbols.contains(symbol)
                 || self.store.symbols.get(symbol).kind != SymbolKind::Constructor
                 || self.store.symbols.get(symbol).owner != Some(class)
             {
                 return Err(TyperError::MalformedConstructorBucket { class, symbol });
             }
-            let callable = match *self.store.symbols.info(symbol) {
-                SymbolInfo::Complete(callable) => callable,
-                SymbolInfo::Missing if self.index.definition_of(symbol).is_some() => {
-                    self.complete_symbol_inner(symbol, info_journal)?
-                }
-                SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => {
-                    return Err(TyperError::DeferredSymbolCompletion { symbol });
-                }
-            };
-            if !self.is_constructor_callable(callable) {
-                return Err(TyperError::MalformedConstructorCandidate { symbol, callable });
-            }
-            candidates.push(ConstructorCandidate {
-                symbol,
-                callable,
-                owner: class,
-            });
         }
-        Ok(candidates)
+        Ok(bucket)
     }
 
     fn is_constructor_selection(&self, tree: TreeId<Untyped>) -> bool {
@@ -3021,17 +3126,43 @@ impl<'a> SourceTyper<'a> {
                     type_arguments,
                 )
             };
-        let candidates = self.constructor_candidates_for_class(class, info_journal)?;
+        let candidate_set =
+            self.constructor_application_candidates_for_class(class, info_journal)?;
+        let candidates = candidate_set.applicable_signatures;
+        if candidates.is_empty() && candidate_set.generic_deferred {
+            if candidate_set.rejected_incomplete.len() == 1 {
+                // Preserve the existing single-constructor generic boundary.
+                self.constructor_candidates_for_class(class, info_journal)?;
+            }
+            return Err(TyperError::GenericConstructorOverloadResolutionDeferred {
+                source: self.source,
+                tree_index: application_tree_index,
+                class,
+                candidates: candidate_set
+                    .rejected_incomplete
+                    .iter()
+                    .map(|(symbol, _)| *symbol)
+                    .collect(),
+            });
+        }
         let candidate = match candidates.as_slice() {
-            [] => return Err(TyperError::ConstructorApplicationUnavailable { class }),
-            [candidate] => candidate,
-            _ => {
-                let generic = candidates.iter().any(|candidate| {
-                    matches!(
-                        self.store.types.try_get(candidate.callable),
-                        Some(Type::Poly(_))
-                    )
+            [] if candidate_set.rejected_incomplete.is_empty() => {
+                return Err(TyperError::ConstructorApplicationUnavailable { class });
+            }
+            [] => {
+                return Err(TyperError::ConstructorApplicationNoApplicable {
+                    source: self.source,
+                    tree_index: application_tree_index,
+                    class,
+                    candidates: candidate_set.rejected_incomplete,
                 });
+            }
+            [candidate] if candidate_set.rejected_incomplete.is_empty() => candidate,
+            _ => {
+                let generic = candidate_set.generic_deferred
+                    || candidates.iter().any(|candidate| {
+                        self.constructor_poly_may_apply(candidate.callable, argument_trees.len())
+                    });
                 if raw_new && generic {
                     return Err(TyperError::GenericConstructorOverloadResolutionDeferred {
                         source: self.source,
@@ -3040,18 +3171,31 @@ impl<'a> SourceTyper<'a> {
                         candidates: candidates
                             .iter()
                             .map(|candidate| candidate.symbol)
+                            .chain(
+                                candidate_set
+                                    .rejected_incomplete
+                                    .iter()
+                                    .map(|(symbol, _)| *symbol),
+                            )
                             .collect(),
                     });
                 }
-                return Err(TyperError::ConstructorOverloadResolutionDeferred {
-                    source: self.source,
-                    tree_index: application_tree_index,
-                    class,
-                    candidates: candidates
-                        .iter()
-                        .map(|candidate| candidate.symbol)
-                        .collect(),
-                });
+                return self.resolve_constructor_overload_application(
+                    ConstructorOverloadRequest {
+                        function_tree,
+                        argument_trees,
+                        context,
+                        tree_index: application_tree_index,
+                        class,
+                        instance_type,
+                        qualifier,
+                        candidates: &candidates,
+                        rejected_incomplete: &candidate_set.rejected_incomplete,
+                        generic_deferred: candidate_set.generic_deferred,
+                    },
+                    info_journal,
+                    new_mappings,
+                );
             }
         };
         if candidate.owner != instance_class || instance_class != class {
@@ -3260,6 +3404,202 @@ impl<'a> SourceTyper<'a> {
             return Err(TyperError::NewTargetNotClass { ty: instance_type });
         };
         Ok((*class, arguments))
+    }
+
+    fn resolve_constructor_overload_application(
+        &mut self,
+        request: ConstructorOverloadRequest<'_>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<Option<ConstructorApplicationFunction>, TyperError> {
+        let ConstructorOverloadRequest {
+            function_tree,
+            argument_trees,
+            context,
+            tree_index,
+            class,
+            instance_type,
+            qualifier,
+            candidates,
+            rejected_incomplete,
+            generic_deferred,
+        } = request;
+        if generic_deferred
+            || candidates.iter().any(|candidate| {
+                self.constructor_poly_may_apply(candidate.callable, argument_trees.len())
+            })
+        {
+            return Err(TyperError::GenericConstructorOverloadResolutionDeferred {
+                source: self.source,
+                tree_index,
+                class,
+                candidates: candidates
+                    .iter()
+                    .map(|candidate| candidate.symbol)
+                    .chain(rejected_incomplete.iter().map(|(symbol, _)| *symbol))
+                    .collect(),
+            });
+        }
+
+        let mut arguments = Vec::with_capacity(argument_trees.len());
+        for argument_tree in argument_trees {
+            let typed =
+                self.type_expression_inner(*argument_tree, context, info_journal, new_mappings)?;
+            let own_type = self.typed_arena.get(typed).ty;
+            let widened_type = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+            arguments.push(TypedArgument {
+                typed,
+                own_type,
+                widened_type,
+            });
+        }
+
+        let mut completed_types = HashSet::new();
+        for argument in &arguments {
+            self.complete_relation_type(
+                argument.widened_type,
+                info_journal,
+                &mut completed_types,
+                0,
+            )?;
+        }
+        let mut application_candidates = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            match self.store.types.try_get(candidate.callable).cloned() {
+                Some(Type::Method(method)) => {
+                    for parameter in &method.params {
+                        self.complete_relation_type(
+                            parameter.ty,
+                            info_journal,
+                            &mut completed_types,
+                            0,
+                        )?;
+                    }
+                }
+                Some(Type::Poly(poly))
+                    if matches!(
+                        self.store.types.try_get(poly.result),
+                        Some(Type::Method(method))
+                            if overload_arity_rejection(method, argument_trees.len()).is_some()
+                    ) => {}
+                _ => {
+                    return Err(TyperError::MalformedConstructorCandidate {
+                        symbol: candidate.symbol,
+                        callable: candidate.callable,
+                    });
+                }
+            }
+            application_candidates.push(ApplicationCandidate {
+                symbol: candidate.symbol,
+                callable: candidate.callable,
+                member: None,
+            });
+        }
+
+        let winner = self
+            .choose_overload_candidate_with_policy(
+                &mut application_candidates,
+                &arguments,
+                tree_index,
+                true,
+            )
+            .map_err(|error| match error {
+                TyperError::OverloadApplicationNoApplicable { candidates, .. } => {
+                    let mut candidates = candidates;
+                    candidates.extend_from_slice(rejected_incomplete);
+                    TyperError::ConstructorApplicationNoApplicable {
+                        source: self.source,
+                        tree_index,
+                        class,
+                        candidates,
+                    }
+                }
+                TyperError::AmbiguousOverloadApplication { candidates, .. } => {
+                    TyperError::AmbiguousConstructorApplication {
+                        source: self.source,
+                        tree_index,
+                        class,
+                        candidates,
+                    }
+                }
+                TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                    candidate, ..
+                } => TyperError::ConstructorOverloadResolutionRequiresUnsupportedCandidate {
+                    source: self.source,
+                    tree_index,
+                    class,
+                    candidate,
+                },
+                other => other,
+            })?;
+        if let Some((candidate, _)) = rejected_incomplete.first() {
+            return Err(
+                TyperError::ConstructorOverloadResolutionRequiresUnsupportedCandidate {
+                    source: self.source,
+                    tree_index,
+                    class,
+                    candidate: *candidate,
+                },
+            );
+        }
+        let Some(qualifier) = qualifier else {
+            return Err(TyperError::GenericConstructorOverloadResolutionDeferred {
+                source: self.source,
+                tree_index,
+                class,
+                candidates: candidates
+                    .iter()
+                    .map(|candidate| candidate.symbol)
+                    .collect(),
+            });
+        };
+        let result = self.validate_constructor_application_callable(
+            winner.symbol,
+            winner.callable,
+            tree_index,
+        )?;
+        self.require_constructor_result_matches_instance(
+            winner.symbol,
+            result,
+            instance_type,
+            tree_index,
+            info_journal,
+        )?;
+
+        let Some(function_node) = self.arena.try_get(function_tree).cloned() else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: function_tree.index(),
+            });
+        };
+        let TreeKind::Select(selection) = function_node.kind else {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index: function_tree.index(),
+                expression_kind: tree_kind_name(&function_node.kind),
+            });
+        };
+        let ty = self.store.types.alloc(Type::TermRef {
+            prefix: instance_type,
+            target: TermRefTarget::Symbol(winner.symbol),
+        });
+        let typed = TypedAstBuilder::new(&mut self.typed_arena).select(
+            qualifier,
+            selection.name,
+            selection.backquoted,
+            ty,
+            function_node.position,
+        );
+        self.typed_index
+            .insert(self.source, function_tree, typed)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, function_tree));
+        Ok(Some((typed, winner.callable, Some(arguments))))
     }
 
     fn raw_generic_new_class(
@@ -4059,6 +4399,16 @@ impl<'a> SourceTyper<'a> {
             }
         }
         false
+    }
+
+    fn constructor_poly_may_apply(&self, callable: TypeId, actual_arity: usize) -> bool {
+        let Some(Type::Poly(poly)) = self.store.types.try_get(callable) else {
+            return false;
+        };
+        match self.store.types.try_get(poly.result) {
+            Some(Type::Method(method)) => overload_arity_rejection(method, actual_arity).is_none(),
+            _ => true,
+        }
     }
 
     fn ensure_constructor_class_info(
@@ -5355,8 +5705,19 @@ impl<'a> SourceTyper<'a> {
         arguments: &[TypedArgument],
         tree_index: u32,
     ) -> Result<ApplicationCandidate, TyperError> {
+        self.choose_overload_candidate_with_policy(candidates, arguments, tree_index, false)
+    }
+
+    fn choose_overload_candidate_with_policy(
+        &mut self,
+        candidates: &mut [ApplicationCandidate],
+        arguments: &[TypedArgument],
+        tree_index: u32,
+        retain_unsupported_rejections: bool,
+    ) -> Result<ApplicationCandidate, TyperError> {
         let mut applicable = Vec::new();
         let mut rejected = Vec::new();
+        let mut unsupported_candidates = Vec::new();
         for candidate in candidates.iter().copied() {
             let method = match self.store.types.try_get(candidate.callable) {
                 Some(Type::Method(method)) => method.clone(),
@@ -5372,6 +5733,14 @@ impl<'a> SourceTyper<'a> {
                             }
                         }
                         _ => {
+                            if retain_unsupported_rejections {
+                                rejected.push((
+                                    candidate.symbol,
+                                    OverloadRejection::UnsupportedSemantics,
+                                ));
+                                unsupported_candidates.push(candidate.symbol);
+                                continue;
+                            }
                             return Err(
                                 TyperError::OverloadResolutionRequiresUnsupportedCandidate {
                                     source: self.source,
@@ -5427,6 +5796,11 @@ impl<'a> SourceTyper<'a> {
                 continue;
             }
             if unsupported_relation {
+                if retain_unsupported_rejections {
+                    rejected.push((candidate.symbol, OverloadRejection::UnsupportedSemantics));
+                    unsupported_candidates.push(candidate.symbol);
+                    continue;
+                }
                 return Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
                     source: self.source,
                     tree_index,
@@ -5444,6 +5818,11 @@ impl<'a> SourceTyper<'a> {
                 })
                 || self.type_contains_param_ref(method.result, candidate.callable)?;
             if unsupported {
+                if retain_unsupported_rejections {
+                    rejected.push((candidate.symbol, OverloadRejection::UnsupportedSemantics));
+                    unsupported_candidates.push(candidate.symbol);
+                    continue;
+                }
                 return Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
                     source: self.source,
                     tree_index,
@@ -5451,6 +5830,13 @@ impl<'a> SourceTyper<'a> {
                 });
             }
             applicable.push(candidate);
+        }
+        if !unsupported_candidates.is_empty() && !applicable.is_empty() {
+            return Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
+                source: self.source,
+                tree_index,
+                candidate: unsupported_candidates[0],
+            });
         }
         match applicable.as_slice() {
             [candidate] => Ok(*candidate),
@@ -16370,9 +16756,287 @@ mod tests {
     }
 
     #[test]
-    fn overloaded_constructor_application_is_explicitly_deferred() {
+    fn overloaded_constructor_application_selects_matching_secondary_constructor() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class Text; class C(value: Int) { def this(value: Text) = this(1) }; class Use { def make: C = new C(1) }",
+            "class C(value: Int) { def this(flag: Boolean) = this(1) }; class Use { def make: C = new C(true) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructors = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&constructor_name)
+            .to_vec();
+        assert_eq!(constructors.len(), 2);
+        let secondary_constructor = constructors[1];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = typer.typed_ast().get(typed).kind.clone() else {
+            panic!("constructor call should remain an Apply")
+        };
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(selected),
+            ..
+        } = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.function).ty)
+        else {
+            panic!("constructor selection should preserve its selected symbol")
+        };
+        assert_eq!(*selected, secondary_constructor);
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed).ty),
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(result_class),
+                ..
+            } if *result_class == class
+        ));
+    }
+
+    #[test]
+    fn constructor_overload_selects_the_more_specific_parameter() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C(value: Any) { def this(value: Int) = this(value) }; class Use { def make: C = new C(1) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructors = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&constructor_name)
+            .to_vec();
+        assert_eq!(constructors.len(), 2);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let signatures: Vec<_> = constructors
+            .iter()
+            .map(
+                |constructor| match *typer.store().symbols.info(*constructor) {
+                    SymbolInfo::Complete(callable) => callable,
+                    _ => panic!("constructor signature should have been completed"),
+                },
+            )
+            .collect();
+        let more_specific = constructors
+            .iter()
+            .zip(&signatures)
+            .find_map(|(symbol, signature)| {
+                let Type::Method(method) = typer.store().types.get(*signature) else {
+                    return None;
+                };
+                (method.params[0].ty == definitions.int).then_some(*symbol)
+            })
+            .expect("the secondary constructor should take Int");
+
+        let TreeKind::Apply(application) = typer.typed_ast().get(typed).kind.clone() else {
+            panic!("constructor call should remain an Apply")
+        };
+        assert!(
+            matches!(
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(application.function).ty),
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } if *symbol == more_specific
+            ),
+            "selected constructor differs from expected {more_specific:?}; candidates {constructors:?}"
+        );
+    }
+
+    #[test]
+    fn overloaded_constructor_no_applicable_reports_each_rejection_and_rolls_back() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C(value: Int) { def this(flag: Boolean) = this(1) }; class Use { def make: C = new C() }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let semantic_checkpoint = typer.store().checkpoint();
+        let typed_tree_count = typer.typed_ast().iter().count();
+
+        let error = typer.type_expression(rhs, context).unwrap_err();
+
+        let TyperError::ConstructorApplicationNoApplicable {
+            class: error_class,
+            candidates,
+            ..
+        } = error
+        else {
+            panic!("expected per-candidate constructor rejections, got {error:?}")
+        };
+        assert_eq!(error_class, class);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().all(|(_, rejection)| matches!(
+            rejection,
+            OverloadRejection::WrongArity {
+                expected: 1,
+                actual: 0
+            }
+        )));
+        assert_eq!(typer.store().checkpoint(), semantic_checkpoint);
+        assert_eq!(typer.typed_ast().iter().count(), typed_tree_count);
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
+    }
+
+    #[test]
+    fn constructor_no_applicable_retains_unsupported_candidate_reason() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C(value: Int) { def this(using flag: Boolean) = this(1) }; class Use { def make: C = new C(true) }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let error = typer.type_expression(rhs, context).unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                TyperError::ConstructorApplicationNoApplicable { ref candidates, .. }
+                    if candidates.len() == 2
+                        && candidates.iter().any(|(_, reason)| matches!(
+                            reason,
+                            OverloadRejection::UnsupportedSemantics
+                        ))
+                        && candidates.iter().any(|(_, reason)| matches!(
+                            reason,
+                            OverloadRejection::ArgumentNonConformance { .. }
+                        ))
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn constructor_no_applicable_retains_incomplete_signature_reason() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C(value: Int) { def this(flag: Boolean) = this(1) }; class Use { def make: C = new C(true) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructors = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&constructor_name)
+            .to_vec();
+        assert_eq!(constructors.len(), 2);
+        let incomplete = constructors[1];
+        store.symbols.set_info(incomplete, SymbolInfo::Error);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let error = typer.type_expression(rhs, context).unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                TyperError::ConstructorApplicationNoApplicable { ref candidates, .. }
+                    if candidates.len() == 2
+                        && candidates.iter().any(|(symbol, reason)| {
+                            *symbol == incomplete
+                                && matches!(reason, OverloadRejection::IncompleteSignature)
+                        })
+                        && candidates.iter().any(|(_, reason)| matches!(
+                            reason,
+                            OverloadRejection::ArgumentNonConformance { .. }
+                        ))
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn equally_specific_constructors_are_ambiguous_and_roll_back() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C(value: Int) { def this(value: Int) = this(1) }; class Use { def make: C = new C(1) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let semantic_checkpoint = typer.store().checkpoint();
+        let typed_tree_count = typer.typed_ast().iter().count();
+
+        let error = typer.type_expression(rhs, context).unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                TyperError::AmbiguousConstructorApplication {
+                    class: error_class,
+                    ref candidates,
+                    ..
+                } if error_class == class && candidates.len() == 2
+            ),
+            "{error:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), semantic_checkpoint);
+        assert_eq!(typer.typed_ast().iter().count(), typed_tree_count);
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
+    }
+
+    #[test]
+    fn generic_secondary_constructor_competition_is_deferred() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C(value: Int, other: Int) { def this[A](value: A) = this(1, 1) }; class Use { def make: C = new C(1) }",
         );
         let class = class_symbol(&parsed, &store, &index, source, "C");
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
@@ -16387,14 +17051,15 @@ mod tests {
         let context = typer.expression_context_for(method).unwrap();
 
         let error = typer.type_expression(rhs, context).unwrap_err();
+
         assert!(
             matches!(
-            &error,
-            TyperError::ConstructorOverloadResolutionDeferred {
-                class: error_class,
-                candidates,
-                ..
-            } if *error_class == class && candidates.len() == 2
+                error,
+                TyperError::GenericConstructorOverloadResolutionDeferred {
+                    class: error_class,
+                    ref candidates,
+                    ..
+                } if error_class == class && candidates.len() == 2
             ),
             "{error:?}"
         );
