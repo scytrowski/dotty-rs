@@ -106,6 +106,31 @@ pub enum TyperError {
     MissingClassScope { symbol: SymbolId },
     /// A class-like symbol already contains an incompatible complete type.
     MalformedClassInfo { symbol: SymbolId, info: TypeId },
+    /// A `new` type tree is a template; anonymous-class lowering is deferred.
+    AnonymousClassInstantiationDeferred { source: SourceId, tree_index: u32 },
+    /// The projected type does not resolve to a named class-like symbol.
+    NewTargetNotClass { ty: TypeId },
+    /// Traits cannot be instantiated with `new`.
+    TraitInstantiation { symbol: SymbolId },
+    /// Abstract classes cannot be instantiated with `new`.
+    AbstractClassInstantiation { symbol: SymbolId },
+    /// Module classes and objects cannot be instantiated with `new`.
+    ModuleInstantiation { symbol: SymbolId },
+    /// Packages cannot be instantiated with `new`.
+    PackageInstantiation { symbol: SymbolId },
+    /// A type parameter is not proven to be an instantiable concrete class.
+    TypeParameterInstantiation { symbol: SymbolId },
+    /// Class metadata needed for construction is absent or incomplete.
+    NewClassInfoUnavailable { symbol: SymbolId },
+    /// Constructor lookup normalization failed or exceeded its bound.
+    ConstructorLookupNormalization {
+        ty: TypeId,
+        error: crate::types::TypeNormalizeError,
+    },
+    /// The exact `<init>` scope bucket contains a non-constructor or invalid symbol.
+    MalformedConstructorBucket { class: SymbolId, symbol: SymbolId },
+    /// A constructor bucket entry has a non-callable or invalid completed type.
+    MalformedConstructorCandidate { symbol: SymbolId, callable: TypeId },
     /// A template parent is not a type or a supported constructor-call shape.
     MalformedClassParent { source: SourceId, tree_index: u32 },
     /// A projected parent does not resolve to a class or trait declaration.
@@ -270,6 +295,12 @@ pub enum TyperError {
     },
     /// The arguments on a source receiver do not match its source class arity.
     ReceiverGenericArityMismatch {
+        class: SymbolId,
+        expected: usize,
+        actual: usize,
+    },
+    /// The applied target of constructor discovery has the wrong class arity.
+    ConstructorTargetGenericArityMismatch {
         class: SymbolId,
         expected: usize,
         actual: usize,
@@ -897,6 +928,17 @@ struct ApplicationCandidate {
     symbol: SymbolId,
     callable: TypeId,
     member: Option<MemberCandidate>,
+}
+
+/// One constructor declared directly by an instantiated class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConstructorCandidate {
+    /// Exact semantic identity of this constructor overload.
+    pub symbol: SymbolId,
+    /// Completed callable constructor signature.
+    pub callable: TypeId,
+    /// Class that directly declares the constructor.
+    pub owner: SymbolId,
 }
 
 #[derive(Clone, Copy)]
@@ -1690,6 +1732,31 @@ impl<'a> SourceTyper<'a> {
             });
         };
         let typed = match source_tree.kind {
+            TreeKind::New(new) => {
+                let Some(type_tree) = self.arena.try_get(new.tpt) else {
+                    return Err(TyperError::TreeOutsideArena {
+                        source: self.source,
+                        tree_index: new.tpt.index(),
+                    });
+                };
+                if matches!(type_tree.kind, TreeKind::Template(_)) {
+                    return Err(TyperError::AnonymousClassInstantiationDeferred {
+                        source: self.source,
+                        tree_index: tree.index(),
+                    });
+                }
+                let type_context = self.expression_type_context(context)?;
+                let instance_type = self.type_of_tpt_inner(new.tpt, type_context)?;
+                let class = self.instantiable_class_of_type(instance_type, info_journal)?;
+                self.ensure_constructor_class_info(class, info_journal)?;
+                let typed_tpt =
+                    self.reify_constructor_type_tree(new.tpt, instance_type, new_mappings)?;
+                Ok(TypedAstBuilder::new(&mut self.typed_arena).new_expr(
+                    typed_tpt,
+                    instance_type,
+                    source_tree.position,
+                ))
+            }
             TreeKind::Literal(literal) => {
                 self.literal_type(&literal.value, tree.index())?;
                 let ty = self
@@ -2511,6 +2578,285 @@ impl<'a> SourceTyper<'a> {
         Ok(typed)
     }
 
+    /// Finds constructors declared directly by the class represented by `instance_type`.
+    /// This deliberately does not perform overload selection or inherit constructors.
+    pub fn constructors_of(
+        &mut self,
+        instance_type: TypeId,
+    ) -> Result<Vec<ConstructorCandidate>, TyperError> {
+        self.run_atomic(|typer, info_journal| {
+            let class = typer.instantiable_class_of_type(instance_type, info_journal)?;
+            let class_info = typer.ensure_constructor_class_info(class, info_journal)?;
+            let declarations = match typer.store.types.try_get(class_info) {
+                Some(Type::ClassInfo(info)) if info.class == class => info.declarations,
+                _ => {
+                    return Err(TyperError::MalformedClassInfo {
+                        symbol: class,
+                        info: class_info,
+                    });
+                }
+            };
+            if !typer.store.scopes.contains(declarations) {
+                return Err(TyperError::NewClassInfoUnavailable { symbol: class });
+            }
+            let constructor_name = dotty_core::Name::new(
+                typer.store.names.intern("<init>"),
+                dotty_core::Namespace::Term,
+            );
+            let bucket = typer
+                .store
+                .scopes
+                .get(declarations)
+                .lookup_all(&constructor_name)
+                .to_vec();
+            let mut candidates = Vec::with_capacity(bucket.len());
+            for symbol in bucket {
+                if !typer.store.symbols.contains(symbol)
+                    || typer.store.symbols.get(symbol).kind != SymbolKind::Constructor
+                    || typer.store.symbols.get(symbol).owner != Some(class)
+                {
+                    return Err(TyperError::MalformedConstructorBucket { class, symbol });
+                }
+                let callable = match *typer.store.symbols.info(symbol) {
+                    SymbolInfo::Complete(callable) => callable,
+                    SymbolInfo::Missing if typer.index.definition_of(symbol).is_some() => {
+                        typer.complete_symbol_inner(symbol, info_journal)?
+                    }
+                    SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => {
+                        return Err(TyperError::DeferredSymbolCompletion { symbol });
+                    }
+                };
+                if !typer.is_constructor_callable(callable) {
+                    return Err(TyperError::MalformedConstructorCandidate { symbol, callable });
+                }
+                candidates.push(ConstructorCandidate {
+                    symbol,
+                    callable,
+                    owner: class,
+                });
+            }
+            Ok(candidates)
+        })
+    }
+
+    fn instantiable_class_of_type(
+        &mut self,
+        instance_type: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<SymbolId, TyperError> {
+        let normalized = self.normalize_constructor_target(instance_type, info_journal)?;
+        let (tycon, actual_arity) = match self.store.types.try_get(normalized) {
+            Some(Type::Applied { tycon, args }) => (*tycon, args.len()),
+            _ => (normalized, 0),
+        };
+        let target = self.normalize_constructor_target(tycon, info_journal)?;
+        let symbol = match self.store.types.try_get(target) {
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            }) => *symbol,
+            _ => {
+                return Err(TyperError::NewTargetNotClass { ty: instance_type });
+            }
+        };
+        if !self.store.symbols.contains(symbol) {
+            return Err(TyperError::UnknownSymbol { symbol });
+        }
+        let semantic = self.store.symbols.get(symbol);
+        match semantic.kind {
+            SymbolKind::Class => {
+                match self.constructor_target_class_arity(symbol)? {
+                    Some(expected_arity) if actual_arity != expected_arity => {
+                        return Err(TyperError::ConstructorTargetGenericArityMismatch {
+                            class: symbol,
+                            expected: expected_arity,
+                            actual: actual_arity,
+                        });
+                    }
+                    None if actual_arity > 0 => {
+                        return Err(TyperError::ExternalGenericInstantiationDeferred {
+                            class: symbol,
+                        });
+                    }
+                    Some(_) | None => {}
+                }
+                if semantic.flags.contains(SymbolFlags::ABSTRACT) {
+                    return Err(TyperError::AbstractClassInstantiation { symbol });
+                }
+                Ok(symbol)
+            }
+            SymbolKind::Trait => Err(TyperError::TraitInstantiation { symbol }),
+            SymbolKind::ModuleClass | SymbolKind::Object => {
+                Err(TyperError::ModuleInstantiation { symbol })
+            }
+            SymbolKind::Package => Err(TyperError::PackageInstantiation { symbol }),
+            SymbolKind::TypeParameter => Err(TyperError::TypeParameterInstantiation { symbol }),
+            _ => Err(TyperError::NewTargetNotClass { ty: instance_type }),
+        }
+    }
+
+    fn constructor_target_class_arity(&self, class: SymbolId) -> Result<Option<usize>, TyperError> {
+        let Some(definition) = self.index.definition_of(class) else {
+            return Ok(None);
+        };
+        let SourceDefinition::Canonical { source, tree } = definition else {
+            return Err(TyperError::SourceClassTypeParametersProvenanceMissing { symbol: class });
+        };
+        if source != self.source {
+            return Err(TyperError::SourceClassTypeParametersProvenanceMissing { symbol: class });
+        }
+        let Some(class_node) = self.arena.try_get(tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source,
+                tree_index: tree.index(),
+            });
+        };
+        let TreeKind::TypeDef(class_definition) = &class_node.kind else {
+            return Err(TyperError::MalformedSourceClassTypeParameters {
+                class,
+                tree_index: tree.index(),
+            });
+        };
+        let Some(template_node) = self.arena.try_get(class_definition.rhs) else {
+            return Err(TyperError::TreeOutsideArena {
+                source,
+                tree_index: class_definition.rhs.index(),
+            });
+        };
+        let TreeKind::Template(template) = &template_node.kind else {
+            return Err(TyperError::MalformedSourceClassTypeParameters {
+                class,
+                tree_index: class_definition.rhs.index(),
+            });
+        };
+        let Some(constructor_node) = self.arena.try_get(template.constructor) else {
+            return Err(TyperError::TreeOutsideArena {
+                source,
+                tree_index: template.constructor.index(),
+            });
+        };
+        let TreeKind::DefDef(constructor) = &constructor_node.kind else {
+            return Err(TyperError::MalformedSourceClassTypeParameters {
+                class,
+                tree_index: template.constructor.index(),
+            });
+        };
+        let constructor_symbol = self.index.symbol_at(source, template.constructor).ok_or(
+            TyperError::MalformedSourceClassTypeParameters {
+                class,
+                tree_index: template.constructor.index(),
+            },
+        )?;
+        for parameter_tree in &constructor.type_params {
+            let Some(parameter_node) = self.arena.try_get(*parameter_tree) else {
+                return Err(TyperError::TreeOutsideArena {
+                    source,
+                    tree_index: parameter_tree.index(),
+                });
+            };
+            if !matches!(parameter_node.kind, TreeKind::TypeDef(_)) {
+                return Err(TyperError::MalformedSourceClassTypeParameters {
+                    class,
+                    tree_index: parameter_tree.index(),
+                });
+            }
+            let parameter = self
+                .index
+                .derived_symbol_at(constructor_symbol, source, *parameter_tree)
+                .ok_or(TyperError::ClassTypeParameterSymbolMissing {
+                    class,
+                    tree_index: parameter_tree.index(),
+                })?;
+            if !self.store.symbols.contains(parameter)
+                || self.store.symbols.get(parameter).kind != SymbolKind::TypeParameter
+            {
+                return Err(TyperError::MalformedSourceClassTypeParameters {
+                    class,
+                    tree_index: parameter_tree.index(),
+                });
+            }
+        }
+        Ok(Some(constructor.type_params.len()))
+    }
+
+    fn normalize_constructor_target(
+        &mut self,
+        ty: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            match crate::types::TypeNormalizer::new(self.store).normalize_for_lookup(ty) {
+                Ok(normalized) => return Ok(normalized),
+                Err(crate::types::TypeNormalizeError::AliasInfoIncomplete { symbol, .. })
+                    if self.index.definition_of(symbol).is_some() =>
+                {
+                    self.complete_symbol_inner(symbol, info_journal)?;
+                }
+                Err(error) => {
+                    return Err(TyperError::ConstructorLookupNormalization { ty, error });
+                }
+            }
+        }
+        Err(TyperError::ConstructorLookupNormalization {
+            ty,
+            error: crate::types::TypeNormalizeError::TooDeep,
+        })
+    }
+
+    fn is_constructor_callable(&self, callable: TypeId) -> bool {
+        let mut current = callable;
+        let mut visited = HashSet::new();
+        for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            if !visited.insert(current) {
+                return false;
+            }
+            match self.store.types.try_get(current) {
+                Some(Type::Method(_)) => return true,
+                Some(Type::Poly(poly)) => current = poly.result,
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    fn ensure_constructor_class_info(
+        &mut self,
+        class: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        if !self.store.symbols.contains(class) {
+            return Err(TyperError::UnknownSymbol { symbol: class });
+        }
+        let info = match *self.store.symbols.info(class) {
+            SymbolInfo::Complete(info) => info,
+            SymbolInfo::Missing if self.index.definition_of(class).is_some() => {
+                self.complete_symbol_inner(class, info_journal)?
+            }
+            SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => {
+                return Err(TyperError::NewClassInfoUnavailable { symbol: class });
+            }
+        };
+        self.validate_existing_class_info(class, info)?;
+        let Type::ClassInfo(class_info) =
+            self.store
+                .types
+                .try_get(info)
+                .ok_or(TyperError::MalformedClassInfo {
+                    symbol: class,
+                    info,
+                })?
+        else {
+            return Err(TyperError::MalformedClassInfo {
+                symbol: class,
+                info,
+            });
+        };
+        if !self.store.scopes.contains(class_info.declarations) {
+            return Err(TyperError::NewClassInfoUnavailable { symbol: class });
+        }
+        Ok(info)
+    }
+
     fn type_local_value(
         &mut self,
         tree: TreeId<Untyped>,
@@ -2709,6 +3055,34 @@ impl<'a> SourceTyper<'a> {
                 tree_kind: tree_kind_name(&source_node.kind),
             });
         }
+        let typed = TypedAstBuilder::new(&mut self.typed_arena).type_tree(ty, source_node.position);
+        self.typed_index
+            .insert(self.source, source_tree, typed)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, source_tree));
+        Ok(typed)
+    }
+
+    fn reify_constructor_type_tree(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        ty: TypeId,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if let Some(typed) = self.typed_index.get(self.source, source_tree) {
+            return Ok(typed);
+        }
+        let Some(source_node) = self.arena.try_get(source_tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: source_tree.index(),
+            });
+        };
         let typed = TypedAstBuilder::new(&mut self.typed_arena).type_tree(ty, source_node.position);
         self.typed_index
             .insert(self.source, source_tree, typed)
@@ -4576,11 +4950,13 @@ impl<'a> SourceTyper<'a> {
         } else {
             None
         };
-        match self.store.types.get(ty) {
-            Type::ClassInfo(info)
+        match self.store.types.try_get(ty) {
+            Some(Type::ClassInfo(info))
                 if info.class == symbol
                     && info.prefix == self.definitions.no_prefix
-                    && expected_scope.is_none_or(|scope| info.declarations == scope) =>
+                    && expected_scope.is_none_or(|scope| info.declarations == scope)
+                    && self.store.scopes.contains(info.declarations)
+                    && self.store.scopes.get(info.declarations).owner == Some(symbol) =>
             {
                 Ok(())
             }
@@ -13481,6 +13857,597 @@ mod tests {
                 .unwrap(),
             definitions.int
         );
+    }
+
+    #[test]
+    fn new_expression_is_typed_with_its_projected_class_type_and_stable_mapping() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C; class Use { def make: C = new C }");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let (rhs, new) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match node.kind {
+                TreeKind::New(new) => Some((tree, new)),
+                _ => None,
+            })
+            .expect("expected a source New expression");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert!(matches!(
+            typer.typed_ast().get(typed).kind,
+            TreeKind::New(_)
+        ));
+        assert_eq!(
+            type_symbol(typer.store(), typer.typed_ast().get(typed).ty),
+            class
+        );
+        let typed_tpt = typer.source_typed_index().get(source, new.tpt).unwrap();
+        assert!(matches!(
+            typer.typed_ast().get(typed_tpt).kind,
+            TreeKind::TypeTree(_)
+        ));
+        assert_eq!(
+            typer.typed_ast().get(typed_tpt).ty,
+            typer.typed_ast().get(typed).ty
+        );
+        assert_eq!(typer.type_expression(rhs, context).unwrap(), typed);
+    }
+
+    #[test]
+    fn new_expression_preserves_generic_instance_arguments() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Box[A]; class Use { def make: Box[Int] = new Box[Int] }");
+        let box_class = class_symbol(&parsed, &store, &index, source, "Box");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let rhs = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::New(_)).then_some(tree))
+            .expect("expected a source New expression");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let Type::Applied { tycon, args } =
+            typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("generic new must retain its applied class type");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), box_class);
+        assert_eq!(args, &[definitions.int]);
+    }
+
+    #[test]
+    fn new_rejects_traits_and_abstract_classes_with_specific_errors() {
+        for (source_text, class_name, expected_trait) in [
+            ("trait T; class Use { def make: T = new T }", "T", true),
+            (
+                "abstract class C; class Use { def make: C = new C }",
+                "C",
+                false,
+            ),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let class = class_symbol(&parsed, &store, &index, source, class_name);
+            let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+            let semantic_checkpoint = typer.store().checkpoint();
+            let typed_tree_count = typer.typed_ast().iter().count();
+
+            let error = typer.type_expression(rhs, context).unwrap_err();
+
+            if expected_trait {
+                assert!(
+                    matches!(error, TyperError::TraitInstantiation { symbol } if symbol == class)
+                );
+            } else {
+                assert!(
+                    matches!(error, TyperError::AbstractClassInstantiation { symbol } if symbol == class)
+                );
+            }
+            assert_eq!(typer.store().checkpoint(), semantic_checkpoint);
+            assert_eq!(typer.typed_ast().iter().count(), typed_tree_count);
+            assert!(typer.source_typed_index().get(source, rhs).is_none());
+        }
+    }
+
+    #[test]
+    fn constructor_discovery_keeps_every_direct_overload_in_scope_order() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C(value: Int) { def this(flag: Boolean) = this(0) }; class Use { def make: C = new C }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let instance_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(class),
+        });
+        assert!(matches!(store.symbols.info(class), SymbolInfo::Missing));
+        let constructor_name = dotty_core::Name::new(store.names.intern("<init>"), Namespace::Term);
+        let expected_order = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&constructor_name)
+            .to_vec();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let candidates = typer.constructors_of(instance_type).unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.symbol)
+                .collect::<Vec<_>>(),
+            expected_order
+        );
+        assert!(matches!(
+            typer.store().symbols.info(class),
+            SymbolInfo::Complete(_)
+        ));
+        assert!(candidates.iter().all(|candidate| candidate.owner == class));
+        assert!(candidates.iter().all(|candidate| {
+            typer.store().symbols.get(candidate.symbol).kind == SymbolKind::Constructor
+        }));
+        assert!(candidates.iter().all(|candidate| {
+            matches!(typer.store().types.get(candidate.callable), Type::Method(_))
+        }));
+    }
+
+    #[test]
+    fn constructor_discovery_validates_source_class_type_argument_arity() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Box[A]; class Plain");
+        let box_class = class_symbol(&parsed, &store, &index, source, "Box");
+        let plain_class = class_symbol(&parsed, &store, &index, source, "Plain");
+        let wrong_box_arity = applied_class_type(
+            &mut store,
+            definitions,
+            box_class,
+            &[definitions.int, definitions.boolean],
+        );
+        let wrong_plain_arity =
+            applied_class_type(&mut store, definitions, plain_class, &[definitions.int]);
+        let raw_box = nominal_type_ref(&mut store, definitions, box_class);
+        let valid_box = applied_class_type(&mut store, definitions, box_class, &[definitions.int]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for (target, expected_class, expected, actual) in [
+            (wrong_box_arity, box_class, 1, 2),
+            (raw_box, box_class, 1, 0),
+            (wrong_plain_arity, plain_class, 0, 1),
+        ] {
+            assert!(matches!(
+                typer.constructors_of(target),
+                Err(TyperError::ConstructorTargetGenericArityMismatch {
+                    class,
+                    expected: error_expected,
+                    actual: error_actual,
+                }) if class == expected_class
+                    && error_expected == expected
+                    && error_actual == actual
+            ));
+        }
+        assert_eq!(typer.constructors_of(valid_box).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn new_through_simple_alias_preserves_the_projected_alias_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { type Alias = C; def make: Alias = new Alias }");
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Alias");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let new_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::New(_)).then_some(tree))
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(new_tree, context).unwrap();
+
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == alias
+        ));
+        let candidates = typer
+            .constructors_of(typer.typed_ast().get(typed).ty)
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn rejected_alias_target_rolls_back_alias_completion_and_typed_allocations() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("trait T; class Use { type Alias = T; def make: Alias = new Alias }");
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Alias");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let new_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::New(_)).then_some(tree))
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let semantic_checkpoint = typer.store().checkpoint();
+        let typed_tree_count = typer.typed_ast().iter().count();
+
+        assert!(matches!(
+            typer.type_expression(new_tree, context),
+            Err(TyperError::TraitInstantiation { .. })
+        ));
+
+        assert_eq!(typer.store().checkpoint(), semantic_checkpoint);
+        assert_eq!(typer.typed_ast().iter().count(), typed_tree_count);
+        assert!(matches!(
+            typer.store().symbols.info(alias),
+            SymbolInfo::Missing
+        ));
+        assert!(typer.source_typed_index().get(source, new_tree).is_none());
+    }
+
+    #[test]
+    fn new_module_class_is_rejected_as_a_non_instantiable_target() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("object O");
+        let (module_tree, object) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match node.kind {
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => {
+                    Some((tree, index.symbol_at(source, tree).unwrap()))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let object_owner = store.symbols.get(object).owner.unwrap();
+        let module_class = index
+            .derived_symbol_at(object_owner, source, module_tree)
+            .unwrap();
+        let instance_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(module_class),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.constructors_of(instance_type),
+            Err(TyperError::ModuleInstantiation { symbol }) if symbol == module_class
+        ));
+    }
+
+    #[test]
+    fn anonymous_template_new_is_explicitly_deferred() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C; class Use { def make: C = new C { val value: Int = 1 } }");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let new_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::New(_)).then_some(tree))
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(new_tree, context),
+            Err(TyperError::AnonymousClassInstantiationDeferred { .. })
+        ));
+    }
+
+    #[test]
+    fn constructor_discovery_does_not_inherit_parent_constructors() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Parent(value: Int); class Child extends Parent(0); class Use { def make: Child = new Child }",
+        );
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let new_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match node.kind {
+                TreeKind::New(new)
+                    if matches!(parsed.ast.try_get(new.tpt).map(|node| &node.kind), Some(TreeKind::Ident(ident)) if store.names.resolve(ident.name.text()) == "Child") =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer.type_expression(new_tree, context).unwrap();
+
+        let constructors = typer
+            .constructors_of(typer.typed_ast().get(typed).ty)
+            .unwrap();
+
+        assert_eq!(constructors.len(), 1);
+        assert_eq!(constructors[0].owner, child);
+    }
+
+    #[test]
+    fn malformed_constructor_bucket_is_reported_instead_of_filtered() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let scope = index.scope_of(class).unwrap();
+        let constructor_name = dotty_core::Name::new(store.names.intern("<init>"), Namespace::Term);
+        let malformed = store.symbols.alloc(dotty_core::Symbol {
+            name: constructor_name,
+            owner: Some(class),
+            kind: SymbolKind::Method,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        store
+            .scopes
+            .get_mut(scope)
+            .enter(constructor_name, malformed);
+        let instance_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(class),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.constructors_of(instance_type),
+            Err(TyperError::MalformedConstructorBucket { class: error_class, symbol })
+                if error_class == class && symbol == malformed
+        ));
+    }
+
+    #[test]
+    fn new_type_parameter_is_rejected_without_assuming_concreteness() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Use { def make[A]: A = new A }");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let new_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::New(_)).then_some(tree))
+            .unwrap();
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "A" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(new_tree, context),
+            Err(TyperError::TypeParameterInstantiation { symbol }) if symbol == parameter
+        ));
+    }
+
+    #[test]
+    fn constructor_target_reports_unavailable_and_malformed_external_class_info() {
+        let (arena, mut store, packages, definitions) = setup();
+        let index = SourceSemanticIndex::new();
+        let source = SourceId::from_index(17);
+        let missing = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        let missing_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(missing),
+        });
+        let malformed = symbol(
+            &mut store,
+            SymbolKind::Class,
+            SymbolInfo::Complete(definitions.int),
+        );
+        let malformed_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(malformed),
+        });
+        let wrong_scope_owner = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        let wrong_scope = store
+            .scopes
+            .alloc(dotty_core::Scope::new(Some(wrong_scope_owner)));
+        let wrong_scope_class = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        let wrong_scope_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: definitions.no_prefix,
+            class: wrong_scope_class,
+            parents: vec![definitions.object_type],
+            declarations: wrong_scope,
+            self_type: None,
+        }));
+        store
+            .symbols
+            .set_info(wrong_scope_class, SymbolInfo::Complete(wrong_scope_info));
+        let wrong_scope_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(wrong_scope_class),
+        });
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert!(matches!(
+            typer.constructors_of(missing_type),
+            Err(TyperError::NewClassInfoUnavailable { symbol }) if symbol == missing
+        ));
+        assert!(matches!(
+            typer.constructors_of(malformed_type),
+            Err(TyperError::MalformedClassInfo { symbol, info })
+                if symbol == malformed && info == definitions.int
+        ));
+        assert!(matches!(
+            typer.constructors_of(wrong_scope_type),
+            Err(TyperError::MalformedClassInfo { symbol, info })
+                if symbol == wrong_scope_class && info == wrong_scope_info
+        ));
+    }
+
+    #[test]
+    fn malformed_completed_constructor_type_is_rejected() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let primary = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Template(template) => index.symbol_at(source, template.constructor),
+                _ => None,
+            })
+            .unwrap();
+        let malformed_callable = definitions.unit;
+        store
+            .symbols
+            .set_info(primary, SymbolInfo::Complete(malformed_callable));
+        let instance_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(class),
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.constructors_of(instance_type),
+            Err(TyperError::MalformedConstructorCandidate { symbol, callable })
+                if symbol == primary && callable == malformed_callable
+        ));
+    }
+
+    #[test]
+    fn constructor_target_alias_normalization_is_bounded() {
+        let (arena, mut store, packages, definitions) = setup();
+        let index = SourceSemanticIndex::new();
+        let source = SourceId::from_index(19);
+        let class = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        let mut target_type = store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(class),
+        });
+        for _ in 0..=crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            let alias = symbol(&mut store, SymbolKind::TypeAlias, SymbolInfo::Missing);
+            let alias_reference = store.types.alloc(Type::TypeRef {
+                prefix: definitions.no_prefix,
+                target: TypeRefTarget::Symbol(alias),
+            });
+            let alias_info = store
+                .types
+                .alloc(Type::AliasingBounds { alias: target_type });
+            store
+                .symbols
+                .set_info(alias, SymbolInfo::Complete(alias_info));
+            target_type = alias_reference;
+        }
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert!(matches!(
+            typer.constructors_of(target_type),
+            Err(TyperError::ConstructorLookupNormalization {
+                error: crate::types::TypeNormalizeError::TooDeep,
+                ..
+            })
+        ));
     }
 
     #[test]
