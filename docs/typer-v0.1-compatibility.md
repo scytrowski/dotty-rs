@@ -80,8 +80,11 @@ transparent wrappers are normalized only to discover the class symbol; the
 typed `New` keeps the unnormalized projected type. Anonymous-template `new`
 is deferred. Constructor discovery reads only the target class's declaration
 scope, returns every `<init>` constructor in insertion order, and never walks
-parent classes or selects an overload. The parser's surrounding constructor
-application is still deferred to the next typer increment.
+parent classes. A plain monomorphic constructor application is supported when
+exactly one direct constructor exists; it preserves the constructor symbol in
+the typed selection and reuses ordinary method argument checking, including
+nested curried clauses. Overloaded, polymorphic, and contextual constructor
+applications remain explicit deferrals.
 
 An `if` condition is checked against canonical `Boolean`. Both branches are
 typed in the same lexical context and retain their own types in the typed AST.
