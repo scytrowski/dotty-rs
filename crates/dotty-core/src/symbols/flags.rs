@@ -48,6 +48,8 @@ flag_bits! {
     JAVA_DEFINED = 14;
     ERASED = 15;
     OVERRIDE = 16;
+    ENUM = 17;
+    EXPORTED = 18;
 }
 
 impl SymbolFlags {
@@ -127,5 +129,25 @@ mod tests {
             combined.difference(SymbolFlags::ABSTRACT),
             SymbolFlags::FINAL
         );
+    }
+
+    #[test]
+    fn enum_flag_is_distinct_and_composes_with_other_properties() {
+        assert_ne!(SymbolFlags::ENUM, SymbolFlags::CASE);
+        assert_ne!(SymbolFlags::ENUM, SymbolFlags::EXPORTED);
+
+        let flags = SymbolFlags::ENUM | SymbolFlags::CASE;
+        assert!(flags.contains(SymbolFlags::ENUM));
+        assert!(flags.contains(SymbolFlags::CASE));
+    }
+
+    #[test]
+    fn exported_flag_is_distinct_and_composes_with_other_properties() {
+        assert_ne!(SymbolFlags::EXPORTED, SymbolFlags::SYNTHETIC);
+        assert_ne!(SymbolFlags::EXPORTED, SymbolFlags::ENUM);
+
+        let flags = SymbolFlags::EXPORTED | SymbolFlags::SYNTHETIC;
+        assert!(flags.contains(SymbolFlags::EXPORTED));
+        assert!(flags.contains(SymbolFlags::SYNTHETIC));
     }
 }
