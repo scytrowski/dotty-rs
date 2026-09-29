@@ -3002,14 +3002,7 @@ impl<'a> SourceTyper<'a> {
                 }
                 (instantiated.result, true)
             }
-            Some(Type::Poly(_)) => {
-                self.validate_constructor_application_callable(
-                    candidate.symbol,
-                    candidate.callable,
-                    application_tree_index,
-                )?;
-                (candidate.callable, false)
-            }
+            Some(Type::Poly(_)) => (candidate.callable, false),
             Some(_) if !type_arguments.is_empty() => {
                 return Err(TyperError::ConstructorCallableNotPolymorphic {
                     source: self.source,
@@ -14754,6 +14747,74 @@ mod tests {
         };
         assert_eq!(type_symbol(typer.store(), *tycon), class);
         assert_eq!(args, &[definitions.int]);
+    }
+
+    #[test]
+    fn explicit_generic_primary_constructor_instantiates_once_for_curried_clauses() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class PairBox[A](first: A)(second: A); class Use { def make: PairBox[Int] = new PairBox[Int](1)(2) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "PairBox");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructor = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup(&constructor_name)
+            .unwrap();
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(outer) = &typer.typed_ast().get(typed).kind else {
+            panic!("curried generic constructor should produce an outer Apply");
+        };
+        let TreeKind::Apply(inner) = &typer.typed_ast().get(outer.function).kind else {
+            panic!("curried generic constructor should produce an inner Apply");
+        };
+        assert_eq!(inner.args.len(), 1);
+        assert_eq!(outer.args.len(), 1);
+        let Type::Method(next_clause) = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(outer.function).ty)
+        else {
+            panic!("first clause should leave the instantiated second clause");
+        };
+        assert_eq!(next_clause.params[0].ty, definitions.int);
+        let TreeKind::Select(selection) = &typer.typed_ast().get(inner.function).kind else {
+            panic!("generic constructor function should remain a direct Select");
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(inner.function).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == constructor
+        ));
+        let Type::Applied { tycon, args } =
+            typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("curried constructor result should retain PairBox[Int]");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), class);
+        assert_eq!(args, &[definitions.int]);
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(selection.qualifier).ty),
+            Type::Applied { tycon, args }
+                if type_symbol(typer.store(), *tycon) == class && args == &[definitions.int]
+        ));
     }
 
     #[test]
