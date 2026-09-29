@@ -24,6 +24,7 @@ mod annotated;
 mod ast_view;
 mod binders;
 mod class;
+mod companions;
 mod completion;
 mod constructor;
 mod discovery;

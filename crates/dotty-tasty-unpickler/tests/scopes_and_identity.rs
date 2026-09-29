@@ -14,6 +14,7 @@ const OVERLOADS: &[u8] = include_bytes!("fixtures/semantic/Overloads.tasty");
 const PLAIN: &[u8] = include_bytes!("fixtures/semantic/Plain.tasty");
 const BOTH: &[u8] = include_bytes!("fixtures/semantic/Both.tasty");
 const MARKER: &[u8] = include_bytes!("fixtures/semantic/Marker.tasty");
+const CTOR_OBJ: &[u8] = include_bytes!("fixtures/semantic/CtorObj.tasty");
 
 /// Address of the single top-level `PACKAGE` node of each fixture.
 const PACKAGE_ADDRESS: u32 = 0;
@@ -209,6 +210,14 @@ fn a_class_and_its_companion_object_are_distinct_symbols_in_distinct_namespaces(
     assert_ne!(class, object);
     assert_eq!(entered.kind(class), SymbolKind::Class);
     assert_eq!(entered.kind(object), SymbolKind::Object);
+    assert_eq!(
+        entered.store.symbols.get(class).links.companion,
+        Some(object)
+    );
+    assert_eq!(
+        entered.store.symbols.get(object).links.companion,
+        Some(class)
+    );
 }
 
 #[test]
@@ -244,6 +253,16 @@ fn a_trait_is_a_trait_and_owns_its_members() {
 
     assert_eq!(entered.kind(marker), SymbolKind::Trait);
     assert_eq!(entered.kind(mark), SymbolKind::Method);
+    assert_eq!(entered.store.symbols.get(marker).links.companion, None);
+}
+
+#[test]
+fn an_object_without_a_class_companion_stays_unlinked() {
+    let mut entered = enter(CTOR_OBJ);
+    let package = entered.package();
+    let object = entered.only(package, "CtorObj", Namespace::Term);
+
+    assert_eq!(entered.store.symbols.get(object).links.companion, None);
 }
 
 // --- overloads ---

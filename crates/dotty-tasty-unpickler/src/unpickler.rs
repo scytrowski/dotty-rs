@@ -370,6 +370,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
                 self.enter_package(&ast, at)?;
             }
         }
+        self.link_companions()?;
         Ok(())
     }
 }
