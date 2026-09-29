@@ -124,6 +124,7 @@ struct ExportHandoffAudit {
     syntax_occurrences: usize,
     sites_recorded: usize,
     sites_blocked_by_parser_recovery: usize,
+    sites_in_method_bodies: usize,
     forwarders_synthesized: usize,
 }
 
@@ -867,6 +868,7 @@ fn collect_deferred_features(
         "export_syntax_occurrences",
         "export_sites_recorded",
         "export_sites_blocked_by_parser_recovery",
+        "export_sites_in_method_bodies",
         "export_forwarders_synthesized",
         "derives_clauses",
         "local_definitions",
@@ -1114,6 +1116,14 @@ fn collect_deferred_features(
             TreeKind::Export(_) => {
                 record(&mut features, "export_sites_recorded", 1, |_| {
                     named.is_some_and(|(index, _)| index.export_site_at(source, tree_id).is_some())
+                });
+                record(&mut features, "export_sites_in_method_bodies", 1, |_| {
+                    tree.position.is_some_and(|span| {
+                        let position = span.span().range();
+                        method_rhs_ranges.iter().any(|rhs| {
+                            rhs.start() <= position.start() && position.end() <= rhs.end()
+                        })
+                    })
                 });
             }
             TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds)) => {
@@ -1676,6 +1686,8 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
                 count("export_sites_recorded").materialized;
             namer.export_handoff_audit.sites_blocked_by_parser_recovery +=
                 count("export_sites_blocked_by_parser_recovery").occurrences;
+            namer.export_handoff_audit.sites_in_method_bodies +=
+                count("export_sites_in_method_bodies").materialized;
             // Namer only records export sites; forwarder synthesis is owned by
             // a later typed phase and must remain zero in this gate.
         }
@@ -1987,10 +1999,11 @@ fn print_summary(report: &Report) {
         );
         let exports = &namer.export_handoff_audit;
         println!(
-            "  exports: {} syntax occurrences, {} sites recorded, {} blocked by parser recovery, {} forwarders synthesized",
+            "  exports: {} syntax occurrences, {} sites recorded, {} blocked by parser recovery, {} inside method bodies, {} forwarders synthesized",
             exports.syntax_occurrences,
             exports.sites_recorded,
             exports.sites_blocked_by_parser_recovery,
+            exports.sites_in_method_bodies,
             exports.forwarders_synthesized
         );
     }
@@ -2288,12 +2301,17 @@ mod tests {
             .deferred_features
             .get("export_forwarders_synthesized")
             .expect("forwarder synthesis count exists");
+        let method_sites = parsed
+            .deferred_features
+            .get("export_sites_in_method_bodies")
+            .expect("method-body export sites counted");
 
         assert_eq!(syntax.occurrences, 1);
         assert_eq!(syntax.materialized, 1);
         assert_eq!(sites.occurrences, 1);
         assert_eq!(sites.materialized, 1);
         assert_eq!(blocked.occurrences, 0);
+        assert_eq!(method_sites.materialized, 0);
         assert_eq!(forwarders.occurrences, 0);
     }
 
