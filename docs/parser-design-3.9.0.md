@@ -379,6 +379,10 @@ simple type aliases and abstract type declarations with lower and/or upper
 bounds, including symbolic operator names such as `:*`, `==`, and `::` when
 they do not collide with reserved type-grammar tokens; value and method
 operator names remain handled by their separate declaration productions
+type references accept non-reserved symbolic spellings such as `::`, `=:=`,
+and `<:<` in simple, qualified, and applied type positions, including symbolic
+class names and constructor type references; this does not add general infix
+type parsing beyond the separately documented subset
 parenthesized type grouping and tuple types, represented by the shared
 `Parens` and `Tuple` source nodes; tuple elements use the supported full type
 expression subset and compose with applied types
