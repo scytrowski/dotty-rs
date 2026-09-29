@@ -284,9 +284,11 @@ infix operators with Scala 3.9 precedence and associativity
 feature-gated legacy postfix operators (disabled by default)
 ordinary assignment with bare `=`
 named arguments in ordinary and `using` lists in the narrow bare-identifier form
-the initial `if` and `while` expression forms, including Scala 2-compatible
-parenthesized conditions with braced branches, and indented method/control-flow
-bodies containing supported local definitions inside braced scopes. In legacy
+the initial `if` and `while` expression forms, including line-broken leading-
+operator conditions across comments, indented block conditions, Scala
+2-compatible parenthesized conditions with braced branches, and indented
+method/control-flow bodies containing supported local definitions inside
+braced scopes. In legacy
 parenthesized `if`/`while` conditions, only the condition is consumed before
 parsing the following branch/body, so expressions beginning with parentheses
 or prefix operators are not mistaken for condition suffixes
