@@ -1907,14 +1907,14 @@ fn parsed_enum_reuses_explicit_companion_without_entering_cases_as_members() {
         store
             .scopes
             .get(enum_scope)
-            .lookup_all(&TermName::new(store.names.intern("Red")).as_name())
+            .lookup_all(TermName::new(store.names.intern("Red")).as_name())
             .is_empty()
     );
     assert_eq!(
         store
             .scopes
             .get(package_scope)
-            .lookup_all(&TermName::new(store.names.intern("Color")).as_name())
+            .lookup_all(TermName::new(store.names.intern("Color")).as_name())
             .len(),
         1
     );
@@ -1922,7 +1922,7 @@ fn parsed_enum_reuses_explicit_companion_without_entering_cases_as_members() {
         store
             .scopes
             .get(package_scope)
-            .lookup_all(&TypeName::new(store.names.intern("Color")).as_name())
+            .lookup_all(TypeName::new(store.names.intern("Color")).as_name())
             .len(),
         1
     );
