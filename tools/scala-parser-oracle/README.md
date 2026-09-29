@@ -21,7 +21,11 @@ corpus in one JVM, while the Rust dump tool is built and run once. This avoids
 restarting sbt, Scala, Cargo, and Python for every fixture.
 Each Scala fixture is attached to a fresh `CompilationUnit`, so source-level
 language imports and other per-unit parser features cannot leak to later
-fixtures in the batch.
+fixtures in the batch. The oracle initializes one Dotty compiler context with
+the running classpath and applies Dotty's standard root imports to each fresh
+unit context. This mirrors the parser phase's required compiler setup, including
+the definitions used while parsing capture-checking types and while rendering
+syntax diagnostics.
 
 With no argument, `run` reads the source from standard input. The output keeps
 only parser-facing information: node kind, source span, names, literal source
