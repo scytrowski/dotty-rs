@@ -208,7 +208,7 @@ where
                 .ok()
                 .map(|name| *name.as_name()),
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => self
-                .intern_current_type_name()
+                .intern_current_term_name()
                 .ok()
                 .map(|name| *name.as_name()),
             TokenKind::Operator | TokenKind::ColonOp
@@ -218,7 +218,7 @@ where
                 .iter()
                 .any(|reserved| self.current_text_is(reserved)) =>
             {
-                self.intern_current_type_name()
+                self.intern_current_term_name()
                     .ok()
                     .map(|name| *name.as_name())
             }
@@ -477,12 +477,12 @@ mod tests {
         drop(parser);
         assert!(matches!(
             qualifier,
-            Some(name) if name.is_type() && names.resolve(name.text()) == "pkg"
+            Some(name) if name.is_term() && names.resolve(name.text()) == "pkg"
         ));
     }
 
     #[test]
-    fn parses_symbolic_access_qualifiers_in_the_type_namespace() {
+    fn parses_symbolic_access_qualifiers_and_preserves_name_representation() {
         for (source, keyword, name_kind, qualifier, keyword_end, name_end) in [
             (
                 "private[::] val",
@@ -545,7 +545,7 @@ mod tests {
                 }
                 None => panic!("expected a visibility modifier"),
             };
-            assert!(qualifier_name.is_type());
+            assert!(qualifier_name.is_term());
             assert_eq!(
                 parser.current().kind,
                 TokenKind::Keyword(definition_keyword)
