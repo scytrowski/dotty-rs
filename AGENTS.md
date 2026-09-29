@@ -26,7 +26,7 @@ one-way dependency boundaries:
 
 - `dotty-core` owns shared compiler contracts and semantic data structures:
   source locations, diagnostics, token contracts, names, IDs, symbols, scopes,
-  types, semantic storage, and phase-indexed ASTs.
+  types, semantic storage, the source semantic index, and phase-indexed ASTs.
 - `dotty-lexer` tokenizes Scala source and produces the token contracts from
   `dotty-core`.
 - `dotty-parser` is the incremental handwritten Scala 3 source parser. It
@@ -35,7 +35,8 @@ one-way dependency boundaries:
 - `dotty-namer` enters source declarations into the shared semantic model. It
   operates on `dotty-core` trees and must not depend on parser-private types.
 - `dotty-typer` completes source semantics and builds typed information on top
-  of `dotty-core` and the namer. Unsupported or ambiguous semantics should be
+  of `dotty-core`. It consumes the shared source semantic index and must not
+  depend on the namer crate. Unsupported or ambiguous semantics should be
   reported explicitly rather than guessed.
 - `dotty-tasty` owns structural/lossless TASTy decoding and encoding.
 - `dotty-tasty-unpickler` projects decoded TASTy into the shared
@@ -60,7 +61,8 @@ change:
 3. The namer must consume the shared AST/semantic model rather than parser
    internals.
 4. The typer must not parse source or decode TASTy/class files. Those are
-   separate frontend/adapter responsibilities.
+   separate frontend/adapter responsibilities. It may consume source
+   definitions from `dotty-core`, but must not depend on `dotty-namer`.
 5. TASTy and class-file crates must not invent parallel symbol/type models when
    the information belongs in `dotty-core`.
 6. Prefer extending an existing shared abstraction over introducing a second

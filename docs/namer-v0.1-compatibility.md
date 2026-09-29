@@ -6,6 +6,10 @@ can be named and whether the resulting source semantic index satisfies its
 structural invariants. It does not claim that the namer performs typing,
 overload resolution, or compiler desugaring.
 
+The source semantic index is defined in `dotty-core`, because both the namer
+and typer use this contract. The namer remains responsible for populating the
+index; its public API re-exports the core types for compatibility.
+
 ## Reproduction
 
 The corpus is the 1,236 Scala files under `library/src` and `compiler/src` in

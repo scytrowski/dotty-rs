@@ -293,8 +293,8 @@ impl SourceTyper<'_> {
         self.index
             .definition_of(symbol)
             .is_some_and(|definition| match definition {
-                dotty_namer::SourceDefinition::Canonical { source, .. }
-                | dotty_namer::SourceDefinition::Derived { source, .. } => source == self.source,
+                dotty_core::SourceDefinition::Canonical { source, .. }
+                | dotty_core::SourceDefinition::Derived { source, .. } => source == self.source,
             })
     }
 
@@ -485,13 +485,13 @@ fn find_inheritance_cycle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dotty_core::SourceSemanticIndex;
     use dotty_core::ast::Untyped;
     use dotty_core::types::{Annotation, ClassInfo};
     use dotty_core::{
         AstArena, Definitions, Name, Namespace, Packages, SemanticStore, SourceId, Symbol,
         SymbolFlags, SymbolLinks, SymbolOrigin, Visibility,
     };
-    use dotty_namer::SourceSemanticIndex;
 
     struct World {
         arena: AstArena<Untyped>,

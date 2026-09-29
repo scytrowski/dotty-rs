@@ -6,7 +6,6 @@
 //! their arena without exposing parser-private types to naming.
 
 mod naming;
-mod source_index;
 
+pub use dotty_core::{SourceContext, SourceContextId, SourceDefinition, SourceSemanticIndex};
 pub use naming::{NamerError, name_compilation_unit};
-pub use source_index::{SourceContext, SourceContextId, SourceDefinition, SourceSemanticIndex};

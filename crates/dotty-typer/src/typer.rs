@@ -14,10 +14,10 @@ use dotty_core::types::{
 };
 use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
-    ResolutionError, SemanticStore, SourceId, SourceSpan, SymbolFlags, SymbolId, SymbolInfo,
-    SymbolKind, SymbolOrigin, SymbolResolver, TreeId, TypeId, Typed, Untyped,
+    ResolutionError, SemanticStore, SourceContextId, SourceDefinition, SourceId,
+    SourceSemanticIndex, SourceSpan, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin,
+    SymbolResolver, TreeId, TypeId, Typed, Untyped,
 };
-use dotty_namer::{SourceContextId, SourceDefinition, SourceSemanticIndex};
 
 use crate::{SourceTypeIndex, SourceTypedIndex};
 
@@ -51,11 +51,11 @@ pub enum TyperError {
     UnknownSymbol {
         symbol: SymbolId,
     },
-    /// The namer did not retain source provenance for this symbol.
+    /// No source provenance is indexed for this symbol.
     SourceProvenanceMissing {
         symbol: SymbolId,
     },
-    /// A declaration that needs lexical lookup has no namer context.
+    /// A declaration that needs lexical lookup has no source lexical context.
     DeclarationContextMissing {
         symbol: SymbolId,
     },
@@ -89,7 +89,7 @@ pub enum TyperError {
         owner: SymbolId,
         context: SourceContextId,
     },
-    /// The namer did not record a source context for this expression owner.
+    /// No source context is indexed for this expression owner.
     ExpressionOwnerDeclarationContextMissing {
         owner: SymbolId,
     },
@@ -1157,7 +1157,7 @@ impl std::error::Error for TyperError {}
 /// to type an expression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExpressionContext {
-    /// Immutable namer context for source scopes and import lookup.
+    /// Immutable source lexical context for scope and import lookup.
     pub lexical: SourceContextId,
     /// Semantic declaration that owns the expression, used for `this`.
     pub owner: SymbolId,
@@ -1428,7 +1428,7 @@ impl<'a> SourceTyper<'a> {
     }
 
     /// Builds the lexical context for a method or constructor body from the
-    /// authoritative identities recorded by the namer.
+    /// authoritative source identities in the semantic index.
     pub fn expression_context_for(
         &mut self,
         owner: SymbolId,
@@ -1530,7 +1530,7 @@ impl<'a> SourceTyper<'a> {
 
     /// Returns a context with `scope` pushed at the innermost lexical depth.
     /// This lets later expression forms such as `Block` add local scopes
-    /// without changing the namer's immutable source-context model.
+    /// without changing the immutable source-context model.
     pub fn push_local_scope(
         &mut self,
         context: ExpressionContext,
@@ -6400,10 +6400,10 @@ impl<'a> SourceTyper<'a> {
     /// Completes a source declaration, rolling back this call's mutations on failure.
     ///
     /// Source classes, traits, and module classes publish [`Type::ClassInfo`]
-    /// using the declaration scope allocated by the namer. Class and module
-    /// classes receive the canonical `java.lang.Object` parent when no real
-    /// class parent is present. Scala 3.9 TASTy also records `Object` as the
-    /// parent of a trait with no explicit parent.
+    /// using the declaration scope recorded in the source semantic index.
+    /// Class-like symbols receive the canonical `java.lang.Object` parent when
+    /// no real class parent is present. Scala 3.9 TASTy also records `Object`
+    /// as the parent of a trait with no explicit parent.
     pub fn complete_symbol(&mut self, symbol: SymbolId) -> Result<TypeId, TyperError> {
         self.run_atomic(|typer, info_journal| {
             if !typer.store.symbols.contains(symbol) {
@@ -7878,7 +7878,7 @@ impl<'a> SourceTyper<'a> {
         }
     }
 
-    /// Projects a source type tree using the declaration context from the namer.
+    /// Projects a source type tree using its indexed declaration context.
     pub fn type_of_tpt(
         &mut self,
         tree: TreeId<Untyped>,
