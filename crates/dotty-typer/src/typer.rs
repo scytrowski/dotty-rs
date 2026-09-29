@@ -7947,6 +7947,13 @@ impl<'a> SourceTyper<'a> {
                 declaration_context.lexical,
             );
         }
+        let parameter_names = parameters_to_enter
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        if self.local_result_depends_on_parameters(definition.tpt, &parameter_names) {
+            return Err(deferred("dependent result types"));
+        }
         let signature = self.complete_method_signature_body(
             method,
             method_tree_index,
@@ -7961,6 +7968,72 @@ impl<'a> SourceTyper<'a> {
                 .enter(name, parameter);
         }
         Ok(signature)
+    }
+
+    fn local_result_depends_on_parameters(
+        &self,
+        result_tree: TreeId<Untyped>,
+        parameter_names: &[dotty_core::Name],
+    ) -> bool {
+        let mut pending = vec![result_tree];
+        let mut visited = HashSet::new();
+        while let Some(tree) = pending.pop() {
+            if !visited.insert(tree) {
+                continue;
+            }
+            let Some(node) = self.arena.try_get(tree) else {
+                continue;
+            };
+            match &node.kind {
+                TreeKind::SingletonTypeTree(singleton) => {
+                    if self.local_parameter_path(singleton.reference, parameter_names) {
+                        return true;
+                    }
+                }
+                TreeKind::Select(selection) => {
+                    if self.local_parameter_path(selection.qualifier, parameter_names) {
+                        return true;
+                    }
+                }
+                TreeKind::AppliedTypeTree(applied) => {
+                    pending.push(applied.tpt);
+                    pending.extend(applied.args.iter().copied());
+                }
+                TreeKind::ByNameTypeTree(by_name) => pending.push(by_name.result),
+                TreeKind::RefinedTypeTree(refined) => {
+                    pending.push(refined.tpt);
+                    pending.extend(refined.refinements.iter().copied());
+                }
+                TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                    pending.push(parens.inner);
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn local_parameter_path(
+        &self,
+        mut tree: TreeId<Untyped>,
+        parameter_names: &[dotty_core::Name],
+    ) -> bool {
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(tree) {
+                return false;
+            }
+            let Some(node) = self.arena.try_get(tree) else {
+                return false;
+            };
+            match &node.kind {
+                TreeKind::Ident(ident) => return parameter_names.contains(&ident.name),
+                TreeKind::Select(selection) => tree = selection.qualifier,
+                TreeKind::SingletonTypeTree(singleton) => tree = singleton.reference,
+                TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => tree = parens.inner,
+                _ => return false,
+            }
+        }
     }
 
     fn complete_method_signature_body(
@@ -19673,6 +19746,52 @@ mod tests {
             (typer.store().types.get(signature.params[0].ty), typer.store().types.get(signature.result)),
             (Type::TypeRef { target: TypeRefTarget::Symbol(parameter), .. }, Type::TypeRef { target: TypeRefTarget::Symbol(result), .. }) if parameter == result && *result == token
         ));
+    }
+
+    #[test]
+    fn local_dependent_result_is_deferred_without_resolving_a_shadowed_outer_name() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { val item: String = \"outer\"; def outer: Int = { def id(item: Int): item.type = item; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let method_tree = block.stats[0];
+        let (parameter_tree, result_tree) = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => (definition.value_param_clauses[0][0], definition.tpt),
+            _ => panic!("local declaration should be a DefDef"),
+        };
+        assert!(matches!(
+            parsed.ast.get(result_tree).kind,
+            TreeKind::SingletonTypeTree(_)
+        ));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+
+        assert!(matches!(
+            typer.complete_symbol(method),
+            Err(TyperError::LocalMethodSignatureDeferred {
+                feature: "dependent result types",
+                ..
+            })
+        ));
+        assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+        assert!(
+            typer
+                .local_method_parameter_symbol_at(source, parameter_tree)
+                .is_none()
+        );
     }
 
     #[test]
