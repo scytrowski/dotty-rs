@@ -164,9 +164,19 @@ flag. The synthetic missing annotation's source `TypeTree` maps to the typed
 Blocks type their statements in order, preserve the typed Block shape and
 source position, and use the final expression's own type without widening it.
 Each block allocates an empty scope in `SemanticStore` owned by the current
-semantic expression owner; nested blocks push nested scopes. The scope and all
-typed nodes, local symbol mappings, and source mappings are rolled back when
-any part of the block fails. A local `val` or `var` with a source-written type
+semantic expression owner; nested blocks push nested scopes. Before typing
+statements, each block pre-enters its direct local method headers in source
+order. A local method receives a typer-owned `Method` symbol and a distinct
+method-owned scope; the local method index retains its source tree, scope, and
+enclosing block expression context without modifying `SourceSemanticIndex`.
+This makes forward references and same-name overload buckets visible during
+name lookup. Local method signature and body typing remain deferred, so a block
+that reaches a local method definition can still fail at that statement; the
+pre-index is the foundation for the next typing increment. Nested method
+headers are indexed only by their own block. The block scope, local method
+symbols/scopes and metadata, typed nodes, local symbol mappings, and source
+mappings are rolled back when any part of the block fails. A local `val` or
+`var` with a source-written type
 shadows outer bindings throughout the statement sequence, including its own
 initializer; a reference to the local while it is being initialized reports a
 recursive initializer error. Explicitly typed initializers are checked against
@@ -254,8 +264,8 @@ are ready:
   application, `New`, block, ordinary `if`, condition-bearing `while`, and local
   `return` subset, including `match`, `try`, lambdas, and other forms that are
   not currently handled by the expression typer;
-- local `def`, class, type, and pattern declarations, plus imports in block
-  statements;
+- local `def` signature/body typing (headers are pre-indexed), class, type, and
+  pattern declarations, plus imports in block statements;
 - generic overload inference outside the structural candidate-local subset,
   contextual/implicit argument insertion and search, dependent result
   application, and right-associative extension normalization;

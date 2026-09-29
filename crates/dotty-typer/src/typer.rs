@@ -5,8 +5,8 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dotty_core::ast::{
-    ApplyKind, Ident, NumberKind, NumberLiteral, Tree, TreeKind, TypeBoundsTree, TypedAstBuilder,
-    UntypedNode, ValDef,
+    ApplyKind, Ident, Modifier, NumberKind, NumberLiteral, Tree, TreeKind, TypeBoundsTree,
+    TypedAstBuilder, UntypedNode, ValDef,
 };
 use dotty_core::types::{
     ClassInfo, MethodKind, MethodParamSpec, MethodType, PolyType, TermRefTarget, Type,
@@ -14,7 +14,7 @@ use dotty_core::types::{
 };
 use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
-    ResolutionError, SemanticStore, SourceContextId, SourceDefinition, SourceId,
+    ResolutionError, ScopeId, SemanticStore, SourceContextId, SourceDefinition, SourceId,
     SourceSemanticIndex, SourceSpan, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin,
     SymbolResolver, TreeId, TypeId, Typed, Untyped,
 };
@@ -1211,6 +1211,7 @@ pub struct SourceTyper<'a> {
     resolver: Box<dyn SymbolResolver + 'a>,
     type_index: SourceTypeIndex,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
+    local_methods: LocalMethodIndex,
     initializing_local_symbols: HashSet<SymbolId>,
     inferred_method_results_in_progress: HashSet<SymbolId>,
     typed_arena: AstArena<Typed>,
@@ -1303,6 +1304,51 @@ struct ExpressionScopeFrame {
     scope: dotty_core::ScopeId,
     parent: Option<ExpressionScopeId>,
     is_block_scope: bool,
+}
+
+#[derive(Clone, Default)]
+struct LocalMethodIndex {
+    symbols_by_tree: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
+    definitions: HashMap<SymbolId, (SourceId, TreeId<Untyped>)>,
+    scopes: HashMap<SymbolId, ScopeId>,
+    declaration_contexts: HashMap<SymbolId, ExpressionContext>,
+}
+
+impl LocalMethodIndex {
+    fn insert(
+        &mut self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+        symbol: SymbolId,
+        scope: ScopeId,
+        declaration_context: ExpressionContext,
+    ) {
+        self.symbols_by_tree.insert((source, tree), symbol);
+        self.definitions.insert(symbol, (source, tree));
+        self.scopes.insert(symbol, scope);
+        self.declaration_contexts
+            .insert(symbol, declaration_context);
+    }
+
+    fn symbol_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<SymbolId> {
+        self.symbols_by_tree.get(&(source, tree)).copied()
+    }
+
+    fn definition(&self, symbol: SymbolId) -> Option<(SourceId, TreeId<Untyped>)> {
+        self.definitions.get(&symbol).copied()
+    }
+
+    fn scope(&self, symbol: SymbolId) -> Option<ScopeId> {
+        self.scopes.get(&symbol).copied()
+    }
+
+    fn declaration_context(&self, symbol: SymbolId) -> Option<ExpressionContext> {
+        self.declaration_contexts.get(&symbol).copied()
+    }
+
+    fn contains_symbol(&self, symbol: SymbolId) -> bool {
+        self.definitions.contains_key(&symbol)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1450,6 +1496,7 @@ impl<'a> SourceTyper<'a> {
             resolver: Box::new(NoResolver),
             type_index: SourceTypeIndex::default(),
             local_symbols: HashMap::new(),
+            local_methods: LocalMethodIndex::default(),
             initializing_local_symbols: HashSet::new(),
             inferred_method_results_in_progress: HashSet::new(),
             typed_arena: AstArena::new(),
@@ -1468,6 +1515,36 @@ impl<'a> SourceTyper<'a> {
         self
     }
 
+    fn source_tree_for_symbol(&self, symbol: SymbolId) -> Option<(SourceId, TreeId<Untyped>)> {
+        self.local_methods.definition(symbol).or_else(|| {
+            self.index
+                .definition_of(symbol)
+                .map(|definition| match definition {
+                    SourceDefinition::Canonical { source, tree }
+                    | SourceDefinition::Derived { source, tree } => (source, tree),
+                })
+        })
+    }
+
+    fn method_declaration_context(&self, method: SymbolId) -> Option<ExpressionContext> {
+        self.local_methods.declaration_context(method).or_else(|| {
+            self.index
+                .declaration_context_of(method)
+                .map(|lexical| ExpressionContext {
+                    lexical,
+                    owner: method,
+                    local_scopes: None,
+                })
+        })
+    }
+
+    fn method_scope(&self, method: SymbolId) -> Result<ScopeId, TyperError> {
+        match self.local_methods.scope(method) {
+            Some(scope) => Ok(scope),
+            None => Self::indexed_method_scope(method, self.index.scope_of(method)),
+        }
+    }
+
     /// Builds the lexical context for a method or constructor body from the
     /// authoritative source identities in the semantic index.
     pub fn expression_context_for(
@@ -1481,17 +1558,17 @@ impl<'a> SourceTyper<'a> {
         if !matches!(kind, SymbolKind::Method | SymbolKind::Constructor) {
             return Err(TyperError::ExpressionOwnerKindUnsupported { owner, kind });
         }
-        let lexical = self
-            .index
-            .declaration_context_of(owner)
+        let declaration_context = self
+            .method_declaration_context(owner)
             .ok_or(TyperError::ExpressionOwnerDeclarationContextMissing { owner })?;
+        let lexical = declaration_context.lexical;
         if self.index.try_source_context(lexical).is_none() {
             return Err(TyperError::ExpressionOwnerSourceContextMissing {
                 owner,
                 context: lexical,
             });
         }
-        let scope = Self::indexed_method_scope(owner, self.index.scope_of(owner))?;
+        let scope = self.method_scope(owner)?;
         if !self.store.scopes.contains(scope) {
             return Err(TyperError::ExpressionMethodScopeMissing { owner });
         }
@@ -1505,9 +1582,8 @@ impl<'a> SourceTyper<'a> {
         }
         self.push_local_scope(
             ExpressionContext {
-                lexical,
                 owner,
-                local_scopes: None,
+                ..declaration_context
             },
             scope,
         )
@@ -1910,6 +1986,7 @@ impl<'a> SourceTyper<'a> {
         let store_checkpoint = self.store.checkpoint();
         let type_index_checkpoint = self.type_index.checkpoint();
         let local_symbols_checkpoint = self.local_symbols.clone();
+        let local_methods_checkpoint = self.local_methods.clone();
         let initializing_local_symbols_checkpoint = self.initializing_local_symbols.clone();
         let expression_scope_checkpoint = self.expression_scopes.len();
         let mut info_journal = Vec::new();
@@ -1927,6 +2004,7 @@ impl<'a> SourceTyper<'a> {
                 self.store.rollback_to(store_checkpoint);
                 self.type_index.restore(type_index_checkpoint);
                 self.local_symbols = local_symbols_checkpoint;
+                self.local_methods = local_methods_checkpoint;
                 self.initializing_local_symbols = initializing_local_symbols_checkpoint;
                 self.expression_scopes.truncate(expression_scope_checkpoint);
                 for (source, source_tree) in new_mappings.into_iter().rev() {
@@ -2825,6 +2903,7 @@ impl<'a> SourceTyper<'a> {
                 {
                     frame.is_block_scope = true;
                 }
+                self.preindex_local_methods(&block.stats, block_context, block_scope)?;
                 let mut stats = Vec::with_capacity(block.stats.len());
                 for stat in block.stats {
                     let Some(source_stat) = self.arena.try_get(stat) else {
@@ -4595,6 +4674,51 @@ impl<'a> SourceTyper<'a> {
             return Err(TyperError::NewClassInfoUnavailable { symbol: class });
         }
         Ok(info)
+    }
+
+    fn preindex_local_methods(
+        &mut self,
+        stats: &[TreeId<Untyped>],
+        declaration_context: ExpressionContext,
+        block_scope: ScopeId,
+    ) -> Result<(), TyperError> {
+        for tree in stats {
+            let Some(source_tree) = self.arena.try_get(*tree) else {
+                return Err(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: tree.index(),
+                });
+            };
+            let TreeKind::DefDef(definition) = &source_tree.kind else {
+                continue;
+            };
+            let name = *definition.name.as_name();
+            let symbol = self.store.symbols.alloc(dotty_core::Symbol {
+                name,
+                owner: Some(declaration_context.owner),
+                kind: SymbolKind::Method,
+                flags: source_method_flags(&definition.metadata.modifiers),
+                visibility: dotty_core::Visibility::Public,
+                info: SymbolInfo::Missing,
+                origin: SymbolOrigin::Source(self.source),
+                annotations: Vec::new(),
+                position: source_tree.position,
+                links: dotty_core::SymbolLinks::default(),
+            });
+            let method_scope = self
+                .store
+                .scopes
+                .alloc(dotty_core::Scope::new(Some(symbol)));
+            self.store.scopes.get_mut(block_scope).enter(name, symbol);
+            self.local_methods.insert(
+                self.source,
+                *tree,
+                symbol,
+                method_scope,
+                declaration_context,
+            );
+        }
+        Ok(())
     }
 
     fn type_local_value(
@@ -6828,6 +6952,7 @@ impl<'a> SourceTyper<'a> {
         let typed_ast_checkpoint = self.typed_arena.checkpoint();
         let typed_index_checkpoint = self.typed_index.clone();
         let local_symbols_checkpoint = self.local_symbols.clone();
+        let local_methods_checkpoint = self.local_methods.clone();
         let initializing_local_symbols_checkpoint = self.initializing_local_symbols.clone();
         let inferred_method_results_checkpoint = self.inferred_method_results_in_progress.clone();
         let expression_scope_checkpoint = self.expression_scopes.len();
@@ -6844,6 +6969,7 @@ impl<'a> SourceTyper<'a> {
             self.typed_arena.rollback_to(typed_ast_checkpoint);
             self.typed_index = typed_index_checkpoint;
             self.local_symbols = local_symbols_checkpoint;
+            self.local_methods = local_methods_checkpoint;
             self.initializing_local_symbols = initializing_local_symbols_checkpoint;
             self.inferred_method_results_in_progress = inferred_method_results_checkpoint;
             self.expression_scopes.truncate(expression_scope_checkpoint);
@@ -6857,14 +6983,12 @@ impl<'a> SourceTyper<'a> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
         let kind = self.store.symbols.get(symbol).kind;
-        let definition = self
-            .index
-            .definition_of(symbol)
+        let (source, tree) = self
+            .source_tree_for_symbol(symbol)
             .ok_or(TyperError::SourceProvenanceMissing { symbol })?;
-        let (source, tree) = match definition {
-            SourceDefinition::Canonical { source, tree }
-            | SourceDefinition::Derived { source, tree } => (source, tree),
-        };
+        if self.local_methods.contains_symbol(symbol) {
+            return Err(TyperError::DeferredSymbolCompletion { symbol });
+        }
         if source != self.source {
             return Err(TyperError::SourceProvenanceMissing { symbol });
         }
@@ -9315,6 +9439,30 @@ impl<'a> SourceTyper<'a> {
         self.local_symbols.get(&(source, tree)).copied()
     }
 
+    /// Returns the typer-owned method identity entered for a local `DefDef`.
+    pub fn local_method_symbol_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        self.local_methods.symbol_at(source, tree)
+    }
+
+    /// Returns the source declaration recorded for a typer-owned local method.
+    pub fn local_method_definition(&self, method: SymbolId) -> Option<(SourceId, TreeId<Untyped>)> {
+        self.local_methods.definition(method)
+    }
+
+    /// Returns the method-owned scope reserved for a local method's parameters.
+    pub fn local_method_scope(&self, method: SymbolId) -> Option<ScopeId> {
+        self.local_methods.scope(method)
+    }
+
+    /// Returns the enclosing block context captured when a local method was entered.
+    pub fn local_method_declaration_context(&self, method: SymbolId) -> Option<ExpressionContext> {
+        self.local_methods.declaration_context(method)
+    }
+
     /// Exposes the package registry used by this driver.
     pub fn packages(&self) -> &Packages {
         self.packages
@@ -9355,6 +9503,26 @@ fn local_block_declaration_kind(kind: &TreeKind<Untyped>) -> Option<&'static str
         TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_)) => Some("module definition"),
         _ => None,
     }
+}
+
+fn source_method_flags(modifiers: &[Modifier]) -> SymbolFlags {
+    modifiers
+        .iter()
+        .fold(SymbolFlags::EMPTY, |flags, modifier| {
+            let flag = match modifier {
+                Modifier::Abstract => SymbolFlags::ABSTRACT,
+                Modifier::Final => SymbolFlags::FINAL,
+                Modifier::Implicit => SymbolFlags::IMPLICIT,
+                Modifier::Given => SymbolFlags::GIVEN,
+                Modifier::Override => SymbolFlags::OVERRIDE,
+                Modifier::Inline => SymbolFlags::INLINE,
+                Modifier::Transparent => SymbolFlags::TRANSPARENT,
+                Modifier::Extension => SymbolFlags::EXTENSION,
+                Modifier::Erased => SymbolFlags::ERASED,
+                _ => SymbolFlags::EMPTY,
+            };
+            flags | flag
+        })
 }
 
 #[cfg(test)]
@@ -9519,6 +9687,32 @@ mod tests {
             }
         }
         panic!("source method `{target}` not found");
+    }
+
+    fn preindex_block_for_test(
+        typer: &mut SourceTyper<'_>,
+        block_tree: TreeId<Untyped>,
+        parent_context: ExpressionContext,
+    ) -> (ScopeId, ExpressionContext) {
+        let TreeKind::Block(block) = &typer.arena.get(block_tree).kind else {
+            panic!("source tree should be a block")
+        };
+        let stats = block.stats.clone();
+        let scope = typer
+            .store
+            .scopes
+            .alloc(dotty_core::Scope::new(Some(parent_context.owner)));
+        let context = typer.push_local_scope(parent_context, scope).unwrap();
+        if let Some(frame) = context
+            .local_scopes
+            .and_then(|stack| typer.expression_scopes.get_mut(stack.index()))
+        {
+            frame.is_block_scope = true;
+        }
+        typer
+            .preindex_local_methods(&stats, context, scope)
+            .unwrap();
+        (scope, context)
     }
 
     fn method_parameter_context(
@@ -18897,6 +19091,250 @@ mod tests {
         ));
         assert!(typer.local_symbols.is_empty());
         assert_eq!(typer.store().checkpoint(), store_checkpoint);
+    }
+
+    #[test]
+    fn local_method_flags_preserve_supported_source_modifiers() {
+        let cases = [
+            (Modifier::Abstract, SymbolFlags::ABSTRACT),
+            (Modifier::Final, SymbolFlags::FINAL),
+            (Modifier::Implicit, SymbolFlags::IMPLICIT),
+            (Modifier::Given, SymbolFlags::GIVEN),
+            (Modifier::Override, SymbolFlags::OVERRIDE),
+            (Modifier::Inline, SymbolFlags::INLINE),
+            (Modifier::Transparent, SymbolFlags::TRANSPARENT),
+            (Modifier::Extension, SymbolFlags::EXTENSION),
+            (Modifier::Erased, SymbolFlags::ERASED),
+        ];
+        for (modifier, expected) in cases {
+            assert_eq!(source_method_flags(&[modifier]), expected, "{modifier:?}");
+        }
+    }
+
+    #[test]
+    fn local_method_headers_are_preentered_and_forward_calls_resolve_their_identity() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def outer: Int = { foo(); inline def foo(): Int = 1; 0 } }");
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let method_tree = block.stats[1];
+        let call_tree = block.stats[0];
+        let TreeKind::Apply(call) = &parsed.ast.get(call_tree).kind else {
+            panic!("first block stat should call the forward method")
+        };
+        let TreeKind::Ident(callee) = &parsed.ast.get(call.function).kind else {
+            panic!("forward method call should have an identifier callee")
+        };
+        let call_name = callee.name;
+        let call_position = parsed.ast.get(call.function).position;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let outer_context = typer.expression_context_for(outer).unwrap();
+        let (block_scope, block_context) =
+            preindex_block_for_test(&mut typer, block_tree, outer_context);
+
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        let method_definition = typer.local_method_definition(method).unwrap();
+        assert_eq!(method_definition, (source, method_tree));
+        assert_eq!(typer.store().symbols.get(method).kind, SymbolKind::Method);
+        assert_eq!(typer.store().symbols.get(method).owner, Some(outer));
+        assert_eq!(typer.store().symbols.get(method).name, call_name);
+        assert_eq!(
+            typer.store().symbols.get(method).position,
+            parsed.ast.get(method_tree).position
+        );
+        assert!(
+            typer
+                .store()
+                .symbols
+                .get(method)
+                .flags
+                .contains(SymbolFlags::INLINE)
+        );
+        assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+        assert_eq!(typer.store().scopes.get(block_scope).owner, Some(outer));
+        assert_eq!(
+            typer.store().scopes.get(block_scope).lookup_all(&call_name),
+            &[method]
+        );
+        assert_eq!(
+            typer
+                .expression_term_candidates(
+                    call_name,
+                    block_context,
+                    call.function.index(),
+                    call_position
+                )
+                .unwrap(),
+            vec![method]
+        );
+
+        let method_scope = typer.local_method_scope(method).unwrap();
+        assert_ne!(method_scope, block_scope);
+        assert_eq!(typer.store().scopes.get(method_scope).owner, Some(method));
+        assert_eq!(
+            typer.local_method_declaration_context(method),
+            Some(block_context)
+        );
+        assert!(index.definition_of(method).is_none());
+        assert!(index.scope_of(method).is_none());
+        assert!(index.declaration_context_of(method).is_none());
+        let method_context = typer.expression_context_for(method).unwrap();
+        assert_eq!(method_context.owner, method);
+        let method_frame = typer.expression_scopes[method_context.local_scopes.unwrap().index()];
+        assert_eq!(method_frame.scope, method_scope);
+        assert_eq!(method_frame.parent, block_context.local_scopes);
+    }
+
+    #[test]
+    fn same_name_local_methods_share_an_overload_bucket_in_source_order() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def same(value: Int): Int = value; def same(value: Boolean): Int = 1; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let method_trees = block.stats[..2].to_vec();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let outer_context = typer.expression_context_for(outer).unwrap();
+        let (block_scope, _) = preindex_block_for_test(&mut typer, block_tree, outer_context);
+        let methods = method_trees
+            .iter()
+            .map(|tree| typer.local_method_symbol_at(source, *tree).unwrap())
+            .collect::<Vec<_>>();
+        let same_name = *match &parsed.ast.get(method_trees[0]).kind {
+            TreeKind::DefDef(definition) => definition.name.as_name(),
+            _ => panic!("local method tree should be a DefDef"),
+        };
+
+        assert_eq!(
+            typer.store().scopes.get(block_scope).lookup_all(&same_name),
+            methods
+        );
+        let scopes = methods
+            .iter()
+            .map(|method| typer.local_method_scope(*method).unwrap())
+            .collect::<Vec<_>>();
+        assert_ne!(scopes[0], scopes[1]);
+        for (method, scope) in methods.iter().zip(scopes) {
+            assert_eq!(typer.store().scopes.get(scope).owner, Some(*method));
+        }
+    }
+
+    #[test]
+    fn nested_block_methods_are_indexed_only_in_their_own_block_scope() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def outer: Int = { { def hidden(): Int = 1; 0 }; 2 } }");
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(outer_block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let TreeKind::Block(nested_block) = &parsed.ast.get(outer_block.stats[0]).kind else {
+            panic!("first outer stat should be a nested block")
+        };
+        let nested_tree = outer_block.stats[0];
+        let hidden_tree = nested_block.stats[0];
+        let hidden_name = match &parsed.ast.get(hidden_tree).kind {
+            TreeKind::DefDef(definition) => *definition.name.as_name(),
+            _ => panic!("nested method tree should be a DefDef"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let outer_context = typer.expression_context_for(outer).unwrap();
+        let (outer_scope, outer_context) =
+            preindex_block_for_test(&mut typer, block_tree, outer_context);
+
+        assert!(
+            typer
+                .store()
+                .scopes
+                .get(outer_scope)
+                .lookup_all(&hidden_name)
+                .is_empty()
+        );
+        assert!(typer.local_method_symbol_at(source, hidden_tree).is_none());
+
+        let (nested_scope, _) = preindex_block_for_test(&mut typer, nested_tree, outer_context);
+        let hidden = typer.local_method_symbol_at(source, hidden_tree).unwrap();
+        assert_eq!(
+            typer
+                .store()
+                .scopes
+                .get(nested_scope)
+                .lookup_all(&hidden_name),
+            &[hidden]
+        );
+        assert!(
+            typer
+                .store()
+                .scopes
+                .get(outer_scope)
+                .lookup_all(&hidden_name)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn failed_block_typing_rolls_back_preentered_local_methods_and_scopes() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def outer: Int = { 1; foo(); def foo(): Int = 2; 3 } }");
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let local_method_tree = block.stats[2];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+        let typed_checkpoint = typer.typed_ast().checkpoint();
+        let scope_checkpoint = typer.expression_scopes.len();
+
+        let error = typer.type_expression(block_tree, context).unwrap_err();
+
+        assert!(matches!(error, TyperError::DeferredSymbolCompletion { .. }));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
+        assert_eq!(typer.expression_scopes.len(), scope_checkpoint);
+        assert!(
+            typer
+                .local_method_symbol_at(source, local_method_tree)
+                .is_none()
+        );
+        assert!(typer.source_typed_index().get(source, block_tree).is_none());
+        assert!(typer.local_methods.definitions.is_empty());
     }
 
     #[test]
