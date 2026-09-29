@@ -737,7 +737,11 @@ set. It is attached to the existing definition nodes, including
 semantic resolution. Enum definitions use `TypeDef(Template(...))` with the
 parser-level `Modifier::Enum`; this preserves enum identity without adding a
 new shared tree kind. Annotation trees use the source-level
-`Apply(Select(New(type), <init>), args)` shape. Enum-case constructors also
+`Apply(Select(New(type), <init>), args)` shape. The implemented annotation-type
+subset includes parenthesized types with nested annotations, such as
+`@(deprecated @companionMethod)`, preserving the source parentheses and nested
+`Annotated` tree without treating arbitrary expressions as annotation types.
+Enum-case constructors also
 preserve post-name annotations and optional `private`/`protected` access in the
 synthetic constructor's `Modifiers`. Visibility written before `case` remains
 on the case definition and is independent of constructor visibility. This
