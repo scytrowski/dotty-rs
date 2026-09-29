@@ -3504,6 +3504,35 @@ fn treats_a_prefix_spelling_without_a_same_line_operand_as_a_term_identifier() {
 }
 
 #[test]
+fn does_not_treat_a_prefix_operator_as_continuing_onto_the_next_line() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "a && !\nb",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Operator, 2, 4),
+            token(TokenKind::Operator, 5, 6),
+            token(TokenKind::Newline, 6, 7),
+            token(TokenKind::Identifier, 7, 8),
+            token(TokenKind::Eof, 8, 8),
+        ],
+        &mut names,
+    );
+
+    let id = parser.postfix_expr();
+    let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = parser.ast().get(id).kind else {
+        panic!("expected the preceding infix expression");
+    };
+    let TreeKind::Ident(identifier) = parser.ast().get(infix.right).kind else {
+        panic!("a prefix operator on a later line must not become the RHS prefix tree");
+    };
+    let name = identifier.name;
+    assert_eq!(parser.current().kind, TokenKind::Newline);
+    drop(parser);
+    assert_eq!(names.resolve(name.text()), "!");
+}
+
+#[test]
 fn preserves_the_sign_in_a_negated_integer_literal() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

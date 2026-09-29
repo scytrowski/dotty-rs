@@ -247,10 +247,17 @@ impl ContextualScanner {
                 .any(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines));
             let starts_unspaced_prefix_expr =
                 is_unspaced_prefix_expr(&self.source, &self.tokens, current_index);
+            let starts_symbolic_operator = current.kind == TokenKind::Operator
+                && self
+                    .source
+                    .get(current.span.start() as usize..current.span.end() as usize)
+                    != Some("@");
             if has_line_break
                 && !has_separator
                 && can_end_statement(Some(previous.kind))
-                && (can_start_statement_kind(current.kind) || starts_unspaced_prefix_expr)
+                && (can_start_statement_kind(current.kind)
+                    || starts_unspaced_prefix_expr
+                    || starts_symbolic_operator)
                 && !suppresses_statement_separator_kind(current.kind)
                 && !is_leading_infix_tokens(
                     &self.source,
@@ -1122,6 +1129,12 @@ fn is_leading_infix_tokens(
     let Some(next) = next_real_token(tokens, current_index) else {
         return false;
     };
+    let starts_prefix_rhs = next.kind == TokenKind::Operator
+        && is_prefix_operator(source, next.span)
+        && next_real_token(tokens, current_index + 1).is_some_and(|operand| {
+            can_start_simple_expr_kind(operand.kind)
+                && !has_source_line_break(source, next.span.end(), operand.span.start())
+        });
     // Dotty only treats a leading symbolic/backquoted name as an infix
     // operator when whitespace follows it. Without this check, a line such
     // as `!second` would be joined to the preceding expression instead of
@@ -1130,7 +1143,7 @@ fn is_leading_infix_tokens(
         .chars()
         .next()
         .is_some_and(char::is_whitespace)
-        || !can_start_statement_kind(next.kind)
+        || !(can_start_statement_kind(next.kind) || starts_prefix_rhs)
     {
         return false;
     }
@@ -1153,7 +1166,63 @@ fn is_unspaced_prefix_expr(source: &str, tokens: &[Token], operator_index: usize
         return false;
     };
     source[operator.span.end() as usize..operand.span.start() as usize].is_empty()
-        && can_start_statement_kind(operand.kind)
+        && can_start_simple_expr_kind(operand.kind)
+}
+
+fn can_start_simple_expr_kind(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Identifier
+            | TokenKind::BackquotedIdentifier
+            | TokenKind::Quote
+            | TokenKind::XmlStart
+            | TokenKind::CharLiteral
+            | TokenKind::IntegerLiteral
+            | TokenKind::DecimalLiteral
+            | TokenKind::ExponentLiteral
+            | TokenKind::LongLiteral
+            | TokenKind::FloatLiteral
+            | TokenKind::DoubleLiteral
+            | TokenKind::StringLiteral
+            | TokenKind::InterpolationId
+            | TokenKind::Keyword(
+                HardKeyword::This
+                    | HardKeyword::Null
+                    | HardKeyword::New
+                    | HardKeyword::Super
+                    | HardKeyword::True
+                    | HardKeyword::False
+            )
+            | TokenKind::Punctuation(Punctuation::LeftParen | Punctuation::LeftBrace)
+    )
+}
+
+fn can_start_simple_expr_raw(kind: RawTokenKind) -> bool {
+    matches!(
+        kind,
+        RawTokenKind::Identifier
+            | RawTokenKind::BackquotedIdentifier
+            | RawTokenKind::Quote
+            | RawTokenKind::XmlStart
+            | RawTokenKind::CharLiteral
+            | RawTokenKind::IntegerLiteral
+            | RawTokenKind::DecimalLiteral
+            | RawTokenKind::ExponentLiteral
+            | RawTokenKind::LongLiteral
+            | RawTokenKind::FloatLiteral
+            | RawTokenKind::DoubleLiteral
+            | RawTokenKind::StringLiteral
+            | RawTokenKind::InterpolationId
+            | RawTokenKind::Keyword(
+                HardKeyword::This
+                    | HardKeyword::Null
+                    | HardKeyword::New
+                    | HardKeyword::Super
+                    | HardKeyword::True
+                    | HardKeyword::False
+            )
+            | RawTokenKind::Punctuation(Punctuation::LeftParen | Punctuation::LeftBrace)
+    )
 }
 
 fn suppresses_statement_separator(kind: RawTokenKind) -> bool {
@@ -1191,10 +1260,16 @@ fn is_leading_infix(
     {
         return false;
     }
-    let Some(next) = next_raw_token(items, item_index) else {
+    let Some((next_index, next)) = next_raw_token_with_index(items, item_index) else {
         return false;
     };
-    if !can_start_statement(next.kind) {
+    let starts_prefix_rhs = next.kind == RawTokenKind::Operator
+        && is_prefix_operator(source, next.span)
+        && next_raw_token(items, next_index).is_some_and(|operand| {
+            can_start_simple_expr_raw(operand.kind)
+                && !has_source_line_break(source, next.span.end(), operand.span.start())
+        });
+    if !can_start_statement(next.kind) && !starts_prefix_rhs {
         return false;
     }
 
@@ -1203,11 +1278,24 @@ fn is_leading_infix(
     previous_indent.is_prefix_of(&operator_indent)
 }
 
+fn is_prefix_operator(source: &str, span: TextRange) -> bool {
+    source
+        .get(span.start() as usize..span.end() as usize)
+        .is_some_and(|spelling| matches!(spelling, "-" | "+" | "~" | "!"))
+}
+
 fn next_raw_token(items: &[RawItem], item_index: usize) -> Option<&RawToken> {
-    items[item_index + 1..].iter().find_map(|item| match item {
-        RawItem::Token(token) => Some(token),
-        RawItem::Trivia(_) => None,
-    })
+    next_raw_token_with_index(items, item_index).map(|(_, token)| token)
+}
+
+fn next_raw_token_with_index(items: &[RawItem], item_index: usize) -> Option<(usize, &RawToken)> {
+    items[item_index + 1..]
+        .iter()
+        .enumerate()
+        .find_map(|(offset, item)| match item {
+            RawItem::Token(token) => Some((item_index + offset + 1, token)),
+            RawItem::Trivia(_) => None,
+        })
 }
 
 fn is_layout_token(kind: TokenKind) -> bool {
@@ -3260,6 +3348,97 @@ mod tests {
             kinds("value // explanation\n  // continued below\n  && other"),
             vec![
                 TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_a_leading_infix_operator_when_its_operand_is_a_prefix_expression() {
+        let tokens = kinds("value\n  && !other\nnext");
+        assert_eq!(
+            tokens,
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_a_leading_infix_prefix_operand_after_comment_trivia() {
+        assert_eq!(
+            kinds("value // condition\n  // continued\n  && !other\nnext"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn declaration_keyword_does_not_start_a_prefix_rhs_for_leading_infix() {
+        let source = "value\n  && ! val next = 1";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+        let operator_index = scanner
+            .tokens()
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Operator
+                    && &source[token.span.start() as usize..token.span.end() as usize] == "&&"
+            })
+            .expect("leading infix token exists");
+        assert!(!is_leading_infix_tokens(
+            source,
+            scanner.tokens(),
+            0,
+            operator_index
+        ));
+    }
+
+    #[test]
+    fn arrow_indented_feedback_does_not_join_a_leading_infix_with_a_keyword_prefix_rhs() {
+        let source = "(case A =>\n  value\n  && ! val next = 1\n  finish)";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while !(scanner.current().kind == TokenKind::Operator
+            && &source
+                [scanner.current().span.start() as usize..scanner.current().span.end() as usize]
+                == "=>")
+        {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::ArrowIndented);
+
+        let value_end = source.find("value").unwrap() as u32 + "value".len() as u32;
+        let operator_start = source.find("&&").unwrap() as u32;
+        assert!(scanner.tokens().iter().any(|token| {
+            token.kind == TokenKind::Newline
+                && token.span.start() == value_end
+                && token.span.end() == operator_start
+        }));
+    }
+
+    #[test]
+    fn a_blank_line_still_separates_before_a_leading_infix_prefix_operand() {
+        assert_eq!(
+            kinds("value\n\n  && !other"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newlines,
+                TokenKind::Operator,
                 TokenKind::Operator,
                 TokenKind::Identifier,
                 TokenKind::Eof,
