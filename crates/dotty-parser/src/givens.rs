@@ -21,6 +21,14 @@ struct GivenSignature {
     metadata: dotty_core::ast::Modifiers,
 }
 
+struct GivenStructure {
+    type_params: Vec<TreeId<Untyped>>,
+    value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
+    parents: Vec<TreeId<Untyped>>,
+    has_with_template_body: bool,
+    template_body_feedback: Option<u32>,
+}
+
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
@@ -148,11 +156,13 @@ where
             return self.parse_structural_given(
                 mark,
                 name,
-                type_params,
-                value_param_clauses,
-                parents,
-                has_with_template_body,
-                template_body_feedback,
+                GivenStructure {
+                    type_params,
+                    value_param_clauses,
+                    parents,
+                    has_with_template_body,
+                    template_body_feedback,
+                },
                 prefix.metadata,
             );
         }
@@ -225,11 +235,7 @@ where
         &mut self,
         mark: crate::Mark,
         name: dotty_core::TermName,
-        type_params: Vec<TreeId<Untyped>>,
-        value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
-        parents: Vec<TreeId<Untyped>>,
-        has_with_template_body: bool,
-        template_body_feedback: Option<u32>,
+        structure: GivenStructure,
         mut metadata: dotty_core::ast::Modifiers,
     ) -> ParsedStatement {
         if !metadata.modifiers.contains(&Modifier::Given) {
@@ -240,21 +246,21 @@ where
             .with_secondary_constructor_allowed(false, |parser| {
                 parser.with_enum_body(false, |parser| {
                     parser.parse_optional_template_body_with_feedback(
-                        template_body_feedback,
-                        has_with_template_body,
+                        structure.template_body_feedback,
+                        structure.has_with_template_body,
                     )
                 })
             })
             .members;
         let template = self.allocate_given_template(
             mark.start(),
-            type_params.clone(),
-            value_param_clauses.clone(),
-            parents,
+            structure.type_params.clone(),
+            structure.value_param_clauses.clone(),
+            structure.parents,
             body,
         );
 
-        if type_params.is_empty() && value_param_clauses.is_empty() {
+        if structure.type_params.is_empty() && structure.value_param_clauses.is_empty() {
             ParsedStatement::Definition(self.alloc_from(
                 mark,
                 TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(ModuleDef {
