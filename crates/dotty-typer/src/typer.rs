@@ -1115,7 +1115,7 @@ pub enum TyperError {
 }
 
 /// Why one overload was excluded from an application candidate set.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverloadRejection {
     WrongArity {
         expected: usize,
@@ -1125,6 +1125,13 @@ pub enum OverloadRejection {
         argument_index: usize,
         actual: TypeId,
         expected: TypeId,
+    },
+    TypeArgumentInferenceFailure {
+        parameter_index: Option<usize>,
+    },
+    TypeArgumentBoundViolation {
+        parameter_index: usize,
+        side: TypeArgumentBoundSide,
     },
     IncompleteSignature,
     UnsupportedSemantics,
@@ -1209,6 +1216,7 @@ struct ApplicationCandidate {
     symbol: SymbolId,
     callable: TypeId,
     member: Option<MemberCandidate>,
+    rejection: Option<OverloadRejection>,
 }
 
 /// One constructor declared directly by an instantiated class.
@@ -3488,6 +3496,7 @@ impl<'a> SourceTyper<'a> {
                 symbol: candidate.symbol,
                 callable: candidate.callable,
                 member: None,
+                rejection: None,
             });
         }
 
@@ -5315,6 +5324,7 @@ impl<'a> SourceTyper<'a> {
                                 symbol,
                                 callable,
                                 member: None,
+                                rejection: None,
                             })
                         })
                         .collect::<Result<Vec<_>, TyperError>>()?,
@@ -5358,6 +5368,7 @@ impl<'a> SourceTyper<'a> {
                             symbol: member.symbol,
                             callable,
                             member: Some(member),
+                            rejection: None,
                         })
                     })
                     .collect::<Result<Vec<_>, TyperError>>()?;
@@ -5411,23 +5422,12 @@ impl<'a> SourceTyper<'a> {
 
         self.remove_overridden_overload_candidates(&mut candidates, application_tree_index)?;
 
-        if candidates.iter().any(|candidate| {
-            let Some(Type::Poly(poly)) = self.store.types.try_get(candidate.callable) else {
-                return false;
-            };
-            let Some(Type::Method(method)) = self.store.types.try_get(poly.result) else {
-                return false;
-            };
-            overload_arity_rejection(method, arguments.len()).is_none()
-        }) {
-            return Err(TyperError::GenericOverloadResolutionDeferred {
-                source: self.source,
-                tree_index: application_tree_index,
-            });
-        }
-
-        let winner =
-            self.choose_overload_candidate(&mut candidates, &arguments, application_tree_index)?;
+        let winner = self.choose_method_overload_candidate(
+            &mut candidates,
+            &arguments,
+            application_tree_index,
+            info_journal,
+        )?;
         let function_type = match function_shape {
             ApplicationFunctionShape::Ident(ident) => {
                 let ty = self.expression_type_of_symbol(
@@ -5484,6 +5484,158 @@ impl<'a> SourceTyper<'a> {
             callable: winner.callable,
             arguments,
         }))
+    }
+
+    fn choose_method_overload_candidate(
+        &mut self,
+        candidates: &mut [ApplicationCandidate],
+        arguments: &[TypedArgument],
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<ApplicationCandidate, TyperError> {
+        let store_checkpoint = self.store.checkpoint();
+        let type_index_checkpoint = self.type_index.checkpoint();
+        let journal_checkpoint = info_journal.len();
+        let original_candidates = candidates.to_vec();
+
+        let resolution = (|| {
+            self.instantiate_generic_overload_candidates(
+                candidates,
+                arguments,
+                tree_index,
+                info_journal,
+            )?;
+            self.choose_overload_candidate(candidates, arguments, tree_index)
+        })();
+        let selected = resolution?;
+
+        for (symbol, previous) in info_journal[journal_checkpoint..].iter().rev().copied() {
+            if self.store.symbols.contains(symbol) {
+                self.store.symbols.set_info(symbol, previous);
+            }
+        }
+        info_journal.truncate(journal_checkpoint);
+        self.store.rollback_to(store_checkpoint);
+        self.type_index.restore(type_index_checkpoint);
+        candidates.copy_from_slice(&original_candidates);
+
+        let selected_index = candidates
+            .iter()
+            .position(|candidate| candidate.symbol == selected.symbol)
+            .ok_or(TyperError::MalformedOverloadCandidate {
+                symbol: selected.symbol,
+                callable: selected.callable,
+            })?;
+        self.instantiate_generic_overload_candidates(
+            &mut candidates[selected_index..=selected_index],
+            arguments,
+            tree_index,
+            info_journal,
+        )?;
+        Ok(candidates[selected_index])
+    }
+
+    fn instantiate_generic_overload_candidates(
+        &mut self,
+        candidates: &mut [ApplicationCandidate],
+        arguments: &[TypedArgument],
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        for candidate in candidates {
+            let Some(Type::Poly(poly)) = self.store.types.try_get(candidate.callable).cloned()
+            else {
+                continue;
+            };
+            let Some(Type::Method(method)) = self.store.types.try_get(poly.result).cloned() else {
+                continue;
+            };
+            if overload_arity_rejection(&method, arguments.len()).is_some() {
+                continue;
+            }
+
+            let type_arguments = match self.infer_poly_application_arguments(
+                candidate.callable,
+                &poly,
+                arguments,
+                tree_index,
+                info_journal,
+            ) {
+                Ok(type_arguments) => type_arguments,
+                Err(TyperError::ApplicationArgumentTypeMismatch {
+                    argument_index,
+                    actual,
+                    expected,
+                    ..
+                }) => {
+                    candidate.rejection = Some(OverloadRejection::ArgumentNonConformance {
+                        argument_index,
+                        actual,
+                        expected,
+                    });
+                    continue;
+                }
+                Err(TyperError::ConflictingInferenceConstraints {
+                    parameter_index, ..
+                }) => {
+                    candidate.rejection = Some(OverloadRejection::TypeArgumentInferenceFailure {
+                        parameter_index: Some(parameter_index),
+                    });
+                    continue;
+                }
+                Err(TyperError::ApplicationArityMismatch { .. }) => continue,
+                Err(
+                    TyperError::UnconstrainedTypeParameter { .. }
+                    | TyperError::UnsupportedInferenceShape { .. }
+                    | TyperError::UnsupportedPolymorphicApplicationShape { .. },
+                ) => continue,
+                Err(error) => return Err(error),
+            };
+            let instantiated = dotty_core::types::instantiate_poly(
+                self.store,
+                candidate.callable,
+                &type_arguments,
+            )
+            .map_err(TyperError::PolyInstantiation)?;
+
+            let mut supported_bounds = true;
+            for (parameter_index, (argument, bounds)) in type_arguments
+                .iter()
+                .copied()
+                .zip(instantiated.bounds.iter().copied())
+                .enumerate()
+            {
+                match self.check_explicit_type_argument_bounds(
+                    argument,
+                    bounds,
+                    parameter_index,
+                    tree_index,
+                    info_journal,
+                ) {
+                    Ok(()) => {}
+                    Err(TyperError::ExplicitTypeArgumentBoundViolation { side, .. }) => {
+                        candidate.rejection = Some(OverloadRejection::TypeArgumentBoundViolation {
+                            parameter_index,
+                            side,
+                        });
+                        supported_bounds = false;
+                        break;
+                    }
+                    Err(
+                        TyperError::UnsupportedExplicitTypeArgumentBounds { .. }
+                        | TyperError::ExplicitTypeArgumentBoundCheckUnsupported { .. },
+                    ) => {
+                        supported_bounds = false;
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if supported_bounds {
+                candidate.callable = instantiated.result;
+            }
+        }
+        Ok(())
     }
 
     fn validate_overload_callable(
@@ -5714,6 +5866,10 @@ impl<'a> SourceTyper<'a> {
         let mut rejected = Vec::new();
         let mut unsupported_candidates = Vec::new();
         for candidate in candidates.iter().copied() {
+            if let Some(rejection) = candidate.rejection {
+                rejected.push((candidate.symbol, rejection));
+                continue;
+            }
             let method = match self.store.types.try_get(candidate.callable) {
                 Some(Type::Method(method)) => method.clone(),
                 Some(Type::Poly(poly)) => {
@@ -5826,7 +5982,9 @@ impl<'a> SourceTyper<'a> {
             }
             applicable.push(candidate);
         }
-        if !unsupported_candidates.is_empty() && !applicable.is_empty() {
+        if !unsupported_candidates.is_empty()
+            && (!applicable.is_empty() || !retain_unsupported_rejections)
+        {
             return Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate {
                 source: self.source,
                 tree_index,
@@ -20485,15 +20643,18 @@ mod tests {
             &packages,
         );
 
+        let checkpoint = typer.store().checkpoint();
         assert!(matches!(
             typer.type_expression(rhs, context),
             Err(TyperError::AmbiguousOverloadApplication { candidates, .. })
                 if candidates.len() == 2
         ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.typed_ast().iter().next().is_none());
     }
 
     #[test]
-    fn matching_arity_polymorphic_overload_blocks_monomorphic_selection() {
+    fn equally_specific_generic_and_monomorphic_overloads_are_ambiguous() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class A {}; class C { def method(x: A): Int = 1; def method[T](x: T): Int = 2; def use(x: A): Int = method(x) }",
         );
@@ -20528,7 +20689,358 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::GenericOverloadResolutionDeferred { .. })
+            Err(TyperError::AmbiguousOverloadApplication { candidates, .. })
+                if candidates.len() == 2
+        ));
+    }
+
+    #[test]
+    fn generic_overload_is_selected_when_monomorphic_candidate_does_not_apply() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Parent {}; class Child extends Parent {}; class C { def method[T <: Parent](x: T): T = x; def method(x: Parent): Parent = x; def use(x: Child): Parent = method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+            local_scopes: None,
+        };
+        let generic_method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "method"
+                        && !definition.type_params.is_empty() =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("generic overload should produce a typed application")
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if *symbol == generic_method
+        ));
+        let child = class_symbol(&parsed, typer.store, &index, source, "Child");
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == child
+        ));
+        let TreeKind::Apply(source_application) = &parsed.ast.get(rhs).kind else {
+            panic!("source application should have an Apply node")
+        };
+        assert!(
+            source_application
+                .args
+                .iter()
+                .all(|argument| typer.source_typed_index().get(source, *argument).is_some())
+        );
+    }
+
+    #[test]
+    fn generic_overload_rejected_by_bounds_does_not_block_monomorphic_candidate() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Parent {}; class Child extends Parent {}; class C { def method[T <: Child](x: T): Int = 1; def method(x: Parent): Int = 2; def use(x: Parent): Int = method(x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+            local_scopes: None,
+        };
+        let monomorphic = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "method"
+                        && definition.type_params.is_empty() =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("the monomorphic candidate should remain applicable")
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if *symbol == monomorphic
+        ));
+    }
+
+    #[test]
+    fn conflicting_generic_candidate_is_reported_as_inapplicable() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def method[T](x: T, y: T): Int = 1; def method(x: Int, y: Int): Int = 2; def use: Int = method(1, true) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(use_method).unwrap(),
+            owner: use_method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let checkpoint = typer.store().checkpoint();
+        let result = typer.type_expression(rhs, context);
+        assert!(
+            matches!(
+                result,
+                Err(TyperError::OverloadApplicationNoApplicable { ref candidates, .. })
+                    if candidates.len() == 2
+                        && candidates.iter().any(|(_, rejection)| matches!(
+                            rejection,
+                            OverloadRejection::TypeArgumentInferenceFailure { parameter_index: Some(0) }
+                        ))
+            ),
+            "unexpected overload result: {result:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.typed_ast().iter().next().is_none());
+    }
+
+    #[test]
+    fn unconstrained_generic_overload_blocks_a_monomorphic_winner() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def method[A, B](x: A): Int = 1; def method(x: Int): Int = 2; def use: Int = method(1) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(use_method).unwrap(),
+            owner: use_method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate { .. })
+        ));
+    }
+
+    #[test]
+    fn generic_candidates_compete_by_instantiated_specificity() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Parent {}; class Child extends Parent {}; class C { def method[T <: Parent](x: T, y: Parent): Parent = x; def method[T <: Parent](x: T, y: Child): Child = x; def use(x: Child): Child = method(x, x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+            local_scopes: None,
+        };
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(_) = &typer.typed_ast().get(typed).kind else {
+            panic!("a generic overload should be selected")
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == child
+        ));
+    }
+
+    #[test]
+    fn equally_specific_generic_overloads_remain_ambiguous() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A {}; class B {}; class Both extends A, B {}; class C { def method[T](x: T, y: A): Int = 1; def method[T](x: T, y: B): Int = 2; def use(x: Both): Int = method(x, x) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::AmbiguousOverloadApplication { candidates, .. })
+                if candidates.len() == 2
+        ));
+    }
+
+    #[test]
+    fn inherited_generic_overload_is_inferred_after_receiver_adaptation() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Parent {}; class Child extends Parent {}; class Base { def method[T <: Parent](x: T): T = x }; class Derived extends Base { def method(x: Parent): Parent = x }; class Client { def use(value: Derived, child: Child): Child = value.method(child) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree) == Some(use_method)).then(|| {
+                    index
+                        .symbol_at(source, definition.value_param_clauses[0][0])
+                        .unwrap()
+                })
+            })
+            .unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: use_method,
+            local_scopes: None,
+        };
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let child = class_symbol(&parsed, &store, &index, source, "Child");
+        let inherited_method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "method"
+                        && store
+                            .symbols
+                            .get(index.symbol_at(source, tree).unwrap())
+                            .owner
+                            == Some(base) =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer
+            .type_expression(rhs, context)
+            .unwrap_or_else(|error| panic!("typing inherited generic overload failed: {error:?}"));
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("inherited generic overload should be applied")
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if *symbol == inherited_method
+        ));
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == child
         ));
     }
 
