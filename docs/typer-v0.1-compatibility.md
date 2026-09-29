@@ -107,8 +107,9 @@ no-applicable errors retain candidate identities and rejection reasons.
 Inference for raw generic `new` is supported when a generic primary constructor
 wins. If a raw generic `new` selects a secondary constructor, typing is
 explicitly rejected because its signature has not been adapted using inferred
-owner type arguments. Expected-type inference and contextual constructor
-applications remain explicit deferrals.
+owner type arguments. Expected-type inference, automatic contextual constructor
+argument insertion, and implicit search remain explicit deferrals; explicit
+constructor `using` clauses are checked and can contribute inference constraints.
 
 A secondary constructor in a generic class keeps the enclosing class's type
 parameters in its result, for example `C[A]`; those parameters remain owned by
@@ -190,6 +191,22 @@ argument mismatches, and bound violations reject that candidate; unsupported
 inference or conformance shapes remain conservative when they could compete.
 Standalone overloaded identifiers and selections remain deferred.
 
+Application syntax is checked against the current method clause: regular
+applications consume plain clauses, while explicit `using` applications consume
+contextual or legacy implicit clauses. Explicit arguments use the ordinary
+typing, widening, arity, and conformance checks, and the typed `Apply` retains
+its `ApplyKind`. Overload applicability applies the same clause-kind filter, so
+a mismatched candidate cannot win solely because its argument types match.
+Generic inference uses the current explicit clause, including contextual or
+legacy implicit clauses passed with `using`, and the supported direct-parameter
+and matching applied-type constraints also participate in overload selection.
+Curried plain-then-contextual calls continue from the exact result callable of
+the first clause, including after generic inference. Automatic contextual or
+implicit argument insertion and implicit search remain deferred. Erased and
+by-name parameters remain unsupported for explicit application. The Scala
+grammar rejects repeated parameters in contextual clauses; ordinary repeated
+parameter application remains deferred.
+
 `SourceTyper::expression_context_for` builds a method or constructor body
 context from its indexed source declaration context and owned scope. Term
 lookup checks typer-local scopes from innermost to outermost before source
@@ -240,8 +257,8 @@ are ready:
 - local `def`, class, type, and pattern declarations, plus imports in block
   statements;
 - generic overload inference outside the structural candidate-local subset,
-  `using`/implicit argument insertion, dependent result application, and
-  right-associative extension normalization;
+  contextual/implicit argument insertion and search, dependent result
+  application, and right-associative extension normalization;
 - expected-type-driven constructor inference, selecting constructor overloads, and
   anonymous-class lowering;
 - enum semantics, case-class synthetic APIs, and `derives`;

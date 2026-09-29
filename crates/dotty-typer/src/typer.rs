@@ -777,13 +777,20 @@ pub enum TyperError {
         tree_index: u32,
         tree_kind: &'static str,
     },
-    /// Only plain method clauses are supported by ordinary application.
+    /// The application syntax does not match the method clause kind.
+    ApplicationMethodKindMismatch {
+        source: SourceId,
+        tree_index: u32,
+        application_kind: ApplyKind,
+        method_kind: MethodKind,
+    },
+    /// Raw generic constructor inference currently supports only plain clauses.
     UnsupportedApplicationMethodKind {
         source: SourceId,
         tree_index: u32,
         kind: MethodKind,
     },
-    /// `using` application requires contextual argument insertion.
+    /// A call requires contextual argument insertion or implicit search.
     UsingApplicationDeferred {
         source: SourceId,
         tree_index: u32,
@@ -1118,6 +1125,11 @@ pub enum TyperError {
 /// Why one overload was excluded from an application candidate set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverloadRejection {
+    /// This call's `ApplyKind` does not consume the candidate's current clause.
+    ApplicationKindMismatch {
+        application_kind: ApplyKind,
+        method_kind: MethodKind,
+    },
     WrongArity {
         expected: usize,
         actual: usize,
@@ -1136,6 +1148,13 @@ pub enum OverloadRejection {
     },
     IncompleteSignature,
     UnsupportedSemantics,
+}
+
+fn application_kind_accepts(application_kind: ApplyKind, method_kind: MethodKind) -> bool {
+    match application_kind {
+        ApplyKind::Regular => method_kind == MethodKind::Plain,
+        ApplyKind::Using => matches!(method_kind, MethodKind::Contextual | MethodKind::Implicit),
+    }
 }
 
 /// Which side of an ordinary type-parameter bound an explicit argument broke.
@@ -1243,11 +1262,31 @@ struct ConstructorOverloadRequest<'a> {
     context: ExpressionContext,
     tree_index: u32,
     class: SymbolId,
+    application_kind: ApplyKind,
     instance_type: TypeId,
     type_arguments: &'a [TypeId],
     qualifier: Option<TreeId<Typed>>,
     candidates: &'a [ConstructorCandidate],
     rejected_incomplete: &'a [(SymbolId, OverloadRejection)],
+}
+
+#[derive(Clone, Copy)]
+struct ApplicationRequest<'a> {
+    function_tree: TreeId<Untyped>,
+    argument_trees: &'a [TreeId<Untyped>],
+    application_kind: ApplyKind,
+    context: ExpressionContext,
+    tree_index: u32,
+}
+
+#[derive(Clone, Copy)]
+struct ConstructorPolyInferenceRequest<'a> {
+    constructor: SymbolId,
+    binder: TypeId,
+    poly: &'a PolyType,
+    arguments: &'a [TypedArgument],
+    application_kind: ApplyKind,
+    tree_index: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -2432,17 +2471,15 @@ impl<'a> SourceTyper<'a> {
                 )
             }
             TreeKind::Apply(application) => {
-                if application.kind == ApplyKind::Using {
-                    return Err(TyperError::UsingApplicationDeferred {
-                        source: self.source,
-                        tree_index: tree.index(),
-                    });
-                }
-                let constructor_function = self.resolve_constructor_application_function(
-                    application.function,
-                    &application.args,
+                let request = ApplicationRequest {
+                    function_tree: application.function,
+                    argument_trees: &application.args,
+                    application_kind: application.kind,
                     context,
-                    tree.index(),
+                    tree_index: tree.index(),
+                };
+                let constructor_function = self.resolve_constructor_application_function(
+                    request,
                     info_journal,
                     new_mappings,
                 )?;
@@ -2451,10 +2488,7 @@ impl<'a> SourceTyper<'a> {
                     None
                 } else {
                     self.resolve_overloaded_application_function(
-                        application.function,
-                        &application.args,
-                        context,
-                        tree.index(),
+                        request,
                         info_journal,
                         new_mappings,
                     )?
@@ -2503,6 +2537,7 @@ impl<'a> SourceTyper<'a> {
                         callable,
                         &poly,
                         &arguments,
+                        application.kind,
                         tree.index(),
                         info_journal,
                     )?;
@@ -2578,11 +2613,12 @@ impl<'a> SourceTyper<'a> {
                         });
                     }
                 };
-                if method.kind != MethodKind::Plain {
-                    return Err(TyperError::UnsupportedApplicationMethodKind {
+                if !application_kind_accepts(application.kind, method.kind) {
+                    return Err(TyperError::ApplicationMethodKindMismatch {
                         source: self.source,
                         tree_index: tree.index(),
-                        kind: method.kind,
+                        application_kind: application.kind,
+                        method_kind: method.kind,
                     });
                 }
                 if application.args.len() != method.params.len() {
@@ -3073,13 +3109,17 @@ impl<'a> SourceTyper<'a> {
 
     fn resolve_constructor_application_function(
         &mut self,
-        function_tree: TreeId<Untyped>,
-        argument_trees: &[TreeId<Untyped>],
-        context: ExpressionContext,
-        application_tree_index: u32,
+        request: ApplicationRequest<'_>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<Option<ConstructorApplicationFunction>, TyperError> {
+        let ApplicationRequest {
+            function_tree,
+            argument_trees,
+            application_kind,
+            context,
+            tree_index: application_tree_index,
+        } = request;
         if !self.is_constructor_selection(function_tree) {
             return Ok(None);
         }
@@ -3152,6 +3192,7 @@ impl<'a> SourceTyper<'a> {
                         context,
                         tree_index: application_tree_index,
                         class,
+                        application_kind,
                         instance_type,
                         type_arguments: &type_arguments,
                         qualifier,
@@ -3191,11 +3232,14 @@ impl<'a> SourceTyper<'a> {
                     });
                 }
                 let type_arguments = self.infer_constructor_poly_arguments(
-                    candidate.symbol,
-                    candidate.callable,
-                    &poly,
-                    &arguments,
-                    application_tree_index,
+                    ConstructorPolyInferenceRequest {
+                        constructor: candidate.symbol,
+                        binder: candidate.callable,
+                        poly: &poly,
+                        arguments: &arguments,
+                        application_kind,
+                        tree_index: application_tree_index,
+                    },
                     info_journal,
                 )?;
                 let instantiated = dotty_core::types::instantiate_poly(
@@ -3443,6 +3487,7 @@ impl<'a> SourceTyper<'a> {
             context,
             tree_index,
             class,
+            application_kind,
             instance_type,
             type_arguments,
             qualifier,
@@ -3533,6 +3578,7 @@ impl<'a> SourceTyper<'a> {
                 &mut application_candidates,
                 &arguments,
                 tree_index,
+                application_kind,
                 info_journal,
             )
             .map_err(|error| match error {
@@ -3635,6 +3681,7 @@ impl<'a> SourceTyper<'a> {
             &mut selected_application,
             &arguments,
             tree_index,
+            application_kind,
             info_journal,
         )?;
         let result = self.validate_constructor_application_callable(
@@ -3761,7 +3808,7 @@ impl<'a> SourceTyper<'a> {
             let TreeKind::Apply(application) = &node.kind else {
                 break;
             };
-            reversed_clauses.push(application.args.clone());
+            reversed_clauses.push((application.kind, application.args.clone()));
             current = application.function;
         }
         let Some(node) = self.arena.try_get(current) else {
@@ -3814,7 +3861,7 @@ impl<'a> SourceTyper<'a> {
         };
         let mut method_type = poly.result;
         let mut typed_clauses = Vec::with_capacity(reversed_clauses.len());
-        for clause in reversed_clauses {
+        for (application_kind, clause) in reversed_clauses {
             let Some(Type::Method(method)) = self.store.types.try_get(method_type).cloned() else {
                 return Err(TyperError::ApplicationCalleeNotMethod {
                     source: self.source,
@@ -3822,11 +3869,12 @@ impl<'a> SourceTyper<'a> {
                     ty: method_type,
                 });
             };
-            if method.kind != MethodKind::Plain {
-                return Err(TyperError::UnsupportedApplicationMethodKind {
+            if !application_kind_accepts(application_kind, method.kind) {
+                return Err(TyperError::ApplicationMethodKindMismatch {
                     source: self.source,
                     tree_index: root.index(),
-                    kind: method.kind,
+                    application_kind,
+                    method_kind: method.kind,
                 });
             }
             if method.params.len() != clause.len() {
@@ -4008,61 +4056,72 @@ impl<'a> SourceTyper<'a> {
 
     fn infer_constructor_poly_arguments(
         &mut self,
-        constructor: SymbolId,
-        binder: TypeId,
-        poly: &PolyType,
-        arguments: &[TypedArgument],
-        tree_index: u32,
+        request: ConstructorPolyInferenceRequest<'_>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<TypeId>, TyperError> {
-        self.infer_poly_application_arguments(binder, poly, arguments, tree_index, info_journal)
-            .map_err(|error| match error {
-                TyperError::UnconstrainedTypeParameter {
-                    parameter_index, ..
-                } => TyperError::UnconstrainedConstructorTypeParameter {
+        let ConstructorPolyInferenceRequest {
+            constructor,
+            binder,
+            poly,
+            arguments,
+            application_kind,
+            tree_index,
+        } = request;
+        self.infer_poly_application_arguments(
+            binder,
+            poly,
+            arguments,
+            application_kind,
+            tree_index,
+            info_journal,
+        )
+        .map_err(|error| match error {
+            TyperError::UnconstrainedTypeParameter {
+                parameter_index, ..
+            } => TyperError::UnconstrainedConstructorTypeParameter {
+                source: self.source,
+                tree_index,
+                constructor,
+                parameter_index,
+            },
+            TyperError::ConflictingInferenceConstraints {
+                parameter_index,
+                first,
+                second,
+                ..
+            } => TyperError::ConflictingConstructorInferenceConstraints {
+                source: self.source,
+                tree_index,
+                constructor,
+                parameter_index,
+                first,
+                second,
+            },
+            TyperError::UnsupportedInferenceShape {
+                parameter_index,
+                formal,
+                actual,
+                ..
+            } => TyperError::UnsupportedConstructorInferenceShape {
+                source: self.source,
+                tree_index,
+                constructor,
+                parameter_index,
+                formal,
+                actual,
+            },
+            TyperError::UnsupportedPolymorphicApplicationShape { binder, .. } => {
+                TyperError::UnsupportedConstructorInferenceShape {
                     source: self.source,
                     tree_index,
                     constructor,
-                    parameter_index,
-                },
-                TyperError::ConflictingInferenceConstraints {
-                    parameter_index,
-                    first,
-                    second,
-                    ..
-                } => TyperError::ConflictingConstructorInferenceConstraints {
-                    source: self.source,
-                    tree_index,
-                    constructor,
-                    parameter_index,
-                    first,
-                    second,
-                },
-                TyperError::UnsupportedInferenceShape {
-                    parameter_index,
-                    formal,
-                    actual,
-                    ..
-                } => TyperError::UnsupportedConstructorInferenceShape {
-                    source: self.source,
-                    tree_index,
-                    constructor,
-                    parameter_index,
-                    formal,
-                    actual,
-                },
-                TyperError::UnsupportedPolymorphicApplicationShape { binder, .. } => {
-                    TyperError::UnsupportedConstructorInferenceShape {
-                        source: self.source,
-                        tree_index,
-                        constructor,
-                        parameter_index: None,
-                        formal: binder,
-                        actual: binder,
-                    }
+                    parameter_index: None,
+                    formal: binder,
+                    actual: binder,
                 }
-                other => other,
-            })
+            }
+            other => other,
+        })
     }
 
     fn infer_constructor_poly_clauses(
@@ -4309,13 +4368,6 @@ impl<'a> SourceTyper<'a> {
                     });
                 }
                 Some(Type::Method(method)) => {
-                    if method.kind != MethodKind::Plain {
-                        return Err(TyperError::UnsupportedApplicationMethodKind {
-                            source: self.source,
-                            tree_index,
-                            kind: method.kind,
-                        });
-                    }
                     current = method.result;
                 }
                 Some(_) => return Ok(current),
@@ -4949,6 +5001,7 @@ impl<'a> SourceTyper<'a> {
         binder: TypeId,
         poly: &PolyType,
         arguments: &[TypedArgument],
+        application_kind: ApplyKind,
         tree_index: u32,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<TypeId>, TyperError> {
@@ -4967,7 +5020,7 @@ impl<'a> SourceTyper<'a> {
                 actual: arguments.len(),
             });
         }
-        if method.kind != MethodKind::Plain
+        if !application_kind_accepts(application_kind, method.kind)
             || method.params.iter().any(|param| {
                 param.erased
                     || param.varargs
@@ -5371,13 +5424,17 @@ impl<'a> SourceTyper<'a> {
 
     fn resolve_overloaded_application_function(
         &mut self,
-        function_tree: TreeId<Untyped>,
-        argument_trees: &[TreeId<Untyped>],
-        context: ExpressionContext,
-        application_tree_index: u32,
+        request: ApplicationRequest<'_>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<Option<ResolvedApplicationFunction>, TyperError> {
+        let ApplicationRequest {
+            function_tree,
+            argument_trees,
+            application_kind,
+            context,
+            tree_index: application_tree_index,
+        } = request;
         let Some(function_node) = self.arena.try_get(function_tree).cloned() else {
             return Err(TyperError::TreeOutsideArena {
                 source: self.source,
@@ -5518,6 +5575,7 @@ impl<'a> SourceTyper<'a> {
             &mut candidates,
             &arguments,
             application_tree_index,
+            application_kind,
             info_journal,
         )?;
         let function_type = match function_shape {
@@ -5583,6 +5641,7 @@ impl<'a> SourceTyper<'a> {
         candidates: &mut [ApplicationCandidate],
         arguments: &[TypedArgument],
         tree_index: u32,
+        application_kind: ApplyKind,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<ApplicationCandidate, TyperError> {
         let store_checkpoint = self.store.checkpoint();
@@ -5595,9 +5654,10 @@ impl<'a> SourceTyper<'a> {
                 candidates,
                 arguments,
                 tree_index,
+                application_kind,
                 info_journal,
             )?;
-            self.choose_overload_candidate(candidates, arguments, tree_index)
+            self.choose_overload_candidate(candidates, arguments, tree_index, application_kind)
         })();
         let selected = resolution?;
 
@@ -5622,6 +5682,7 @@ impl<'a> SourceTyper<'a> {
             &mut candidates[selected_index..=selected_index],
             arguments,
             tree_index,
+            application_kind,
             info_journal,
         )?;
         Ok(candidates[selected_index])
@@ -5632,6 +5693,7 @@ impl<'a> SourceTyper<'a> {
         candidates: &mut [ApplicationCandidate],
         arguments: &[TypedArgument],
         tree_index: u32,
+        application_kind: ApplyKind,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<ApplicationCandidate, TyperError> {
         let store_checkpoint = self.store.checkpoint();
@@ -5644,9 +5706,16 @@ impl<'a> SourceTyper<'a> {
                 candidates,
                 arguments,
                 tree_index,
+                application_kind,
                 info_journal,
             )?;
-            self.choose_overload_candidate_with_policy(candidates, arguments, tree_index, true)
+            self.choose_overload_candidate_with_policy(
+                candidates,
+                arguments,
+                tree_index,
+                application_kind,
+                true,
+            )
         })();
         let selected = resolution?;
 
@@ -5671,6 +5740,7 @@ impl<'a> SourceTyper<'a> {
             &mut candidates[selected_index..=selected_index],
             arguments,
             tree_index,
+            application_kind,
             info_journal,
         )?;
         Ok(candidates[selected_index])
@@ -5681,6 +5751,7 @@ impl<'a> SourceTyper<'a> {
         candidates: &mut [ApplicationCandidate],
         arguments: &[TypedArgument],
         tree_index: u32,
+        application_kind: ApplyKind,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<(), TyperError> {
         for candidate in candidates {
@@ -5691,6 +5762,13 @@ impl<'a> SourceTyper<'a> {
             let Some(Type::Method(method)) = self.store.types.try_get(poly.result).cloned() else {
                 continue;
             };
+            if !application_kind_accepts(application_kind, method.kind) {
+                candidate.rejection = Some(OverloadRejection::ApplicationKindMismatch {
+                    application_kind,
+                    method_kind: method.kind,
+                });
+                continue;
+            }
             if overload_arity_rejection(&method, arguments.len()).is_some() {
                 continue;
             }
@@ -5699,6 +5777,7 @@ impl<'a> SourceTyper<'a> {
                 candidate.callable,
                 &poly,
                 arguments,
+                application_kind,
                 tree_index,
                 info_journal,
             ) {
@@ -5992,8 +6071,15 @@ impl<'a> SourceTyper<'a> {
         candidates: &mut [ApplicationCandidate],
         arguments: &[TypedArgument],
         tree_index: u32,
+        application_kind: ApplyKind,
     ) -> Result<ApplicationCandidate, TyperError> {
-        self.choose_overload_candidate_with_policy(candidates, arguments, tree_index, false)
+        self.choose_overload_candidate_with_policy(
+            candidates,
+            arguments,
+            tree_index,
+            application_kind,
+            false,
+        )
     }
 
     fn choose_overload_candidate_with_policy(
@@ -6001,6 +6087,7 @@ impl<'a> SourceTyper<'a> {
         candidates: &mut [ApplicationCandidate],
         arguments: &[TypedArgument],
         tree_index: u32,
+        application_kind: ApplyKind,
         retain_unsupported_rejections: bool,
     ) -> Result<ApplicationCandidate, TyperError> {
         let mut applicable = Vec::new();
@@ -6052,6 +6139,16 @@ impl<'a> SourceTyper<'a> {
                     });
                 }
             };
+            if !application_kind_accepts(application_kind, method.kind) {
+                rejected.push((
+                    candidate.symbol,
+                    OverloadRejection::ApplicationKindMismatch {
+                        application_kind,
+                        method_kind: method.kind,
+                    },
+                ));
+                continue;
+            }
             if let Some(expected) = overload_arity_rejection(&method, arguments.len()) {
                 rejected.push((
                     candidate.symbol,
@@ -6099,16 +6196,15 @@ impl<'a> SourceTyper<'a> {
                     candidate: candidate.symbol,
                 });
             }
-            let unsupported = method.kind != MethodKind::Plain
-                || method.params.iter().any(|param| {
-                    param.erased
-                        || param.varargs
-                        || matches!(
-                            self.store.types.try_get(param.ty),
-                            Some(Type::ByName { .. })
-                        )
-                })
-                || self.type_contains_param_ref(method.result, candidate.callable)?;
+            let unsupported = method.params.iter().any(|param| {
+                param.erased
+                    || param.varargs
+                    || matches!(
+                        self.store.types.try_get(param.ty),
+                        Some(Type::ByName { .. })
+                    )
+            }) || self
+                .type_contains_param_ref(method.result, candidate.callable)?;
             if unsupported {
                 if retain_unsupported_rejections {
                     rejected.push((candidate.symbol, OverloadRejection::UnsupportedSemantics));
@@ -17431,6 +17527,52 @@ mod tests {
     }
 
     #[test]
+    fn raw_generic_constructor_infers_from_an_explicit_using_clause() {
+        let source_text = "class C { class Ctx[A]; class Box[A](value: A)(using ctx: Ctx[A]); def make(using ctx: Ctx[Int]): Box[Int] = new Box(1)(using ctx) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(using_application) = typer.typed_ast().get(typed).kind.clone() else {
+            panic!("constructor call should retain its outer using application")
+        };
+        assert_eq!(using_application.kind, ApplyKind::Using);
+        let TreeKind::Apply(regular_application) = typer
+            .typed_ast()
+            .get(using_application.function)
+            .kind
+            .clone()
+        else {
+            panic!("constructor call should retain its regular first clause")
+        };
+        assert_eq!(regular_application.kind, ApplyKind::Regular);
+        let TreeKind::Select(selection) = typer
+            .typed_ast()
+            .get(regular_application.function)
+            .kind
+            .clone()
+        else {
+            panic!("constructor application should select its constructor")
+        };
+        let new_tree = typer.typed_ast().get(selection.qualifier);
+        assert!(matches!(new_tree.kind, TreeKind::New(_)));
+        assert!(matches!(
+            typer.store().types.get(new_tree.ty),
+            Type::Applied { args, .. } if args == &[definitions.int]
+        ));
+    }
+
+    #[test]
     fn raw_generic_secondary_constructor_rejects_uninferred_owner_arguments() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C[A](value: A, count: Int) { def this(flag: Boolean) = this(1, 1) }; class Use { def make = new C(true) }",
@@ -17575,7 +17717,7 @@ mod tests {
     }
 
     #[test]
-    fn constructor_no_applicable_retains_unsupported_candidate_reason() {
+    fn constructor_no_applicable_retains_application_kind_mismatch() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C(value: Int) { def this(using flag: Boolean) = this(1) }; class Use { def make: C = new C(true) }",
         );
@@ -17599,7 +17741,10 @@ mod tests {
                     if candidates.len() == 2
                         && candidates.iter().any(|(_, reason)| matches!(
                             reason,
-                            OverloadRejection::UnsupportedSemantics
+                            OverloadRejection::ApplicationKindMismatch {
+                                application_kind: ApplyKind::Regular,
+                                method_kind: MethodKind::Contextual,
+                            }
                         ))
                         && candidates.iter().any(|(_, reason)| matches!(
                             reason,
@@ -17727,7 +17872,7 @@ mod tests {
     }
 
     #[test]
-    fn contextual_constructor_application_remains_unsupported() {
+    fn regular_constructor_application_rejects_a_contextual_clause() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C(using value: Int); class Use { def make: C = new C(1) }");
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
@@ -17743,8 +17888,9 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::UnsupportedApplicationMethodKind {
-                kind: MethodKind::Contextual,
+            Err(TyperError::ApplicationMethodKindMismatch {
+                application_kind: ApplyKind::Regular,
+                method_kind: MethodKind::Contextual,
                 ..
             })
         ));
@@ -25107,7 +25253,7 @@ mod tests {
     }
 
     #[test]
-    fn contextual_method_application_is_deferred() {
+    fn regular_application_rejects_a_contextual_clause() {
         let source_text = "class C { def f(using x: Int): Int = x; def use: Int = f(1) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
@@ -25127,15 +25273,16 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::UnsupportedApplicationMethodKind {
-                kind: MethodKind::Contextual,
+            Err(TyperError::ApplicationMethodKindMismatch {
+                application_kind: ApplyKind::Regular,
+                method_kind: MethodKind::Contextual,
                 ..
             })
         ));
     }
 
     #[test]
-    fn implicit_method_application_is_deferred() {
+    fn regular_application_rejects_an_implicit_clause() {
         let source_text = "class C { def f(implicit x: Int): Int = x; def use: Int = f(1) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
@@ -25155,16 +25302,105 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::UnsupportedApplicationMethodKind {
-                kind: MethodKind::Implicit,
+            Err(TyperError::ApplicationMethodKindMismatch {
+                application_kind: ApplyKind::Regular,
+                method_kind: MethodKind::Implicit,
                 ..
             })
         ));
     }
 
     #[test]
-    fn using_application_is_deferred() {
+    fn explicit_using_application_types_arguments_and_preserves_its_kind() {
         let source_text = "class C { def f(using x: Int): Int = x; def use: Int = f(using 1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected a typed using application")
+        };
+        assert_eq!(application.kind, ApplyKind::Using);
+        assert_eq!(application.args.len(), 1);
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+    }
+
+    #[test]
+    fn explicit_using_application_types_a_contextual_constructor_clause() {
+        let source_text = "class C(using x: Int); class Use { def make: C = new C(using 1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected a typed contextual constructor application")
+        };
+        assert_eq!(application.kind, ApplyKind::Using);
+        assert_eq!(application.args.len(), 1);
+        let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind else {
+            panic!("expected the constructor selection")
+        };
+        assert!(matches!(
+            typer.typed_ast().get(selection.qualifier).kind,
+            TreeKind::New(_)
+        ));
+    }
+
+    #[test]
+    fn explicit_using_application_types_multiple_arguments() {
+        let source_text = "class C { def f(using x: Int, flag: Boolean): Int = x; def use: Int = f(using 1, true) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected a typed using application")
+        };
+        assert_eq!(application.kind, ApplyKind::Using);
+        assert_eq!(application.args.len(), 2);
+    }
+
+    #[test]
+    fn explicit_using_application_checks_arity() {
+        let source_text = "class C { def f(using x: Int): Int = x; def use: Int = f(using 1, 2) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
         let context = ExpressionContext {
@@ -25183,13 +25419,344 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::UsingApplicationDeferred { .. })
+            Err(TyperError::ApplicationArityMismatch {
+                expected: 1,
+                actual: 2,
+                ..
+            })
         ));
     }
 
     #[test]
+    fn generic_plain_then_using_application_preserves_both_clauses() {
+        let source_text = "class C { class Ctx[A]; def f[A](x: A)(using ctx: Ctx[A]): A = x; def use(using ctx: Ctx[Int]): Int = f(1)(using ctx) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(using_application) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected the outer using application")
+        };
+        assert_eq!(using_application.kind, ApplyKind::Using);
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        let TreeKind::Apply(regular_application) =
+            &typer.typed_ast().get(using_application.function).kind
+        else {
+            panic!("expected the inner regular application")
+        };
+        assert_eq!(regular_application.kind, ApplyKind::Regular);
+    }
+
+    #[test]
+    fn generic_explicit_using_infers_from_its_current_contextual_clause() {
+        let source_text = "class C { class Ctx[A]; def f[A](using ctx: Ctx[A]): Ctx[A] = ctx; def use(using ctx: Ctx[Int]): Ctx[Int] = f(using ctx) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected a typed generic using application")
+        };
+        assert_eq!(application.kind, ApplyKind::Using);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::Applied { args, .. } if args == &[definitions.int]
+        ));
+    }
+
+    #[test]
+    fn generic_contextual_overload_infers_from_the_current_using_clause() {
+        let source_text = "class C { class Ctx[A]; def f[A](using ctx: Ctx[A]): Ctx[A] = ctx; def f(using ctx: Ctx[Boolean]): Ctx[Boolean] = ctx; def use(using ctx: Ctx[Int]): Ctx[Int] = f(using ctx) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let method_name = Name::new(store.names.intern("f"), Namespace::Term);
+        let methods = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&method_name)
+            .to_vec();
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let generic_method = methods
+            .into_iter()
+            .find(|symbol| matches!(typer.complete_symbol(*symbol), Ok(callable) if matches!(typer.store().types.get(callable), Type::Poly(_))))
+            .unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected a typed generic using overload application")
+        };
+        assert_eq!(application.kind, ApplyKind::Using);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::Applied { args, .. } if args == &[definitions.int]
+        ));
+        let function = typer.typed_ast().get(application.function);
+        assert!(matches!(
+            typer.store().types.get(function.ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == generic_method
+        ));
+    }
+
+    #[test]
+    fn generic_explicit_using_infers_from_a_legacy_implicit_clause() {
+        let source_text = "class C { class Ctx[A]; def f[A](implicit ctx: Ctx[A]): Ctx[A] = ctx; def use(implicit ctx: Ctx[Int]): Ctx[Int] = f(using ctx) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected a typed generic using application")
+        };
+        assert_eq!(application.kind, ApplyKind::Using);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::Applied { args, .. } if args == &[definitions.int]
+        ));
+    }
+
+    #[test]
+    fn overload_resolution_selects_by_application_clause_kind() {
+        let source_text = "class C { def f(x: Int): Int = x; def f(using x: Int): Int = x; def plain: Int = f(1); def contextual: Int = f(using 2) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let method_name = Name::new(store.names.intern("f"), Namespace::Term);
+        let methods = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&method_name)
+            .to_vec();
+        let (plain_method, plain_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "plain");
+        let (using_method, using_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "contextual");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let plain_context = typer.expression_context_for(plain_method).unwrap();
+        let using_context = typer.expression_context_for(using_method).unwrap();
+        let mut expected_plain = None;
+        let mut expected_using = None;
+        for method in methods {
+            let callable = typer.complete_symbol(method).unwrap();
+            let Some(Type::Method(signature)) = typer.store().types.try_get(callable) else {
+                panic!("expected monomorphic overload signatures")
+            };
+            match signature.kind {
+                MethodKind::Plain => expected_plain = Some(method),
+                MethodKind::Contextual => expected_using = Some(method),
+                MethodKind::Implicit => panic!("unexpected implicit overload"),
+            }
+        }
+
+        let plain_typed = typer.type_expression(plain_rhs, plain_context).unwrap();
+        let using_typed = typer.type_expression(using_rhs, using_context).unwrap();
+
+        for (typed, expected) in [
+            (plain_typed, expected_plain.unwrap()),
+            (using_typed, expected_using.unwrap()),
+        ] {
+            let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+                panic!("expected a typed overloaded application")
+            };
+            let function = typer.typed_ast().get(application.function);
+            assert!(matches!(
+                typer.store().types.get(function.ty),
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } if *symbol == expected
+            ));
+        }
+        assert!(matches!(
+            typer.typed_ast().get(using_typed).kind,
+            TreeKind::Apply(ref application) if application.kind == ApplyKind::Using
+        ));
+    }
+
+    #[test]
+    fn equally_applicable_using_overloads_remain_ambiguous_and_atomic() {
+        let source_text = "class C { def f(using x: Int): Int = x; def f(using y: Int): Int = y; def use: Int = f(using 1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let store_checkpoint = typer.store().checkpoint();
+        let typed_tree_count = typer.typed_ast().iter().count();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::AmbiguousOverloadApplication { candidates, .. })
+                if candidates.len() == 2
+        ));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.typed_ast().iter().count(), typed_tree_count);
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
+    }
+
+    #[test]
+    fn explicit_using_application_consumes_legacy_implicit_clause() {
+        let source_text = "class C { def f(implicit x: Int): Int = x; def use: Int = f(using 1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert!(matches!(
+            typer.typed_ast().get(typed).kind,
+            TreeKind::Apply(ref application) if application.kind == ApplyKind::Using
+        ));
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+    }
+
+    #[test]
+    fn using_application_rejects_a_plain_clause() {
+        let source_text = "class C { def f(x: Int): Int = x; def use: Int = f(using 1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ApplicationMethodKindMismatch {
+                application_kind: ApplyKind::Using,
+                method_kind: MethodKind::Plain,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn explicit_using_application_reports_argument_type_mismatch_atomically() {
+        let source_text = "class C { def f(using x: Int): Int = x; def use: Int = f(using true) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ApplicationArgumentTypeMismatch {
+                argument_index: 0,
+                actual,
+                expected,
+                ..
+            }) if actual == definitions.boolean && expected == definitions.int
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.typed_ast().iter().next().is_none());
+    }
+
+    #[test]
     fn by_name_application_parameter_is_deferred() {
-        let source_text = "class C { def f(x: => Int): Int = x; def use: Int = f(1) }";
+        let source_text = "class C { def f(using x: => Int): Int = x; def use: Int = f(using 1) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
         let context = ExpressionContext {
@@ -25217,7 +25784,7 @@ mod tests {
 
     #[test]
     fn erased_application_parameter_is_deferred() {
-        let source_text = "class C { def f(x: Int): Int = x; def use: Int = f(1) }";
+        let source_text = "class C { def f(using x: Int): Int = x; def use: Int = f(using 1) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let parameter = parsed
             .ast
