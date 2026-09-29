@@ -209,7 +209,7 @@ fn anonymous_method_like_given_uses_its_declared_result_type() {
 
 #[test]
 fn anonymous_structural_module_given_derives_object_and_module_class_names() {
-    use dotty_core::{SymbolKind, TypeName};
+    use dotty_core::SymbolKind;
 
     let named = named_source("given Ordering[Int]:\n  def compare = 0", 108);
     let TreeKind::PackageDef(package) = &named.parsed.ast.get(named.parsed.root).kind else {
@@ -1690,6 +1690,58 @@ fn parsed_secondary_constructor_parameters_belong_to_the_constructor_scope() {
         Some(parameter_symbol)
     );
     assert_eq!(store.scopes.get(class_scope).lookup(x_name.as_name()), None);
+}
+
+#[test]
+fn parsed_secondary_constructor_type_parameters_are_named_in_its_scope() {
+    use dotty_core::SymbolKind;
+
+    let named = named_source("class C { def this[A, B](x: B) = this() }", 473);
+    let (constructor_tree, definition) = named
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(definition) if !definition.type_params.is_empty() => {
+                Some((tree, definition))
+            }
+            _ => None,
+        })
+        .expect("secondary constructor should retain its type parameters");
+    let constructor = named
+        .index
+        .symbol_at(named.source, constructor_tree)
+        .unwrap();
+    let scope = named.index.scope_of(constructor).unwrap();
+    let parameter_names = definition
+        .type_params
+        .iter()
+        .map(|tree| {
+            let TreeKind::TypeDef(definition) = &named.parsed.ast.get(*tree).kind else {
+                panic!("constructor type parameter should be a TypeDef");
+            };
+            let symbol = named.index.symbol_at(named.source, *tree).unwrap();
+            assert_eq!(
+                named.store.symbols.get(symbol).kind,
+                SymbolKind::TypeParameter
+            );
+            assert_eq!(named.store.symbols.get(symbol).owner, Some(constructor));
+            assert!(named.index.declaration_context_of(symbol).is_some());
+            (definition.name, symbol)
+        })
+        .collect::<Vec<_>>();
+
+    for (name, symbol) in &parameter_names {
+        assert_eq!(
+            named.store.scopes.get(scope).lookup(name.as_name()),
+            Some(*symbol)
+        );
+    }
+    let b_name = parameter_names[1].0;
+    assert_eq!(
+        named.store.scopes.get(scope).lookup(b_name.as_name()),
+        Some(parameter_names[1].1)
+    );
 }
 
 fn assert_secondary_constructor_is_rejected(source_text: &str, source: SourceId) {

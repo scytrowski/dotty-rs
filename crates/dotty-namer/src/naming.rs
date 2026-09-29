@@ -1917,6 +1917,14 @@ impl Namer<'_> {
         class_scope: ScopeId,
         declaration_context: SourceContextId,
     ) -> Result<EnteredHeader, NamerError> {
+        for parameter in &definition.type_params {
+            let TreeKind::TypeDef(_) = &self.arena.get(*parameter).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter.index(),
+                    expected: "TypeDef secondary constructor type parameter",
+                });
+            };
+        }
         for clause in &definition.value_param_clauses {
             for parameter in clause {
                 let TreeKind::ValDef(_) = &self.arena.get(*parameter).kind else {
@@ -2024,6 +2032,29 @@ impl Namer<'_> {
         let TreeKind::DefDef(definition) = &self.arena.get(tree).kind else {
             return Ok(());
         };
+        for parameter_tree in &definition.type_params {
+            let TreeKind::TypeDef(parameter) = &self.arena.get(*parameter_tree).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: parameter_tree.index(),
+                    expected: "TypeDef secondary constructor type parameter",
+                });
+            };
+            let spec = self.source_symbol_spec(
+                *parameter_tree,
+                &parameter.metadata,
+                constructor,
+                SymbolKind::TypeParameter,
+            )?;
+            let parameter_symbol = self.enter_symbol(
+                *parameter_tree,
+                *parameter.name.as_name(),
+                constructor,
+                constructor_scope,
+                spec,
+            )?;
+            self.index
+                .record_declaration_context(parameter_symbol, constructor_context)?;
+        }
         for clause in &definition.value_param_clauses {
             for parameter_tree in clause {
                 let TreeKind::ValDef(parameter) = &self.arena.get(*parameter_tree).kind else {
