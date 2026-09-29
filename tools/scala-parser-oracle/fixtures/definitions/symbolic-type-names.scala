@@ -3,6 +3,10 @@
   type =:=[A, B] = (A, B)
   sealed abstract class <:<[-From, +To] extends (From => To) with Serializable
 
+  class ConsMethodProbe[A] {
+    def :: [B >: A](elem: B): List[B] = new ::(elem, this)
+  }
+
   val cons: ::[Int] = ???
   val equality: =:=[Int, Int] = ???
 
