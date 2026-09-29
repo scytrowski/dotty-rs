@@ -1942,7 +1942,7 @@ fn parsed_singleton_enum_case_is_entered_in_companion_module_class_scope() {
     use dotty_core::{SymbolKind, SymbolOrigin, TermName};
 
     let named = named_source(
-        "enum Color:\n  case Red\n\nobject Color:\n  def helper = 1",
+        "enum Color:\n  import foo.bar\n  case Red\n\nobject Color:\n  def helper = 1",
         501,
     );
     let enum_tree = package_stat_trees(&named)[0];
@@ -1952,7 +1952,8 @@ fn parsed_singleton_enum_case_is_entered_in_companion_module_class_scope() {
     let TreeKind::Template(enum_template) = &named.parsed.ast.get(enum_definition.rhs).kind else {
         panic!("enum should have a Template");
     };
-    let case_tree = enum_template.body[0];
+    let import_tree = enum_template.body[0];
+    let case_tree = enum_template.body[1];
     let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(case_definition)) =
         &named.parsed.ast.get(case_tree).kind
     else {
@@ -1979,6 +1980,8 @@ fn parsed_singleton_enum_case_is_entered_in_companion_module_class_scope() {
     let enum_scope = named.index.scope_of(enum_symbol).unwrap();
     let module_scope = named.index.scope_of(module_class).unwrap();
     let case_name = *TermName::new(case_definition.name.as_name().text()).as_name();
+    let case_context_id = named.index.declaration_context_of(case_symbol).unwrap();
+    let case_context = named.index.source_context(case_context_id);
 
     assert_eq!(
         named.store.symbols.get(case_symbol).kind,
@@ -2020,8 +2023,262 @@ fn parsed_singleton_enum_case_is_entered_in_companion_module_class_scope() {
             .lookup_all(&case_name)
             .is_empty()
     );
-    assert!(named.index.declaration_context_of(case_symbol).is_some());
+    assert_eq!(case_context.import, Some(import_tree));
+    assert_eq!(case_context.owner, enum_symbol);
+    assert_eq!(case_context.lexical_scope, enum_scope);
     assert!(named.index.definition_of(case_symbol).is_some());
+}
+
+#[test]
+fn parsed_comma_group_enum_cases_get_ordered_distinct_identities() {
+    use dotty_core::SymbolKind;
+    use dotty_core::ast::UntypedNode;
+
+    let mut named = named_source("enum Direction:\n  case North, South, East", 502);
+    let enum_tree = package_stat_trees(&named)[0];
+    let TreeKind::TypeDef(enum_definition) = &named.parsed.ast.get(enum_tree).kind else {
+        panic!("enum should be a TypeDef");
+    };
+    let TreeKind::Template(enum_template) = &named.parsed.ast.get(enum_definition.rhs).kind else {
+        panic!("enum should have a Template");
+    };
+    let case_group = enum_template.body[0];
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) =
+        &named.parsed.ast.get(case_group).kind
+    else {
+        panic!("comma-group enum case should be a PatDef");
+    };
+    let enum_symbol = named.index.symbol_at(named.source, enum_tree).unwrap();
+    let companion = named
+        .store
+        .symbols
+        .get(enum_symbol)
+        .links
+        .companion
+        .unwrap();
+    let package_scope = named
+        .store
+        .symbols
+        .get(enum_symbol)
+        .owner
+        .and_then(|owner| named.index.scope_of(owner))
+        .unwrap();
+    let module_class = named
+        .store
+        .scopes
+        .get(package_scope)
+        .lookup(TypeName::new(named.store.names.intern("Direction$")).as_name())
+        .unwrap();
+    assert_eq!(
+        named.store.symbols.get(module_class).kind,
+        SymbolKind::ModuleClass
+    );
+    assert_eq!(
+        named.store.symbols.get(companion).owner,
+        named.store.symbols.get(enum_symbol).owner
+    );
+    let module_scope = named.index.scope_of(module_class).unwrap();
+    let identities = definition
+        .patterns
+        .iter()
+        .map(|tree| {
+            let symbol = named.index.symbol_at(named.source, *tree).unwrap();
+            (*tree, symbol)
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(identities.len(), 3);
+    assert!(
+        identities
+            .windows(2)
+            .all(|pair| pair[0].1.index() < pair[1].1.index())
+    );
+    for (tree, symbol) in &identities {
+        assert_eq!(named.store.symbols.get(*symbol).kind, SymbolKind::Object);
+        assert_eq!(named.store.symbols.get(*symbol).owner, Some(module_class));
+        assert!(
+            named
+                .store
+                .symbols
+                .get(*symbol)
+                .flags
+                .contains(SymbolFlags::CASE)
+        );
+        assert!(
+            named
+                .store
+                .symbols
+                .get(*symbol)
+                .flags
+                .contains(SymbolFlags::ENUM)
+        );
+        assert_eq!(
+            named.store.symbols.get(*symbol).position,
+            named.parsed.ast.get(*tree).position
+        );
+        assert!(matches!(
+            named.index.definition_of(*symbol),
+            Some(dotty_core::SourceDefinition::Canonical { source, tree: source_tree })
+                if source == named.source && source_tree == *tree
+        ));
+        assert!(named.index.declaration_context_of(*symbol).is_some());
+    }
+    let names = identities
+        .iter()
+        .map(|(_, symbol)| {
+            named
+                .store
+                .names
+                .resolve(named.store.symbols.get(*symbol).name.text())
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["North", "South", "East"].map(str::to_owned));
+    assert!(identities.iter().all(|(_, symbol)| {
+        named
+            .store
+            .scopes
+            .get(module_scope)
+            .lookup(&named.store.symbols.get(*symbol).name)
+            == Some(*symbol)
+    }));
+    assert!(named.index.symbol_at(named.source, case_group).is_none());
+}
+
+#[test]
+fn parsed_singleton_enum_case_with_explicit_parent_keeps_only_case_identity() {
+    use dotty_core::ast::UntypedNode;
+    use dotty_core::{SymbolKind, TermName};
+
+    let mut named = named_source("enum Color:\n  case Red extends Color", 503);
+    let enum_tree = package_stat_trees(&named)[0];
+    let TreeKind::TypeDef(enum_definition) = &named.parsed.ast.get(enum_tree).kind else {
+        panic!("enum should be a TypeDef");
+    };
+    let TreeKind::Template(enum_template) = &named.parsed.ast.get(enum_definition.rhs).kind else {
+        panic!("enum should have a Template");
+    };
+    let case_tree = enum_template.body[0];
+    let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(case_definition)) =
+        &named.parsed.ast.get(case_tree).kind
+    else {
+        panic!("singleton enum case should be a ModuleDef");
+    };
+    let TreeKind::Template(case_template) = &named.parsed.ast.get(case_definition.template).kind
+    else {
+        panic!("singleton enum case should retain its explicit parent template");
+    };
+    assert!(!case_template.parents.is_empty());
+    let case_symbol = named.index.symbol_at(named.source, case_tree).unwrap();
+    let enum_symbol = named.index.symbol_at(named.source, enum_tree).unwrap();
+    let owner_scope = named
+        .store
+        .symbols
+        .get(enum_symbol)
+        .owner
+        .and_then(|owner| named.index.scope_of(owner))
+        .unwrap();
+    let case_name = *TermName::new(named.store.names.intern("Red")).as_name();
+    let case_module_class_name = *TypeName::new(named.store.names.intern("Red$")).as_name();
+
+    assert_eq!(
+        named.store.symbols.get(case_symbol).kind,
+        SymbolKind::Object
+    );
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(owner_scope)
+            .lookup_all(&case_name)
+            .len(),
+        0
+    );
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(owner_scope)
+            .lookup_all(&case_module_class_name)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn nested_enum_cases_use_their_own_companion_module_class_scopes() {
+    use dotty_core::SymbolKind;
+    use dotty_core::ast::UntypedNode;
+
+    let named = named_source("enum Outer:\n  enum Inner:\n    case In\n  case Out", 504);
+    let outer_tree = package_stat_trees(&named)[0];
+    let TreeKind::TypeDef(outer_definition) = &named.parsed.ast.get(outer_tree).kind else {
+        panic!("outer enum should be a TypeDef");
+    };
+    let TreeKind::Template(outer_template) = &named.parsed.ast.get(outer_definition.rhs).kind
+    else {
+        panic!("outer enum should have a Template");
+    };
+    let inner_tree = outer_template.body[0];
+    let outer_case_tree = outer_template.body[1];
+    let TreeKind::TypeDef(inner_definition) = &named.parsed.ast.get(inner_tree).kind else {
+        panic!("inner enum should be a TypeDef");
+    };
+    let TreeKind::Template(inner_template) = &named.parsed.ast.get(inner_definition.rhs).kind
+    else {
+        panic!("inner enum should have a Template");
+    };
+    let inner_case_tree = inner_template.body[0];
+    assert!(matches!(
+        named.parsed.ast.get(inner_case_tree).kind,
+        TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+    ));
+    assert!(matches!(
+        named.parsed.ast.get(outer_case_tree).kind,
+        TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+    ));
+    let outer_symbol = named.index.symbol_at(named.source, outer_tree).unwrap();
+    let inner_symbol = named.index.symbol_at(named.source, inner_tree).unwrap();
+    let inner_case = named
+        .index
+        .symbol_at(named.source, inner_case_tree)
+        .unwrap();
+    let outer_case = named
+        .index
+        .symbol_at(named.source, outer_case_tree)
+        .unwrap();
+    let inner_module_class = named.store.symbols.get(inner_case).owner.unwrap();
+    let outer_module_class = named.store.symbols.get(outer_case).owner.unwrap();
+
+    assert_ne!(inner_module_class, outer_module_class);
+    assert_eq!(
+        named.store.symbols.get(inner_module_class).kind,
+        SymbolKind::ModuleClass
+    );
+    assert_eq!(
+        named.store.symbols.get(outer_module_class).kind,
+        SymbolKind::ModuleClass
+    );
+    assert_eq!(
+        named.store.symbols.get(inner_module_class).owner,
+        Some(outer_symbol)
+    );
+    assert_eq!(
+        named.store.symbols.get(outer_module_class).owner,
+        named.store.symbols.get(outer_symbol).owner
+    );
+    assert_eq!(
+        named.store.symbols.get(inner_case).owner,
+        Some(inner_module_class)
+    );
+    assert_eq!(
+        named.store.symbols.get(outer_case).owner,
+        Some(outer_module_class)
+    );
+    assert_eq!(
+        named.store.symbols.get(inner_symbol).owner,
+        Some(outer_symbol)
+    );
 }
 
 #[test]

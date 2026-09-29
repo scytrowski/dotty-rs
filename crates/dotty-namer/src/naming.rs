@@ -1774,6 +1774,12 @@ impl Namer<'_> {
                 TreeKind::PhaseSpecific(UntypedNode::PatDef(definition))
                     if definition.modifiers.modifiers.contains(&Modifier::EnumCase) =>
                 {
+                    self.enter_enum_case_pattern_definition(
+                        *member,
+                        definition,
+                        symbol,
+                        active_source_context,
+                    )?;
                     continue;
                 }
                 _ => {}
@@ -1935,6 +1941,52 @@ impl Namer<'_> {
         )?;
         self.index
             .record_declaration_context(case, declaration_context)?;
+        Ok(())
+    }
+
+    fn enter_enum_case_pattern_definition(
+        &mut self,
+        tree: TreeId<Untyped>,
+        definition: &dotty_core::ast::PatDef,
+        enum_symbol: SymbolId,
+        declaration_context: SourceContextId,
+    ) -> Result<(), NamerError> {
+        let module_class =
+            self.enum_companion_module_class(enum_symbol)
+                .ok_or(NamerError::MalformedAstShape {
+                    tree_index: tree.index(),
+                    expected: "enum companion module class",
+                })?;
+        let scope = self
+            .index
+            .scope_of(module_class)
+            .ok_or(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "enum companion module-class scope",
+            })?;
+        let spec = self.source_symbol_spec(
+            tree,
+            &definition.modifiers,
+            module_class,
+            SymbolKind::Object,
+        )?;
+        for pattern in &definition.patterns {
+            let TreeKind::Ident(identifier) = &self.arena.get(*pattern).kind else {
+                return Err(NamerError::MalformedAstShape {
+                    tree_index: pattern.index(),
+                    expected: "enum case identifier pattern",
+                });
+            };
+            let case = self.enter_symbol(
+                *pattern,
+                *dotty_core::TermName::new(identifier.name.text()).as_name(),
+                module_class,
+                scope,
+                spec,
+            )?;
+            self.index
+                .record_declaration_context(case, declaration_context)?;
+        }
         Ok(())
     }
 
