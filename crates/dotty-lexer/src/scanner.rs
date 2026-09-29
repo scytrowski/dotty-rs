@@ -92,7 +92,7 @@ impl ContextualScanner {
         self.position.min(self.tokens.len().saturating_sub(1))
     }
 
-    fn next_line_is_indented(&self, current_index: usize) -> bool {
+    fn next_line_is_indented_from(&self, current_index: usize, reference_offset: u32) -> bool {
         let Some(current) = self.tokens.get(current_index) else {
             return false;
         };
@@ -110,14 +110,22 @@ impl ContextualScanner {
         if !has_source_line_break(&self.source, current_end, next.span.start()) {
             return false;
         }
-        let current_indent = line_indentation(&self.source, current.span.start());
+        let current_indent = line_indentation(&self.source, reference_offset);
         let next_indent = line_indentation(&self.source, next.span.start());
         current_indent.is_prefix_of(&next_indent) && current_indent != next_indent
     }
 
     fn insert_indent_after_current(&mut self) -> bool {
         let index = self.current_index();
-        if !self.next_line_is_indented(index)
+        let Some(current) = self.tokens.get(index) else {
+            return false;
+        };
+        self.insert_indent_after_current_from(current.span.start())
+    }
+
+    fn insert_indent_after_current_from(&mut self, reference_offset: u32) -> bool {
+        let index = self.current_index();
+        if !self.next_line_is_indented_from(index, reference_offset)
             || self
                 .tokens
                 .get(index + 1)
@@ -437,6 +445,15 @@ impl TokenSource for ContextualScanner {
             }
             ScannerEvent::Indented => {
                 if self.insert_indent_after_current() {
+                    self.feedback_regions.push(FeedbackRegion {
+                        kind: FeedbackRegionKind::Indented,
+                        indent_offset: self.feedback_indent_offset_after_current(),
+                        case_offset: None,
+                    });
+                }
+            }
+            ScannerEvent::IndentedFrom { reference_offset } => {
+                if self.insert_indent_after_current_from(reference_offset) {
                     self.feedback_regions.push(FeedbackRegion {
                         kind: FeedbackRegionKind::Indented,
                         indent_offset: self.feedback_indent_offset_after_current(),
@@ -2333,6 +2350,29 @@ mod tests {
         assert_eq!(scanner.current().kind, TokenKind::ColonEol);
 
         scanner.observe(ScannerEvent::Indented);
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Indent);
+        scanner.advance();
+        assert_eq!(scanner.current().kind, TokenKind::Keyword(HardKeyword::Val));
+    }
+
+    #[test]
+    fn declaration_anchored_indent_opens_a_body_after_a_multiline_parameter_header() {
+        let source = "case class Setting[T] (\n  legacyChoices: Option[Seq[?]] = None)(private[Settings] val idx: Int)(using ct: ClassTag[T]):\n  val rendered = idx.toString";
+        let colon = source.find("):\n  val").expect("template body colon") as u32 + 1;
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().span.start() != colon {
+            assert_ne!(scanner.current().kind, TokenKind::Eof);
+            scanner.advance();
+        }
+
+        assert_eq!(scanner.current().kind, TokenKind::ColonFollow);
+        scanner.observe(ScannerEvent::ColonEol { in_template: true });
+        scanner.observe(ScannerEvent::IndentedFrom {
+            reference_offset: 0,
+        });
+
         assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
         scanner.advance();
         assert_eq!(scanner.current().kind, TokenKind::Indent);

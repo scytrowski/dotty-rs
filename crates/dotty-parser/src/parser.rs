@@ -299,6 +299,20 @@ where
     /// Requests an indented body and returns the token offset that identifies
     /// the feedback region when this call opens one.
     pub(crate) fn observe_indented_body_region(&mut self) -> Option<u32> {
+        self.observe_indented_body_region_with(ScannerEvent::Indented)
+    }
+
+    /// Requests an indented body relative to a grammar-owned header start.
+    /// Multiline template headers can end at the same physical indentation as
+    /// their bodies, so the body must be compared with the declaration line.
+    pub(crate) fn observe_indented_body_region_from(
+        &mut self,
+        reference_offset: u32,
+    ) -> Option<u32> {
+        self.observe_indented_body_region_with(ScannerEvent::IndentedFrom { reference_offset })
+    }
+
+    fn observe_indented_body_region_with(&mut self, event: ScannerEvent) -> Option<u32> {
         let mut lookahead = 1;
         while matches!(
             self.cursor.lookahead(lookahead).kind,
@@ -310,7 +324,7 @@ where
             (1..=lookahead).any(|offset| parser.cursor.lookahead(offset).kind == TokenKind::Indent)
         };
         let already_indented = has_indentation_token(self);
-        self.observe_indented();
+        self.observe(event);
         if already_indented || !has_indentation_token(self) {
             return None;
         }

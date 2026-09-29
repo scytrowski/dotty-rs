@@ -5,6 +5,13 @@ pub enum ScannerEvent {
         in_template: bool,
     },
     Indented,
+    /// Opens an indented region using a grammar-owned declaration/header
+    /// offset rather than the physical line of the body introducer. This is
+    /// needed when a multiline header ends on the same indentation column as
+    /// its body.
+    IndentedFrom {
+        reference_offset: u32,
+    },
     Outdented,
     /// Closes a specific parser-opened indentation region, if still active.
     OutdentedRegion {
