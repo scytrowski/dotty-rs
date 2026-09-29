@@ -1343,10 +1343,9 @@ where
         let mut parent = self.with_parse_kind(crate::ParseKind::Type, |parser| {
             if parser.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
                 // Dotty's `constrApp` parses `annotType1`: a parenthesized
-                // parent may therefore contain a full function/compound type,
-                // while unparenthesized parents remain in the simple-type
-                // grammar.
-                parser.type_expr()
+                // parent may contain a full function type, but the following
+                // brace starts the template body rather than a type refinement.
+                parser.simple_type1()
             } else {
                 parser.simple_type()
             }
@@ -5362,6 +5361,60 @@ mod tests {
         assert!(matches!(
             parser.ast().get(template.parents[1]).kind,
             TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parenthesized_function_parent_does_not_consume_template_body_as_refinement() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "class C extends (A => B) { def f = 1 }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Class), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Extends), 8, 15),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 16, 17),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Operator, 19, 21),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 23, 24),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 25, 26),
+                token(TokenKind::Keyword(HardKeyword::Def), 27, 30),
+                token(TokenKind::Identifier, 31, 32),
+                token(TokenKind::Operator, 33, 34),
+                token(TokenKind::IntegerLiteral, 35, 36),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 37, 38),
+                token(TokenKind::Eof, 38, 38),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_class_definition(Location::Elsewhere)
+        else {
+            panic!("expected a class definition");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected TypeDef");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(definition.rhs).kind else {
+            panic!("expected Template");
+        };
+
+        assert_eq!(template.parents.len(), 1);
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(parenthesized)) =
+            &parser.ast().get(template.parents[0]).kind
+        else {
+            panic!("expected the parenthesized function type to remain the parent");
+        };
+        assert!(matches!(
+            parser.ast().get(parenthesized.inner).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert_eq!(template.body.len(), 1);
+        assert!(matches!(
+            parser.ast().get(template.body[0]).kind,
+            TreeKind::DefDef(_)
         ));
         assert!(parser.diagnostics().is_empty());
     }
