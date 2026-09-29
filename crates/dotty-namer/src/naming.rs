@@ -2071,6 +2071,8 @@ impl Namer<'_> {
                     Modifier::Opaque => SymbolFlags::OPAQUE,
                     Modifier::Extension => SymbolFlags::EXTENSION,
                     Modifier::Erased => SymbolFlags::ERASED,
+                    Modifier::Enum => SymbolFlags::ENUM,
+                    Modifier::EnumCase => SymbolFlags::ENUM | SymbolFlags::CASE,
                     _ => SymbolFlags::EMPTY,
                 };
                 flags | flag
@@ -2429,11 +2431,22 @@ mod tests {
     }
 
     #[test]
+    fn source_enum_modifier_maps_to_enum_flag() {
+        assert_eq!(Namer::source_flags(&[Modifier::Enum]), SymbolFlags::ENUM);
+    }
+
+    #[test]
+    fn source_enum_case_modifier_maps_to_case_and_enum_flags() {
+        assert_eq!(
+            Namer::source_flags(&[Modifier::EnumCase]),
+            SymbolFlags::CASE | SymbolFlags::ENUM
+        );
+    }
+
+    #[test]
     fn parser_role_markers_do_not_become_semantic_flags() {
         let role_markers = [
             Modifier::Trait,
-            Modifier::Enum,
-            Modifier::EnumCase,
             Modifier::ParamAccessor,
             Modifier::Param,
             Modifier::PrivateLocal,
