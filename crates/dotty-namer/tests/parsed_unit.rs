@@ -2181,6 +2181,7 @@ fn generic_curried_enum_case_preserves_constructor_and_parent_structure() {
         panic!("parameterized enum case should have a primary constructor");
     };
     let enum_symbol = named.index.symbol_at(named.source, enum_tree).unwrap();
+    let enum_scope = named.index.scope_of(enum_symbol).unwrap();
     let enum_owner_scope = named
         .store
         .symbols
@@ -2197,6 +2198,7 @@ fn generic_curried_enum_case_preserves_constructor_and_parent_structure() {
         .unwrap();
     let companion_scope = named.index.scope_of(companion).unwrap();
     let case_symbol = named.index.symbol_at(named.source, case_tree).unwrap();
+    let case_name = TypeName::new(case_definition.name.as_name().text());
     let case_scope = named.index.scope_of(case_symbol).unwrap();
     let constructor_symbol = named
         .index
@@ -2233,9 +2235,28 @@ fn generic_curried_enum_case_preserves_constructor_and_parent_structure() {
             .store
             .scopes
             .get(companion_scope)
-            .lookup(case_definition.name.as_name()),
+            .lookup(case_name.as_name()),
         Some(case_symbol)
     );
+    assert!(
+        named
+            .store
+            .scopes
+            .get(enum_scope)
+            .lookup_all(case_name.as_name())
+            .is_empty()
+    );
+    for api_name in ["apply", "unapply", "copy", "ordinal", "values", "valueOf"] {
+        let api_name = dotty_core::TermName::new(named.store.names.intern(api_name));
+        assert!(
+            named
+                .store
+                .scopes
+                .get(companion_scope)
+                .lookup_all(api_name.as_name())
+                .is_empty()
+        );
+    }
 
     for type_parameter_tree in &constructor.type_params {
         let TreeKind::TypeDef(type_parameter) = &named.parsed.ast.get(*type_parameter_tree).kind
