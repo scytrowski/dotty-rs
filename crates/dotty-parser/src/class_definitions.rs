@@ -1362,11 +1362,11 @@ where
     }
 
     fn parse_type_name(&mut self) -> TypeName {
-        if self.current_is_type_reference_name() {
-            if let Ok(name) = self.intern_current_type_name() {
-                self.advance();
-                return name;
-            }
+        if self.current_is_type_reference_name()
+            && let Ok(name) = self.intern_current_type_name()
+        {
+            self.advance();
+            return name;
         }
 
         self.report(
