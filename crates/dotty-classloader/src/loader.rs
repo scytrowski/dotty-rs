@@ -2693,6 +2693,20 @@ mod tests {
             .owner
             .expect("List should have a package owner");
         let list_name = loader.store.symbols.get(list).name;
+        let package_scope = loader
+            .session
+            .packages
+            .scope_of(package)
+            .expect("the package registry should retain its scope");
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&list_name),
+            &[list],
+            "loading a class should enter it in the package scope"
+        );
         loader
             .session
             .packages

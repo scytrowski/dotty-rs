@@ -1,5 +1,5 @@
 use crate::binary_name::BinaryName;
-use dotty_core::{Name, Packages, SemanticStore, SymbolId, SymbolOrigin};
+use dotty_core::{Name, Packages, ScopeId, SemanticStore, SymbolId, SymbolOrigin};
 
 /// The classloader's view of the session's package registry.
 ///
@@ -30,6 +30,12 @@ impl PackageRegistry {
         self.packages
     }
 
+    /// Returns the package's declaration scope while this adapter still
+    /// owns the shared registry.
+    pub(crate) fn scope_of(&self, package: SymbolId) -> Option<ScopeId> {
+        self.packages.scope_of(package)
+    }
+
     /// Returns `name`'s containing package's `SymbolId` — the deepest
     /// segment, e.g. `util`'s symbol for `java/util/List` — entering any
     /// not-yet-seen segment along the way, from the root down.
@@ -56,7 +62,6 @@ impl PackageRegistry {
         class: SymbolId,
     ) {
         let scope = self
-            .packages
             .scope_of(package)
             .expect("a resolved package has a declaration scope");
         let declarations = store.scopes.get_mut(scope);
