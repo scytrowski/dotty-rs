@@ -4803,7 +4803,7 @@ fn extension_export_children_are_deferred_without_method_symbols() {
 #[test]
 fn top_level_exports_keep_wrapper_owner_and_preceding_import_context() {
     let named = named_source(
-        "import util.*\nexport service.foo\nexport service.{foo, bar as baz}\nexport service.*",
+        "import util.*\nexport service.foo\nexport service.{foo, bar as baz}\nexport service.*\nexport service.given Show",
         208,
     );
     let package_stats = package_stat_trees(&named);
@@ -4812,7 +4812,7 @@ fn top_level_exports_keep_wrapper_owner_and_preceding_import_context() {
         .copied()
         .filter(|tree| matches!(named.parsed.ast.get(*tree).kind, TreeKind::Export(_)))
         .collect::<Vec<_>>();
-    assert_eq!(exports.len(), 3);
+    assert_eq!(exports.len(), 4);
 
     let sites = exports
         .iter()
@@ -4839,6 +4839,18 @@ fn top_level_exports_keep_wrapper_owner_and_preceding_import_context() {
             .iter()
             .all(|site| site.extension_prefix_clauses.is_none())
     );
+
+    let TreeKind::Export(given_export) = &named.parsed.ast.get(sites[3].tree).kind else {
+        panic!("the indexed given export should retain its Export tree");
+    };
+    let [given_selector] = given_export.selectors.as_slice() else {
+        panic!("given export should retain one selector");
+    };
+    assert_eq!(
+        named.store.names.resolve(given_selector.imported.text()),
+        ""
+    );
+    assert!(given_selector.bound.is_some());
 
     let import_tree = package_stats
         .iter()
