@@ -25,7 +25,8 @@ impl TastyUnpickler<'_, '_, '_> {
             let scope = self
                 .index
                 .scope_of(owner)
-                .or_else(|| self.packages.scope_of(owner));
+                .or_else(|| self.packages.scope_of(owner))
+                .or_else(|| self.shared_scopes.get(&owner).copied());
             let Some(scope) = scope else {
                 continue;
             };
@@ -101,5 +102,126 @@ impl TastyUnpickler<'_, '_, '_> {
             self.store.symbols.get_mut(object).links.companion = Some(class);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dotty_core::Definitions;
+    use dotty_core::names::Name;
+    use dotty_core::store::SemanticStore;
+    use dotty_core::symbols::SymbolKind;
+    use dotty_tasty::tasty::TastyFile;
+
+    const BOTH: &[u8] = include_bytes!("../tests/fixtures/semantic/Both.tasty");
+
+    #[test]
+    fn rediscovering_an_exact_pair_is_idempotent() {
+        let file = TastyFile::parse_scala_3_9(BOTH).unwrap();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
+        unpickler.enter_symbols().unwrap();
+
+        let class = *unpickler
+            .store
+            .scopes
+            .get(
+                unpickler
+                    .index()
+                    .scope_of(unpickler.index().symbol_at(0).unwrap())
+                    .unwrap(),
+            )
+            .lookup_all(&Name::new(
+                unpickler.store.names.intern("Both"),
+                Namespace::Type,
+            ))
+            .first()
+            .unwrap();
+        let object = *unpickler
+            .store
+            .scopes
+            .get(
+                unpickler
+                    .index()
+                    .scope_of(unpickler.index().symbol_at(0).unwrap())
+                    .unwrap(),
+            )
+            .lookup_all(&Name::new(
+                unpickler.store.names.intern("Both"),
+                Namespace::Term,
+            ))
+            .first()
+            .unwrap();
+
+        unpickler.link_companions().unwrap();
+        assert_eq!(
+            unpickler.store.symbols.get(class).links.companion,
+            Some(object)
+        );
+        assert_eq!(
+            unpickler.store.symbols.get(object).links.companion,
+            Some(class)
+        );
+    }
+
+    #[test]
+    fn a_conflicting_existing_link_fails_before_mutating_its_other_endpoint() {
+        let file = TastyFile::parse_scala_3_9(BOTH).unwrap();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
+        unpickler.enter_symbols().unwrap();
+
+        let package = unpickler.index().symbol_at(0).unwrap();
+        let scope = unpickler.index().scope_of(package).unwrap();
+        let class = *unpickler
+            .store
+            .scopes
+            .get(scope)
+            .lookup_all(&Name::new(
+                unpickler.store.names.intern("Both"),
+                Namespace::Type,
+            ))
+            .iter()
+            .find(|symbol| unpickler.store.symbols.get(**symbol).kind == SymbolKind::Class)
+            .unwrap();
+        let object = *unpickler
+            .store
+            .scopes
+            .get(scope)
+            .lookup_all(&Name::new(
+                unpickler.store.names.intern("Both"),
+                Namespace::Term,
+            ))
+            .first()
+            .unwrap();
+        let module_class = *unpickler
+            .store
+            .scopes
+            .get(scope)
+            .lookup_all(&Name::new(
+                unpickler.store.names.intern("Both$"),
+                Namespace::Type,
+            ))
+            .first()
+            .unwrap();
+        unpickler.store.symbols.get_mut(class).links.companion = Some(module_class);
+        unpickler.store.symbols.get_mut(object).links.companion = None;
+
+        assert_eq!(
+            unpickler.link_companions(),
+            Err(UnpickleError::ConflictingCompanion {
+                symbol: class,
+                existing: module_class,
+                candidate: object,
+            })
+        );
+        assert_eq!(
+            unpickler.store.symbols.get(class).links.companion,
+            Some(module_class)
+        );
+        assert_eq!(unpickler.store.symbols.get(object).links.companion, None);
     }
 }

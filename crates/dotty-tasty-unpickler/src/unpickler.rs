@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use dotty_core::ids::{AnnotationId, SymbolId, TypeId};
+use dotty_core::ids::{AnnotationId, ScopeId, SymbolId, TypeId};
 use dotty_core::resolution::{NoResolver, SymbolResolver};
 use dotty_core::store::SemanticStore;
 use dotty_core::store::StoreCheckpoint;
@@ -16,6 +16,7 @@ use crate::binders::PendingBinder;
 use crate::error::UnpickleError;
 use crate::index::TastySemanticIndex;
 use crate::packages::ScopeJournal;
+use crate::session::TastySession;
 
 /// The marks of one public call, to roll it back.
 pub(crate) struct Transaction {
@@ -53,6 +54,10 @@ pub struct TastyUnpickler<'file, 'bytes, 'store> {
     pub(crate) origin: SymbolOrigin,
     pub(crate) index: TastySemanticIndex,
     pub(crate) packages: Packages,
+    /// Declaration scopes of class-like owners in the shared TASTy session.
+    pub(crate) shared_scopes: HashMap<SymbolId, ScopeId>,
+    /// Owners whose scopes were added to `shared_scopes`, for enter rollback.
+    pub(crate) shared_scope_order: Vec<SymbolId>,
     /// Asked for members the entered state does not hold. Owned, and given
     /// the store to read on each request; it never opens files here.
     pub(crate) resolver: Box<dyn SymbolResolver>,
@@ -123,6 +128,8 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             origin,
             index: TastySemanticIndex::new(),
             packages,
+            shared_scopes: HashMap::new(),
+            shared_scope_order: Vec::new(),
             resolver: Box::new(NoResolver),
             scope_journal: Vec::new(),
             pending_binders: Vec::new(),
@@ -141,6 +148,20 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
     pub fn with_resolver(mut self, resolver: Box<dyn SymbolResolver>) -> Self {
         self.resolver = resolver;
         self
+    }
+
+    /// Prepares to enter a file in a session that shares package and class
+    /// scopes with previously entered TASTy units.
+    pub fn with_session(
+        file: &'file TastyFile<'bytes>,
+        store: &'store mut SemanticStore,
+        definitions: Definitions,
+        session: TastySession,
+    ) -> Self {
+        let mut unpickler = Self::with_packages(file, store, definitions, session.packages);
+        unpickler.shared_scopes = session.owner_scopes;
+        unpickler.shared_scope_order = session.scope_order;
+        unpickler
     }
 
     /// The origin stamped on every symbol this unpickler enters.
@@ -167,9 +188,23 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
     }
 
     /// Consumes the unpickler, keeping the index for later passes and the
-    /// package registry to hand to the unpickler of the next unit.
+    /// package registry. Use [`into_session_parts`](Self::into_session_parts)
+    /// when the next unit must also reuse entered class scopes.
     pub fn into_parts(self) -> (TastySemanticIndex, Packages) {
         (self.index, self.packages)
+    }
+
+    /// Consumes the unpickler, keeping the index and the complete session for
+    /// the next unit.
+    pub fn into_session_parts(self) -> (TastySemanticIndex, TastySession) {
+        (
+            self.index,
+            TastySession {
+                packages: self.packages,
+                owner_scopes: self.shared_scopes,
+                scope_order: self.shared_scope_order,
+            },
+        )
     }
 
     /// Pass 1: enters a symbol for every definition in the file.
@@ -185,6 +220,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
         let checkpoint = self.store.checkpoint();
         let index = self.index.clone();
         let packages = self.packages.mark();
+        let shared_scopes = self.shared_scope_order.len();
         self.scope_journal.clear();
 
         if let Err(error) = self.enter_all() {
@@ -196,6 +232,11 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
                 self.store.scopes.get_mut(scope).remove(symbol);
             }
             self.packages.roll_back_to(self.store, packages);
+            while self.shared_scope_order.len() > shared_scopes {
+                if let Some(owner) = self.shared_scope_order.pop() {
+                    self.shared_scopes.remove(&owner);
+                }
+            }
             self.store.rollback_to(checkpoint);
             self.index = index;
             self.scope_journal.clear();
@@ -344,6 +385,26 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
         let old = self.store.symbols.get(symbol).info;
         self.info_journal.push((symbol, old));
         self.store.symbols.set_info(symbol, info);
+    }
+
+    /// Keeps a declaration scope available to later TASTy units in this
+    /// session, without completing its owner.
+    pub(crate) fn share_owner_scope(
+        &mut self,
+        owner: SymbolId,
+        scope: ScopeId,
+    ) -> Result<(), UnpickleError> {
+        match self.shared_scopes.get(&owner) {
+            Some(existing) if *existing != scope => {
+                Err(UnpickleError::DuplicateScope { symbol: owner })
+            }
+            Some(_) => Ok(()),
+            None => {
+                self.shared_scopes.insert(owner, scope);
+                self.shared_scope_order.push(owner);
+                Ok(())
+            }
+        }
     }
 
     /// Sets a symbol's annotations and marks its annotation completion

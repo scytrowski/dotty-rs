@@ -271,6 +271,28 @@ a shared package keeps the origin of the unit that first entered it.
 `TastyUnpickler::new` starts from an empty registry, so a lone unit behaves as
 before.
 
+### Companion links
+
+After pass 1 has entered every identity in a unit,
+`TastyUnpickler` links a `Class` or `Trait` to a same-named `Object` in the
+same owner's declaration scope, and publishes the reciprocal link. Both
+namespace and owner are checked, and each side must have exactly one matching
+candidate. A `ModuleClass` is never an endpoint. A missing or ambiguous side
+is left unlinked; symbol completion is not needed.
+
+When several units share one store, carry a `TastySession` using
+`with_session` / `into_session_parts`. It retains class declaration scopes as
+well as the package registry, so a later unit can complete a pair under an
+already-entered owner without forcing its `ClassInfo`. The package-only
+`with_packages` / `into_parts` API remains available for callers that do not
+need cross-unit class-scope lookup.
+
+All candidate pairs are checked before either endpoint is changed. Repeating
+the same discovery is idempotent; an endpoint already linked to a different
+symbol returns `UnpickleError::ConflictingCompanion`. Since link publication is
+the final step of pass 1, a failed entry leaves links from earlier units
+unchanged.
+
 The caller owns the session and passes the store's `Definitions` (bootstrapped
 once) to `new`/`with_packages`. The unpickler never bootstraps, and every
 reference without a prefix (`TYPEREFdirect`, `TERMREFdirect`, `TYPEREFpkg`,
@@ -323,8 +345,8 @@ not declared in any scope.
 A `TYPEPARAM`/`PARAM` node's name and modifiers are decoded from the node
 itself, at its own address.
 
-Not entered: definitions inside method bodies, parameters of type-lambda
-aliases, and companion links.
+Not entered: definitions inside method bodies and parameters of type-lambda
+aliases. Companion links are published after the complete identity walk.
 
 ### Types (pass 2a)
 
