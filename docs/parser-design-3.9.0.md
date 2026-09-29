@@ -324,6 +324,9 @@ parameter. Feature-gated modifier syntax continues to follow the parser's
 configured feature policy.
 Annotations on ordinary method parameters are also preserved. These prefixes
 are not treated as a blanket set of modifiers valid for every parameter kind.
+In `using` clauses, the named-parameter lookahead also recognizes annotation
+and supported modifier prefixes (including constructor `val`/`var` accessors),
+while a bare `using T` remains an anonymous context parameter.
 Ordinary named method and non-accessor class-constructor parameters also
 support by-name types (`x: => T`). The parser represents these with the shared
 `ByNameTypeTree`, wrapping the supported type grammar after `=>`; this is
