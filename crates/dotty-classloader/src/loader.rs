@@ -377,6 +377,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 links: SymbolLinks::default(),
             })
         };
+        self.session
+            .packages
+            .enter_class(self.store, owner, symbol_name, class_symbol);
         let declarations = self.store.scopes.alloc(Scope::new(Some(class_symbol)));
 
         (class_symbol, declarations)
@@ -2657,6 +2660,88 @@ mod tests {
         assert_eq!(
             package_a, package_b,
             "the second loader should reuse the first loader's java/util package SymbolId"
+        );
+    }
+
+    #[test]
+    fn loaded_classes_are_entered_once_in_their_package_scope() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/util/List"),
+            synthetic_class("java/util/List", Some("java/lang/Object")),
+        );
+        let mut loader = ClassLoader::with_definitions(
+            InMemoryClassPath(classes),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let list = loader
+            .load_class(&BinaryName::from_internal("java/util/List"))
+            .expect("List should load");
+        let package = loader
+            .store
+            .symbols
+            .get(list)
+            .owner
+            .expect("List should have a package owner");
+        let list_name = loader.store.symbols.get(list).name;
+        let package_scope = loader
+            .session
+            .packages
+            .scope_of(package)
+            .expect("the package registry should retain its scope");
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&list_name),
+            &[list],
+            "loading a class should enter it in the package scope"
+        );
+        loader
+            .session
+            .packages
+            .enter_class(loader.store, package, list_name, list);
+        let session = loader.into_session();
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+        classes.insert(
+            BinaryName::from_internal("java/util/List"),
+            synthetic_class("java/util/List", Some("java/lang/Object")),
+        );
+        let mut next_loader = ClassLoader::with_definitions(
+            InMemoryClassPath(classes),
+            &mut store,
+            definitions,
+            session,
+        );
+        assert_eq!(
+            next_loader
+                .load_class(&BinaryName::from_internal("java/util/List"))
+                .expect("the next loader should reuse List"),
+            list
+        );
+        let packages = next_loader.into_session().into_packages();
+        let package_scope = packages
+            .scope_of(package)
+            .expect("the shared package registry should retain its scope");
+        let list_name = Name::new(store.symbols.get(list).name.text(), Namespace::Type);
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&list_name),
+            &[list],
+            "reusing a class should not duplicate its package-scope entry"
         );
     }
 

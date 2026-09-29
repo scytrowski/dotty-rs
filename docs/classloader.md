@@ -231,7 +231,11 @@ its owner's scope; the full path is only ever reconstructed by walking
 `owner`. The unnamed package is the explicit root (empty name,
 `owner: None`), which owns every top-level package and every top-level class
 with no package. `LoadingSession::with_packages` / `into_packages` hand the
-shared registry to and from the next adapter.
+shared registry to and from the next adapter. Each loaded binary class is
+also entered under its type name in the scope of the package from its binary
+name. This package-scope index is separate from `Symbol::owner`: a nested
+class can be semantically owned by its enclosing class while remaining
+discoverable by its binary name through the package scope.
 
 ### 4.3 Nesting
 
