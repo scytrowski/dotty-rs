@@ -20923,6 +20923,50 @@ mod tests {
     }
 
     #[test]
+    fn forward_local_monomorphic_overload_uses_argument_filtering() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { pick(1); def pick(value: Boolean): Int = 2; def pick(value: Int): Int = 1; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let call_tree = block.stats[0];
+        let boolean_method_tree = block.stats[1];
+        let integer_method_tree = block.stats[2];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        typer.type_expression(block_tree, context).unwrap();
+
+        let integer_method = typer
+            .local_method_symbol_at(source, integer_method_tree)
+            .unwrap();
+        let boolean_method = typer
+            .local_method_symbol_at(source, boolean_method_tree)
+            .unwrap();
+        let typed_call = typer.source_typed_index().get(source, call_tree).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_call).kind else {
+            panic!("forward local overload call should produce an Apply");
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == integer_method
+        ));
+        assert_ne!(integer_method, boolean_method);
+    }
+
+    #[test]
     fn indistinguishable_local_overloads_remain_ambiguous() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def outer: Int = { def pick(value: Int): Int = 1; def pick(other: Int): Int = 2; pick(1) } }",
