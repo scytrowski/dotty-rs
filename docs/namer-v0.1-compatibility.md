@@ -27,7 +27,7 @@ the Rust lexer, parser, or namer measurement.
 
 ## Results
 
-The latest measurement is at dotty-rs revision `f42b3db` and Scala revision
+The latest measurement is at dotty-rs revision `5edd6ee` and Scala revision
 `777528f`. The parser produced ASTs for all 1,236 files: 1,127 had no
 recoverable diagnostics and 109 had diagnostics. There were zero hard parser
 failures, process failures, panics, or hangs. The namer ran on all files and
@@ -57,14 +57,17 @@ materialized. The AST contains 390 singleton cases (384 materialized), 130
 comma-group singleton cases (116 materialized), and 91 parameterized cases (82
 materialized).
 
-Four enum definitions and 12 enum cases are classified as parser-blocked. The
-four definitions were present as detached AST nodes in recovered files, outside
-any containing `Template.body`; the Namer therefore had no owner context. A
-clean nested-enum regression confirms that this case is distinct from a Namer
-identity failure. The remaining unmatched enum occurrences are in unsuccessful
-Namer runs or local scopes and are not counted as completed-run structural
-failures. Synthetic enum APIs such as `values`, lookup methods, and `ordinal`
-are later synthesis work, not enum identity failures.
+Two enum definitions and seven enum cases are classified as parser-blocked.
+These are recovered AST nodes without a containing package or template scope;
+nodes misplaced under unrelated parser-recovery blocks are also treated as
+detached. Top-level enums remain attached to their package even when another
+part of the file has parser diagnostics, so missing identities for those
+declarations are still reported as Namer invariant failures. Regressions cover
+both recovered top-level enums and detached enum nodes. The remaining unmatched
+enum occurrences are in unsuccessful Namer runs or local scopes and are not
+counted as completed-run structural failures. Synthetic enum APIs such as
+`values`, lookup methods, and `ordinal` are later synthesis work, not enum
+identity failures.
 
 ## Export handoff
 

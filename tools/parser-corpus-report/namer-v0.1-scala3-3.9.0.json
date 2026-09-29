@@ -6,7 +6,7 @@
   ],
   "source_version": "3.9.0",
   "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
-  "parser_revision": "f42b3dbfe9de9f322377da7def268cb620281b81",
+  "parser_revision": "5edd6eee2152814059c1427b4cd49d8f61546f74",
   "scala_oracle_files": null,
   "scala_oracle_failures": null,
   "files_attempted": 1236,
@@ -355,14 +355,14 @@
       "definitions_encountered": 78,
       "class_identities_materialized": 69,
       "companion_identity_pairs_materialized": 69,
-      "definitions_blocked_by_parser_recovery": 4,
+      "definitions_blocked_by_parser_recovery": 2,
       "singleton_cases_encountered": 390,
       "singleton_cases_materialized": 384,
       "comma_group_singleton_cases_encountered": 130,
       "comma_group_singleton_cases_materialized": 116,
       "parameterized_cases_encountered": 91,
       "parameterized_cases_materialized": 82,
-      "cases_blocked_by_parser_recovery": 12
+      "cases_blocked_by_parser_recovery": 7
     },
     "export_handoff_audit": {
       "syntax_occurrences": 10,
