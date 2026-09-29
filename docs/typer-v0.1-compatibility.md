@@ -196,6 +196,9 @@ contextual or legacy implicit clauses. Explicit arguments use the ordinary
 typing, widening, arity, and conformance checks, and the typed `Apply` retains
 its `ApplyKind`. Overload applicability applies the same clause-kind filter, so
 a mismatched candidate cannot win solely because its argument types match.
+Generic inference uses the current explicit clause, including contextual or
+legacy implicit clauses passed with `using`, and the supported direct-parameter
+and matching applied-type constraints also participate in overload selection.
 Curried plain-then-contextual calls continue from the exact result callable of
 the first clause, including after generic inference. Automatic contextual or
 implicit argument insertion and implicit search remain deferred. Erased and

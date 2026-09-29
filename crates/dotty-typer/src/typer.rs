@@ -1280,6 +1280,16 @@ struct ApplicationRequest<'a> {
 }
 
 #[derive(Clone, Copy)]
+struct ConstructorPolyInferenceRequest<'a> {
+    constructor: SymbolId,
+    binder: TypeId,
+    poly: &'a PolyType,
+    arguments: &'a [TypedArgument],
+    application_kind: ApplyKind,
+    tree_index: u32,
+}
+
+#[derive(Clone, Copy)]
 struct TypedArgument {
     typed: TreeId<Typed>,
     own_type: TypeId,
@@ -2527,6 +2537,7 @@ impl<'a> SourceTyper<'a> {
                         callable,
                         &poly,
                         &arguments,
+                        application.kind,
                         tree.index(),
                         info_journal,
                     )?;
@@ -3221,11 +3232,14 @@ impl<'a> SourceTyper<'a> {
                     });
                 }
                 let type_arguments = self.infer_constructor_poly_arguments(
-                    candidate.symbol,
-                    candidate.callable,
-                    &poly,
-                    &arguments,
-                    application_tree_index,
+                    ConstructorPolyInferenceRequest {
+                        constructor: candidate.symbol,
+                        binder: candidate.callable,
+                        poly: &poly,
+                        arguments: &arguments,
+                        application_kind,
+                        tree_index: application_tree_index,
+                    },
                     info_journal,
                 )?;
                 let instantiated = dotty_core::types::instantiate_poly(
@@ -4041,61 +4055,72 @@ impl<'a> SourceTyper<'a> {
 
     fn infer_constructor_poly_arguments(
         &mut self,
-        constructor: SymbolId,
-        binder: TypeId,
-        poly: &PolyType,
-        arguments: &[TypedArgument],
-        tree_index: u32,
+        request: ConstructorPolyInferenceRequest<'_>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<TypeId>, TyperError> {
-        self.infer_poly_application_arguments(binder, poly, arguments, tree_index, info_journal)
-            .map_err(|error| match error {
-                TyperError::UnconstrainedTypeParameter {
-                    parameter_index, ..
-                } => TyperError::UnconstrainedConstructorTypeParameter {
+        let ConstructorPolyInferenceRequest {
+            constructor,
+            binder,
+            poly,
+            arguments,
+            application_kind,
+            tree_index,
+        } = request;
+        self.infer_poly_application_arguments(
+            binder,
+            poly,
+            arguments,
+            application_kind,
+            tree_index,
+            info_journal,
+        )
+        .map_err(|error| match error {
+            TyperError::UnconstrainedTypeParameter {
+                parameter_index, ..
+            } => TyperError::UnconstrainedConstructorTypeParameter {
+                source: self.source,
+                tree_index,
+                constructor,
+                parameter_index,
+            },
+            TyperError::ConflictingInferenceConstraints {
+                parameter_index,
+                first,
+                second,
+                ..
+            } => TyperError::ConflictingConstructorInferenceConstraints {
+                source: self.source,
+                tree_index,
+                constructor,
+                parameter_index,
+                first,
+                second,
+            },
+            TyperError::UnsupportedInferenceShape {
+                parameter_index,
+                formal,
+                actual,
+                ..
+            } => TyperError::UnsupportedConstructorInferenceShape {
+                source: self.source,
+                tree_index,
+                constructor,
+                parameter_index,
+                formal,
+                actual,
+            },
+            TyperError::UnsupportedPolymorphicApplicationShape { binder, .. } => {
+                TyperError::UnsupportedConstructorInferenceShape {
                     source: self.source,
                     tree_index,
                     constructor,
-                    parameter_index,
-                },
-                TyperError::ConflictingInferenceConstraints {
-                    parameter_index,
-                    first,
-                    second,
-                    ..
-                } => TyperError::ConflictingConstructorInferenceConstraints {
-                    source: self.source,
-                    tree_index,
-                    constructor,
-                    parameter_index,
-                    first,
-                    second,
-                },
-                TyperError::UnsupportedInferenceShape {
-                    parameter_index,
-                    formal,
-                    actual,
-                    ..
-                } => TyperError::UnsupportedConstructorInferenceShape {
-                    source: self.source,
-                    tree_index,
-                    constructor,
-                    parameter_index,
-                    formal,
-                    actual,
-                },
-                TyperError::UnsupportedPolymorphicApplicationShape { binder, .. } => {
-                    TyperError::UnsupportedConstructorInferenceShape {
-                        source: self.source,
-                        tree_index,
-                        constructor,
-                        parameter_index: None,
-                        formal: binder,
-                        actual: binder,
-                    }
+                    parameter_index: None,
+                    formal: binder,
+                    actual: binder,
                 }
-                other => other,
-            })
+            }
+            other => other,
+        })
     }
 
     fn infer_constructor_poly_clauses(
@@ -4975,6 +5000,7 @@ impl<'a> SourceTyper<'a> {
         binder: TypeId,
         poly: &PolyType,
         arguments: &[TypedArgument],
+        application_kind: ApplyKind,
         tree_index: u32,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<TypeId>, TyperError> {
@@ -4993,7 +5019,7 @@ impl<'a> SourceTyper<'a> {
                 actual: arguments.len(),
             });
         }
-        if method.kind != MethodKind::Plain
+        if !application_kind_accepts(application_kind, method.kind)
             || method.params.iter().any(|param| {
                 param.erased
                     || param.varargs
@@ -5627,7 +5653,7 @@ impl<'a> SourceTyper<'a> {
                 candidates,
                 arguments,
                 tree_index,
-                Some(application_kind),
+                application_kind,
                 info_journal,
             )?;
             self.choose_overload_candidate(candidates, arguments, tree_index, application_kind)
@@ -5655,7 +5681,7 @@ impl<'a> SourceTyper<'a> {
             &mut candidates[selected_index..=selected_index],
             arguments,
             tree_index,
-            Some(application_kind),
+            application_kind,
             info_journal,
         )?;
         Ok(candidates[selected_index])
@@ -5679,7 +5705,7 @@ impl<'a> SourceTyper<'a> {
                 candidates,
                 arguments,
                 tree_index,
-                Some(application_kind),
+                application_kind,
                 info_journal,
             )?;
             self.choose_overload_candidate_with_policy(
@@ -5713,7 +5739,7 @@ impl<'a> SourceTyper<'a> {
             &mut candidates[selected_index..=selected_index],
             arguments,
             tree_index,
-            Some(application_kind),
+            application_kind,
             info_journal,
         )?;
         Ok(candidates[selected_index])
@@ -5724,7 +5750,7 @@ impl<'a> SourceTyper<'a> {
         candidates: &mut [ApplicationCandidate],
         arguments: &[TypedArgument],
         tree_index: u32,
-        application_kind: Option<ApplyKind>,
+        application_kind: ApplyKind,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<(), TyperError> {
         for candidate in candidates {
@@ -5735,9 +5761,7 @@ impl<'a> SourceTyper<'a> {
             let Some(Type::Method(method)) = self.store.types.try_get(poly.result).cloned() else {
                 continue;
             };
-            if let Some(application_kind) = application_kind
-                && !application_kind_accepts(application_kind, method.kind)
-            {
+            if !application_kind_accepts(application_kind, method.kind) {
                 candidate.rejection = Some(OverloadRejection::ApplicationKindMismatch {
                     application_kind,
                     method_kind: method.kind,
@@ -5752,6 +5776,7 @@ impl<'a> SourceTyper<'a> {
                 candidate.callable,
                 &poly,
                 arguments,
+                application_kind,
                 tree_index,
                 info_journal,
             ) {
@@ -25387,6 +25412,118 @@ mod tests {
             panic!("expected the inner regular application")
         };
         assert_eq!(regular_application.kind, ApplyKind::Regular);
+    }
+
+    #[test]
+    fn generic_explicit_using_infers_from_its_current_contextual_clause() {
+        let source_text = "class C { class Ctx[A]; def f[A](using ctx: Ctx[A]): Ctx[A] = ctx; def use(using ctx: Ctx[Int]): Ctx[Int] = f(using ctx) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected a typed generic using application")
+        };
+        assert_eq!(application.kind, ApplyKind::Using);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::Applied { args, .. } if args == &[definitions.int]
+        ));
+    }
+
+    #[test]
+    fn generic_contextual_overload_infers_from_the_current_using_clause() {
+        let source_text = "class C { class Ctx[A]; def f[A](using ctx: Ctx[A]): Ctx[A] = ctx; def f(using ctx: Ctx[Boolean]): Ctx[Boolean] = ctx; def use(using ctx: Ctx[Int]): Ctx[Int] = f(using ctx) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let method_name = Name::new(store.names.intern("f"), Namespace::Term);
+        let methods = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&method_name)
+            .to_vec();
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let generic_method = methods
+            .into_iter()
+            .find(|symbol| matches!(typer.complete_symbol(*symbol), Ok(callable) if matches!(typer.store().types.get(callable), Type::Poly(_))))
+            .unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected a typed generic using overload application")
+        };
+        assert_eq!(application.kind, ApplyKind::Using);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::Applied { args, .. } if args == &[definitions.int]
+        ));
+        let function = typer.typed_ast().get(application.function);
+        assert!(matches!(
+            typer.store().types.get(function.ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == generic_method
+        ));
+    }
+
+    #[test]
+    fn generic_explicit_using_infers_from_a_legacy_implicit_clause() {
+        let source_text = "class C { class Ctx[A]; def f[A](implicit ctx: Ctx[A]): Ctx[A] = ctx; def use(implicit ctx: Ctx[Int]): Ctx[Int] = f(using ctx) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected a typed generic using application")
+        };
+        assert_eq!(application.kind, ApplyKind::Using);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::Applied { args, .. } if args == &[definitions.int]
+        ));
     }
 
     #[test]
