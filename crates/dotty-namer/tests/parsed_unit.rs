@@ -4794,7 +4794,10 @@ fn extension_export_children_are_deferred_without_method_symbols() {
         site.extension_prefix_clauses,
         Some(extension.param_clauses.clone())
     );
-    assert_eq!(index.export_sites_for_owner(site.owner), &[site.clone()]);
+    assert_eq!(
+        index.export_sites_for_owner(site.owner),
+        std::slice::from_ref(site)
+    );
 }
 
 #[test]
