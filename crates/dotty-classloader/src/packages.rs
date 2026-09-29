@@ -1,5 +1,5 @@
 use crate::binary_name::BinaryName;
-use dotty_core::{Packages, SemanticStore, SymbolId, SymbolOrigin};
+use dotty_core::{Name, Packages, SemanticStore, SymbolId, SymbolOrigin};
 
 /// The classloader's view of the session's package registry.
 ///
@@ -41,6 +41,28 @@ impl PackageRegistry {
     /// entering any missing segment.
     pub(crate) fn resolve_package(&mut self, store: &mut SemanticStore, path: &str) -> SymbolId {
         self.resolve_path(store, path)
+    }
+
+    /// Enters a loaded class in its package's name-lookup scope. The
+    /// class's owner already identifies the package; this separate entry
+    /// makes package members discoverable without scanning all symbols.
+    /// Re-entering the same identity is harmless when a package registry is
+    /// handed between adapters or loader sessions.
+    pub(crate) fn enter_class(
+        &mut self,
+        store: &mut SemanticStore,
+        package: SymbolId,
+        name: Name,
+        class: SymbolId,
+    ) {
+        let scope = self
+            .packages
+            .scope_of(package)
+            .expect("a resolved package has a declaration scope");
+        let declarations = store.scopes.get_mut(scope);
+        if !declarations.lookup_all(&name).contains(&class) {
+            declarations.enter(name, class);
+        }
     }
 
     /// `path` is a `/`-joined package path, or `""` for the root/unnamed

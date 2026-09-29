@@ -377,6 +377,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 links: SymbolLinks::default(),
             })
         };
+        self.session
+            .packages
+            .enter_class(self.store, owner, symbol_name, class_symbol);
         let declarations = self.store.scopes.alloc(Scope::new(Some(class_symbol)));
 
         (class_symbol, declarations)
@@ -2683,13 +2686,18 @@ mod tests {
         let list = loader
             .load_class(&BinaryName::from_internal("java/util/List"))
             .expect("List should load");
-        let session = loader.into_session();
-        let package = store
+        let package = loader
+            .store
             .symbols
             .get(list)
             .owner
             .expect("List should have a package owner");
-        let list_name = Name::new(store.symbols.get(list).name.text(), Namespace::Type);
+        let list_name = loader.store.symbols.get(list).name;
+        loader
+            .session
+            .packages
+            .enter_class(loader.store, package, list_name, list);
+        let session = loader.into_session();
         let mut classes = HashMap::new();
         classes.insert(
             BinaryName::from_internal("java/lang/Object"),
@@ -2715,6 +2723,7 @@ mod tests {
         let package_scope = packages
             .scope_of(package)
             .expect("the shared package registry should retain its scope");
+        let list_name = Name::new(store.symbols.get(list).name.text(), Namespace::Type);
         assert_eq!(
             store.scopes.get(package_scope).lookup_all(&list_name),
             &[list],
