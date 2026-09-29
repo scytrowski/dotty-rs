@@ -307,7 +307,8 @@ where
         let tpt = if matches!(
             self.current().kind,
             TokenKind::Identifier | TokenKind::BackquotedIdentifier
-        ) {
+        ) || self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen)
+        {
             self.with_location(Location::Elsewhere, |parser| {
                 parser.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
             })
@@ -412,6 +413,7 @@ mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use crate::statements::ParsedStatement;
+    use dotty_core::ast::UntypedNode;
     use dotty_core::{NameInterner, TokenKind, TreeKind};
 
     #[test]
@@ -686,6 +688,56 @@ mod tests {
             0
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_parenthesized_nested_annotation_types() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "@(deprecated @companionMethod) class A",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+                token(TokenKind::Identifier, 2, 12),
+                token(TokenKind::Operator, 13, 14),
+                token(TokenKind::Identifier, 14, 29),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 29, 30),
+                token(TokenKind::Keyword(HardKeyword::Class), 31, 36),
+                token(TokenKind::Identifier, 37, 38),
+                token(TokenKind::Eof, 38, 38),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an annotated class");
+        };
+        let TreeKind::TypeDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a type definition");
+        };
+        assert_eq!(definition.metadata.annotations.len(), 1);
+
+        let outer = definition.metadata.annotations[0];
+        let TreeKind::Apply(application) = &parser.ast().get(outer).kind else {
+            panic!("expected the annotation to be constructor-applied");
+        };
+        let TreeKind::Select(selection) = &parser.ast().get(application.function).kind else {
+            panic!("expected the annotation constructor selection");
+        };
+        let TreeKind::New(new) = &parser.ast().get(selection.qualifier).kind else {
+            panic!("expected the annotation type to be wrapped in New");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &parser.ast().get(new.tpt).kind
+        else {
+            panic!("expected the annotation type's source parentheses to be preserved");
+        };
+        assert!(
+            matches!(parser.ast().get(parens.inner).kind, TreeKind::Annotated(_)),
+            "unexpected inner annotation type: {:?}",
+            parser.ast().get(parens.inner).kind
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]

@@ -2187,7 +2187,11 @@ where
     /// Parses the small simple-type subset needed by simple expressions.
     pub(crate) fn simple_type(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
-        let mut tree = self.simple_type_reference();
+        let mut tree = if self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
+            self.parse_parenthesized_type(mark)
+        } else {
+            self.simple_type_reference()
+        };
 
         loop {
             if self
