@@ -14717,7 +14717,7 @@ mod tests {
     #[test]
     fn generic_primary_constructor_preserves_nested_explicit_type_arguments() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class Box[A](); class Use { def make: Box[Box[Int]] = new Box[Box[Int]]() }",
+            "class Box[A](value: A); class Use { def make(value: Box[Int]): Box[Box[Int]] = new Box[Box[Int]](value) }",
         );
         let class = class_symbol(&parsed, &store, &index, source, "Box");
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
