@@ -198,7 +198,12 @@ where
                 break;
             }
             let checkpoint = self.cursor.checkpoint();
-            params.push(self.parse_term_param(owner, first_ordinary_clause, metadata.clone()));
+            params.push(self.parse_term_param(
+                owner,
+                first_ordinary_clause,
+                metadata.clone(),
+                is_using,
+            ));
 
             if !self.cursor.progressed_since(checkpoint) {
                 self.report(
@@ -240,6 +245,7 @@ where
         owner: ParamOwner,
         first_ordinary_clause: bool,
         mut metadata: Modifiers,
+        is_using_clause: bool,
     ) -> TreeId<Untyped> {
         let mark = self.mark();
         while self.current().kind == TokenKind::Operator && self.current_text_is("@") {
@@ -251,6 +257,16 @@ where
         } else if self.current_is_inline_parameter_modifier() {
             self.add_modifier(&mut metadata, Modifier::Inline);
             self.advance();
+            false
+        } else if is_using_clause && crate::modifiers::is_hard_modifier(self.current().kind) {
+            self.report_at(
+                ParseDiagnosticKind::UnsupportedSyntax,
+                self.current_span(),
+                "hard modifiers are not allowed on a named `using` parameter for this owner",
+            );
+            while crate::modifiers::is_hard_modifier(self.current().kind) {
+                self.advance();
+            }
             false
         } else {
             false
