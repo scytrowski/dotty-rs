@@ -5420,6 +5420,56 @@ mod tests {
     }
 
     #[test]
+    fn anonymous_parenthesized_function_parent_keeps_its_template_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "new Parent with (A => B) { def f = 1 }",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::New), 0, 3),
+                token(TokenKind::Identifier, 4, 10),
+                token(TokenKind::Keyword(HardKeyword::With), 11, 15),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 16, 17),
+                token(TokenKind::Identifier, 17, 18),
+                token(TokenKind::Operator, 19, 21),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 23, 24),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 25, 26),
+                token(TokenKind::Keyword(HardKeyword::Def), 27, 30),
+                token(TokenKind::Identifier, 31, 32),
+                token(TokenKind::Operator, 33, 34),
+                token(TokenKind::IntegerLiteral, 35, 36),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 37, 38),
+                token(TokenKind::Eof, 38, 38),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::New(New { tpt }) = parser.ast().get(tree).kind else {
+            panic!("expected an anonymous new template");
+        };
+        let TreeKind::Template(template) = &parser.ast().get(tpt).kind else {
+            panic!("expected the anonymous template");
+        };
+        assert_eq!(template.parents.len(), 2);
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(parenthesized)) =
+            &parser.ast().get(template.parents[1]).kind
+        else {
+            panic!("expected a parenthesized function-type mixin");
+        };
+        assert!(matches!(
+            parser.ast().get(parenthesized.inner).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert_eq!(template.body.len(), 1);
+        assert!(matches!(
+            parser.ast().get(template.body[0]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn recovers_from_a_missing_function_parent_result_type() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
