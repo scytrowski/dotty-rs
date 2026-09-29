@@ -568,3 +568,49 @@ reduction to any one PR. The intervening changes include parser hardening,
 assignment parsing, and constructor parameter modifiers. The three
 constructor-modifier corpus examples named in #420 parse without diagnostics.
 Hard failures, process failures, panics, and hangs remain zero.
+
+## Corpus rerun after PR #477
+
+Issue #479 reran the same 1,236-file corpus at parser revision
+`46bab6e40f78f67e8ff2f39fe6864574b78adf66` (main after PR #477), using Scala
+3.9.0 source revision `777528f19a58e794c9954a42f433373472ec57f8`. The report is
+[`parser-post-issue-477-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-477-scala3-3.9.0.json).
+
+| Measure | After #435 (`45191bc6`) | After #477 (`46bab6e4`) | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parse | 1,074 (86.89%) | 1,113 (90.05%) | +39 (+3.16 pp) |
+| Recoverable diagnostics | 162 (13.11%) | 123 (9.95%) | -39 (-3.16 pp) |
+| Hard parser failures / process failures / panics / hangs | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | unchanged |
+| Scanner diagnostics | 13 | 13 | 0 |
+| Scala oracle results / exceptions | 1,236 / 30 | 1,236 / 30 | unchanged |
+
+The capture-checking-disabled cohort increased from 853 to 882 clean files
+(+29 of 994); the enabled cohort increased from 221 to 231 (+10 of 242).
+Diagnostic occurrences fell from 2,488 to 1,738 (-750, or 30.1%):
+
+| Diagnostic occurrences | After #435 | After #477 | Change |
+| --- | ---: | ---: | ---: |
+| `ExpectedExpression` | 804 | 675 | -129 |
+| `ExpectedPattern` | 5 | 5 | 0 |
+| `ExpectedToken` | 355 | 232 | -123 |
+| `ExpectedType` | 236 | 7 | -229 |
+| `UnexpectedToken` | 580 | 413 | -167 |
+| `UnsupportedSyntax` | 508 | 406 | -102 |
+| **Total** | **2,488** | **1,738** | **-750 (-30.1%)** |
+
+The largest first-failure buckets are now `ExpectedToken` (41 files),
+`ExpectedExpression` (38), `UnexpectedToken` (26), and `ExpectedType` (4).
+Against #435, these changed by -10, -4, +3, and -25 respectively. The small
+increase in `UnexpectedToken` is a first-diagnostic-only shift and does not
+outweigh the net 39 additional clean files; first-failure counts can move as
+parsing proceeds farther. The largest diagnostic-occurrence buckets are
+`ExpectedExpression` (675), `UnexpectedToken` (413), and `UnsupportedSyntax`
+(406). Oracle exceptions remain 30, so those files' Scala behavior is still
+not represented by successful oracle trees.
+
+This is an aggregate comparison from the post-#435 baseline through the main
+tip after PR #477; it does not attribute the 39 additional clean files or the
+diagnostic reduction to PR #477 alone. The corpus run took about 15.7 seconds
+on the measurement machine. Hard failures, process failures, panics, and hangs
+remain zero.
