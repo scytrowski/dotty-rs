@@ -777,13 +777,20 @@ pub enum TyperError {
         tree_index: u32,
         tree_kind: &'static str,
     },
-    /// Only plain method clauses are supported by ordinary application.
+    /// The application syntax does not match the method clause kind.
+    ApplicationMethodKindMismatch {
+        source: SourceId,
+        tree_index: u32,
+        application_kind: ApplyKind,
+        method_kind: MethodKind,
+    },
+    /// The constructor application helper currently supports only plain clauses.
     UnsupportedApplicationMethodKind {
         source: SourceId,
         tree_index: u32,
         kind: MethodKind,
     },
-    /// `using` application requires contextual argument insertion.
+    /// A call requires contextual argument insertion or implicit search.
     UsingApplicationDeferred {
         source: SourceId,
         tree_index: u32,
@@ -2432,12 +2439,6 @@ impl<'a> SourceTyper<'a> {
                 )
             }
             TreeKind::Apply(application) => {
-                if application.kind == ApplyKind::Using {
-                    return Err(TyperError::UsingApplicationDeferred {
-                        source: self.source,
-                        tree_index: tree.index(),
-                    });
-                }
                 let constructor_function = self.resolve_constructor_application_function(
                     application.function,
                     &application.args,
@@ -2578,11 +2579,18 @@ impl<'a> SourceTyper<'a> {
                         });
                     }
                 };
-                if method.kind != MethodKind::Plain {
-                    return Err(TyperError::UnsupportedApplicationMethodKind {
+                let method_kind_matches = match application.kind {
+                    ApplyKind::Regular => method.kind == MethodKind::Plain,
+                    ApplyKind::Using => {
+                        matches!(method.kind, MethodKind::Contextual | MethodKind::Implicit)
+                    }
+                };
+                if !method_kind_matches {
+                    return Err(TyperError::ApplicationMethodKindMismatch {
                         source: self.source,
                         tree_index: tree.index(),
-                        kind: method.kind,
+                        application_kind: application.kind,
+                        method_kind: method.kind,
                     });
                 }
                 if application.args.len() != method.params.len() {
@@ -25107,7 +25115,7 @@ mod tests {
     }
 
     #[test]
-    fn contextual_method_application_is_deferred() {
+    fn regular_application_rejects_a_contextual_clause() {
         let source_text = "class C { def f(using x: Int): Int = x; def use: Int = f(1) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
@@ -25127,15 +25135,16 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::UnsupportedApplicationMethodKind {
-                kind: MethodKind::Contextual,
+            Err(TyperError::ApplicationMethodKindMismatch {
+                application_kind: ApplyKind::Regular,
+                method_kind: MethodKind::Contextual,
                 ..
             })
         ));
     }
 
     #[test]
-    fn implicit_method_application_is_deferred() {
+    fn regular_application_rejects_an_implicit_clause() {
         let source_text = "class C { def f(implicit x: Int): Int = x; def use: Int = f(1) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
@@ -25155,16 +25164,74 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::UnsupportedApplicationMethodKind {
-                kind: MethodKind::Implicit,
+            Err(TyperError::ApplicationMethodKindMismatch {
+                application_kind: ApplyKind::Regular,
+                method_kind: MethodKind::Implicit,
                 ..
             })
         ));
     }
 
     #[test]
-    fn using_application_is_deferred() {
+    fn explicit_using_application_types_arguments_and_preserves_its_kind() {
         let source_text = "class C { def f(using x: Int): Int = x; def use: Int = f(using 1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected a typed using application")
+        };
+        assert_eq!(application.kind, ApplyKind::Using);
+        assert_eq!(application.args.len(), 1);
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+    }
+
+    #[test]
+    fn explicit_using_application_types_multiple_arguments() {
+        let source_text = "class C { def f(using x: Int, flag: Boolean): Int = x; def use: Int = f(using 1, true) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected a typed using application")
+        };
+        assert_eq!(application.kind, ApplyKind::Using);
+        assert_eq!(application.args.len(), 2);
+    }
+
+    #[test]
+    fn explicit_using_application_checks_arity() {
+        let source_text = "class C { def f(using x: Int): Int = x; def use: Int = f(using 1, 2) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
         let context = ExpressionContext {
@@ -25183,8 +25250,108 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::UsingApplicationDeferred { .. })
+            Err(TyperError::ApplicationArityMismatch {
+                expected: 1,
+                actual: 2,
+                ..
+            })
         ));
+    }
+
+    #[test]
+    fn generic_plain_then_using_application_preserves_both_clauses() {
+        let source_text = "class C { class Ctx[A]; def f[A](x: A)(using ctx: Ctx[A]): A = x; def use(using ctx: Ctx[Int]): Int = f(1)(using ctx) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: method_parameter_context(&parsed, &index, source, method, 0),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(using_application) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected the outer using application")
+        };
+        assert_eq!(using_application.kind, ApplyKind::Using);
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        let TreeKind::Apply(regular_application) =
+            &typer.typed_ast().get(using_application.function).kind
+        else {
+            panic!("expected the inner regular application")
+        };
+        assert_eq!(regular_application.kind, ApplyKind::Regular);
+    }
+
+    #[test]
+    fn using_application_rejects_a_plain_clause() {
+        let source_text = "class C { def f(x: Int): Int = x; def use: Int = f(using 1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ApplicationMethodKindMismatch {
+                application_kind: ApplyKind::Using,
+                method_kind: MethodKind::Plain,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn explicit_using_application_reports_argument_type_mismatch_atomically() {
+        let source_text = "class C { def f(using x: Int): Int = x; def use: Int = f(using true) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ApplicationArgumentTypeMismatch {
+                argument_index: 0,
+                actual,
+                expected,
+                ..
+            }) if actual == definitions.boolean && expected == definitions.int
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.typed_ast().iter().next().is_none());
     }
 
     #[test]
