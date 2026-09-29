@@ -2968,17 +2968,17 @@ impl<'a> SourceTyper<'a> {
                         });
                     };
                     if let Some(kind) = local_block_declaration_kind(&source_stat.kind) {
-                        if let TreeKind::DefDef(definition) = &source_stat.kind {
-                            if definition.rhs.is_some() {
-                                stats.push(self.type_local_method_definition(
-                                    stat,
-                                    definition,
-                                    source_stat.position,
-                                    info_journal,
-                                    new_mappings,
-                                )?);
-                                continue;
-                            }
+                        if let TreeKind::DefDef(definition) = &source_stat.kind
+                            && definition.rhs.is_some()
+                        {
+                            stats.push(self.type_local_method_definition(
+                                stat,
+                                definition,
+                                source_stat.position,
+                                info_journal,
+                                new_mappings,
+                            )?);
+                            continue;
                         }
                         if let TreeKind::ValDef(definition) = &source_stat.kind {
                             if definition
