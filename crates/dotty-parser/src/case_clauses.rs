@@ -40,20 +40,24 @@ where
         let body = if expr_only {
             self.advance();
             self.consume_case_newlines();
-            let indented = self.accept(TokenKind::Indent);
-            let body = self.with_case_body(|parser| {
-                parser.with_location(Location::InBlock, |parser| parser.expr())
-            });
-            if indented {
-                self.consume_case_newlines();
-                if !self.accept(TokenKind::Outdent) {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedToken,
-                        "expected an outdent to close an expression-only case body",
-                    );
+            self.with_case_body(|parser| {
+                if parser.current().kind == TokenKind::Indent {
+                    // Dotty's expression-only case production still parses an
+                    // indented expression as a BlockExpr. Keep the indentation
+                    // token visible so the shared case-body parser consumes
+                    // the complete statement sequence and its matching outdent.
+                    let body = parser.parse_case_body(body_mark);
+                    if let TreeKind::Block(Block { stats, expr }) = &parser.ast.get(body).kind
+                        && stats.is_empty()
+                    {
+                        *expr
+                    } else {
+                        body
+                    }
+                } else {
+                    parser.with_location(Location::InBlock, |parser| parser.expr())
                 }
-            }
-            body
+            })
         } else {
             self.observe_case_body_indented(mark.start);
             self.advance();
@@ -322,6 +326,46 @@ mod tests {
         assert!(matches!(parser.ast().get(body).kind, TreeKind::Ident(_)));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(observed.borrow().is_empty());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn expression_only_case_with_an_indent_parses_the_whole_block_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case x =>\n  first\n  second",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Newline, 9, 10),
+                token(TokenKind::Indent, 12, 12),
+                token(TokenKind::Identifier, 12, 17),
+                token(TokenKind::Newline, 17, 18),
+                token(TokenKind::Identifier, 20, 26),
+                token(TokenKind::Outdent, 26, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        );
+
+        let case = parser.case_clause(true);
+        let TreeKind::CaseDef(case) = &parser.ast().get(case).kind else {
+            panic!("expected a case clause");
+        };
+        let TreeKind::Block(body) = &parser.ast().get(case.body).kind else {
+            panic!("an indented expression-only case body should retain its block");
+        };
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(body.stats[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(body.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
     }
 
