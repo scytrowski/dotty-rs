@@ -80,11 +80,17 @@ transparent wrappers are normalized only to discover the class symbol; the
 typed `New` keeps the unnormalized projected type. Anonymous-template `new`
 is deferred. Constructor discovery reads only the target class's declaration
 scope, returns every `<init>` constructor in insertion order, and never walks
-parent classes. A plain monomorphic constructor application is supported when
-exactly one direct constructor exists; it preserves the constructor symbol in
-the typed selection and reuses ordinary method argument checking, including
-nested curried clauses. Overloaded, polymorphic, and contextual constructor
-applications remain explicit deferrals.
+parent classes. A primary constructor application is supported when exactly
+one direct constructor exists; it preserves the constructor symbol in the
+typed selection and reuses ordinary method argument checking, including
+nested curried clauses. For a generic primary constructor, explicit type
+arguments are read from the typed `New` instance type and instantiate the
+constructor's exact `Poly` binder by index. Ordinary lower and upper bounds
+use the same relation as explicit method type applications, and the
+instantiated final result must agree with the instance class and type
+arguments. No synthetic source `TypeApply` is introduced. Constructor
+inference, overload competition, and contextual constructor applications
+remain explicit deferrals.
 
 An `if` condition is checked against canonical `Boolean`. Both branches are
 typed in the same lexical context and retain their own types in the typed AST.
@@ -203,7 +209,7 @@ are ready:
   statements;
 - generic overload inference, `using`/implicit argument insertion, dependent
   result application, and right-associative extension normalization;
-- applying constructor arguments, selecting a constructor overload, and
+- inferring constructor type arguments, selecting constructor overloads, and
   anonymous-class lowering;
 - enum semantics, case-class synthetic APIs, and `derives`;
 - context-bound evidence synthesis;
