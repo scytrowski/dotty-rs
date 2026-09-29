@@ -1830,6 +1830,113 @@ fn parsed_nested_object_creates_module_class_and_links_its_companion() {
 }
 
 #[test]
+fn parsed_enum_reuses_explicit_companion_without_entering_cases_as_members() {
+    use dotty_core::{SymbolKind, SymbolOrigin, TermName};
+    use dotty_lexer::ContextualScanner;
+
+    let source_text = "enum Color:\n  case Red\n\nobject Color:\n  def helper = 1";
+    let source = SourceId::from_index(489);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source_text).expect("source should lex");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let enum_tree = package.stats[0];
+    let object_tree = package.stats[1];
+    let TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::ModuleDef(object)) =
+        &parsed.ast.get(object_tree).kind
+    else {
+        panic!("explicit enum companion should be an object");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(object.template).kind else {
+        panic!("object should have a Template");
+    };
+    let helper_tree = template.body[0];
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Color.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("enum and its companion should be named together");
+
+    let package_scope = packages.get(&[] as &[&str]).unwrap().scope;
+    let enum_symbol = index.symbol_at(source, enum_tree).unwrap();
+    let object_symbol = index.symbol_at(source, object_tree).unwrap();
+    let helper_symbol = index.symbol_at(source, helper_tree).unwrap();
+    let module_class = store
+        .scopes
+        .get(package_scope)
+        .lookup(TypeName::new(store.names.intern("Color$")).as_name())
+        .unwrap();
+    let enum_scope = index.scope_of(enum_symbol).unwrap();
+    assert!(index.scope_of(module_class).is_some());
+
+    assert_eq!(store.symbols.get(enum_symbol).kind, SymbolKind::Class);
+    assert_eq!(store.symbols.get(object_symbol).kind, SymbolKind::Object);
+    assert_eq!(
+        store.symbols.get(module_class).kind,
+        SymbolKind::ModuleClass
+    );
+    assert_eq!(
+        store.symbols.get(object_symbol).origin,
+        SymbolOrigin::Source(source)
+    );
+    assert_eq!(index.symbol_at(source, enum_tree), Some(enum_symbol));
+    assert_eq!(index.symbol_at(source, object_tree), Some(object_symbol));
+    assert_eq!(
+        store.symbols.get(enum_symbol).links.companion,
+        Some(object_symbol)
+    );
+    assert_eq!(
+        store.symbols.get(object_symbol).links.companion,
+        Some(enum_symbol)
+    );
+    assert_eq!(store.symbols.get(helper_symbol).owner, Some(module_class));
+    assert!(
+        store
+            .scopes
+            .get(enum_scope)
+            .lookup_all(&TermName::new(store.names.intern("Red")).as_name())
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .scopes
+            .get(package_scope)
+            .lookup_all(&TermName::new(store.names.intern("Color")).as_name())
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .scopes
+            .get(package_scope)
+            .lookup_all(&TypeName::new(store.names.intern("Color")).as_name())
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .scopes
+            .get(package_scope)
+            .lookup_all(TypeName::new(store.names.intern("Color$")).as_name())
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn parsed_pattern_val_binders_are_fields_of_the_source_wrapper() {
     use dotty_core::ast::UntypedNode;
     use dotty_core::{SymbolKind, TermName};

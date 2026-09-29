@@ -1345,7 +1345,7 @@ impl Namer<'_> {
             } => {
                 let object_name = self.store.symbols.get(object_symbol).name;
                 if let Some(class) = self.source_companion_class(object_name, enclosing_scope) {
-                    self.companion_links.push((class, object_symbol));
+                    self.queue_companion_link(class, object_symbol);
                 }
                 return self.scan_template_body(
                     template,
@@ -1387,6 +1387,9 @@ impl Namer<'_> {
         let TreeKind::TypeDef(definition) = &self.arena.get(tree).kind else {
             return Ok(());
         };
+        if definition.metadata.modifiers.contains(&Modifier::Enum) {
+            self.ensure_enum_companion(tree, symbol, declaration_context)?;
+        }
         self.scan_template_body(
             definition.rhs,
             symbol,
@@ -1416,6 +1419,133 @@ impl Namer<'_> {
             });
         let candidate = candidates.next()?;
         candidates.next().is_none().then_some(candidate)
+    }
+
+    fn queue_companion_link(&mut self, class: SymbolId, object: SymbolId) {
+        if !self.companion_links.contains(&(class, object)) {
+            self.companion_links.push((class, object));
+        }
+    }
+
+    fn ensure_enum_companion(
+        &mut self,
+        tree: TreeId<Untyped>,
+        enum_symbol: SymbolId,
+        declaration_context: SourceContextId,
+    ) -> Result<(), NamerError> {
+        let enum_name = self.store.symbols.get(enum_symbol).name;
+        let enum_text = self.store.names.resolve(enum_name.text()).to_owned();
+        let owner =
+            self.store
+                .symbols
+                .get(enum_symbol)
+                .owner
+                .ok_or(NamerError::MalformedAstShape {
+                    tree_index: tree.index(),
+                    expected: "enum class with a semantic owner",
+                })?;
+        let owner_scope = self
+            .index
+            .scope_of(owner)
+            .ok_or(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "enum owner with a declaration scope",
+            })?;
+        let term_name = *dotty_core::TermName::new(enum_name.text()).as_name();
+        let explicit_objects = self
+            .store
+            .scopes
+            .get(owner_scope)
+            .lookup_all(&term_name)
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                let candidate = self.store.symbols.get(*candidate);
+                candidate.kind == SymbolKind::Object
+                    && matches!(candidate.origin, SymbolOrigin::Source(_))
+            })
+            .collect::<Vec<_>>();
+
+        if let [object] = explicit_objects.as_slice() {
+            let module_class_text = format!("{enum_text}$");
+            let module_class_name =
+                *TypeName::new(self.store.names.intern(&module_class_text)).as_name();
+            let module_classes = self
+                .store
+                .scopes
+                .get(owner_scope)
+                .lookup_all(&module_class_name)
+                .iter()
+                .copied()
+                .filter(|candidate| {
+                    let candidate = self.store.symbols.get(*candidate);
+                    candidate.kind == SymbolKind::ModuleClass
+                        && candidate.owner == Some(owner)
+                        && matches!(candidate.origin, SymbolOrigin::Source(_))
+                })
+                .collect::<Vec<_>>();
+            if module_classes.len() == 1 {
+                self.queue_companion_link(enum_symbol, *object);
+                return Ok(());
+            }
+            return Err(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "explicit enum companion with one module class",
+            });
+        }
+        if !explicit_objects.is_empty() {
+            return Err(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "unique explicit enum companion object",
+            });
+        }
+
+        let module_class_text = format!("{enum_text}$");
+        let module_class_name =
+            *TypeName::new(self.store.names.intern(&module_class_text)).as_name();
+        let object = self.store.symbols.alloc(Symbol {
+            name: term_name,
+            owner: Some(owner),
+            kind: SymbolKind::Object,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        self.store
+            .scopes
+            .get_mut(owner_scope)
+            .enter(term_name, object);
+        self.scope_insertions.push((owner_scope, object));
+
+        let module_class = self.store.symbols.alloc(Symbol {
+            name: module_class_name,
+            owner: Some(owner),
+            kind: SymbolKind::ModuleClass,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        self.store
+            .scopes
+            .get_mut(owner_scope)
+            .enter(module_class_name, module_class);
+        self.scope_insertions.push((owner_scope, module_class));
+        let module_scope = self.store.scopes.alloc(Scope::new(Some(module_class)));
+        self.index.record_scope(module_class, module_scope)?;
+        self.index
+            .record_declaration_context(object, declaration_context)?;
+        self.index
+            .record_declaration_context(module_class, declaration_context)?;
+        self.queue_companion_link(enum_symbol, object);
+        Ok(())
     }
 
     fn scan_template_body(
@@ -1621,6 +1751,9 @@ impl Namer<'_> {
                 continue;
             }
             let is_enum_case = match &self.arena.get(*member).kind {
+                TreeKind::TypeDef(definition) => {
+                    definition.metadata.modifiers.contains(&Modifier::EnumCase)
+                }
                 TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) => {
                     definition.metadata.modifiers.contains(&Modifier::EnumCase)
                 }
@@ -4673,6 +4806,60 @@ mod tests {
             Some(symbol)
         );
         assert!(index.scope_of(symbol).is_some());
+    }
+
+    #[test]
+    fn enum_without_a_source_object_gets_a_synthetic_companion_pair() {
+        let mut store = SemanticStore::new();
+        let mut arena = AstArena::<Untyped>::new();
+        let enumeration = class_definition(
+            &mut arena,
+            &mut store,
+            "Color",
+            vec![Modifier::Enum],
+            vec![],
+            None,
+        );
+        let root = package_with_stat(&mut arena, &mut store, "enums", vec![enumeration]);
+        let mut packages = Packages::new();
+
+        let index = name_package(&arena, root, 18, &mut store, &mut packages).unwrap();
+        let package_scope = packages.get(&["enums"]).unwrap().scope;
+        let enum_symbol = type_symbol(&mut store, package_scope, "Color").unwrap();
+        let object_symbol = term_symbol(&mut store, package_scope, "Color").unwrap();
+        let module_class = type_symbol(&mut store, package_scope, "Color$").unwrap();
+
+        assert_eq!(
+            store.symbols.get(enum_symbol).links.companion,
+            Some(object_symbol)
+        );
+        assert_eq!(
+            store.symbols.get(object_symbol).links.companion,
+            Some(enum_symbol)
+        );
+        assert_eq!(
+            store.symbols.get(module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            store.symbols.get(module_class).owner,
+            packages.symbol(&["enums"])
+        );
+        assert_eq!(
+            store.symbols.get(object_symbol).origin,
+            SymbolOrigin::Synthetic
+        );
+        assert_eq!(
+            store.symbols.get(module_class).origin,
+            SymbolOrigin::Synthetic
+        );
+        assert!(index.scope_of(module_class).is_some());
+        assert!(index.declaration_context_of(object_symbol).is_some());
+        assert!(index.declaration_context_of(module_class).is_some());
+        assert_eq!(
+            index.symbol_at(SourceId::from_index(18), enumeration),
+            Some(enum_symbol)
+        );
     }
 
     #[test]
