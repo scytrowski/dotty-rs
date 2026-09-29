@@ -2444,6 +2444,34 @@ mod tests {
     }
 
     #[test]
+    fn recovers_from_a_missing_type_on_an_annotation_prefixed_using_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(using @A ctx)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses[0].len(), 1);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn parses_multiple_anonymous_using_types_in_source_order() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
