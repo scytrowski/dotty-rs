@@ -107,8 +107,9 @@ no-applicable errors retain candidate identities and rejection reasons.
 Inference for raw generic `new` is supported when a generic primary constructor
 wins. If a raw generic `new` selects a secondary constructor, typing is
 explicitly rejected because its signature has not been adapted using inferred
-owner type arguments. Expected-type inference and contextual constructor
-applications remain explicit deferrals.
+owner type arguments. Expected-type inference, automatic contextual constructor
+argument insertion, and implicit search remain explicit deferrals; explicit
+constructor `using` clauses are checked and can contribute inference constraints.
 
 A secondary constructor in a generic class keeps the enclosing class's type
 parameters in its result, for example `C[A]`; those parameters remain owned by

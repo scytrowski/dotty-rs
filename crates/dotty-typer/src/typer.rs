@@ -3808,7 +3808,7 @@ impl<'a> SourceTyper<'a> {
             let TreeKind::Apply(application) = &node.kind else {
                 break;
             };
-            reversed_clauses.push(application.args.clone());
+            reversed_clauses.push((application.kind, application.args.clone()));
             current = application.function;
         }
         let Some(node) = self.arena.try_get(current) else {
@@ -3861,7 +3861,7 @@ impl<'a> SourceTyper<'a> {
         };
         let mut method_type = poly.result;
         let mut typed_clauses = Vec::with_capacity(reversed_clauses.len());
-        for clause in reversed_clauses {
+        for (application_kind, clause) in reversed_clauses {
             let Some(Type::Method(method)) = self.store.types.try_get(method_type).cloned() else {
                 return Err(TyperError::ApplicationCalleeNotMethod {
                     source: self.source,
@@ -3869,11 +3869,12 @@ impl<'a> SourceTyper<'a> {
                     ty: method_type,
                 });
             };
-            if method.kind != MethodKind::Plain {
-                return Err(TyperError::UnsupportedApplicationMethodKind {
+            if !application_kind_accepts(application_kind, method.kind) {
+                return Err(TyperError::ApplicationMethodKindMismatch {
                     source: self.source,
                     tree_index: root.index(),
-                    kind: method.kind,
+                    application_kind,
+                    method_kind: method.kind,
                 });
             }
             if method.params.len() != clause.len() {
@@ -17523,6 +17524,52 @@ mod tests {
             panic!("raw generic New should retain its inferred class type arguments")
         };
         assert_eq!(args, &[definitions.boolean]);
+    }
+
+    #[test]
+    fn raw_generic_constructor_infers_from_an_explicit_using_clause() {
+        let source_text = "class C { class Ctx[A]; class Box[A](value: A)(using ctx: Ctx[A]); def make(using ctx: Ctx[Int]): Box[Int] = new Box(1)(using ctx) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(using_application) = typer.typed_ast().get(typed).kind.clone() else {
+            panic!("constructor call should retain its outer using application")
+        };
+        assert_eq!(using_application.kind, ApplyKind::Using);
+        let TreeKind::Apply(regular_application) = typer
+            .typed_ast()
+            .get(using_application.function)
+            .kind
+            .clone()
+        else {
+            panic!("constructor call should retain its regular first clause")
+        };
+        assert_eq!(regular_application.kind, ApplyKind::Regular);
+        let TreeKind::Select(selection) = typer
+            .typed_ast()
+            .get(regular_application.function)
+            .kind
+            .clone()
+        else {
+            panic!("constructor application should select its constructor")
+        };
+        let new_tree = typer.typed_ast().get(selection.qualifier);
+        assert!(matches!(new_tree.kind, TreeKind::New(_)));
+        assert!(matches!(
+            typer.store().types.get(new_tree.ty),
+            Type::Applied { args, .. } if args == &[definitions.int]
+        ));
     }
 
     #[test]
