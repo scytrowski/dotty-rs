@@ -420,14 +420,8 @@ pub enum TyperError {
         owner: SymbolId,
         tree_index: u32,
     },
-    /// Source identities needed to apply a generic owner to a secondary
-    /// constructor result are not represented as constructor parameters.
-    GenericSecondaryConstructorDeferred {
-        constructor: SymbolId,
-        owner: SymbolId,
-    },
-    /// Secondary-constructor type parameters do not yet have source symbols.
-    SecondaryConstructorTypeParametersDeferred {
+    /// Scala 3 secondary constructors cannot declare their own type parameters.
+    SecondaryConstructorTypeParametersUnsupported {
         constructor: SymbolId,
     },
     /// A deferred completion belongs to a future completion engine.
@@ -2975,8 +2969,9 @@ impl<'a> SourceTyper<'a> {
                 SymbolInfo::Missing if self.index.definition_of(symbol).is_some() => {
                     match self.complete_symbol_inner(symbol, info_journal) {
                         Ok(callable) => Some(callable),
-                        Err(TyperError::GenericSecondaryConstructorDeferred { .. })
-                        | Err(TyperError::SecondaryConstructorTypeParametersDeferred { .. }) => {
+                        Err(TyperError::SecondaryConstructorTypeParametersUnsupported {
+                            ..
+                        }) => {
                             result.generic_deferred = true;
                             result
                                 .rejected_incomplete
@@ -7447,13 +7442,7 @@ impl<'a> SourceTyper<'a> {
         let is_primary = owner_constructor == Some(constructor_tree);
 
         if !is_primary && !definition.type_params.is_empty() {
-            return Err(TyperError::SecondaryConstructorTypeParametersDeferred { constructor });
-        }
-        if !is_primary
-            && definition.type_params.is_empty()
-            && !self.owner_type_parameters(constructor, owner)?.is_empty()
-        {
-            return Err(TyperError::GenericSecondaryConstructorDeferred { constructor, owner });
+            return Err(TyperError::SecondaryConstructorTypeParametersUnsupported { constructor });
         }
 
         let mut clauses = Vec::new();
@@ -7481,7 +7470,23 @@ impl<'a> SourceTyper<'a> {
             clauses.push(MethodClauseSpec::Terms(parameters, kind));
         }
         let clauses = Self::normalize_constructor_clauses(&clauses);
-        let mut result = self.constructor_effective_result(owner, &clauses);
+        let result_parameters = if is_primary {
+            match clauses.first() {
+                Some(MethodClauseSpec::Types(parameters)) => parameters.clone(),
+                _ => Vec::new(),
+            }
+        } else {
+            let owner_parameters = self.owner_type_parameters(constructor, owner)?;
+            self.type_parameter_specs(
+                owner,
+                &owner_parameters,
+                false,
+                info_journal,
+                constructor_tree.index(),
+                0,
+            )?
+        };
+        let mut result = self.constructor_effective_result(owner, &result_parameters);
         for clause in clauses.into_iter().rev() {
             result = match clause {
                 MethodClauseSpec::Types(parameters) => {
@@ -7611,29 +7616,27 @@ impl<'a> SourceTyper<'a> {
     fn constructor_effective_result(
         &mut self,
         owner: SymbolId,
-        clauses: &[MethodClauseSpec],
+        type_parameters: &[TypeParamSpec],
     ) -> TypeId {
         let owner_ref = self
             .store
             .types
             .alloc(Type::type_ref(self.definitions.no_prefix, owner));
-        match clauses.first() {
-            Some(MethodClauseSpec::Types(parameters)) => {
-                let args = parameters
-                    .iter()
-                    .map(|parameter| {
-                        self.store
-                            .types
-                            .alloc(Type::type_ref(self.definitions.no_prefix, parameter.symbol))
-                    })
-                    .collect();
-                self.store.types.alloc(Type::Applied {
-                    tycon: owner_ref,
-                    args,
-                })
-            }
-            _ => owner_ref,
+        if type_parameters.is_empty() {
+            return owner_ref;
         }
+        let args = type_parameters
+            .iter()
+            .map(|parameter| {
+                self.store
+                    .types
+                    .alloc(Type::type_ref(self.definitions.no_prefix, parameter.symbol))
+            })
+            .collect();
+        self.store.types.alloc(Type::Applied {
+            tycon: owner_ref,
+            args,
+        })
     }
 
     fn normalize_constructor_clauses(clauses: &[MethodClauseSpec]) -> Vec<MethodClauseSpec> {
@@ -12841,9 +12844,29 @@ mod tests {
     }
 
     #[test]
-    fn generic_secondary_constructor_is_deferred_without_constructor_type_params() {
+    fn secondary_constructor_of_generic_owner_returns_the_applied_owner_type() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C[A](value: A) { def this(other: A) = this(other) }");
+        let class_parameter_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+                        panic!("expected a class template");
+                    };
+                    let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind
+                    else {
+                        panic!("expected the primary constructor");
+                    };
+                    Some(constructor.type_params[0])
+                }
+                _ => None,
+            })
+            .unwrap();
+        let class_parameter = index.symbol_at(source, class_parameter_tree).unwrap();
         let constructor_tree = parsed
             .ast
             .iter()
@@ -12858,6 +12881,74 @@ mod tests {
             .unwrap();
         let constructor = index.symbol_at(source, constructor_tree).unwrap();
         let owner = store.symbols.get(constructor).owner.unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let signature = typer.complete_symbol(constructor).unwrap();
+
+        let Type::Method(method_type) = typer.store().types.get(signature) else {
+            panic!("a valid secondary constructor has no constructor type parameters");
+        };
+        assert_eq!(method_type.params.len(), 1);
+        assert_eq!(
+            type_symbol(typer.store(), method_type.params[0].ty),
+            class_parameter
+        );
+        let Type::Applied { tycon, args } = typer.store().types.get(method_type.result) else {
+            panic!("expected the owner type applied to its class parameter");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), owner);
+        assert_eq!(args.len(), 1);
+        assert_eq!(type_symbol(typer.store(), args[0]), class_parameter);
+        assert!(matches!(
+            *typer.store().symbols.info(class_parameter),
+            SymbolInfo::Complete(_)
+        ));
+    }
+
+    #[test]
+    fn secondary_constructor_owner_parameter_failure_rolls_back_completion() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C[A <: Missing](value: A) { def this(other: A) = this(other) }");
+        let class_parameter_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+                        panic!("expected a class template");
+                    };
+                    let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind
+                    else {
+                        panic!("expected the primary constructor");
+                    };
+                    Some(constructor.type_params[0])
+                }
+                _ => None,
+            })
+            .unwrap();
+        let class_parameter = index.symbol_at(source, class_parameter_tree).unwrap();
+        let constructor_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "<init>" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, constructor_tree).unwrap();
         let before = store.checkpoint();
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -12870,12 +12961,14 @@ mod tests {
 
         assert!(matches!(
             typer.complete_symbol(constructor),
-            Err(TyperError::GenericSecondaryConstructorDeferred {
-                constructor: error_constructor,
-                owner: error_owner
-            }) if error_constructor == constructor && error_owner == owner
+            Err(TyperError::TypeNameNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "Missing"
         ));
         assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(
+            *typer.store().symbols.info(class_parameter),
+            SymbolInfo::Missing
+        );
         assert_eq!(
             *typer.store().symbols.info(constructor),
             SymbolInfo::Missing
@@ -12883,7 +12976,7 @@ mod tests {
     }
 
     #[test]
-    fn secondary_constructor_type_parameters_are_explicitly_deferred() {
+    fn secondary_constructor_type_parameters_are_explicitly_unsupported() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C(value: Int) { def this[A](other: A) = this(0) }");
         let constructor_tree = parsed
@@ -12911,7 +13004,7 @@ mod tests {
 
         assert!(matches!(
             typer.complete_symbol(constructor),
-            Err(TyperError::SecondaryConstructorTypeParametersDeferred {
+            Err(TyperError::SecondaryConstructorTypeParametersUnsupported {
                 constructor: error_constructor
             }) if error_constructor == constructor
         ));

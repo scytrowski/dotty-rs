@@ -105,6 +105,14 @@ candidate identities and rejection reasons. Generic constructor competition,
 expected-type inference, and contextual constructor applications remain
 explicit deferrals.
 
+A secondary constructor in a generic class keeps the enclosing class's type
+parameters in its result, for example `C[A]`; those parameters remain owned by
+the class and are not rebound as constructor parameters. Scala 3.9.0's pinned
+[syntax grammar](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/docs/_docs/reference/syntax.md#L442-L443)
+does not allow a secondary constructor to declare its own type-parameter
+clause, so such recovered source is reported as unsupported instead of being
+typed as a generic constructor.
+
 An `if` condition is checked against canonical `Boolean`. Both branches are
 typed in the same lexical context and retain their own types in the typed AST.
 The join widens branch value types, chooses an equivalent/supertype branch
