@@ -614,3 +614,55 @@ tip after PR #477; it does not attribute the 39 additional clean files or the
 diagnostic reduction to PR #477 alone. The corpus run took about 15.7 seconds
 on the measurement machine. Hard failures, process failures, panics, and hangs
 remain zero.
+
+## Corpus rerun after PR #503
+
+Issue #506 reran the same 1,236-file corpus at parser revision
+`4c6b1e2e53aa4bd988c11e7352a506758133b990` (main after PR #503), using Scala
+3.9.0 source revision `777528f19a58e794c9954a42f433373472ec57f8`. The report is
+[`parser-post-issue-506-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-506-scala3-3.9.0.json).
+
+| Measure | After #477 (`46bab6e4`) | After #503 (`4c6b1e2e`) | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parse | 1,113 (90.05%) | 1,127 (91.18%) | +14 (+1.13 pp) |
+| Recoverable diagnostics | 123 (9.95%) | 109 (8.82%) | -14 (-1.13 pp) |
+| Hard parser failures / process failures / panics / hangs | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | unchanged |
+| Scanner diagnostics | 13 | 13 | 0 |
+| Scala oracle results / exceptions | 1,236 / 30 | 1,236 / 0 | 0 / -30 |
+
+The clean-parse gain splits into +13 files in the capture-checking-disabled
+cohort (882 → 895 of 994) and +1 in the enabled cohort (231 → 232 of 242).
+Diagnostic occurrences fell from 1,738 to 1,471 (-267, or 15.4%):
+
+| Diagnostic occurrences | After #477 | After #503 | Change |
+| --- | ---: | ---: | ---: |
+| `ExpectedExpression` | 675 | 577 | -98 |
+| `ExpectedPattern` | 5 | 5 | 0 |
+| `ExpectedToken` | 232 | 185 | -47 |
+| `ExpectedType` | 7 | 7 | 0 |
+| `UnexpectedToken` | 413 | 336 | -77 |
+| `UnsupportedSyntax` | 406 | 361 | -45 |
+| **Total** | **1,738** | **1,471** | **-267 (-15.4%)** |
+
+The largest first-failure buckets are now `ExpectedExpression` (35 files),
+`ExpectedToken` (28), `UnexpectedToken` (28), `ExpectedType` (4), and
+`ExpectedPattern` (2). Relative to #477, the first-failure counts changed by
+-3, -13, +2, 0, and 0 respectively. The two-file increase in
+`UnexpectedToken` is a first-diagnostic shift; the net result is 14 more clean
+files and fewer total diagnostic occurrences.
+
+The Scala oracle failure count fell from 30 to zero after the oracle-context
+initialization change in PR #483; this is a harness reliability improvement,
+not a 30-file Rust parser coverage gain. The source inventory and Rust
+hard-failure counts are unchanged. The corpus confirms that
+`compiler/src/dotty/tools/dotc/core/NameOps.scala` now parses without
+diagnostics. `compiler/src/dotty/tools/dotc/cc/SafeRefs.scala` still reports an
+`ExpectedToken` and an `UnexpectedToken`: its continuation is `&& !isSafe(...)`,
+and the scanner's leading-infix lookahead currently does not consider a prefix
+operator at the start of the right operand. The existing comment-continuation
+fixture uses an identifier operand and does not cover this remaining case.
+
+This is an aggregate before/after measurement across the changes since PR #477;
+it does not attribute all 14 clean parses or the diagnostic reduction to PR
+#503 alone. Hard failures, process failures, panics, and hangs remain zero.

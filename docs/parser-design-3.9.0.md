@@ -1003,9 +1003,9 @@ An earlier rerun after PR #308 is recorded in
 1,236 files parse without diagnostics (48.54%), with zero hard failures,
 panics, or hangs.
 
-The latest rerun, after PRs #371, #373, #375, #377, and #378, is recorded in
-`tools/parser-corpus-report/parser-post-issue-379-scala3-3.9.0.json`: 908 of
-1,236 files parse without diagnostics (73.46%), with zero hard failures,
+The latest rerun, after PR #503, is recorded in
+`tools/parser-corpus-report/parser-post-issue-506-scala3-3.9.0.json`: 1,127 of
+1,236 files parse without diagnostics (91.18%), with zero hard failures,
 panics, or hangs. See
 [`parser-v0.1-compatibility.md`](parser-v0.1-compatibility.md) for the
 comparison and failure-bucket analysis.
