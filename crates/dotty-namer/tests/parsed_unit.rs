@@ -2146,6 +2146,94 @@ fn parsed_comma_group_enum_cases_get_ordered_distinct_identities() {
 }
 
 #[test]
+fn failed_enum_case_group_rolls_back_partially_entered_identities() {
+    use dotty_core::ast::{ErrorNode, ErrorNodeKind, UntypedNode};
+
+    let (mut parsed, source, mut store) =
+        parsed_source("enum Direction:\n  case North, South", 505);
+    let enum_tree = match &parsed.ast.get(parsed.root).kind {
+        TreeKind::PackageDef(package) => package.stats[0],
+        _ => panic!("parser should return a package root"),
+    };
+    let case_patterns = {
+        let TreeKind::TypeDef(enum_definition) = &parsed.ast.get(enum_tree).kind else {
+            panic!("enum should be a TypeDef");
+        };
+        let TreeKind::Template(enum_template) = &parsed.ast.get(enum_definition.rhs).kind else {
+            panic!("enum should have a Template");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) =
+            &parsed.ast.get(enum_template.body[0]).kind
+        else {
+            panic!("comma-group enum case should be a PatDef");
+        };
+        definition.patterns.clone()
+    };
+    let invalid_pattern = case_patterns[1];
+    parsed.ast.get_mut(invalid_pattern).kind =
+        TreeKind::PhaseSpecific(UntypedNode::Error(ErrorNode {
+            kind: ErrorNodeKind::UnexpectedToken,
+        }));
+
+    let mut packages = Packages::new();
+    let root = packages.enter(
+        &mut store,
+        dotty_core::SymbolOrigin::Synthetic,
+        &[] as &[&str],
+    )[0];
+    let initial_store_checkpoint = store.checkpoint();
+    let initial_root_entry_count = store.scopes.get(root.scope).entered_symbols().count();
+    let error = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Direction.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect_err("malformed later enum case should fail naming");
+
+    assert_eq!(
+        error,
+        NamerError::MalformedAstShape {
+            tree_index: invalid_pattern.index(),
+            expected: "enum case identifier pattern",
+        }
+    );
+    assert_eq!(store.checkpoint(), initial_store_checkpoint);
+    assert_eq!(
+        store.scopes.get(root.scope).entered_symbols().count(),
+        initial_root_entry_count
+    );
+    let enum_term_name = *dotty_core::TermName::new(store.names.intern("Direction")).as_name();
+    let enum_type_name = *TypeName::new(store.names.intern("Direction")).as_name();
+    let companion_type_name = *TypeName::new(store.names.intern("Direction$")).as_name();
+    assert!(
+        store
+            .scopes
+            .get(root.scope)
+            .lookup_all(&enum_term_name)
+            .is_empty()
+    );
+    assert!(
+        store
+            .scopes
+            .get(root.scope)
+            .lookup_all(&enum_type_name)
+            .is_empty()
+    );
+    assert!(
+        store
+            .scopes
+            .get(root.scope)
+            .lookup_all(&companion_type_name)
+            .is_empty()
+    );
+    assert!(packages.get(&[] as &[&str]).is_some());
+    assert!(packages.is_empty());
+}
+
+#[test]
 fn parsed_singleton_enum_case_with_explicit_parent_keeps_only_case_identity() {
     use dotty_core::ast::UntypedNode;
     use dotty_core::{SymbolKind, TermName};
