@@ -1122,6 +1122,12 @@ fn is_leading_infix_tokens(
     let Some(next) = next_real_token(tokens, current_index) else {
         return false;
     };
+    let starts_prefix_rhs = next.kind == TokenKind::Operator
+        && is_prefix_operator(source, next.span)
+        && next_real_token(tokens, current_index + 1).is_some_and(|operand| {
+            can_start_statement_kind(operand.kind)
+                && !has_source_line_break(source, next.span.end(), operand.span.start())
+        });
     // Dotty only treats a leading symbolic/backquoted name as an infix
     // operator when whitespace follows it. Without this check, a line such
     // as `!second` would be joined to the preceding expression instead of
@@ -1130,7 +1136,7 @@ fn is_leading_infix_tokens(
         .chars()
         .next()
         .is_some_and(char::is_whitespace)
-        || !can_start_statement_kind(next.kind)
+        || !(can_start_statement_kind(next.kind) || starts_prefix_rhs)
     {
         return false;
     }
@@ -1191,10 +1197,16 @@ fn is_leading_infix(
     {
         return false;
     }
-    let Some(next) = next_raw_token(items, item_index) else {
+    let Some((next_index, next)) = next_raw_token_with_index(items, item_index) else {
         return false;
     };
-    if !can_start_statement(next.kind) {
+    let starts_prefix_rhs = next.kind == RawTokenKind::Operator
+        && is_prefix_operator(source, next.span)
+        && next_raw_token(items, next_index).is_some_and(|operand| {
+            can_start_statement(operand.kind)
+                && !has_source_line_break(source, next.span.end(), operand.span.start())
+        });
+    if !can_start_statement(next.kind) && !starts_prefix_rhs {
         return false;
     }
 
@@ -1203,11 +1215,24 @@ fn is_leading_infix(
     previous_indent.is_prefix_of(&operator_indent)
 }
 
+fn is_prefix_operator(source: &str, span: TextRange) -> bool {
+    source
+        .get(span.start() as usize..span.end() as usize)
+        .is_some_and(|spelling| matches!(spelling, "-" | "+" | "~" | "!"))
+}
+
 fn next_raw_token(items: &[RawItem], item_index: usize) -> Option<&RawToken> {
-    items[item_index + 1..].iter().find_map(|item| match item {
-        RawItem::Token(token) => Some(token),
-        RawItem::Trivia(_) => None,
-    })
+    next_raw_token_with_index(items, item_index).map(|(_, token)| token)
+}
+
+fn next_raw_token_with_index(items: &[RawItem], item_index: usize) -> Option<(usize, &RawToken)> {
+    items[item_index + 1..]
+        .iter()
+        .enumerate()
+        .find_map(|(offset, item)| match item {
+            RawItem::Token(token) => Some((item_index + offset + 1, token)),
+            RawItem::Trivia(_) => None,
+        })
 }
 
 fn is_layout_token(kind: TokenKind) -> bool {
@@ -3260,6 +3285,54 @@ mod tests {
             kinds("value // explanation\n  // continued below\n  && other"),
             vec![
                 TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_a_leading_infix_operator_when_its_operand_is_a_prefix_expression() {
+        let tokens = kinds("value\n  && !other\nnext");
+        assert_eq!(
+            tokens,
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_a_leading_infix_prefix_operand_after_comment_trivia() {
+        assert_eq!(
+            kinds("value // condition\n  // continued\n  && !other\nnext"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Operator,
+                TokenKind::Operator,
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_blank_line_still_separates_before_a_leading_infix_prefix_operand() {
+        assert_eq!(
+            kinds("value\n\n  && !other"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newlines,
+                TokenKind::Operator,
                 TokenKind::Operator,
                 TokenKind::Identifier,
                 TokenKind::Eof,
