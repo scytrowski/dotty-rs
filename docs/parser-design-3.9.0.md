@@ -910,7 +910,10 @@ An indented body after `do` or `yield` uses the shared statement-sequence
 parser, so local definitions and a final expression form a `Block`. The parser
 uses scanner feedback when such a body is nested in a braced scope and consumes
 its matching outdent without absorbing the following outer statement. Inline
-bodies remain ordinary expressions.
+bodies remain ordinary expressions. In the wrapped legacy form without `do` or
+`yield`, newlines after the closing enumerator delimiter are preserved until
+the body parser can request indentation feedback; this allows an indented body
+to begin with a local definition or statement sequence.
 
 ## Scala parser oracle
 
