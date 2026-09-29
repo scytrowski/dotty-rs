@@ -3351,6 +3351,66 @@ impl<'a> SourceTyper<'a> {
         Ok((*class, arguments))
     }
 
+    fn constructor_overload_callable(
+        &mut self,
+        candidate: ConstructorCandidate,
+        instance_type: TypeId,
+        type_arguments: &[TypeId],
+        has_qualifier: bool,
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        if !has_qualifier || type_arguments.is_empty() {
+            return Ok(candidate.callable);
+        }
+        let adapt_owner = || MemberCandidate {
+            symbol: candidate.symbol,
+            declaring_class: candidate.owner,
+            receiver_view: instance_type,
+            inheritance_depth: 0,
+        };
+        let Some(Type::Poly(poly)) = self.store.types.try_get(candidate.callable).cloned() else {
+            return self.member_type_on_journaled(&adapt_owner(), info_journal);
+        };
+        let is_primary = self
+            .owner_primary_constructor_tree(candidate.symbol, candidate.owner)?
+            .is_some_and(|tree| self.index.symbol_at(self.source, tree) == Some(candidate.symbol));
+        if !is_primary {
+            return self.member_type_on_journaled(&adapt_owner(), info_journal);
+        }
+        if type_arguments.len() != poly.params.len() {
+            return Err(TyperError::ConstructorTypeArgumentArityMismatch {
+                source: self.source,
+                tree_index,
+                constructor: candidate.symbol,
+                expected: poly.params.len(),
+                actual: type_arguments.len(),
+            });
+        }
+        let instantiated =
+            dotty_core::types::instantiate_poly(self.store, candidate.callable, type_arguments)
+                .map_err(|error| TyperError::ConstructorPolyInstantiationFailed {
+                    constructor: candidate.symbol,
+                    error,
+                })?;
+        for (parameter_index, (argument, bounds)) in type_arguments
+            .iter()
+            .copied()
+            .zip(instantiated.bounds.iter().copied())
+            .enumerate()
+        {
+            self.check_constructor_type_argument_bounds(
+                candidate.symbol,
+                argument,
+                bounds,
+                parameter_index,
+                tree_index,
+                info_journal,
+            )?;
+        }
+        Ok(instantiated.result)
+    }
+
     fn resolve_constructor_overload_application(
         &mut self,
         request: ConstructorOverloadRequest<'_>,
@@ -3391,79 +3451,19 @@ impl<'a> SourceTyper<'a> {
                 0,
             )?;
         }
+        let candidate_checkpoint = self.store.checkpoint();
+        let type_index_checkpoint = self.type_index.checkpoint();
+        let journal_checkpoint = info_journal.len();
         let mut application_candidates = Vec::with_capacity(candidates.len());
         for candidate in candidates {
-            let callable = if qualifier.is_some() && !type_arguments.is_empty() {
-                if let Some(Type::Poly(poly)) =
-                    self.store.types.try_get(candidate.callable).cloned()
-                {
-                    let is_primary = self
-                        .owner_primary_constructor_tree(candidate.symbol, candidate.owner)?
-                        .is_some_and(|tree| {
-                            self.index.symbol_at(self.source, tree) == Some(candidate.symbol)
-                        });
-                    if !is_primary {
-                        self.member_type_on_journaled(
-                            &MemberCandidate {
-                                symbol: candidate.symbol,
-                                declaring_class: candidate.owner,
-                                receiver_view: instance_type,
-                                inheritance_depth: 0,
-                            },
-                            info_journal,
-                        )?
-                    } else {
-                        if type_arguments.len() != poly.params.len() {
-                            return Err(TyperError::ConstructorTypeArgumentArityMismatch {
-                                source: self.source,
-                                tree_index,
-                                constructor: candidate.symbol,
-                                expected: poly.params.len(),
-                                actual: type_arguments.len(),
-                            });
-                        }
-                        let instantiated = dotty_core::types::instantiate_poly(
-                            self.store,
-                            candidate.callable,
-                            type_arguments,
-                        )
-                        .map_err(|error| {
-                            TyperError::ConstructorPolyInstantiationFailed {
-                                constructor: candidate.symbol,
-                                error,
-                            }
-                        })?;
-                        for (parameter_index, (argument, bounds)) in type_arguments
-                            .iter()
-                            .copied()
-                            .zip(instantiated.bounds.iter().copied())
-                            .enumerate()
-                        {
-                            self.check_constructor_type_argument_bounds(
-                                candidate.symbol,
-                                argument,
-                                bounds,
-                                parameter_index,
-                                tree_index,
-                                info_journal,
-                            )?;
-                        }
-                        instantiated.result
-                    }
-                } else {
-                    self.member_type_on_journaled(
-                        &MemberCandidate {
-                            symbol: candidate.symbol,
-                            declaring_class: candidate.owner,
-                            receiver_view: instance_type,
-                            inheritance_depth: 0,
-                        },
-                        info_journal,
-                    )?
-                }
-            } else {
-                candidate.callable
-            };
+            let callable = self.constructor_overload_callable(
+                *candidate,
+                instance_type,
+                type_arguments,
+                qualifier.is_some(),
+                tree_index,
+                info_journal,
+            )?;
             let rejection = None;
             match self.store.types.try_get(callable).cloned() {
                 Some(Type::Method(method)) => {
@@ -3544,6 +3544,16 @@ impl<'a> SourceTyper<'a> {
                 },
                 other => other,
             })?;
+        let winner_symbol = winner.symbol;
+        for (symbol, previous) in info_journal[journal_checkpoint..].iter().rev().copied() {
+            if self.store.symbols.contains(symbol) {
+                self.store.symbols.set_info(symbol, previous);
+            }
+        }
+        info_journal.truncate(journal_checkpoint);
+        self.store.rollback_to(candidate_checkpoint);
+        self.type_index.restore(type_index_checkpoint);
+        completed_types.clear();
         if let Some((candidate, _)) = rejected_incomplete.first() {
             return Err(
                 TyperError::ConstructorOverloadResolutionRequiresUnsupportedCandidate {
@@ -3554,6 +3564,39 @@ impl<'a> SourceTyper<'a> {
                 },
             );
         }
+        let selected_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.symbol == winner_symbol)
+            .copied()
+            .ok_or(TyperError::MalformedConstructorCandidate {
+                symbol: winner_symbol,
+                callable: winner.callable,
+            })?;
+        let selected_callable = self.constructor_overload_callable(
+            selected_candidate,
+            instance_type,
+            type_arguments,
+            qualifier.is_some(),
+            tree_index,
+            info_journal,
+        )?;
+        if let Some(Type::Method(method)) = self.store.types.try_get(selected_callable).cloned() {
+            for parameter in &method.params {
+                self.complete_relation_type(parameter.ty, info_journal, &mut completed_types, 0)?;
+            }
+        }
+        let mut selected_application = [ApplicationCandidate {
+            symbol: winner_symbol,
+            callable: selected_callable,
+            member: None,
+            rejection: None,
+        }];
+        let winner = self.choose_constructor_overload_candidate(
+            &mut selected_application,
+            &arguments,
+            tree_index,
+            info_journal,
+        )?;
         let result = self.validate_constructor_application_callable(
             winner.symbol,
             winner.callable,
