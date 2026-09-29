@@ -1151,11 +1151,16 @@ impl Namer<'_> {
             SymbolKind::Class
         };
         let mapped = self.map_source_modifiers(tree, &definition.metadata, owner_context.owner)?;
+        let flags = if definition.metadata.modifiers.contains(&Modifier::EnumCase) {
+            mapped.flags | SymbolFlags::FINAL
+        } else {
+            mapped.flags
+        };
         let symbol = self.store.symbols.alloc(Symbol {
             name,
             owner: Some(owner_context.owner),
             kind,
-            flags: mapped.flags,
+            flags,
             visibility: mapped.visibility,
             info: SymbolInfo::Missing,
             origin: SymbolOrigin::Source(self.source),
@@ -1763,7 +1768,16 @@ impl Namer<'_> {
                 TreeKind::TypeDef(definition)
                     if definition.metadata.modifiers.contains(&Modifier::EnumCase) =>
                 {
-                    // Parameterized enum cases are still deferred.
+                    if is_enum_class
+                        && let Some(header) = self.enter_enum_case_class_header(
+                            *member,
+                            symbol,
+                            &class_context,
+                            active_source_context,
+                        )?
+                    {
+                        nested_headers.push(header);
+                    }
                     continue;
                 }
                 TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition))
@@ -1911,6 +1925,35 @@ impl Namer<'_> {
             self.scan_entered_header(header)?;
         }
         Ok(())
+    }
+
+    fn enter_enum_case_class_header(
+        &mut self,
+        tree: TreeId<Untyped>,
+        enum_symbol: SymbolId,
+        enclosing_context: &NamingContext,
+        source_context: SourceContextId,
+    ) -> Result<Option<EnteredHeader>, NamerError> {
+        let module_class =
+            self.enum_companion_module_class(enum_symbol)
+                .ok_or(NamerError::MalformedAstShape {
+                    tree_index: tree.index(),
+                    expected: "enum companion module class",
+                })?;
+        let scope = self
+            .index
+            .scope_of(module_class)
+            .ok_or(NamerError::MalformedAstShape {
+                tree_index: tree.index(),
+                expected: "enum companion module-class scope",
+            })?;
+        let owner_context = NamingContext {
+            owner: module_class,
+            scope,
+            package_path: enclosing_context.package_path.clone(),
+            source_context,
+        };
+        self.enter_class_or_trait_header(tree, &owner_context)
     }
 
     fn enter_enum_singleton_case(

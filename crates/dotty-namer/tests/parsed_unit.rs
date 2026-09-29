@@ -2030,6 +2030,419 @@ fn parsed_singleton_enum_case_is_entered_in_companion_module_class_scope() {
 }
 
 #[test]
+fn parameterized_enum_case_reuses_class_and_constructor_naming() {
+    use dotty_core::{SymbolKind, SymbolOrigin, TypeName};
+
+    let mut named = named_source("enum Result:\n  case Success(value: Int)", 506);
+    let enum_tree = package_stat_trees(&named)[0];
+    let TreeKind::TypeDef(enum_definition) = &named.parsed.ast.get(enum_tree).kind else {
+        panic!("enum should be a TypeDef");
+    };
+    let TreeKind::Template(enum_template) = &named.parsed.ast.get(enum_definition.rhs).kind else {
+        panic!("enum should have a Template");
+    };
+    let case_tree = enum_template.body[0];
+    let TreeKind::TypeDef(case_definition) = &named.parsed.ast.get(case_tree).kind else {
+        panic!("parameterized enum case should be a TypeDef");
+    };
+    let TreeKind::Template(case_template) = &named.parsed.ast.get(case_definition.rhs).kind else {
+        panic!("parameterized enum case should have a Template");
+    };
+    let TreeKind::DefDef(case_constructor) = &named.parsed.ast.get(case_template.constructor).kind
+    else {
+        panic!("parameterized enum case should have a primary constructor");
+    };
+    let parameter_tree = case_constructor.value_param_clauses[0][0];
+    let enum_symbol = named.index.symbol_at(named.source, enum_tree).unwrap();
+    let enum_scope = named.index.scope_of(enum_symbol).unwrap();
+    let owner = named.store.symbols.get(enum_symbol).owner.unwrap();
+    let owner_scope = named.index.scope_of(owner).unwrap();
+    let companion_name = TypeName::new(named.store.names.intern("Result$"));
+    let companion_class = named
+        .store
+        .scopes
+        .get(owner_scope)
+        .lookup(companion_name.as_name())
+        .unwrap();
+    let companion_scope = named.index.scope_of(companion_class).unwrap();
+    let case_symbol = named.index.symbol_at(named.source, case_tree).unwrap();
+    let constructor_symbol = named
+        .index
+        .symbol_at(named.source, case_template.constructor)
+        .unwrap();
+    let field_symbol = named.index.symbol_at(named.source, parameter_tree).unwrap();
+    let constructor_parameter = named
+        .index
+        .derived_symbol_at(constructor_symbol, named.source, parameter_tree)
+        .unwrap();
+    let case_name = TypeName::new(case_definition.name.as_name().text());
+
+    assert_eq!(
+        named.store.symbols.get(companion_class).kind,
+        SymbolKind::ModuleClass
+    );
+    assert_eq!(named.store.symbols.get(case_symbol).kind, SymbolKind::Class);
+    assert_eq!(
+        named.store.symbols.get(case_symbol).owner,
+        Some(companion_class)
+    );
+    assert_eq!(
+        named.store.symbols.get(case_symbol).origin,
+        SymbolOrigin::Source(named.source)
+    );
+    assert!(
+        named
+            .store
+            .symbols
+            .get(case_symbol)
+            .flags
+            .contains(SymbolFlags::CASE | SymbolFlags::ENUM | SymbolFlags::FINAL)
+    );
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(companion_scope)
+            .lookup(case_name.as_name()),
+        Some(case_symbol)
+    );
+    assert!(
+        named
+            .store
+            .scopes
+            .get(enum_scope)
+            .lookup_all(case_name.as_name())
+            .is_empty()
+    );
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(named.index.scope_of(case_symbol).unwrap())
+            .owner,
+        Some(case_symbol)
+    );
+    assert_eq!(
+        named.store.symbols.get(constructor_symbol).kind,
+        SymbolKind::Constructor
+    );
+    assert_eq!(
+        named.store.symbols.get(constructor_symbol).owner,
+        Some(case_symbol)
+    );
+    assert_eq!(
+        named.store.symbols.get(field_symbol).kind,
+        SymbolKind::Field
+    );
+    assert_eq!(
+        named.store.symbols.get(field_symbol).owner,
+        Some(case_symbol)
+    );
+    assert_eq!(
+        named.store.symbols.get(constructor_parameter).kind,
+        SymbolKind::Parameter
+    );
+    assert_eq!(
+        named.store.symbols.get(constructor_parameter).owner,
+        Some(constructor_symbol)
+    );
+    assert!(matches!(
+        named.index.definition_of(case_symbol),
+        Some(SourceDefinition::Canonical { source, tree })
+            if source == named.source && tree == case_tree
+    ));
+    assert!(named.index.declaration_context_of(case_symbol).is_some());
+}
+
+#[test]
+fn generic_curried_enum_case_preserves_constructor_and_parent_structure() {
+    use dotty_core::{SymbolKind, SymbolOrigin, TypeName};
+
+    let mut named = named_source(
+        "enum Result:\n  case Pair[A, B](left: A)(val right: B) extends Result",
+        507,
+    );
+    let enum_tree = package_stat_trees(&named)[0];
+    let TreeKind::TypeDef(enum_definition) = &named.parsed.ast.get(enum_tree).kind else {
+        panic!("enum should be a TypeDef");
+    };
+    let TreeKind::Template(enum_template) = &named.parsed.ast.get(enum_definition.rhs).kind else {
+        panic!("enum should have a Template");
+    };
+    let case_tree = enum_template.body[0];
+    let TreeKind::TypeDef(case_definition) = &named.parsed.ast.get(case_tree).kind else {
+        panic!("parameterized enum case should be a TypeDef");
+    };
+    let TreeKind::Template(case_template) = &named.parsed.ast.get(case_definition.rhs).kind else {
+        panic!("parameterized enum case should have a Template");
+    };
+    let TreeKind::DefDef(constructor) = &named.parsed.ast.get(case_template.constructor).kind
+    else {
+        panic!("parameterized enum case should have a primary constructor");
+    };
+    let enum_symbol = named.index.symbol_at(named.source, enum_tree).unwrap();
+    let enum_scope = named.index.scope_of(enum_symbol).unwrap();
+    let enum_owner_scope = named
+        .store
+        .symbols
+        .get(enum_symbol)
+        .owner
+        .and_then(|owner| named.index.scope_of(owner))
+        .unwrap();
+    let companion_name = TypeName::new(named.store.names.intern("Result$"));
+    let companion = named
+        .store
+        .scopes
+        .get(enum_owner_scope)
+        .lookup(companion_name.as_name())
+        .unwrap();
+    let companion_scope = named.index.scope_of(companion).unwrap();
+    let case_symbol = named.index.symbol_at(named.source, case_tree).unwrap();
+    let case_name = TypeName::new(case_definition.name.as_name().text());
+    let case_scope = named.index.scope_of(case_symbol).unwrap();
+    let constructor_symbol = named
+        .index
+        .symbol_at(named.source, case_template.constructor)
+        .unwrap();
+    let constructor_scope = named.index.scope_of(constructor_symbol).unwrap();
+
+    assert_eq!(constructor.type_params.len(), 2);
+    assert_eq!(constructor.value_param_clauses.len(), 2);
+    assert!(
+        constructor
+            .value_param_clauses
+            .iter()
+            .all(|clause| clause.len() == 1)
+    );
+    assert_eq!(case_template.parents.len(), 1);
+    assert_eq!(named.store.symbols.get(case_symbol).kind, SymbolKind::Class);
+    assert_eq!(named.store.symbols.get(case_symbol).owner, Some(companion));
+    assert_eq!(
+        named.store.symbols.get(case_symbol).origin,
+        SymbolOrigin::Source(named.source)
+    );
+    assert!(
+        named
+            .store
+            .symbols
+            .get(case_symbol)
+            .flags
+            .contains(SymbolFlags::CASE | SymbolFlags::ENUM | SymbolFlags::FINAL)
+    );
+    assert_eq!(named.store.scopes.get(case_scope).owner, Some(case_symbol));
+    assert_eq!(
+        named
+            .store
+            .scopes
+            .get(companion_scope)
+            .lookup(case_name.as_name()),
+        Some(case_symbol)
+    );
+    assert!(
+        named
+            .store
+            .scopes
+            .get(enum_scope)
+            .lookup_all(case_name.as_name())
+            .is_empty()
+    );
+    for api_name in ["apply", "unapply", "copy", "ordinal", "values", "valueOf"] {
+        let api_name = dotty_core::TermName::new(named.store.names.intern(api_name));
+        assert!(
+            named
+                .store
+                .scopes
+                .get(companion_scope)
+                .lookup_all(api_name.as_name())
+                .is_empty()
+        );
+    }
+
+    for type_parameter_tree in &constructor.type_params {
+        let TreeKind::TypeDef(type_parameter) = &named.parsed.ast.get(*type_parameter_tree).kind
+        else {
+            panic!("case type parameter should be a TypeDef");
+        };
+        let class_parameter = named
+            .index
+            .symbol_at(named.source, *type_parameter_tree)
+            .unwrap();
+        let constructor_parameter = named
+            .index
+            .derived_symbol_at(constructor_symbol, named.source, *type_parameter_tree)
+            .unwrap();
+        assert_eq!(
+            named.store.symbols.get(class_parameter).kind,
+            SymbolKind::TypeParameter
+        );
+        assert_eq!(
+            named.store.symbols.get(class_parameter).owner,
+            Some(case_symbol)
+        );
+        assert_eq!(
+            named.store.symbols.get(constructor_parameter).kind,
+            SymbolKind::TypeParameter
+        );
+        assert_eq!(
+            named.store.symbols.get(constructor_parameter).owner,
+            Some(constructor_symbol)
+        );
+        assert_eq!(
+            named.store.symbols.get(class_parameter).position,
+            named.parsed.ast.get(*type_parameter_tree).position
+        );
+        assert_eq!(
+            named.store.symbols.get(constructor_parameter).position,
+            named.parsed.ast.get(*type_parameter_tree).position
+        );
+        assert_eq!(
+            named
+                .store
+                .names
+                .resolve(type_parameter.name.as_name().text()),
+            named
+                .store
+                .names
+                .resolve(named.store.symbols.get(class_parameter).name.text())
+        );
+    }
+
+    for clause in &constructor.value_param_clauses {
+        let parameter_tree = clause[0];
+        let TreeKind::ValDef(parameter_definition) = &named.parsed.ast.get(parameter_tree).kind
+        else {
+            panic!("case constructor parameter should be a ValDef");
+        };
+        let field = named.index.symbol_at(named.source, parameter_tree).unwrap();
+        let constructor_parameter = named
+            .index
+            .derived_symbol_at(constructor_symbol, named.source, parameter_tree)
+            .unwrap();
+        let is_private_local = parameter_definition
+            .metadata
+            .modifiers
+            .contains(&dotty_core::ast::Modifier::PrivateLocal);
+        assert_eq!(
+            named.store.symbols.get(field).kind,
+            if is_private_local {
+                SymbolKind::Parameter
+            } else {
+                SymbolKind::Field
+            }
+        );
+        assert_eq!(named.store.symbols.get(field).owner, Some(case_symbol));
+        assert_eq!(
+            named.store.symbols.get(constructor_parameter).kind,
+            SymbolKind::Parameter
+        );
+        assert_eq!(
+            named.store.symbols.get(constructor_parameter).owner,
+            Some(constructor_symbol)
+        );
+        assert_eq!(
+            named.store.symbols.get(field).position,
+            named.parsed.ast.get(parameter_tree).position
+        );
+        assert_eq!(
+            named.store.symbols.get(constructor_parameter).position,
+            named.parsed.ast.get(parameter_tree).position
+        );
+        assert_eq!(
+            named
+                .store
+                .scopes
+                .get(case_scope)
+                .lookup(parameter_definition.name.as_name()),
+            (!is_private_local).then_some(field)
+        );
+        assert!(
+            named
+                .store
+                .scopes
+                .get(constructor_scope)
+                .lookup(parameter_definition.name.as_name())
+                .is_some()
+        );
+    }
+
+    assert!(matches!(
+        named.index.definition_of(case_symbol),
+        Some(SourceDefinition::Canonical { source, tree })
+            if source == named.source && tree == case_tree
+    ));
+    assert!(named.index.declaration_context_of(case_symbol).is_some());
+}
+
+#[test]
+fn malformed_later_enum_case_rolls_back_earlier_case_class_identity() {
+    use dotty_core::ast::{ErrorNode, ErrorNodeKind, UntypedNode};
+
+    let (mut parsed, source, mut store) = parsed_source(
+        "enum Direction:\n  case Up(value: Int)\n  case Down(step: Int)",
+        508,
+    );
+    let enum_tree = match &parsed.ast.get(parsed.root).kind {
+        TreeKind::PackageDef(package) => package.stats[0],
+        _ => panic!("parser should return a package root"),
+    };
+    let invalid_parameter = {
+        let TreeKind::TypeDef(enum_definition) = &parsed.ast.get(enum_tree).kind else {
+            panic!("enum should be a TypeDef");
+        };
+        let TreeKind::Template(enum_template) = &parsed.ast.get(enum_definition.rhs).kind else {
+            panic!("enum should have a Template");
+        };
+        let TreeKind::TypeDef(case_definition) = &parsed.ast.get(enum_template.body[1]).kind else {
+            panic!("later parameterized enum case should be a TypeDef");
+        };
+        let TreeKind::Template(case_template) = &parsed.ast.get(case_definition.rhs).kind else {
+            panic!("parameterized enum case should have a Template");
+        };
+        let TreeKind::DefDef(constructor) = &parsed.ast.get(case_template.constructor).kind else {
+            panic!("parameterized enum case should have a primary constructor");
+        };
+        constructor.value_param_clauses[0][0]
+    };
+    parsed.ast.get_mut(invalid_parameter).kind =
+        TreeKind::PhaseSpecific(UntypedNode::Error(ErrorNode {
+            kind: ErrorNodeKind::UnexpectedToken,
+        }));
+
+    let mut packages = Packages::new();
+    let root = packages.enter(
+        &mut store,
+        dotty_core::SymbolOrigin::Synthetic,
+        &[] as &[&str],
+    )[0];
+    let initial_store_checkpoint = store.checkpoint();
+    let initial_root_entry_count = store.scopes.get(root.scope).entered_symbols().count();
+    let error = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Direction.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect_err("malformed later case parameter should fail naming");
+
+    assert_eq!(
+        error,
+        NamerError::MalformedAstShape {
+            tree_index: invalid_parameter.index(),
+            expected: "ValDef constructor value parameter",
+        }
+    );
+    assert_eq!(store.checkpoint(), initial_store_checkpoint);
+    assert_eq!(
+        store.scopes.get(root.scope).entered_symbols().count(),
+        initial_root_entry_count
+    );
+    assert!(packages.get(&[] as &[&str]).is_some());
+    assert!(packages.is_empty());
+}
+
+#[test]
 fn parsed_comma_group_enum_cases_get_ordered_distinct_identities() {
     use dotty_core::SymbolKind;
     use dotty_core::ast::UntypedNode;
