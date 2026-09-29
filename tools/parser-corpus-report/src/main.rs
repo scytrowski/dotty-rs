@@ -877,10 +877,12 @@ fn collect_deferred_features(
         features.entry(name.to_owned()).or_default();
     }
     let source = SourceId::from_index(0);
-    let template_members = arena
+    let attached_declarations = arena
         .iter()
         .filter_map(|(_, tree)| match &tree.kind {
             TreeKind::Template(template) => Some(template.body.iter().copied()),
+            TreeKind::PackageDef(package) => Some(package.stats.iter().copied()),
+            TreeKind::Block(block) => Some(block.stats.iter().copied()),
             _ => None,
         })
         .flatten()
@@ -995,7 +997,7 @@ fn collect_deferred_features(
                     let parser_blocked = enum_identity_is_parser_blocked(
                         !diagnostics.is_empty(),
                         symbol_materialized,
-                        template_members.contains(&tree_id),
+                        attached_declarations.contains(&tree_id),
                     ) && named.is_some();
                     record(
                         &mut features,
@@ -1208,9 +1210,9 @@ fn collect_deferred_features(
 fn enum_identity_is_parser_blocked(
     parser_recovered: bool,
     identity_materialized: bool,
-    is_template_member: bool,
+    is_attached_to_parent: bool,
 ) -> bool {
-    parser_recovered && !identity_materialized && !is_template_member
+    parser_recovered && !identity_materialized && !is_attached_to_parent
 }
 
 fn enum_companion_identity_pair(
@@ -1270,10 +1272,12 @@ fn validate_namer_audit_invariants(
     parser_recovered: bool,
 ) -> Vec<String> {
     let mut violations = Vec::new();
-    let template_members = arena
+    let attached_declarations = arena
         .iter()
         .filter_map(|(_, tree)| match &tree.kind {
             TreeKind::Template(template) => Some(template.body.iter().copied()),
+            TreeKind::PackageDef(package) => Some(package.stats.iter().copied()),
+            TreeKind::Block(block) => Some(block.stats.iter().copied()),
             _ => None,
         })
         .flatten()
@@ -1323,7 +1327,7 @@ fn validate_namer_audit_invariants(
             if enum_identity_is_parser_blocked(
                 parser_recovered,
                 false,
-                template_members.contains(&tree_id),
+                attached_declarations.contains(&tree_id),
             ) {
                 continue;
             }
@@ -2207,6 +2211,40 @@ mod tests {
         assert!(!enum_identity_is_parser_blocked(false, false, false));
         assert!(!enum_identity_is_parser_blocked(true, true, false));
         assert!(!enum_identity_is_parser_blocked(true, false, true));
+    }
+
+    #[test]
+    fn recovered_top_level_enum_keeps_its_package_identity() {
+        let parsed = parse_source(
+            "enum Color { case Red }\nobject Broken { def = }",
+            "RecoveredTopLevelEnum.scala",
+            true,
+        );
+
+        assert!(matches!(parsed.status, Status::RecoverableDiagnostics));
+        assert_eq!(
+            parsed
+                .deferred_features
+                .get("enum_class_identities")
+                .expect("top-level enum identity measured")
+                .materialized,
+            1
+        );
+        assert_eq!(
+            parsed
+                .deferred_features
+                .get("enum_definitions_blocked_by_parser_recovery")
+                .expect("parser-blocked definitions measured")
+                .occurrences,
+            0
+        );
+        let Some(NamerOutcome::Success {
+            invariant_violations,
+        }) = parsed.namer
+        else {
+            panic!("recovered top-level enum should remain nameable");
+        };
+        assert!(invariant_violations.is_empty(), "{invariant_violations:?}");
     }
 
     #[test]
