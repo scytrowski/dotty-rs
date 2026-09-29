@@ -1905,6 +1905,59 @@ fn parses_while_with_do_and_a_body() {
 }
 
 #[test]
+fn parses_an_indented_while_condition_as_a_block() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "while\n  first\n  second\ndo body",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::While), 0, 5),
+            token(TokenKind::Indent, 8, 8),
+            token(TokenKind::Identifier, 8, 13),
+            token(TokenKind::Newline, 13, 16),
+            token(TokenKind::Identifier, 16, 22),
+            token(TokenKind::Outdent, 23, 23),
+            token(TokenKind::Keyword(HardKeyword::Do), 23, 25),
+            token(TokenKind::Identifier, 26, 30),
+            token(TokenKind::Eof, 30, 30),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::While(while_tree) = parser.ast().get(id).kind else {
+        panic!("expected while tree");
+    };
+    let TreeKind::Block(block) = &parser.ast().get(while_tree.cond).kind else {
+        panic!("expected an indented block condition");
+    };
+
+    assert_eq!(block.stats.len(), 1);
+    assert!(matches!(
+        parser.ast().get(block.stats[0]).kind,
+        TreeKind::Ident(_)
+    ));
+    assert!(matches!(
+        parser.ast().get(block.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(
+        parser
+            .ast()
+            .get(while_tree.cond)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(8, 22).unwrap()
+    );
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(0, 30).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn parses_while_with_a_parenthesized_condition() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
