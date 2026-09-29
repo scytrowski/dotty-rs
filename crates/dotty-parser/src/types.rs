@@ -2187,8 +2187,27 @@ where
     /// Parses the small simple-type subset needed by simple expressions.
     pub(crate) fn simple_type(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
-        let mut tree = self.simple_type_reference();
+        let tree = self.simple_type_reference();
+        self.parse_simple_type_suffixes(mark, tree)
+    }
 
+    /// Parses the annotation grammar's `SimpleType1` subset, which also
+    /// admits a parenthesized type before the usual simple-type suffixes.
+    pub(crate) fn simple_type1(&mut self) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let tree = if self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
+            self.parse_parenthesized_type(mark)
+        } else {
+            self.simple_type_reference()
+        };
+        self.parse_simple_type_suffixes(mark, tree)
+    }
+
+    fn parse_simple_type_suffixes(
+        &mut self,
+        mark: crate::Mark,
+        mut tree: TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
         loop {
             if self
                 .cursor
