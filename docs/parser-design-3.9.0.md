@@ -671,6 +671,8 @@ given name: T: body            -> ModuleDef(Template(...))
 given [A] => T: body            -> TypeDef(Template(...))
 given A with B                  -> ModuleDef(Template(parents = [A, B]))
 given A(), B                    -> ModuleDef(Template(parents = [A(), B]))
+given A with                    -> ModuleDef(Template(parents = [A], body = ...))
+given A with B with              -> ModuleDef(Template(parents = [A, B], body = ...))
 ```
 
 Anonymous givens use the canonical empty interned term name; the parser does
@@ -686,8 +688,13 @@ metadata. Old-style abstract named givens are parsed as `DefDef` nodes with
 spanless `EmptyTree` RHS through the shared AST's optional RHS. Dotty's
 migration warning for this deprecated syntax is not currently modeled.
 Structural givens preserve constructor applications and comma- or
-`with`-separated parent lists in the shared `Template`; other legacy migration
-syntax and semantic resolution remain outside the parser.
+`with`-separated parent lists in the shared `Template`. As in Scala 3.9,
+`with` followed on the same line by a parent continues the parent list, while
+a line-final `with` (or `with {`) introduces the legacy template body. For an
+indented body, the parser requests the scanner's indentation feedback at
+`with` and then delegates to the shared template-body parser. A missing body
+is diagnosed without consuming the following outer statement. Other legacy
+migration syntax and semantic resolution remain outside the parser.
 As in Dotty 3.9, the arrow following a given type-parameter clause is optional;
 named generic signatures may place type and `using` parameter clauses before
 the colon that introduces the given type.
