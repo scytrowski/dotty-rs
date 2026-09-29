@@ -172,13 +172,13 @@ inherited generic methods. Standalone overloaded identifiers and selections
 remain deferred. Generic overload competition remains deferred.
 
 `SourceTyper::expression_context_for` builds a method or constructor body
-context from the namer's declaration context and owned scope. Term lookup checks
-typer-local scopes from innermost to outermost before source scopes and their
-import rules, preserving each matching overload bucket. The method scope is
-reused as indexed, so parameters are not entered a second time. Constructor
-contexts expose constructor-owned parameters for lookup, but constructor-body
-typing is not otherwise implemented. `push_local_scope` adds empty block scopes
-without changing the namer's source-context graph.
+context from its indexed source declaration context and owned scope. Term
+lookup checks typer-local scopes from innermost to outermost before source
+scopes and their import rules, preserving each matching overload bucket. The
+method scope is reused as indexed, so parameters are not entered a second time.
+Constructor contexts expose constructor-owned parameters for lookup, but
+constructor-body typing is not otherwise implemented. `push_local_scope` adds
+empty block scopes without changing the source-context graph.
 
 Explicit positional type applications are supported for one resolved `Poly`
 callee. Type arguments use the expression's lexical context, require exact
