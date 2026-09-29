@@ -392,6 +392,85 @@ mod tests {
     }
 
     #[test]
+    fn nested_feedback_case_region_stops_before_the_less_indented_outer_case() {
+        let source = "{ outer match\n  case A => inner match\n    case B => b\n  case D => d\n}";
+        let mut offset = 0usize;
+        let mut source_token = |spelling: &str, kind: TokenKind| {
+            let start = source[offset..]
+                .find(spelling)
+                .map(|relative| offset + relative)
+                .expect("token spelling occurs after the preceding token");
+            let end = start + spelling.len();
+            offset = end;
+            token(kind, start as u32, end as u32)
+        };
+        let tokens = vec![
+            source_token("{", TokenKind::Punctuation(Punctuation::LeftBrace)),
+            source_token("outer", TokenKind::Identifier),
+            source_token("match", TokenKind::Keyword(HardKeyword::Match)),
+            source_token("\n", TokenKind::Newline),
+            source_token("case", TokenKind::Keyword(HardKeyword::Case)),
+            source_token("A", TokenKind::Identifier),
+            source_token("=>", TokenKind::Operator),
+            source_token("inner", TokenKind::Identifier),
+            source_token("match", TokenKind::Keyword(HardKeyword::Match)),
+            source_token("\n", TokenKind::Newline),
+            source_token("case", TokenKind::Keyword(HardKeyword::Case)),
+            source_token("B", TokenKind::Identifier),
+            source_token("=>", TokenKind::Operator),
+            source_token("b", TokenKind::Identifier),
+            source_token("\n", TokenKind::Newline),
+            source_token("case", TokenKind::Keyword(HardKeyword::Case)),
+            source_token("D", TokenKind::Identifier),
+            source_token("=>", TokenKind::Operator),
+            source_token("d", TokenKind::Identifier),
+            source_token("\n", TokenKind::Newline),
+            source_token("}", TokenKind::Punctuation(Punctuation::RightBrace)),
+            token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+        ];
+        let mut names = NameInterner::new();
+        let mut parser = Parser::new(
+            SourceText::new(source).unwrap(),
+            SourceId::from_index(1),
+            FeedbackTokenSource {
+                source: source.to_owned(),
+                tokens,
+                index: 0,
+                arrow_indents: true,
+                outdent_at: None,
+                closed_feedback_by_delimiter: Rc::new(Cell::new(false)),
+                feedback_regions: Vec::new(),
+            },
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::Block(Block { expr, .. }) = parser.ast().get(tree).kind else {
+            panic!("expected the surrounding brace block");
+        };
+        let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(expr).kind else {
+            panic!("expected the outer match");
+        };
+        assert_eq!(cases.len(), 2);
+        let TreeKind::CaseDef(CaseDef { body, .. }) = &parser.ast().get(cases[0]).kind else {
+            panic!("expected the first outer case");
+        };
+        let TreeKind::Block(Block { expr, .. }) = parser.ast().get(*body).kind else {
+            panic!("expected the outer case body block");
+        };
+        let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(expr).kind else {
+            panic!("expected the nested match");
+        };
+        assert_eq!(cases.len(), 1);
+        assert!(
+            parser.diagnostics().is_empty(),
+            "{:?}",
+            parser.diagnostics()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn separates_indented_case_bodies_from_later_cases_and_following_expressions() {
         let source = "{ value match\n    case A =>\n      a\n    case B =>\n      b\n  after }";
         let tokens = vec![
