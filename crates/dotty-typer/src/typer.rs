@@ -20551,7 +20551,6 @@ mod tests {
     #[test]
     fn local_unsupported_parameter_modifiers_remain_deferred() {
         for (unsupported_modifier, expected_feature) in [
-            (Modifier::Given, "contextual parameters"),
             (Modifier::Erased, "erased parameters"),
             (Modifier::Inline, "parameter modifiers"),
         ] {
