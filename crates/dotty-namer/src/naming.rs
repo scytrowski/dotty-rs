@@ -1768,15 +1768,15 @@ impl Namer<'_> {
                 TreeKind::TypeDef(definition)
                     if definition.metadata.modifiers.contains(&Modifier::EnumCase) =>
                 {
-                    if is_enum_class {
-                        if let Some(header) = self.enter_enum_case_class_header(
+                    if is_enum_class
+                        && let Some(header) = self.enter_enum_case_class_header(
                             *member,
                             symbol,
                             &class_context,
                             active_source_context,
-                        )? {
-                            nested_headers.push(header);
-                        }
+                        )?
+                    {
+                        nested_headers.push(header);
                     }
                     continue;
                 }
