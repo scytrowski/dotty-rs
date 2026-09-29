@@ -171,11 +171,22 @@ method-owned scope; the local method index retains its source tree, scope, and
 enclosing block expression context without modifying `SourceSemanticIndex`.
 This makes forward references and same-name overload buckets visible during
 name lookup. Local method signature and body typing remain deferred, so a block
-that reaches a local method definition can still fail at that statement; the
-pre-index is the foundation for the next typing increment. Nested method
-headers are indexed only by their own block. The block scope, local method
-symbols/scopes and metadata, typed nodes, local symbol mappings, and source
-mappings are rolled back when any part of the block fails. A local `val` or
+name lookup. Plain local methods with no type parameters, one ordinary term
+parameter clause (which may be empty), and an explicit result type complete a
+`Method` signature using the shared method-signature builder. Each parameter
+gets a typer-owned `Parameter` symbol in that method's distinct scope, with
+source-tree identity and the declaration site's lexical type context retained
+without changing `SourceSemanticIndex`. Forward calls can complete and use
+these signatures on demand. Inferred or parameter-dependent result types,
+contextual, erased, by-name, or repeated parameters, multiple clauses, and type
+parameters remain explicitly deferred. Local method bodies are still deferred,
+so a block that reaches a local method definition can fail at that statement;
+the typed local `DefDef` is the next increment. Nested method headers are
+indexed only by their own block. The block scope, local method and parameter
+symbols/scopes and metadata,
+typed nodes, local symbol mappings, and source mappings are rolled back when
+any part of the enclosing block fails. Failed signature completion also leaves
+the local method's pre-indexed scope and missing info intact. A local `val` or
 `var` with a source-written type
 shadows outer bindings throughout the statement sequence, including its own
 initializer; a reference to the local while it is being initialized reports a
