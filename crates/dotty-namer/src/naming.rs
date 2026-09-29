@@ -1749,6 +1749,12 @@ impl Namer<'_> {
 
         let mut nested_headers = Vec::new();
         let mut active_source_context = class_source_context;
+        let is_enum_class = self
+            .store
+            .symbols
+            .get(symbol)
+            .flags
+            .contains(SymbolFlags::ENUM);
         for member in &template.body {
             if *member == template.constructor {
                 continue;
@@ -1763,23 +1769,27 @@ impl Namer<'_> {
                 TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition))
                     if definition.metadata.modifiers.contains(&Modifier::EnumCase) =>
                 {
-                    self.enter_enum_singleton_case(
-                        *member,
-                        &definition.metadata,
-                        symbol,
-                        active_source_context,
-                    )?;
+                    if is_enum_class {
+                        self.enter_enum_singleton_case(
+                            *member,
+                            &definition.metadata,
+                            symbol,
+                            active_source_context,
+                        )?;
+                    }
                     continue;
                 }
                 TreeKind::PhaseSpecific(UntypedNode::PatDef(definition))
                     if definition.modifiers.modifiers.contains(&Modifier::EnumCase) =>
                 {
-                    self.enter_enum_case_pattern_definition(
-                        *member,
-                        definition,
-                        symbol,
-                        active_source_context,
-                    )?;
+                    if is_enum_class {
+                        self.enter_enum_case_pattern_definition(
+                            *member,
+                            definition,
+                            symbol,
+                            active_source_context,
+                        )?;
+                    }
                     continue;
                 }
                 _ => {}
