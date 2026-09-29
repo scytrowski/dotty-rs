@@ -39,16 +39,34 @@ UTF-8 byte ranges, end-exclusive, matching Rust diagnostics.
 
 | Subgroup | Observed reach | Evidence and interpretation | Follow-up direction |
 | --- | ---: | --- | --- |
-| Prefixes on named `using` parameters | 9/30 | Six files use `using @constructorOnly name: T` (including `OptimizerSettings.scala:12`, `387..388`, and `Capability.scala:176`, `7456..7457`); three use constructor accessors such as `using val ctx: Context` (`QuotesImpl.scala`, `Extractors.scala`, `SourceCode.scala`). Rust reports `expected a type operand` at `@`/`val`. Dotty emits trees for these examples. | Fix the parameter-clause classifier so annotations and allowed parameter modifiers do not make a named term parameter look like an anonymous context type. Test both forms, plus anonymous `using T`, which must remain unchanged. The shared path is `current_is_anonymous_using_type` in `parameters.rs`. |
-| Indented structural `given` body after `with` | 2/30 | `SymbolUtils.scala:13`, `262..262` fails at `extension`; `Constants.scala:234`, `9352..9355` fails at `def`. Both are members in an indented `given ... with` body and both have Dotty trees. The parser's given-parent loop treats `with` as another parent separator and attempts to parse the first body member as a type. | Separate given-template-body boundary work in `givens.rs`; distinguish a following indented body from another parent before parsing a parent type. Include a normal member and an extension member. |
-| Symbolic type names / constructors | 6/30 | Examples include `::` in `Option.scala:642` (`21781..21783`), `List.scala:103` (`4038..4040`), `Decorators.scala:324` (`12521..12523`), `=:=` in `FunctionExtensions.scala:54` (`2076..2079`), and symbolic declarations in `package.scala:78` and `typeConstraints.scala:64`. Diagnostics vary between `expected a type operand`, `expected a simple type`, and a missing type name. Dotty emits trees for the sampled forms. | Treat operator-spelled type names as a type-name grammar issue, not a general missing-type issue. Compare declarations, references, and constructor syntax in Dotty before choosing one shared parser change. |
-| Annotation target / nested annotation syntax | 3/30 | `Predef.scala:443`, `19200..19201`; `RedBlackTree.scala:595`, `26725..26726`; and `AnyRefMap.scala:46`, `1864..1865` report `expected an annotation type after @`. The spelling includes annotations applied to annotations or targeted annotations. The `AnyRefMap` oracle result is inconclusive due to the null-context exception above. | Verify each precise annotation form separately against Dotty; do not broaden ordinary annotation parsing based only on the shared message. |
-| Remaining type/declaration cases | 10/30 | Heterogeneous remainder: nullable/union types (`Formatting.scala`, `ArrayBuilder.scala`, `ListBuffer.scala`), wildcard placement (`TreeSeqMap.scala:289`), extension/type contexts (`SyntheticsExtractor.scala`), symbolic or unusual parameter forms, and one parser diagnostic overlapped by scanner diagnostics in `semanticdb/Scala3.scala`. Some source-level oracle runs are inconclusive. | Keep these as individual reproducers until each has a confirmed Dotty parse result and owning production. No single “ExpectedType support” increment is justified. |
+| Named `using` parameters with annotation/modifier prefixes | 9/30 | All nine exact first diagnostics are listed below. Rust reports `ExpectedType: expected a type operand`; Dotty emitted trees for all nine. | Fix the parameter-clause classifier so annotation/modifier prefixes do not make a named term parameter look like an anonymous context type. Owner: `parameters.rs::current_is_anonymous_using_type`. Preserve anonymous `using T`. |
+| Indented given/template body after `with` | 5/30 | Five cases have this body-boundary shape: `compiler/src/dotty/tools/backend/jvm/SymbolUtils.scala:13` (`262..262`, `extension`), `compiler/src/dotty/tools/dotc/core/Constants.scala:234` (`9352..9355`, `def`), `compiler/src/dotty/tools/dotc/semanticdb/SyntheticsExtractor.scala:97` (`3465..3465`, `extension`), `library/src/scala/util/CommandLineParser.scala:81` (`3106..3109`, `def`), and `compiler/src/dotty/tools/dotc/semanticdb/Scala3.scala:80` (`2954..2954`, `extension`). Each reports `ExpectedType: expected a type operand`; Dotty emitted a tree for each. `Scala3.scala` also has eight independent lexer diagnostics for invalid escapes in raw-regex strings at `716..719`, `721..724`, `783..792`, `841..858`, `841..863`, `841..865`, `841..870`, and `841..872`; those earlier spans belong to `dotty-lexer`, not the given-body parser failure. | Check whether the given-parent parser is consuming `with`/its indented body as another parent. Candidate owner: `givens.rs::parse_given_parent_suffixes`, with template-body boundary behavior in `templates.rs`. Reach is five observed files; validate normal and extension members separately. Track the raw-regex diagnostics as a distinct lexer issue. |
+| Symbolic type names / constructors | 6/30 | `library/src/scala/Option.scala:642` (`21781..21783`, `expected a simple type`), `library/src/scala/collection/immutable/List.scala:103` (`4038..4040`, same), `compiler/src/dotty/tools/dotc/core/Decorators.scala:324` (`12521..12523`, `expected a type operand`), `library/src/scala/jdk/FunctionExtensions.scala:54` (`2076..2079`, same), `library/src/scala/package.scala:78` (`3172..3174`, `expected a type name after .`), and `library/src/scala/typeConstraints.scala:64` (`2849..2852`, `expected a type name after class or trait`). Dotty emitted trees for all six. | Treat operator-spelled type names as a type-grammar issue, not a generic missing-type fix. Compare declaration, reference, and constructor positions. Owner: type-name productions in `types.rs`. |
+| Annotation target / nested annotation syntax | 3/30 | `library/src/scala/Predef.scala:443` (`19200..19201`), `library/src/scala/collection/immutable/RedBlackTree.scala:595` (`26725..26726`), and `library/src/scala/collection/mutable/AnyRefMap.scala:46` (`1864..1865`) each report `ExpectedType: expected an annotation type after @`. Dotty emitted trees for the first two; the `AnyRefMap.scala` oracle run failed with the null-`Context` harness exception, so that case is inconclusive. | Verify the three exact annotation forms separately; do not broaden ordinary annotation parsing based only on the shared message. Owner: `modifiers.rs::parse_annotation`; narrow the exact forms with minimal reproducers. |
+| Null/capture-related type forms | 6/30 | `compiler/src/dotty/tools/dotc/printing/Formatting.scala:64` (`2430..2433`, `X | Null`), `library/src/scala/collection/Iterator.scala:200` (`8330..8332`, capture-annotated function type), `library/src/scala/collection/mutable/ArrayBuilder.scala:425` (`11730..11739`, after a capture-annotated self type), `library/src/scala/collection/mutable/ListBuffer.scala:53` (`1770..1772`, `::[A] | Null`), `library/src/scala/collection/mutable/TreeSet.scala:122` (`4895..4902`, after a capture-annotated self type), and `library/src/scala/collection/mutable/UnrolledBuffer.scala:270` (`7989..7996`, after a capture-annotated self type) report `ExpectedType: expected a type operand` from `types.rs::parse_type_operand`. Dotty emitted trees for Formatting/ListBuffer; the other four are oracle-inconclusive because of the null-`Context` harness failure. | Separate nullable-union support from capture syntax before implementation. Reach is six first-failure files, but only two have a conclusive tree result in this run. |
+| Wildcard type outside a type-argument position | 1/30 | `library/src/scala/collection/immutable/TreeSeqMap.scala:289` (`9203..9204`) reports `ExpectedType: a wildcard type is only valid as a type argument`; Dotty emitted a tree. | Compare the tuple/wildcard type production with Scala 3.9; keep the change limited to this position. Owner: `types.rs::parse_type_operand`. |
 
-The nine parameter-prefix cases are the clearest implementation opportunity:
-they are repeated, valid Scala syntax and point to one dispatch predicate. The
-two structural-given cases are a second, independent candidate. The remaining
-bucket should not be collapsed into either fix.
+The nine named-parameter cases are the clearest implementation opportunity:
+they are repeated, valid Scala syntax and point to one dispatch predicate.
+The five given-body cases look related but should be minimized before assuming
+one shared cause. All 30 first failures are now assigned to observed syntax
+groups. The scanner diagnostics in `Scala3.scala` are a separate lexer finding,
+not evidence for a broad parser/type change.
+
+Exact paths for the nine named-parameter cases (all first diagnostics are
+`ExpectedType: expected a type operand`; all have Dotty trees):
+
+| Path and source location | Span |
+| --- | ---: |
+| `compiler/src/dotty/tools/backend/jvm/opt/OptimizerSettings.scala:12` | `387..388` |
+| `compiler/src/dotty/tools/dotc/cc/Capability.scala:176` | `7456..7457` |
+| `compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala:68` | `2700..2701` |
+| `compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala` | `5285..5286` |
+| `compiler/src/dotty/tools/dotc/transform/Pickler.scala` | `1663..1664` |
+| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala` | `725..726` |
+| `compiler/src/scala/quoted/runtime/impl/QuotesImpl.scala` | `1405..1408` |
+| `compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala` | `3462..3465` |
+| `compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala` | `3632..3635` |
 
 ## `UnexpectedToken` (24 first failures)
 
@@ -59,44 +77,77 @@ The current message split is:
 | `expected a block statement separator` | 20 |
 | `expected a template member separator` | 4 |
 
-Dotty produced trees for all 24 files, but the 20 block-separator locations do
-not identify one shared separator defect. Representative distinct contexts:
+All 20 block-separator first failures have the exact Rust diagnostic
+`UnexpectedToken: expected a block statement separator`, emitted by
+`statements.rs::parse_statement_sequence`. Dotty returned a tree for each of
+the 20. This confirms parser-layer acceptance in the pinned oracle; it does
+not say that the files typecheck. Six observed contexts are specific enough to
+motivate isolated reproducers:
 
-| Source location | Rust span / message | Context indicated by source | Recommended treatment |
+| Context / observed reach | Representative source and span | Source landmark at the Rust diagnostic | Narrow follow-up |
 | --- | --- | --- | --- |
-| `BTypeLoader.scala:178` | `8716..8717`, block separator | Comma after a multiline `if` expression used as an argument. | Minimize conditional-expression/argument boundary independently. |
-| `AliasingAnalyzer.scala:621` | `22633..22634`, block separator | Final expression after a braced `match` inside a block. | Check match-body termination and the block's final expression as a separate case. |
-| `BoxUnbox.scala:810` | `37944..37946`, block separator | `if` after local statements in a lambda passed to `flatMap`. | Isolate multi-statement lambda-body parsing; do not change generic separators first. |
-| `CaptureAnnotation.scala:76` | `2912..2916`, block separator | `then` after an indented colon argument containing `case` clauses. | Track as a colon-argument/layout boundary; it is distinct from an ordinary brace block. |
-| `Phases.scala:537` and `BestEffortTastyWriter.scala:26` | `22831..22838` / `992..999`, block separator | `finally` following a `try` body. | Confirm try/finally body ownership; avoid counting both as evidence for a universal block rule. |
-| `trace.scala:55` | `1923..1925`, block separator | `inline if` form. | Keep inline control-flow support separate from ordinary `if` parsing. |
-| `Denotations.scala:267`, `TyperState.scala:311`, `Inlines.scala:610`, `Inferencing.scala:65` | template separator | Inline/match, interpolation, or nested member/extension boundaries. | Triage each enclosing production and layout transition separately. |
+| Multiline `if` call argument (1/20) | `BTypeLoader.scala:178`, `8716..8717` | Comma after the multiline expression argument. | Minimize the `if`-as-argument boundary. |
+| Final expression after braced `match` (1/20) | `AliasingAnalyzer.scala:621`, `22633..22634` | Following expression in an enclosing block. | Check match-body termination against the enclosing block's final expression. |
+| Nested lambda/control-flow body (1/20) | `BoxUnbox.scala:810`, `37944..37946` | `if` after local statements in a lambda passed to `flatMap`. | Isolate the lambda block and its nested branch sequence. |
+| Colon-argument/layout boundary (1/20) | `CaptureAnnotation.scala:76`, `2912..2916` | `then` after an indented colon argument containing `case` clauses. | Keep separate from ordinary brace-block separators; minimize scanner feedback and colon-argument ownership. |
+| `try` body followed by `finally` (2/20) | `Phases.scala:537`, `22831..22838`; `BestEffortTastyWriter.scala:26`, `992..999` | `finally` at the boundary after each try body. | Compare try/finally body ownership; two files are evidence for this context, not for a universal separator fix. |
+| Inline conditional (1/20) | `reporting/trace.scala:55`, `1923..1925` | `inline if` in an expression body. | Keep inline control flow separate from the ordinary `if` production. |
 
-Other block-separator first failures occur around body/branch boundaries or
-nested expressions in `BackendUtils.scala`, `Annotations.scala`,
-`ContextOps.scala`, `NamerOps.scala`, `Types.scala`, `PickledQuotes.scala`,
-`Reporter.scala`, `messages.scala`, `Erasure.scala`,
-`FullParameterization.scala`, `UnrollDefinitions.scala`,
-`QuotesAndSplices.scala`, and `Source.scala`. These are valid Dotty inputs,
-but their enclosing forms differ; a lower diagnostic count alone would not
-prove that a common separator change is correct.
+The other 13 files are enumerated below rather than grouped under a guessed
+grammar cause. In each, the span is where the common statement-sequence
+separator check fires; the nearby token alone does not identify which earlier
+construct made the sequence appear unterminated. Their Rust owner/diagnostic
+and Dotty result are the same as stated above. Each currently contributes one
+observed file; do not combine them into one implementation task until a
+minimal reproducer establishes a common cause.
+
+| Path and line | Span | Nearby source landmark | Why not classified more narrowly yet |
+| --- | ---: | --- | --- |
+| `compiler/src/dotty/tools/backend/jvm/BackendUtils.scala:385` | `17928..17929` | Closing brace after a conditional expression. | Failure is reported at the enclosing brace, not at a discriminating inner token. |
+| `compiler/src/dotty/tools/dotc/core/Annotations.scala:293` | `11898..11899` | Closing brace after a contextual-function-typed lazy annotation body. | Could be a type/body-boundary cascade; the separator span does not isolate it. |
+| `compiler/src/dotty/tools/dotc/core/ContextOps.scala:76` | `3616..3620` | `else` after an indented `if ... then` member expression. | Need a minimal conditional/member-body example to distinguish layout from expression parsing. |
+| `compiler/src/dotty/tools/dotc/core/NamerOps.scala:254` | `11542..11547` | `match` following an `@unchecked` type ascription. | Pattern/match and enclosing method-body boundaries overlap at the reported sequence error. |
+| `compiler/src/dotty/tools/dotc/core/Types.scala:2037` | `87427..87428` | Comma after a multiline `mapConserve:` argument in `FunctionNOf`. | Colon-argument termination and call-argument continuation are both involved. |
+| `compiler/src/dotty/tools/dotc/quoted/PickledQuotes.scala:207` | `9255..9259` | `else` in an `if` inside a braced lambda. | The downstream separator follows conditional/lambda parsing; no smaller shared failure is established. |
+| `compiler/src/dotty/tools/dotc/reporting/Reporter.scala:63` | `2070..2071` | Closing brace after a local recursive `loop()` body. | Error is at a brace after nested local control flow, so the enclosing boundary needs minimization. |
+| `compiler/src/dotty/tools/dotc/reporting/messages.scala:1220` | `46020..46024` | `else` in a multiline conditional used to build an interpolated message. | May be conditional/interpolation interaction; not evidence for a generic block rule. |
+| `compiler/src/dotty/tools/dotc/transform/Erasure.scala:504` | `22388..22389` | Comma after a lambda argument in a multiline call. | Lambda-body termination and following call argument are both candidates. |
+| `compiler/src/dotty/tools/dotc/transform/FullParameterization.scala:123` | `5085..5086` | Comma after a multiline `PolyType` argument. | Nested type/lambda argument boundary; needs an isolated type-construction reproducer. |
+| `compiler/src/dotty/tools/dotc/transform/UnrollDefinitions.scala:177` | `6822..6824` | `if` in a nested local method body. | The source landmark starts a conditional, but the diagnostic is a sequence error; ownership is not yet isolated. |
+| `compiler/src/dotty/tools/dotc/typer/QuotesAndSplices.scala:393` | `18208..18209` | Closing brace after nested polyfunction-type construction. | The closing boundary follows nested type syntax; no specific shared statement form is confirmed. |
+| `library/src/scala/io/Source.scala:209` | `7498..7502` | `else` in a legacy-style conditional followed by infix-style calls. | Legacy syntax and expression termination overlap; isolate before assigning a parser fix. |
+
+The four template-separator first failures share the Rust diagnostic
+`UnexpectedToken: expected a template member separator` from
+`templates.rs::parse_template_body`. Dotty returned a tree for all four, but
+their source landmarks differ; the current evidence supports four one-file
+reproducers, not a universal template-separator change.
+
+| Path and line | Span | Source landmark | Current interpretation / reach |
+| --- | ---: | --- | --- |
+| `compiler/src/dotty/tools/dotc/core/Denotations.scala:267` | `11404..11408` | `inline this match` in a template member. | Inline/match member boundary; 1 file. |
+| `compiler/src/dotty/tools/dotc/core/TyperState.scala:311` | `12377..12420` | Nested conditional inside string interpolation in a member body. | Interpolation/expression boundary; 1 file. |
+| `compiler/src/dotty/tools/dotc/inlines/Inlines.scala:610` | `28582..28585` | `def apply(t: Type) =` inside an indented anonymous `TypeMap` body. | Indented nested member boundary; 1 file. |
+| `compiler/src/dotty/tools/dotc/typer/Inferencing.scala:65` | `2737..2738` | Comma after an override member in an anonymous `ForceDegree.Value` initializer. | Anonymous-template/call-argument boundary; 1 file. |
 
 ## Suggested implementation queue
 
 1. Named `using` parameters with annotations/modifiers (9 observed first
    failures; add focused tests for `@constructorOnly` and `using val`).
-2. Indented structural-given body after `with` (2 observed first failures;
-   cover both `def` and nested `extension`).
+2. Indented given/template body after `with` (5 observed first failures;
+   cover ordinary `def` members and `extension` members in separate reproducers).
 3. Symbolic type names in declarations/references/constructor positions (6
    observed first failures; split further if Dotty shows distinct productions).
 4. Verify targeted/nested annotation forms (3 observed first failures; keep
    parser-valid forms separate from any oracle-inconclusive example).
 5. Reduce the 20 block-separator files by grammar context before opening any
-   broad fix: conditional arguments, final expressions after `match`, lambda
-   bodies, colon arguments, `try/finally`, and inline control flow are the
-   current concrete leads. Keep the four template-separator files separate.
-6. Revisit the remaining type cases only with minimized sources and a conclusive
-   pinned-Dotty result.
+   broad fix. Six contexts have concrete leads; keep the other 13 enumerated
+   files as separate reproducers until their earlier construct is isolated.
+   Keep all four template-separator files separate as well.
+6. Revisit null/capture and wildcard-position cases only with minimized
+   sources and a conclusive pinned-Dotty result; four of the six null/capture
+   cases currently have inconclusive oracle results. Track the raw-regex
+   diagnostics in `Scala3.scala` separately in the lexer backlog.
 
 No parser or lexer behavior was changed during this triage. The source parser
 remains independent of `dotty-lexer`; the report was diagnostic research only.
