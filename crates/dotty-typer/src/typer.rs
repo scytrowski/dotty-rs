@@ -7885,13 +7885,24 @@ impl<'a> SourceTyper<'a> {
             let TreeKind::ValDef(parameter) = &parameter_node.kind else {
                 return Err(deferred("non-value parameter"));
             };
-            if parameter.metadata.modifiers.iter().any(|modifier| {
-                matches!(
-                    modifier,
-                    Modifier::Given | Modifier::Implicit | Modifier::Erased
-                )
-            }) {
-                return Err(deferred("contextual or erased parameters"));
+            if parameter
+                .metadata
+                .modifiers
+                .iter()
+                .any(|modifier| matches!(modifier, Modifier::Given | Modifier::Implicit))
+            {
+                return Err(deferred("contextual parameters"));
+            }
+            if parameter.metadata.modifiers.contains(&Modifier::Erased) {
+                return Err(deferred("erased parameters"));
+            }
+            if parameter
+                .metadata
+                .modifiers
+                .iter()
+                .any(|modifier| *modifier != Modifier::Param)
+            {
+                return Err(deferred("parameter modifiers"));
             }
             let parameter_type =
                 self.arena
@@ -19730,8 +19741,12 @@ mod tests {
     }
 
     #[test]
-    fn local_contextual_and_erased_parameters_remain_deferred() {
-        for unsupported_modifier in [Modifier::Given, Modifier::Erased] {
+    fn local_unsupported_parameter_modifiers_remain_deferred() {
+        for (unsupported_modifier, expected_feature) in [
+            (Modifier::Given, "contextual parameters"),
+            (Modifier::Erased, "erased parameters"),
+            (Modifier::Inline, "parameter modifiers"),
+        ] {
             let (mut parsed, mut store, packages, definitions, index, source) = parse_and_name(
                 "class C { def outer: Int = { def local(value: Int): Int = value; 0 } }",
             );
@@ -19765,9 +19780,9 @@ mod tests {
             assert!(matches!(
                 typer.complete_symbol(method),
                 Err(TyperError::LocalMethodSignatureDeferred {
-                    feature: "contextual or erased parameters",
+                    feature,
                     ..
-                })
+                }) if feature == expected_feature
             ));
             assert!(
                 typer
