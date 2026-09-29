@@ -35,6 +35,8 @@ pub enum NamerError {
     },
     /// An extension method was assigned prefix-clause metadata more than once.
     DuplicateExtensionPrefixClauses { method: SymbolId },
+    /// An export source tree was registered more than once.
+    DuplicateSourceExportSite { source: SourceId, tree_index: u32 },
     /// A semantic owner was assigned more than one declaration scope.
     DuplicateDeclarationScope { symbol: SymbolId },
     /// A declaration symbol was assigned two different source contexts.
@@ -108,6 +110,11 @@ impl fmt::Display for NamerError {
                 f,
                 "method symbol {} already has extension prefix clauses",
                 method.index()
+            ),
+            Self::DuplicateSourceExportSite { source, tree_index } => write!(
+                f,
+                "source {} tree {tree_index} already has an export site",
+                source.index()
             ),
             Self::DuplicateDeclarationScope { symbol } => {
                 write!(
@@ -203,6 +210,9 @@ impl From<SourceSemanticIndexError> for NamerError {
             },
             SourceSemanticIndexError::DuplicateExtensionPrefixClauses { method } => {
                 Self::DuplicateExtensionPrefixClauses { method }
+            }
+            SourceSemanticIndexError::DuplicateSourceExportSite { source, tree_index } => {
+                Self::DuplicateSourceExportSite { source, tree_index }
             }
         }
     }
