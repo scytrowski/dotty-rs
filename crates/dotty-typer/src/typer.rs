@@ -5584,7 +5584,12 @@ impl<'a> SourceTyper<'a> {
                     continue;
                 }
                 Err(TyperError::ApplicationArityMismatch { .. }) => continue,
-                Err(_) => continue,
+                Err(
+                    TyperError::UnconstrainedTypeParameter { .. }
+                    | TyperError::UnsupportedInferenceShape { .. }
+                    | TyperError::UnsupportedPolymorphicApplicationShape { .. },
+                ) => continue,
+                Err(error) => return Err(error),
             };
             let instantiated = dotty_core::types::instantiate_poly(
                 self.store,
@@ -5616,10 +5621,14 @@ impl<'a> SourceTyper<'a> {
                         supported_bounds = false;
                         break;
                     }
-                    Err(_) => {
+                    Err(
+                        TyperError::UnsupportedExplicitTypeArgumentBounds { .. }
+                        | TyperError::ExplicitTypeArgumentBoundCheckUnsupported { .. },
+                    ) => {
                         supported_bounds = false;
                         break;
                     }
+                    Err(error) => return Err(error),
                 }
             }
             if supported_bounds {
@@ -20634,11 +20643,14 @@ mod tests {
             &packages,
         );
 
+        let checkpoint = typer.store().checkpoint();
         assert!(matches!(
             typer.type_expression(rhs, context),
             Err(TyperError::AmbiguousOverloadApplication { candidates, .. })
                 if candidates.len() == 2
         ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.typed_ast().iter().next().is_none());
     }
 
     #[test]
@@ -20743,6 +20755,15 @@ mod tests {
             typer.store().types.get(typer.typed_ast().get(typed).ty),
             Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == child
         ));
+        let TreeKind::Apply(source_application) = &parsed.ast.get(rhs).kind else {
+            panic!("source application should have an Apply node")
+        };
+        assert!(
+            source_application
+                .args
+                .iter()
+                .all(|argument| typer.source_typed_index().get(source, *argument).is_some())
+        );
     }
 
     #[test]
