@@ -475,7 +475,8 @@ where
                 self.current().kind,
                 TokenKind::Keyword(dotty_core::HardKeyword::Val | dotty_core::HardKeyword::Var)
             )
-            || self.current_is_modifier()
+            || crate::modifiers::is_hard_modifier(self.current().kind)
+            || self.current_is_inline_parameter_modifier()
     }
 
     fn parse_anonymous_using_types(
@@ -2344,6 +2345,34 @@ mod tests {
         assert_eq!(metadata.modifiers, vec![Modifier::Given, Modifier::Param]);
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn soft_keyword_type_remains_an_anonymous_using_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(using transparent)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::Identifier, 7, 18),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected an anonymous using parameter");
+        };
+        assert_eq!(parser.names.resolve(parameter.name.as_name().text()), "x$1");
+        let TreeKind::Ident(name) = parser.ast().get(parameter.tpt).kind else {
+            panic!("expected the soft keyword to remain an ordinary type identifier");
+        };
+        assert_eq!(parser.names.resolve(name.name.text()), "transparent");
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
