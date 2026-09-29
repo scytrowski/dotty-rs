@@ -648,10 +648,14 @@ stored in the existing `Template.self_val`; its source-level `ValDef` carries
 simple qualified and compound `InfixType` self types. This is deliberately
 different from an expression block, whose last expression is its result. Layout
 classification remains owned by the scanner; the parser only feeds back the
-`ColonEol`, `Indented`, `Outdented`, and `SelfArrow` events needed to close a
-template region. The parser preserves `derives` and ordered `uses` metadata in
-`UntypedTemplateMetadata`; it does not perform derivation or semantic capture
-checking. Sequence capture references, `.rd` forms, auxiliary constructors,
+`ColonEol`, `Indented`/`IndentedFrom`, `Outdented`, and `SelfArrow` events
+needed to delimit a template region. For a multiline class-like header, the
+parser supplies the declaration-start offset when requesting the template body;
+this lets the scanner compare body indentation with the declaration rather
+than the final continued parameter-clause line. The parser preserves `derives`
+and ordered `uses` metadata in `UntypedTemplateMetadata`; it does not perform
+derivation or semantic capture checking. Sequence capture references, `.rd`
+forms, auxiliary constructors,
 and semantic template processing remain future work. Direct enum-case
 annotations, access modifiers, and qualified visibility are preserved as
 definition metadata; constructor-level annotations/modifiers after the case

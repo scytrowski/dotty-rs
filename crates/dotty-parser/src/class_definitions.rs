@@ -133,7 +133,9 @@ where
         metadata: Modifiers,
     ) -> ParsedStatement {
         let tail = self.with_secondary_constructor_allowed(false, |parser| {
-            parser.with_enum_body(false, |parser| parser.parse_template_tail(false))
+            parser.with_enum_body(false, |parser| {
+                parser.parse_template_tail(false, Some(mark.start()))
+            })
         });
         self.build_module_definition(mark, name, metadata, tail)
     }
@@ -694,9 +696,13 @@ where
         let constructor_end = self.last_real_token_end;
         let tail = self.with_secondary_constructor_allowed(!is_trait && !is_enum, |parser| {
             if is_enum {
-                parser.with_enum_body(true, |parser| parser.parse_template_tail(true))
+                parser.with_enum_body(true, |parser| {
+                    parser.parse_template_tail(true, Some(mark.start()))
+                })
             } else {
-                parser.with_enum_body(false, |parser| parser.parse_template_tail(false))
+                parser.with_enum_body(false, |parser| {
+                    parser.parse_template_tail(false, Some(mark.start()))
+                })
             }
         });
         let parent_start = self.template_tail_start(&tail);
@@ -756,33 +762,32 @@ where
         ))
     }
 
-    fn parse_template_tail(&mut self, required_body: bool) -> TemplateTail {
+    fn parse_template_tail(
+        &mut self,
+        required_body: bool,
+        indent_reference: Option<u32>,
+    ) -> TemplateTail {
         let parents = self.parse_parent_clause();
         let derives = self.parse_derives_clause();
         let uses = self.parse_uses_clause();
-        let body = if required_body {
-            self.parse_required_template_body()
-        } else {
-            self.parse_optional_template_body()
-        };
+        let body_checkpoint = self.cursor.checkpoint();
+        let body = self.parse_optional_template_body_with_feedback_and_reference(
+            None,
+            false,
+            indent_reference,
+        );
+        if required_body && !self.cursor.progressed_since(body_checkpoint) {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected an enum body after its header",
+            );
+        }
         TemplateTail {
             parents,
             self_val: body.self_val,
             body: body.members,
             metadata: UntypedTemplateMetadata { derives, uses },
         }
-    }
-
-    fn parse_required_template_body(&mut self) -> TemplateBodyResult {
-        let checkpoint = self.cursor.checkpoint();
-        let body = self.parse_optional_template_body();
-        if !self.cursor.progressed_since(checkpoint) {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected an enum body after its header",
-            );
-        }
-        body
     }
 
     fn template_tail_start(&self, tail: &TemplateTail) -> Option<u32> {
@@ -1054,6 +1059,19 @@ where
         feedback_indent: Option<u32>,
         required: bool,
     ) -> TemplateBodyResult {
+        self.parse_optional_template_body_with_feedback_and_reference(
+            feedback_indent,
+            required,
+            None,
+        )
+    }
+
+    fn parse_optional_template_body_with_feedback_and_reference(
+        &mut self,
+        feedback_indent: Option<u32>,
+        required: bool,
+        indent_reference: Option<u32>,
+    ) -> TemplateBodyResult {
         self.consume_newlines_before_template_body();
         if required
             && !matches!(
@@ -1078,7 +1096,9 @@ where
                 self.observe_colon_eol(true);
             }
             if self.current().kind == TokenKind::ColonEol {
-                let feedback_indent = self.observe_indented_body_region();
+                let feedback_indent = indent_reference
+                    .map(|reference| self.observe_indented_body_region_from(reference))
+                    .unwrap_or_else(|| self.observe_indented_body_region());
                 self.advance();
                 if self.current().kind == TokenKind::Indent {
                     return self.parse_template_body_with_feedback(
