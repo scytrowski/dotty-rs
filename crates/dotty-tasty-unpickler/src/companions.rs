@@ -111,10 +111,36 @@ mod tests {
     use dotty_core::Definitions;
     use dotty_core::names::Name;
     use dotty_core::store::SemanticStore;
-    use dotty_core::symbols::SymbolKind;
+    use dotty_core::symbols::{
+        Scope, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
+    };
     use dotty_tasty::tasty::TastyFile;
 
     const BOTH: &[u8] = include_bytes!("../tests/fixtures/semantic/Both.tasty");
+    const FOO: &[u8] = include_bytes!("../tests/fixtures/semantic/Foo.tasty");
+    const OBJECT: &[u8] = include_bytes!("../tests/fixtures/semantic/CtorObj.tasty");
+
+    fn synthetic_symbol(
+        store: &mut SemanticStore,
+        name: &str,
+        namespace: Namespace,
+        owner: Option<dotty_core::ids::SymbolId>,
+        kind: SymbolKind,
+    ) -> dotty_core::ids::SymbolId {
+        let name = Name::new(store.names.intern(name), namespace);
+        store.symbols.alloc(Symbol {
+            name,
+            owner,
+            kind,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        })
+    }
 
     #[test]
     fn rediscovering_an_exact_pair_is_idempotent() {
@@ -222,6 +248,125 @@ mod tests {
             unpickler.store.symbols.get(class).links.companion,
             Some(module_class)
         );
+        assert_eq!(unpickler.store.symbols.get(object).links.companion, None);
+    }
+
+    #[test]
+    fn a_later_unit_links_to_an_identity_already_in_the_shared_owner_scope() {
+        use crate::session::TastySession;
+
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let first_file = TastyFile::parse_scala_3_9(FOO).unwrap();
+        let mut first =
+            TastyUnpickler::with_session(&first_file, &mut store, definitions, TastySession::new());
+        first.enter_symbols().unwrap();
+        let package = first.index().symbol_at(0).unwrap();
+        let package_scope = first.index().scope_of(package).unwrap();
+        let name = Name::new(first.store.names.intern("CtorObj"), Namespace::Type);
+        let class = first.store.symbols.alloc(Symbol {
+            name,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        first.store.scopes.get_mut(package_scope).enter(name, class);
+        let (_, session) = first.into_session_parts();
+
+        let object_file = TastyFile::parse_scala_3_9(OBJECT).unwrap();
+        let mut second =
+            TastyUnpickler::with_session(&object_file, &mut store, definitions, session);
+        second.enter_symbols().unwrap();
+        let package = second.index().symbol_at(0).unwrap();
+        let package_scope = second.index().scope_of(package).unwrap();
+        let object_name = Name::new(second.store.names.intern("CtorObj"), Namespace::Term);
+        let object = *second
+            .store
+            .scopes
+            .get(package_scope)
+            .lookup_all(&object_name)
+            .iter()
+            .find(|symbol| second.store.symbols.get(**symbol).kind == SymbolKind::Object)
+            .unwrap();
+
+        assert_eq!(second.store.symbols.get(class).info, SymbolInfo::Missing);
+        assert_eq!(
+            second.store.symbols.get(class).links.companion,
+            Some(object)
+        );
+        assert_eq!(
+            second.store.symbols.get(object).links.companion,
+            Some(class)
+        );
+    }
+
+    #[test]
+    fn same_named_symbols_under_different_owners_do_not_pair() {
+        let file = TastyFile::parse_scala_3_9(FOO).unwrap();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut unpickler = TastyUnpickler::new(&file, &mut store, definitions);
+        unpickler.enter_symbols().unwrap();
+        let package = unpickler.index().symbol_at(0).unwrap();
+
+        let owner_a = synthetic_symbol(
+            unpickler.store,
+            "OwnerA",
+            Namespace::Type,
+            Some(package),
+            SymbolKind::Class,
+        );
+        let owner_b = synthetic_symbol(
+            unpickler.store,
+            "OwnerB",
+            Namespace::Type,
+            Some(package),
+            SymbolKind::Class,
+        );
+        let scope_a = unpickler.store.scopes.alloc(Scope::new(Some(owner_a)));
+        let scope_b = unpickler.store.scopes.alloc(Scope::new(Some(owner_b)));
+        unpickler.index.insert_scope(owner_a, scope_a).unwrap();
+        unpickler.index.insert_scope(owner_b, scope_b).unwrap();
+        unpickler.share_owner_scope(owner_a, scope_a).unwrap();
+        unpickler.share_owner_scope(owner_b, scope_b).unwrap();
+
+        let class = synthetic_symbol(
+            unpickler.store,
+            "Same",
+            Namespace::Type,
+            Some(owner_a),
+            SymbolKind::Class,
+        );
+        let object = synthetic_symbol(
+            unpickler.store,
+            "Same",
+            Namespace::Term,
+            Some(owner_b),
+            SymbolKind::Object,
+        );
+        let class_name = unpickler.store.symbols.get(class).name;
+        let object_name = unpickler.store.symbols.get(object).name;
+        unpickler
+            .store
+            .scopes
+            .get_mut(scope_a)
+            .enter(class_name, class);
+        unpickler
+            .store
+            .scopes
+            .get_mut(scope_b)
+            .enter(object_name, object);
+        unpickler.index.insert_symbol(1000, class).unwrap();
+        unpickler.index.insert_symbol(1001, object).unwrap();
+
+        unpickler.link_companions().unwrap();
+        assert_eq!(unpickler.store.symbols.get(class).links.companion, None);
         assert_eq!(unpickler.store.symbols.get(object).links.companion, None);
     }
 }

@@ -132,10 +132,12 @@ fn run_corpus(root: &Path, corpus: &str, reverse: bool) -> (Audit, BTreeSet<Stri
 
         let Some(owner) = symbol.owner else {
             audit.one_sided_identities += 1;
+            audit.conflicting_links += usize::from(symbol.links.companion.is_some());
             continue;
         };
         let Some(scope) = session.scope_of(owner) else {
             audit.one_sided_identities += 1;
+            audit.conflicting_links += usize::from(symbol.links.companion.is_some());
             continue;
         };
         let other_name = Name::new(
@@ -161,36 +163,43 @@ fn run_corpus(root: &Path, corpus: &str, reverse: bool) -> (Audit, BTreeSet<Stri
                 }
             })
             .collect();
-        match candidates.as_slice() {
-            [] => audit.one_sided_identities += 1,
+        let reciprocal = match candidates.as_slice() {
             [other] => {
-                let reciprocal = symbol.links.companion == Some(*other)
-                    && store.symbols.get(*other).links.companion == Some(id);
-                if reciprocal {
-                    if is_class {
-                        audit.class_or_trait_with_companion += 1;
-                        if symbol.kind == SymbolKind::Trait {
-                            audit.traits_with_companion += 1;
-                        }
-                        if store.symbols.get(owner).kind != SymbolKind::Package {
-                            audit.nested_pairs += 1;
-                        }
-                        audit.pairs_linked.insert(format!(
-                            "{} <-> {}",
-                            symbol_path(&store, id),
-                            symbol_path(&store, *other)
-                        ));
-                    } else {
-                        audit.object_with_companion += 1;
+                symbol.links.companion == Some(*other)
+                    && store.symbols.get(*other).links.companion == Some(id)
+            }
+            _ => false,
+        };
+        let has_any_link = symbol.links.companion.is_some()
+            || candidates
+                .iter()
+                .any(|other| store.symbols.get(*other).links.companion.is_some());
+        if has_any_link && !reciprocal {
+            audit.conflicting_links += 1;
+        }
+        match candidates.as_slice() {
+            [] if !has_any_link => audit.one_sided_identities += 1,
+            [] => {}
+            [other] if reciprocal => {
+                if is_class {
+                    audit.class_or_trait_with_companion += 1;
+                    if symbol.kind == SymbolKind::Trait {
+                        audit.traits_with_companion += 1;
                     }
-                } else if symbol.links.companion.is_some()
-                    || store.symbols.get(*other).links.companion.is_some()
-                {
-                    audit.conflicting_links += 1;
+                    if store.symbols.get(owner).kind != SymbolKind::Package {
+                        audit.nested_pairs += 1;
+                    }
+                    audit.pairs_linked.insert(format!(
+                        "{} <-> {}",
+                        symbol_path(&store, id),
+                        symbol_path(&store, *other)
+                    ));
                 } else {
-                    audit.one_sided_identities += 1;
+                    audit.object_with_companion += 1;
                 }
             }
+            [_] if !has_any_link => audit.one_sided_identities += 1,
+            [_] => {}
             _ => audit.ambiguous_candidates += 1,
         }
     }
@@ -259,9 +268,11 @@ fn report_companion_links_and_unit_order_permutations() {
         unexpected += forward.ambiguous_candidates
             + forward.conflicting_links
             + forward.module_class_links
+            + forward.failed_units
             + reverse.ambiguous_candidates
             + reverse.conflicting_links
             + reverse.module_class_links
+            + reverse.failed_units
             + order_differences;
     }
     assert_eq!(

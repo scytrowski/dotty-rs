@@ -212,8 +212,9 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
     /// Malformed or unsupported input is a typed error, and the call is
     /// atomic: on failure the store holds exactly the symbols, scopes, types
     /// and annotations it held before the call, every scope holds the
-    /// declarations it held before, and the index and package registry are as
-    /// they were, so nothing half-entered can be found later. Interned names
+    /// declarations it held before, and the index, package registry and
+    /// shared owner-scope registry are as they were, so nothing half-entered
+    /// can be found later. Interned names
     /// and the origin registered by [`new`](Self::new) stay, which is
     /// harmless. The unpickler is usable afterwards, for example to retry.
     pub fn enter_symbols(&mut self) -> Result<&TastySemanticIndex, UnpickleError> {
