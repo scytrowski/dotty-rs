@@ -97,7 +97,7 @@ fn dump_fixture(mode: &str, path: &str) -> Result<String, String> {
     let mut names = NameInterner::new();
     let result = if mode == "pattern" {
         parse_pattern_fragment(source_text, SourceId::from_index(0), scanner, &mut names)
-    } else if mode == "compilation" {
+    } else if mode == "compilation" || mode == "oracle-only" {
         parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names)
     } else if mode == "block-erased" {
         Parser::new(source_text, SourceId::from_index(0), scanner, &mut names)
@@ -121,6 +121,7 @@ fn dump_fixture(mode: &str, path: &str) -> Result<String, String> {
         || mode == "block"
         || mode == "block-erased"
         || mode == "compilation"
+        || mode == "oracle-only"
     {
         result.root
     } else {

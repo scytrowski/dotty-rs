@@ -4,6 +4,7 @@ import java.nio.file.{Files, Paths}
 
 import dotty.tools.dotc.CompilationUnit
 import dotty.tools.dotc.core.Contexts.ContextBase
+import dotty.tools.dotc.typer.ImportInfo.withRootImports
 import dotty.tools.dotc.core.Flags.{Abstract, Case, Enum, EnumCase, Final, Given, Implicit, Inline, Infix, Lazy, Mutable, Opaque, Open, Override, Param, ParamAccessor, Private, PrivateLocal, Protected, Sealed, Trait, Transparent}
 import dotty.tools.dotc.parsing.Parsers
 import dotty.tools.dotc.core.Flags.Package as PackageFlag
@@ -11,6 +12,13 @@ import dotty.tools.dotc.util.SourceFile
 import scala.util.control.NonFatal
 
 object Main:
+  private lazy val initialContext =
+    val base = new ContextBase
+    val context = base.initialCtx.fresh
+    context.setSetting(context.settings.classpath, System.getProperty("java.class.path"))
+    base.initialize()(using context)
+    context
+
   def main(args: Array[String]): Unit =
     val (mode, path) = args.toList match
       case path :: Nil => ("expr", path)
@@ -46,16 +54,17 @@ object Main:
     val sourcePath = Paths.get(path)
     val source = Files.readString(sourcePath)
     val sourceFile = SourceFile.virtual(sourcePath.toString, source)
-    val context = (new ContextBase).initialCtx
+    val context = initialContext
     val unit = CompilationUnit(sourceFile, mustExist = false)(using context)
-    val unitContext = context.fresh.setCompilationUnit(unit)
+    val unitContext = context.fresh.setCompilationUnit(unit).withRootImports
     val parser = new Parsers.Parser(sourceFile)(using unitContext)
     val tree = mode match
       case "pattern" => parser.pattern()
-      case "compilation" => parser.compilationUnit()
+      case "compilation" | "oracle-only" => parser.compilationUnit()
       case _ => parser.expr()
 
-    if mode == "compilation" && tree.getClass.getSimpleName.stripSuffix("$") == "EmptyTree" then
+    val isCompilation = mode == "compilation" || mode == "oracle-only"
+    if isCompilation && tree.getClass.getSimpleName.stripSuffix("$") == "EmptyTree" then
       renderEmptyCompilation(source)
     else
       render(tree, source, placeholderBase(tree, source))
