@@ -587,11 +587,14 @@ subset supports abstract, aliased, and upper-bounded `TypeDef` members in
 source order, including the parentless `{ type X }` form. Parentless
 refinements use a zero-width `TypeTree` only as the non-optional AST parent
 placeholder and do not create a semantic refinement scope. Declaration-only
-`val`, `var`, and `def` members reuse the shared `ValDef` and `DefDef` nodes;
-their right-hand sides and parameter defaults are diagnosed, as are
-class-like members and definition modifiers. Refined type members,
-capture-checking refinements and other
-full type forms remain deferred.
+`val`, `var`, and `def` members reuse the shared `ValDef` and `DefDef` nodes.
+As in Scala 3.9's `refineStatSeq`, annotation/modifier-prefixed members,
+class-like members, term members with right-hand sides, and methods with
+default arguments produce diagnostics and are omitted from the retained
+refinement list; recovery still reaches following members. Annotations on the
+refined parent type are a separate supported form. Further refined type
+members, capture-checking refinements, and other full type forms remain
+deferred.
 
 Type-parameter clauses preserve Scala 3.9 context bounds in the existing
 `ContextBounds` / `ContextBoundTypeTree` nodes, including explicit lower/upper

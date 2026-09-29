@@ -1771,34 +1771,44 @@ where
         let ParsedStatement::Definition(definition) = statement else {
             return None;
         };
-        self.validate_refinement_member(definition, member_start);
-        Some(definition)
+        self.validate_refinement_member(definition, member_start)
+            .then_some(definition)
     }
 
-    fn validate_refinement_member(&mut self, member: TreeId<Untyped>, mark: crate::Mark) {
-        let has_rhs = match &self.ast.get(member).kind {
-            TreeKind::ValDef(definition) => definition.rhs.is_some(),
-            TreeKind::DefDef(definition) => {
-                definition.rhs.is_some()
-                    || definition
-                        .value_param_clauses
-                        .iter()
-                        .flatten()
-                        .any(|parameter| {
-                            matches!(
-                                self.ast.get(*parameter).kind,
-                                TreeKind::ValDef(ref parameter) if parameter.rhs.is_some()
-                            )
-                        })
-            }
-            _ => false,
+    fn validate_refinement_member(&mut self, member: TreeId<Untyped>, mark: crate::Mark) -> bool {
+        let (has_rhs, has_default_argument) = match &self.ast.get(member).kind {
+            TreeKind::ValDef(definition) => (definition.rhs.is_some(), false),
+            TreeKind::DefDef(definition) => (
+                definition.rhs.is_some(),
+                definition
+                    .value_param_clauses
+                    .iter()
+                    .flatten()
+                    .any(|parameter| {
+                        matches!(
+                            self.ast.get(*parameter).kind,
+                            TreeKind::ValDef(ref parameter) if parameter.rhs.is_some()
+                        )
+                    }),
+            ),
+            _ => (false, false),
         };
-        if has_rhs {
+        if has_default_argument {
             self.report_at(
                 ParseDiagnosticKind::UnsupportedSyntax,
                 self.span_from(mark),
-                "refinement val, var, and def declarations cannot have a right-hand side or default argument",
+                "refinement methods cannot have default arguments",
             );
+            false
+        } else if has_rhs {
+            self.report_at(
+                ParseDiagnosticKind::UnsupportedSyntax,
+                self.span_from(mark),
+                "refinement val, var, and def declarations cannot have a right-hand side",
+            );
+            false
+        } else {
+            true
         }
     }
 
@@ -10725,7 +10735,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnoses_a_rhs_and_preserves_a_following_type_member() {
+    fn rejects_a_rhs_member_and_preserves_a_following_type_member() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "A { val x: Int = 1; type Y = String }",
@@ -10753,12 +10763,17 @@ mod tests {
         let TreeKind::RefinedTypeTree(refined) = &parser.ast().get(id).kind else {
             panic!("expected a refined type");
         };
-        assert_eq!(refined.refinements.len(), 2);
-        assert!(matches!(
-            parser.ast().get(refined.refinements[1]).kind,
-            TreeKind::TypeDef(_)
-        ));
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(refined.refinements.len(), 1);
+        let TreeKind::TypeDef(following) = &parser.ast().get(refined.refinements[0]).kind else {
+            panic!("expected the valid following type member to survive recovery");
+        };
+        assert_eq!(parser.names.resolve(following.name.as_name().text()), "Y");
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].message(),
+            "refinement val, var, and def declarations cannot have a right-hand side"
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
@@ -10787,11 +10802,56 @@ mod tests {
         );
 
         let id = parser.type_expr();
-        assert!(matches!(
-            parser.ast().get(id).kind,
-            TreeKind::RefinedTypeTree(_)
-        ));
-        assert!(!parser.diagnostics().is_empty());
+        let TreeKind::RefinedTypeTree(refined) = &parser.ast().get(id).kind else {
+            panic!("expected a refined type");
+        };
+        assert!(refined.refinements.is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].message(),
+            "refinement methods cannot have default arguments"
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn rejects_a_method_rhs_and_preserves_a_following_type_member() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { def f: Int = 1; type Y }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Keyword(HardKeyword::Def), 4, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::ColonFollow, 9, 10),
+                token(TokenKind::Identifier, 11, 14),
+                token(TokenKind::Operator, 15, 16),
+                token(TokenKind::IntegerLiteral, 17, 18),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 18, 19),
+                token(TokenKind::Keyword(HardKeyword::Type), 20, 24),
+                token(TokenKind::Identifier, 25, 26),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 27, 28),
+                token(TokenKind::Eof, 28, 28),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::RefinedTypeTree(refined) = &parser.ast().get(id).kind else {
+            panic!("expected a refined type");
+        };
+        assert_eq!(refined.refinements.len(), 1);
+        let TreeKind::TypeDef(following) = &parser.ast().get(refined.refinements[0]).kind else {
+            panic!("expected the following type member to survive recovery");
+        };
+        assert_eq!(parser.names.resolve(following.name.as_name().text()), "Y");
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].message(),
+            "refinement val, var, and def declarations cannot have a right-hand side"
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
@@ -10853,6 +10913,46 @@ mod tests {
         };
         assert_eq!(refined.refinements.len(), 1);
         assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn rejects_an_annotation_prefix_without_swallowing_a_following_type_member() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "A { @A def hidden: Int; type Y }",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 2, 3),
+                token(TokenKind::Operator, 4, 5),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Keyword(HardKeyword::Def), 7, 10),
+                token(TokenKind::Identifier, 11, 17),
+                token(TokenKind::ColonFollow, 17, 18),
+                token(TokenKind::Identifier, 19, 22),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 22, 23),
+                token(TokenKind::Keyword(HardKeyword::Type), 24, 28),
+                token(TokenKind::Identifier, 29, 30),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 31, 32),
+                token(TokenKind::Eof, 32, 32),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::RefinedTypeTree(refined) = &parser.ast().get(id).kind else {
+            panic!("expected a refined type");
+        };
+        assert_eq!(refined.refinements.len(), 1);
+        let TreeKind::TypeDef(following) = &parser.ast().get(refined.refinements[0]).kind else {
+            panic!("expected the following type member to survive recovery");
+        };
+        assert_eq!(parser.names.resolve(following.name.as_name().text()), "Y");
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
