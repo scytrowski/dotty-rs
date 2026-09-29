@@ -157,9 +157,8 @@ remains independent of `dotty-lexer`; the report was diagnostic research only.
 The six symbolic-type corpus files were rechecked after the changes for
 [#461](https://github.com/scytrowski/dotty-rs/issues/461). Five became clean;
 `library/src/scala/collection/immutable/List.scala` advanced beyond its
-`def ::` type-name failure and then reported three `ExpectedToken` diagnostics
-and one `UnsupportedSyntax` diagnostic at byte span `20020..20022`, on the
-symbol in this declaration:
+`def ::` type-name failure and exposed a later access-qualifier gap at byte
+span `20020..20022`, on the symbol in this declaration:
 
 ```scala
 private[::] def `next$access$1` = next
@@ -169,5 +168,5 @@ Pinned Dotty 3.9 accepts this as an `AccessQualifier` containing an identifier
 (`id | this`); the parser's access-qualifier production had not accepted
 symbolic identifier tokens. This narrow follow-up is tracked in
 [#471](https://github.com/scytrowski/dotty-rs/issues/471). The full-file result
-depends on both symbolic type-name support from #461 and this access-qualifier
-support.
+was rechecked with both #461 and #471 applied: all six files parse without
+diagnostics, scanner errors, or hard failures.
