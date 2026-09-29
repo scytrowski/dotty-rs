@@ -1572,7 +1572,7 @@ mod tests {
             .expect("enum cases counted");
 
         assert_eq!(enum_definition.occurrences, 1);
-        assert_eq!(enum_definition.materialized, 0);
+        assert_eq!(enum_definition.materialized, 1);
         assert_eq!(enum_cases.occurrences, 2);
         assert_eq!(enum_cases.materialized, 0);
     }
