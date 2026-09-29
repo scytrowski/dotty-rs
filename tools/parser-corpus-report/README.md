@@ -41,8 +41,8 @@ corpus; exact normalized tree equality remains the job of
 building its source tree; the batch keeps going so those failures remain
 visible instead of truncating the corpus measurement.
 
-Schema version 4 also records the parser commit as `parser_revision` and
-partitions outcomes into `capture_checking_cohorts`
+Schema version 5 records the parser commit as `parser_revision`, partitions
+outcomes into `capture_checking_cohorts`
 (`enabled`, `disabled`, and `unknown`) using the parser's effective
 `ParserFeatures` after compilation-unit imports have been processed. Each
 cohort records the same clean/recoverable/hard-failure and diagnostic summary
@@ -53,6 +53,13 @@ syntax while keeping unparsed operator tokens visible for manual review. The
 report includes paths for raw-only marker hits and lexer caret tokens for which
 the parser did not build a capture-specific AST shape, making the remaining
 candidate set inspectable rather than treating every caret as capture syntax.
+
+With `--namer`, the report also records Namer errors and invariant failures,
+enum identity coverage by case category, parser-blocked enum definitions and
+cases, export syntax-to-semantic handoff, and deferred feature counts. Export
+forwarder synthesis remains a separate typed-phase metric. The reproducible
+Scala 3.9.0 Namer results and their classification are in
+[`namer-v0.1-compatibility.md`](../../docs/namer-v0.1-compatibility.md).
 
 The low-level binary also accepts repeated `--root` options for focused runs:
 

@@ -1,20 +1,19 @@
 # Namer v0.1 source compatibility
 
-This report measures the source namer against the Scala 3.9.0 compiler and
-library sources. It checks whether the parser's current compilation-unit AST
-can be named and whether the resulting source semantic index satisfies its
-structural invariants. It does not claim that the namer performs typing,
-overload resolution, or compiler desugaring.
+This report measures source naming against the Scala 3.9.0 compiler and
+library sources. It checks whether the parser's compilation-unit AST can be
+named and whether the resulting source semantic index satisfies its structural
+invariants. It does not claim that the namer performs typing, overload
+resolution, or compiler desugaring.
 
-The source semantic index is defined in `dotty-core`, because both the namer
-and typer use this contract. The namer remains responsible for populating the
-index; its public API re-exports the core types for compatibility.
+The source semantic index lives in `dotty-core`, because both the namer and
+typer consume the same contract. The namer populates that index.
 
 ## Reproduction
 
 The corpus is the 1,236 Scala files under `library/src` and `compiler/src` in
-Scala revision `777528f19a58e794c9954a42f433373472ec57f8`. Recreate the checked-in
-JSON report with:
+Scala revision `777528f19a58e794c9954a42f433373472ec57f8`. Recreate the report
+with:
 
 ```text
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
@@ -22,69 +21,93 @@ tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/namer-v0.1-scala3-3.9.0.json
 ```
 
-The runner verifies that exact Scala revision. `--skip-oracle` omits the sbt
-oracle batch; it does not affect the Rust parser or namer run. The JSON report
-records the source revision and leaves oracle counts unset. The measurement
-was refreshed for issue #490 after PR #497; the JSON records the exact
-dotty-rs and Scala source revisions.
+The runner verifies the pinned Scala revision and records the exact dotty-rs
+revision. `--skip-oracle` skips only the sbt reference run; it does not affect
+the Rust lexer, parser, or namer measurement.
 
 ## Results
 
-The parser produced a compilation-unit AST for all 1,236 files. It parsed
-1,113 without diagnostics and 123 with recoverable diagnostics. The namer ran
-on all 1,236 ASTs: 1,229 succeeded (99.43%) and 7 returned typed errors
-(0.57%). Of the successful runs, 116 named parser-recovered ASTs. All 7 typed
-errors came from recovered ASTs; none occurred on a clean parse. There were no
-namer invariant violations, transaction residue after failed calls, process
-failures, panics, or hangs.
+The latest measurement is at dotty-rs revision `f42b3db` and Scala revision
+`777528f`. The parser produced ASTs for all 1,236 files: 1,127 had no
+recoverable diagnostics and 109 had diagnostics. There were zero hard parser
+failures, process failures, panics, or hangs. The namer ran on all files and
+succeeded on 1,229 (99.43%); seven returned typed errors. All seven errors were
+on parser-recovered input. No semantic invariant failures or transaction
+residue were found.
 
-The namer errors fall into two groups:
+Compared with the previous checked-in report (parser revision `4cf7eb2`), the
+corpus has 14 more clean parses and 14 fewer recovered parses. Namer success
+and error counts are unchanged; 14 fewer successful Namer runs now require
+parser recovery.
 
-| Error | Count | Assessment |
-| --- | ---: | --- |
-| `InvalidVisibilityQualifier` | 4 | Valid enclosing class or package qualifiers are not resolved yet. These are a namer gap tracked in [issue #283](https://github.com/scytrowski/dotty-rs/issues/283). |
-| `MalformedAstShape` | 3 | Parser recovery supplied extension children outside the supported method/export forms. These failures originate in parser recovery. |
+| Namer error | Count | Files | Classification |
+| --- | ---: | --- | --- |
+| `InvalidVisibilityQualifier` | 4 | `CaptureSet.scala`, `TypeComparer.scala`, `ProtoTypes.scala`, `Promise.scala` | Recovered ASTs contain qualified private forms whose owner cannot yet be resolved. |
+| `MalformedAstShape` | 3 | `tpd.scala`, `QuoteMatcher.scala`, `NamedTuple.scala` | Parser recovery produced extension children outside the supported method/export forms. |
 
-This classification is based on each failing file's parser diagnostics and
-recovered AST; parser-recovery cases should be reevaluated after those syntax
-forms are supported.
+These are typed errors, not invariant failures. Their parser-recovered inputs
+need reevaluation as the corresponding syntax support improves.
 
-## Deferred source features
+## Enum identity coverage
 
-The checked-in JSON inventories source forms that require work beyond entering
-source declarations in scopes. “Deferred” counts only occurrences in files
-where naming succeeded; parser-blocked forms are listed separately. A
-materialized occurrence means the current source semantic index contains a
-symbol for the corresponding AST node. Synthetic API rows count source
-declarations for which the namer does not yet synthesize those APIs.
+The audit distinguishes enum declarations, their class and companion identities,
+and the three enum-case forms. It found 78 enum definitions; 69 enum class
+identities and all 69 corresponding companion object/module-class pairs were
+materialized. The AST contains 390 singleton cases (384 materialized), 130
+comma-group singleton cases (116 materialized), and 91 parameterized cases (82
+materialized).
 
-| Feature | Occurrences | In files | Deferred after successful naming |
-| --- | ---: | ---: | ---: |
-| Enum definitions | 78 | 57 | 5 |
-| Enum cases | 611 | 57 | 97 |
-| Case class synthetic APIs | 659 | 157 | 650 |
-| Export forwarders | 35 | 10 | 16 |
-| Derives clauses | 135 | 25 | 134 |
-| Local definitions inside method bodies | 34,927 | 730 | 33,763 |
-| Source annotations | 4,031 | 563 | 3,991 |
-| Context-bound evidence synthesis | 812 | 42 | 812 |
+Four enum definitions and 12 enum cases are classified as parser-blocked. The
+four definitions were present as detached AST nodes in recovered files, outside
+any containing `Template.body`; the Namer therefore had no owner context. A
+clean nested-enum regression confirms that this case is distinct from a Namer
+identity failure. The remaining unmatched enum occurrences are in unsuccessful
+Namer runs or local scopes and are not counted as completed-run structural
+failures. Synthetic enum APIs such as `values`, lookup methods, and `ordinal`
+are later synthesis work, not enum identity failures.
 
-The local-definition inventory is computed from AST source spans contained in
-method RHS spans. It is an inventory estimate, not a claim that every such
-definition should become a scope member.
+## Export handoff
 
-The report lists parser-blocked forms separately from Namer deferrals because
-those forms did not reach the namer. Other parser-recovered input remains
-included in the Namer run.
+The source corpus contains 10 export keyword occurrences. Seven export sites
+were recorded in source semantic metadata; none were blocked by parser
+recovery. Two AST export sites occur inside method bodies, whose local scopes
+are outside this Namer gate. The remaining unrecorded site occurs in a unit
+where Namer returned a typed error. No typed export forwarders were
+synthesized: that work belongs to a later typed phase. The report measures
+syntax, semantic handoff, parser recovery, and forwarder synthesis separately.
 
-## Readiness
+## Remaining feature classification
 
-**Recommendation: the current source semantic index is suitable as input to
-the first source typer milestone.** The audit reports zero semantic-index
-invariant failures, and all successful runs preserve the package/scope and
-symbol ownership relationships the typer can build on. The typer milestone
-must account for the documented deferred synthetic members, exports, local
-scopes, and annotations. Qualified visibility has a focused blocker in issue
-#283, and the remaining 3 errors are tied to parser-recovered shapes. This is a
-readiness decision for the first typer input contract, not a claim that the
-Namer implements typing or all Scala 3.9 source syntax.
+Counts below describe the current corpus inventory. “Deferred” counts
+occurrences in units where naming succeeded; parser-blocked syntax and failed
+Namer runs remain separate.
+
+| Feature | Occurrences / files | Deferred after successful naming | Classification |
+| --- | ---: | ---: | --- |
+| Local declarations inside method bodies | 34,995 / 730 | 33,831 | Namer scope/identity gap: method-local scopes are not entered by this gate. |
+| Case-class synthetic APIs | 659 / 157 | 650 | Semantic synthesis/lowering gap. |
+| Derives clauses | 135 / 25 | 134 | Semantic synthesis/lowering gap. |
+| Context-bound evidence | 812 / 42 | 812 | Semantic synthesis/lowering gap. |
+| Source annotations | 4,031 / 563 | 3,991 | Typer gap: syntax remains on AST declarations, but annotation semantics are not projected to symbols. |
+| Package objects | Covered by regression | 0 known deferred | Supported Namer identity; no longer a parser blocker. |
+| Enum synthetic APIs | Not counted by this identity gate | Later feature | Intentional synthesis work after enum identity entry. |
+| Typed export forwarders | 10 export syntaxes | 0 synthesized here | Intentional later typed-phase work. |
+
+The local-definition count is an inventory of declaration spans contained in
+method RHS spans. It does not claim that every such declaration must become a
+class or package scope member.
+
+## Structural checks and readiness
+
+For successful Namer runs, the corpus audit checks canonical and derived symbol
+identities, declaration ownership and scopes, reciprocal companion links and
+uniqueness, enum case owners, export site owners/contexts, source contexts,
+duplicate identities, transaction rollback, and package/source-wrapper
+identity reuse. All reported semantic invariant failures and transaction
+residue counts are zero. Parser-recovered detached enum nodes are listed as
+parser-blocked rather than charged as Namer invariant failures.
+
+The current source semantic index is suitable for the first source typer
+milestone, with the deferred local-scope, annotation, synthetic-member, and
+forwarder work above kept explicit. This is a readiness statement about the
+Namer-to-typer contract, not a claim of complete Scala 3.9 source support.

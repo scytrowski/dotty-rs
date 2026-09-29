@@ -1,39 +1,39 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "corpus_roots": [
     "library/src",
     "compiler/src"
   ],
   "source_version": "3.9.0",
   "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
-  "parser_revision": "4cf7eb29f5eb24ab17b437fd819d874eeafe1366",
+  "parser_revision": "f42b3dbfe9de9f322377da7def268cb620281b81",
   "scala_oracle_files": null,
   "scala_oracle_failures": null,
   "files_attempted": 1236,
-  "files_parsed_without_diagnostics": 1113,
-  "files_parsed_with_recoverable_diagnostics": 123,
+  "files_parsed_without_diagnostics": 1127,
+  "files_parsed_with_recoverable_diagnostics": 109,
   "hard_parser_failures": 0,
   "process_failures": 0,
   "panics": 0,
   "hangs": 0,
   "scanner_diagnostics": 13,
   "diagnostic_histogram": {
-    "ExpectedExpression": 673,
+    "ExpectedExpression": 577,
     "ExpectedPattern": 5,
-    "ExpectedToken": 232,
+    "ExpectedToken": 185,
     "ExpectedType": 7,
-    "UnexpectedToken": 411,
-    "UnsupportedSyntax": 406
+    "UnexpectedToken": 336,
+    "UnsupportedSyntax": 361
   },
   "first_failure_histogram": {
     "ExpectedExpression": {
-      "count": 38,
+      "count": 35,
       "examples": [
         "compiler/src/dotty/tools/dotc/Run.scala",
         "compiler/src/dotty/tools/dotc/ast/Desugar.scala",
-        "compiler/src/dotty/tools/dotc/ast/NavigateAST.scala",
         "compiler/src/dotty/tools/dotc/ast/tpd.scala",
-        "compiler/src/dotty/tools/dotc/cc/Capability.scala"
+        "compiler/src/dotty/tools/dotc/cc/CaptureOps.scala",
+        "compiler/src/dotty/tools/dotc/classpath/DirectoryClassPath.scala"
       ]
     },
     "ExpectedPattern": {
@@ -44,13 +44,13 @@
       ]
     },
     "ExpectedToken": {
-      "count": 41,
+      "count": 28,
       "examples": [
         "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
         "compiler/src/dotty/tools/dotc/ast/TreeInfo.scala",
+        "compiler/src/dotty/tools/dotc/cc/Capability.scala",
         "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala",
-        "compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala",
-        "compiler/src/dotty/tools/dotc/cc/SafeRefs.scala"
+        "compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala"
       ]
     },
     "ExpectedType": {
@@ -63,7 +63,7 @@
       ]
     },
     "UnexpectedToken": {
-      "count": 26,
+      "count": 28,
       "examples": [
         "compiler/src/dotty/tools/backend/jvm/BTypeLoader.scala",
         "compiler/src/dotty/tools/backend/jvm/BackendUtils.scala",
@@ -110,27 +110,27 @@
   "capture_checking_cohorts": {
     "disabled": {
       "files": 994,
-      "clean": 882,
-      "recoverable": 112,
+      "clean": 895,
+      "recoverable": 99,
       "hard_failures": 0,
       "scanner_diagnostics": 13,
       "diagnostic_histogram": {
-        "ExpectedExpression": 637,
+        "ExpectedExpression": 541,
         "ExpectedPattern": 5,
-        "ExpectedToken": 211,
+        "ExpectedToken": 165,
         "ExpectedType": 1,
-        "UnexpectedToken": 382,
-        "UnsupportedSyntax": 384
+        "UnexpectedToken": 308,
+        "UnsupportedSyntax": 339
       },
       "first_failure_histogram": {
         "ExpectedExpression": {
-          "count": 38,
+          "count": 35,
           "examples": [
             "compiler/src/dotty/tools/dotc/Run.scala",
             "compiler/src/dotty/tools/dotc/ast/Desugar.scala",
-            "compiler/src/dotty/tools/dotc/ast/NavigateAST.scala",
             "compiler/src/dotty/tools/dotc/ast/tpd.scala",
-            "compiler/src/dotty/tools/dotc/cc/Capability.scala"
+            "compiler/src/dotty/tools/dotc/cc/CaptureOps.scala",
+            "compiler/src/dotty/tools/dotc/classpath/DirectoryClassPath.scala"
           ]
         },
         "ExpectedPattern": {
@@ -141,17 +141,17 @@
           ]
         },
         "ExpectedToken": {
-          "count": 36,
+          "count": 24,
           "examples": [
             "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
             "compiler/src/dotty/tools/dotc/ast/TreeInfo.scala",
+            "compiler/src/dotty/tools/dotc/cc/Capability.scala",
             "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala",
-            "compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala",
-            "compiler/src/dotty/tools/dotc/cc/SafeRefs.scala"
+            "compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala"
           ]
         },
         "UnexpectedToken": {
-          "count": 26,
+          "count": 28,
           "examples": [
             "compiler/src/dotty/tools/backend/jvm/BTypeLoader.scala",
             "compiler/src/dotty/tools/backend/jvm/BackendUtils.scala",
@@ -233,26 +233,25 @@
     },
     "enabled": {
       "files": 242,
-      "clean": 231,
-      "recoverable": 11,
+      "clean": 232,
+      "recoverable": 10,
       "hard_failures": 0,
       "scanner_diagnostics": 0,
       "diagnostic_histogram": {
         "ExpectedExpression": 36,
-        "ExpectedToken": 21,
+        "ExpectedToken": 20,
         "ExpectedType": 6,
-        "UnexpectedToken": 29,
+        "UnexpectedToken": 28,
         "UnsupportedSyntax": 22
       },
       "first_failure_histogram": {
         "ExpectedToken": {
-          "count": 5,
+          "count": 4,
           "examples": [
             "library/src/scala/Tuple.scala",
             "library/src/scala/collection/Iterator.scala",
             "library/src/scala/collection/MapView.scala",
-            "library/src/scala/collection/mutable/StringBuilder.scala",
-            "library/src/scala/util/boundary.scala"
+            "library/src/scala/collection/mutable/StringBuilder.scala"
           ]
         },
         "ExpectedType": {
@@ -300,13 +299,13 @@
     "files_namer_ran": 1236,
     "files_namer_succeeded": 1229,
     "files_namer_returned_error": 7,
-    "files_named_after_parser_recovery": 116,
+    "files_named_after_parser_recovery": 102,
     "files_with_namer_errors_after_parser_recovery": 7,
     "files_with_invariant_failures": 0,
     "failed_calls_with_transaction_residue": 0,
     "namer_success_percent": 99.4336569579288,
     "namer_typed_error_percent": 0.5663430420711975,
-    "clean_parse_vs_namer_success_delta": 116,
+    "clean_parse_vs_namer_success_delta": 102,
     "namer_error_histogram": {
       "InvalidVisibilityQualifier": {
         "count": 4,
@@ -315,7 +314,7 @@
         "examples": [
           {
             "path": "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala",
-            "message": "tree 3698 has an invalid qualified private visibility"
+            "message": "tree 3697 has an invalid qualified private visibility"
           },
           {
             "path": "compiler/src/dotty/tools/dotc/core/TypeComparer.scala",
@@ -351,7 +350,27 @@
         ]
       }
     },
-    "invariant_failure_histogram": {}
+    "invariant_failure_histogram": {},
+    "enum_identity_audit": {
+      "definitions_encountered": 78,
+      "class_identities_materialized": 69,
+      "companion_identity_pairs_materialized": 69,
+      "definitions_blocked_by_parser_recovery": 4,
+      "singleton_cases_encountered": 390,
+      "singleton_cases_materialized": 384,
+      "comma_group_singleton_cases_encountered": 130,
+      "comma_group_singleton_cases_materialized": 116,
+      "parameterized_cases_encountered": 91,
+      "parameterized_cases_materialized": 82,
+      "cases_blocked_by_parser_recovery": 12
+    },
+    "export_handoff_audit": {
+      "syntax_occurrences": 10,
+      "sites_recorded": 7,
+      "sites_blocked_by_parser_recovery": 0,
+      "sites_in_method_bodies": 2,
+      "forwarders_synthesized": 0
+    }
   },
   "deferred_features": {
     "case_class_synthetic_apis": {
@@ -393,50 +412,11 @@
         "compiler/src/dotty/tools/dotc/cc/SepCheck.scala"
       ]
     },
-    "enum_cases": {
-      "files": 57,
-      "occurrences": 611,
-      "materialized_occurrences": 500,
-      "deferred_occurrences": 97,
-      "examples": [
-        "compiler/src/dotty/tools/MainGenericCompiler.scala",
-        "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
-        "compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala",
-        "compiler/src/dotty/tools/backend/jvm/TestOp.scala",
-        "compiler/src/dotty/tools/debug/ReflectEvalStrategy.scala"
-      ]
-    },
-    "enum_definitions": {
-      "files": 57,
-      "occurrences": 78,
-      "materialized_occurrences": 69,
-      "deferred_occurrences": 5,
-      "examples": [
-        "compiler/src/dotty/tools/MainGenericCompiler.scala",
-        "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
-        "compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala",
-        "compiler/src/dotty/tools/backend/jvm/TestOp.scala",
-        "compiler/src/dotty/tools/debug/ReflectEvalStrategy.scala"
-      ]
-    },
-    "export_forwarders": {
-      "files": 10,
-      "occurrences": 35,
-      "materialized_occurrences": 0,
-      "deferred_occurrences": 16,
-      "examples": [
-        "compiler/src/dotty/tools/dotc/Run.scala",
-        "compiler/src/dotty/tools/dotc/cc/Capability.scala",
-        "compiler/src/dotty/tools/dotc/core/Flags.scala",
-        "compiler/src/dotty/tools/dotc/core/Signature.scala",
-        "compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala"
-      ]
-    },
     "local_definitions": {
       "files": 730,
-      "occurrences": 34927,
+      "occurrences": 34995,
       "materialized_occurrences": 0,
-      "deferred_occurrences": 33763,
+      "deferred_occurrences": 33831,
       "examples": [
         "compiler/src/dotty/tools/MainGenericCompiler.scala",
         "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
@@ -536,8 +516,8 @@
       ]
     },
     "parser_blocked: top-level expressions are not supported in a compilation unit": {
-      "files": 42,
-      "occurrences": 248,
+      "files": 37,
+      "occurrences": 203,
       "materialized_occurrences": 0,
       "deferred_occurrences": 0,
       "examples": [
