@@ -310,7 +310,7 @@ where
         ) || self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen)
         {
             self.with_location(Location::Elsewhere, |parser| {
-                parser.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type())
+                parser.with_parse_kind(crate::ParseKind::Type, |parser| parser.simple_type1())
             })
         } else {
             let position = self.current_span();
