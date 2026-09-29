@@ -814,6 +814,13 @@ patterns, optional guards (including line breaks between a pattern and its
 `Apply`/`TypeApply` until later semantic lowering. Full case-clause features
 and pattern semantics remain future work.
 
+Nested match and case-body boundaries are closed by their active scanner
+`Indent` region, not by treating every encountered `case` as belonging to the
+innermost match. The parser requests closure at a less-indented case boundary;
+the scanner decides from source layout whether to materialize the `Outdent`.
+This applies both to eager layout tokens and to regions opened through parser
+feedback, including layout suppressed inside braces.
+
 The complete-expression boundary also recognizes the initial explicit function
 literal subset:
 

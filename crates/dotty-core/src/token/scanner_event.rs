@@ -13,7 +13,7 @@ pub enum ScannerEvent {
         reference_offset: u32,
     },
     Outdented,
-    /// Closes a specific parser-opened indentation region, if still active.
+    /// Closes a specific active indentation region, if still active.
     OutdentedRegion {
         indent_offset: u32,
     },
