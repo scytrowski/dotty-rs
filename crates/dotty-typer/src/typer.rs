@@ -784,7 +784,7 @@ pub enum TyperError {
         application_kind: ApplyKind,
         method_kind: MethodKind,
     },
-    /// The constructor application helper currently supports only plain clauses.
+    /// Raw generic constructor inference currently supports only plain clauses.
     UnsupportedApplicationMethodKind {
         source: SourceId,
         tree_index: u32,
@@ -1125,6 +1125,7 @@ pub enum TyperError {
 /// Why one overload was excluded from an application candidate set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverloadRejection {
+    /// This call's `ApplyKind` does not consume the candidate's current clause.
     ApplicationKindMismatch {
         application_kind: ApplyKind,
         method_kind: MethodKind,
@@ -25571,7 +25572,7 @@ mod tests {
 
     #[test]
     fn by_name_application_parameter_is_deferred() {
-        let source_text = "class C { def f(x: => Int): Int = x; def use: Int = f(1) }";
+        let source_text = "class C { def f(using x: => Int): Int = x; def use: Int = f(using 1) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
         let context = ExpressionContext {
@@ -25599,7 +25600,7 @@ mod tests {
 
     #[test]
     fn erased_application_parameter_is_deferred() {
-        let source_text = "class C { def f(x: Int): Int = x; def use: Int = f(1) }";
+        let source_text = "class C { def f(using x: Int): Int = x; def use: Int = f(using 1) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let parameter = parsed
             .ast

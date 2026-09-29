@@ -190,6 +190,19 @@ argument mismatches, and bound violations reject that candidate; unsupported
 inference or conformance shapes remain conservative when they could compete.
 Standalone overloaded identifiers and selections remain deferred.
 
+Application syntax is checked against the current method clause: regular
+applications consume plain clauses, while explicit `using` applications consume
+contextual or legacy implicit clauses. Explicit arguments use the ordinary
+typing, widening, arity, and conformance checks, and the typed `Apply` retains
+its `ApplyKind`. Overload applicability applies the same clause-kind filter, so
+a mismatched candidate cannot win solely because its argument types match.
+Curried plain-then-contextual calls continue from the exact result callable of
+the first clause, including after generic inference. Automatic contextual or
+implicit argument insertion and implicit search remain deferred. Erased and
+by-name parameters remain unsupported for explicit application. The Scala
+grammar rejects repeated parameters in contextual clauses; ordinary repeated
+parameter application remains deferred.
+
 `SourceTyper::expression_context_for` builds a method or constructor body
 context from its indexed source declaration context and owned scope. Term
 lookup checks typer-local scopes from innermost to outermost before source
@@ -240,8 +253,8 @@ are ready:
 - local `def`, class, type, and pattern declarations, plus imports in block
   statements;
 - generic overload inference outside the structural candidate-local subset,
-  `using`/implicit argument insertion, dependent result application, and
-  right-associative extension normalization;
+  contextual/implicit argument insertion and search, dependent result
+  application, and right-associative extension normalization;
 - expected-type-driven constructor inference, selecting constructor overloads, and
   anonymous-class lowering;
 - enum semantics, case-class synthetic APIs, and `derives`;
