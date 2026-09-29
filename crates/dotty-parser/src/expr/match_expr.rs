@@ -65,15 +65,13 @@ where
         let has_inline_case = self.features().sub_cases
             && next_kind == TokenKind::Keyword(dotty_core::HardKeyword::Case)
             && !self.has_physical_line_break(self.current().span.end(), next_token.span.start());
-        let has_scanner_indented_cases = next_kind == TokenKind::Indent;
-        let opened_feedback_case_region =
-            if !has_braced_cases && !has_inline_case && !has_scanner_indented_cases {
-                // Braced scopes suppress eager indentation in the scanner. Ask it
-                // to open a case region when the cases are laid out after `match`.
-                self.observe_match_cases_indented()
-            } else {
-                false
-            };
+        let case_region = if !has_braced_cases && !has_inline_case {
+            // Ask the scanner to identify the active case region, whether
+            // its Indent was emitted eagerly or opened by parser feedback.
+            self.observe_match_cases_indented()
+        } else {
+            None
+        };
         self.advance();
         let cases = if self.accept(TokenKind::Punctuation(Punctuation::LeftBrace)) {
             let cases = self.case_clauses();
@@ -91,17 +89,22 @@ where
         } else {
             self.consume_match_newlines();
             if self.accept(TokenKind::Indent) {
-                let cases = self.case_clauses();
+                let cases = self
+                    .case_clauses_in_region(case_region.map(|(indent_offset, _)| indent_offset));
                 let closed_by_delimiter =
                     self.current().kind == TokenKind::Punctuation(Punctuation::RightParen);
-                if closed_by_delimiter && opened_feedback_case_region {
+                if closed_by_delimiter
+                    && case_region.is_some_and(|(_, opened_by_feedback)| opened_by_feedback)
+                {
                     self.observe_outdented_by_delimiter();
+                } else if closed_by_delimiter && !self.cursor.at(TokenKind::Outdent) {
+                    self.observe_outdented();
+                } else if !self.cursor.at(TokenKind::Outdent)
+                    && let Some((indent_offset, _)) = case_region
+                {
+                    self.observe_outdented_region(indent_offset);
                 } else if !self.cursor.at(TokenKind::Outdent) {
-                    if opened_feedback_case_region {
-                        self.observe_match_cases_outdented();
-                    } else {
-                        self.observe_outdented();
-                    }
+                    self.observe_outdented();
                 }
                 if !self.accept(TokenKind::Outdent) && !closed_by_delimiter {
                     self.report(
@@ -154,12 +157,29 @@ mod tests {
     };
     use std::{cell::Cell, rc::Rc};
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FeedbackRegionKind {
+        MatchCases,
+        CaseBody,
+    }
+
     struct FeedbackTokenSource {
+        source: String,
         tokens: Vec<Token>,
         index: usize,
         arrow_indents: bool,
         outdent_at: Option<u32>,
         closed_feedback_by_delimiter: Rc<Cell<bool>>,
+        feedback_regions: Vec<(u32, FeedbackRegionKind)>,
+    }
+
+    fn indentation_at(source: &str, offset: u32) -> usize {
+        let offset = offset as usize;
+        let line_start = source[..offset].rfind('\n').map_or(0, |index| index + 1);
+        source[line_start..offset]
+            .bytes()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count()
     }
 
     impl TokenSource for FeedbackTokenSource {
@@ -182,34 +202,128 @@ mod tests {
         fn observe(&mut self, event: ScannerEvent) {
             if event == ScannerEvent::OutdentedByDelimiter {
                 self.closed_feedback_by_delimiter.set(true);
+                self.feedback_regions.pop();
+            }
+            if let ScannerEvent::OutdentedRegion { indent_offset } = event
+                && self
+                    .feedback_regions
+                    .last()
+                    .is_some_and(|(offset, _)| *offset == indent_offset)
+                && indentation_at(&self.source, self.current().span.start())
+                    < indentation_at(&self.source, indent_offset)
+            {
+                let offset = self.current().span.start();
+                self.tokens.insert(
+                    self.index,
+                    Token::new(TokenKind::Outdent, TextRange::new(offset, offset).unwrap()),
+                );
+                self.feedback_regions.pop();
             }
             match (event, self.current().kind) {
                 (ScannerEvent::MatchCasesIndented, TokenKind::Keyword(HardKeyword::Match)) => {
-                    let offset = self.current().span.end();
+                    let mut indent_index = self.index + 1;
+                    while matches!(
+                        self.tokens[indent_index].kind,
+                        TokenKind::Newline | TokenKind::Newlines
+                    ) {
+                        indent_index += 1;
+                    }
+                    let offset = self.tokens[indent_index].span.start();
                     self.tokens.insert(
-                        self.index + 1,
+                        indent_index,
                         Token::new(TokenKind::Indent, TextRange::new(offset, offset).unwrap()),
                     );
+                    self.feedback_regions
+                        .push((offset, FeedbackRegionKind::MatchCases));
                 }
-                (ScannerEvent::CaseBodyIndented { .. }, TokenKind::Operator)
-                    if self.arrow_indents =>
+                (ScannerEvent::CaseBodyIndented { case_start }, TokenKind::Operator)
+                    if self.arrow_indents
+                        && self.tokens[self.index + 1..]
+                            .iter()
+                            .take_while(|token| {
+                                matches!(token.kind, TokenKind::Newline | TokenKind::Newlines)
+                            })
+                            .next()
+                            .is_some()
+                        && self.tokens[self.index + 1..]
+                            .iter()
+                            .find(|token| {
+                                !matches!(token.kind, TokenKind::Newline | TokenKind::Newlines)
+                            })
+                            .is_some_and(|token| {
+                                indentation_at(&self.source, token.span.start())
+                                    > indentation_at(&self.source, case_start)
+                            }) =>
                 {
-                    let offset = self.current().span.end();
+                    let mut indent_index = self.index + 1;
+                    while matches!(
+                        self.tokens[indent_index].kind,
+                        TokenKind::Newline | TokenKind::Newlines
+                    ) {
+                        indent_index += 1;
+                    }
+                    let offset = self.tokens[indent_index].span.start();
                     self.tokens.insert(
-                        self.index + 1,
+                        indent_index,
                         Token::new(TokenKind::Indent, TextRange::new(offset, offset).unwrap()),
                     );
+                    self.feedback_regions
+                        .push((offset, FeedbackRegionKind::CaseBody));
                 }
-                (ScannerEvent::Outdented | ScannerEvent::MatchCasesOutdented, _)
+                (ScannerEvent::Outdented, _)
                     if self
-                        .outdent_at
-                        .is_none_or(|offset| self.current().span.start() == offset) =>
+                        .feedback_regions
+                        .last()
+                        .is_some_and(|(_, kind)| *kind == FeedbackRegionKind::CaseBody)
+                        && self
+                            .outdent_at
+                            .is_none_or(|offset| self.current().span.start() == offset) =>
                 {
                     let offset = self.current().span.start();
                     self.tokens.insert(
                         self.index,
                         Token::new(TokenKind::Outdent, TextRange::new(offset, offset).unwrap()),
                     );
+                    self.feedback_regions.pop();
+                }
+                (ScannerEvent::Outdented, _)
+                    if self
+                        .feedback_regions
+                        .last()
+                        .is_some_and(|(_, kind)| *kind == FeedbackRegionKind::MatchCases)
+                        && self.tokens[self.index..]
+                            .iter()
+                            .find(|token| {
+                                !matches!(token.kind, TokenKind::Newline | TokenKind::Newlines)
+                            })
+                            .is_some_and(|token| {
+                                token.kind == TokenKind::Keyword(HardKeyword::Case)
+                            }) => {}
+                (ScannerEvent::Outdented, _)
+                    if self
+                        .feedback_regions
+                        .last()
+                        .is_some_and(|(_, kind)| *kind == FeedbackRegionKind::MatchCases) =>
+                {
+                    let offset = self.current().span.start();
+                    self.tokens.insert(
+                        self.index,
+                        Token::new(TokenKind::Outdent, TextRange::new(offset, offset).unwrap()),
+                    );
+                    self.feedback_regions.pop();
+                }
+                (ScannerEvent::MatchCasesOutdented, _)
+                    if self
+                        .feedback_regions
+                        .last()
+                        .is_some_and(|(_, kind)| *kind == FeedbackRegionKind::MatchCases) =>
+                {
+                    let offset = self.current().span.start();
+                    self.tokens.insert(
+                        self.index,
+                        Token::new(TokenKind::Outdent, TextRange::new(offset, offset).unwrap()),
+                    );
+                    self.feedback_regions.pop();
                 }
                 _ => {}
             }
@@ -242,11 +356,13 @@ mod tests {
             SourceText::new(source).unwrap(),
             SourceId::from_index(1),
             FeedbackTokenSource {
+                source: source.to_owned(),
                 tokens,
                 index: 0,
                 arrow_indents: true,
                 outdent_at: None,
                 closed_feedback_by_delimiter: Rc::new(Cell::new(false)),
+                feedback_regions: Vec::new(),
             },
             &mut names,
         );
@@ -260,7 +376,12 @@ mod tests {
         let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(stats[0]).kind else {
             panic!("expected the match expression");
         };
-        assert_eq!(cases.len(), 2);
+        assert_eq!(
+            cases.len(),
+            2,
+            "expected both match cases; diagnostics: {:?}",
+            parser.diagnostics()
+        );
         assert!(matches!(parser.ast().get(expr).kind, TreeKind::Ident(_)));
         assert!(
             parser.diagnostics().is_empty(),
@@ -295,11 +416,13 @@ mod tests {
             SourceText::new(source).unwrap(),
             SourceId::from_index(1),
             FeedbackTokenSource {
+                source: source.to_owned(),
                 tokens,
                 index: 0,
                 arrow_indents: true,
                 outdent_at: None,
                 closed_feedback_by_delimiter: Rc::new(Cell::new(false)),
+                feedback_regions: Vec::new(),
             },
             &mut names,
         );
@@ -360,11 +483,13 @@ mod tests {
             SourceText::new(source).unwrap(),
             SourceId::from_index(1),
             FeedbackTokenSource {
+                source: source.to_owned(),
                 tokens,
                 index: 0,
                 arrow_indents: false,
                 outdent_at: Some(64),
                 closed_feedback_by_delimiter: Rc::new(Cell::new(false)),
+                feedback_regions: Vec::new(),
             },
             &mut names,
         );
@@ -412,11 +537,13 @@ mod tests {
             SourceText::new(source).unwrap(),
             SourceId::from_index(1),
             FeedbackTokenSource {
+                source: source.to_owned(),
                 tokens,
                 index: 0,
                 arrow_indents: true,
                 outdent_at: None,
                 closed_feedback_by_delimiter: Rc::new(Cell::new(false)),
+                feedback_regions: Vec::new(),
             },
             &mut names,
         )
@@ -659,11 +786,13 @@ mod tests {
             SourceText::new(source).unwrap(),
             SourceId::from_index(1),
             FeedbackTokenSource {
+                source: source.to_owned(),
                 tokens,
                 index: 0,
                 arrow_indents: false,
                 outdent_at: Some(0),
                 closed_feedback_by_delimiter: Rc::clone(&closed_feedback_by_delimiter),
+                feedback_regions: Vec::new(),
             },
             &mut names,
         );

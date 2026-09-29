@@ -46,7 +46,9 @@ where
                     // indented expression as a BlockExpr. Keep the indentation
                     // token visible so the shared case-body parser consumes
                     // the complete statement sequence and its matching outdent.
-                    let body = parser.parse_case_body(body_mark);
+                    let body_indent = (parser.current().kind == TokenKind::Indent)
+                        .then(|| parser.current().span.start());
+                    let body = parser.parse_case_body(body_mark, body_indent);
                     if let TreeKind::Block(Block { stats, expr }) = &parser.ast.get(body).kind
                         && stats.is_empty()
                     {
@@ -59,9 +61,9 @@ where
                 }
             })
         } else {
-            self.observe_case_body_indented(mark.start);
+            let body_indent_offset = self.observe_case_body_indented(mark.start);
             self.advance();
-            self.parse_case_body(body_mark)
+            self.parse_case_body(body_mark, body_indent_offset)
         };
         self.alloc_from(
             mark,
@@ -75,9 +77,26 @@ where
 
     /// Parses a consecutive case list, leaving its enclosing `}`/`Outdent` untouched.
     pub(crate) fn case_clauses(&mut self) -> Vec<TreeId<Untyped>> {
+        self.case_clauses_in_region(None)
+    }
+
+    /// Parses cases while allowing the scanner to end a parser- or scanner-opened case
+    /// region before a less-indented outer `case` clause.
+    pub(crate) fn case_clauses_in_region(
+        &mut self,
+        region_indent_offset: Option<u32>,
+    ) -> Vec<TreeId<Untyped>> {
         let mut cases = Vec::new();
         self.consume_case_separators();
-        while self.current().kind == TokenKind::Keyword(HardKeyword::Case) {
+        loop {
+            if self.current().kind == TokenKind::Keyword(HardKeyword::Case)
+                && let Some(indent_offset) = region_indent_offset
+            {
+                self.observe_outdented_region(indent_offset);
+            }
+            if self.current().kind != TokenKind::Keyword(HardKeyword::Case) {
+                break;
+            }
             let checkpoint = self.cursor.checkpoint();
             cases.push(self.case_clause(false));
             self.consume_case_separators();
@@ -125,7 +144,11 @@ where
         self.parse_guard()
     }
 
-    fn parse_case_body(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+    fn parse_case_body(
+        &mut self,
+        mark: crate::Mark,
+        body_indent_offset: Option<u32>,
+    ) -> TreeId<Untyped> {
         self.consume_case_newlines();
         if matches!(
             self.current().kind,
@@ -150,7 +173,11 @@ where
             self.advance();
             let result = self
                 .with_case_body(|parser| parser.parse_expression_block_body(TokenKind::Outdent));
-            if !self.cursor.at(TokenKind::Outdent) {
+            if !self.cursor.at(TokenKind::Outdent)
+                && let Some(indent_offset) = body_indent_offset
+            {
+                self.observe_outdented_region(indent_offset);
+            } else if !self.cursor.at(TokenKind::Outdent) {
                 self.observe_outdented();
             }
             if !self.accept(TokenKind::Outdent) {

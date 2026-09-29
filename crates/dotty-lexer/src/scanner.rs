@@ -370,6 +370,23 @@ impl ContextualScanner {
         true
     }
 
+    fn innermost_open_indent_offset(&self, before: usize) -> Option<u32> {
+        let mut closed_regions = 0usize;
+        for token in self.tokens[..before].iter().rev() {
+            match token.kind {
+                TokenKind::Outdent => closed_regions = closed_regions.saturating_add(1),
+                TokenKind::Indent if closed_regions > 0 => closed_regions -= 1,
+                TokenKind::Indent
+                    if !self.delimiter_closed_indents.contains(&token.span.start()) =>
+                {
+                    return Some(token.span.start());
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn remove_pending_indent_after_current(&mut self) -> bool {
         let mut index = self.current_index().saturating_add(1);
         while self
@@ -489,14 +506,16 @@ impl TokenSource for ContextualScanner {
                 _ => {}
             },
             ScannerEvent::OutdentedRegion { indent_offset } => {
-                let matches_top_region = self.feedback_regions.last().is_some_and(|region| {
-                    region.kind == FeedbackRegionKind::Indented
-                        && region.indent_offset == indent_offset
-                });
-                if matches_top_region
+                let matches_top_feedback_region = self
+                    .feedback_regions
+                    .last()
+                    .is_some_and(|region| region.indent_offset == indent_offset);
+                if self.innermost_open_indent_offset(self.current_index()) == Some(indent_offset)
                     && self.insert_outdent_before_current(false, true, Some(indent_offset))
                 {
-                    self.feedback_regions.pop();
+                    if matches_top_feedback_region {
+                        self.feedback_regions.pop();
+                    }
                 }
             }
             ScannerEvent::MatchCasesIndented => {
@@ -4567,6 +4586,48 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn named_outdent_can_close_an_eager_layout_region() {
+        let mut scanner = ContextualScanner::new("root\n  child\nback").expect("source scans");
+        let child_index = scanner
+            .tokens
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Identifier
+                    && scanner
+                        .source
+                        .get(token.span.start() as usize..token.span.end() as usize)
+                        == Some("child")
+            })
+            .expect("child token");
+        let indent_offset = scanner.tokens[child_index].span.start();
+        scanner.tokens.insert(
+            child_index,
+            Token::new(
+                TokenKind::Indent,
+                TextRange::new(indent_offset, indent_offset).unwrap(),
+            ),
+        );
+        let back_index = scanner
+            .tokens
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Identifier
+                    && scanner
+                        .source
+                        .get(token.span.start() as usize..token.span.end() as usize)
+                        == Some("back")
+            })
+            .expect("back token");
+        scanner.position = back_index;
+
+        scanner.observe(ScannerEvent::OutdentedRegion { indent_offset });
+
+        assert!(scanner.feedback_regions.is_empty());
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Identifier);
     }
 
     #[test]
