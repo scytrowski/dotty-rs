@@ -88,8 +88,17 @@ arguments are read from the typed `New` instance type and instantiate the
 constructor's exact `Poly` binder by index. Ordinary lower and upper bounds
 use the same relation as explicit method type applications, and the
 instantiated final result must agree with the instance class and type
-arguments. No synthetic source `TypeApply` is introduced. Constructor
-inference, overload competition, and contextual constructor applications
+arguments. When class type arguments are omitted, a unique generic primary
+constructor infers them from widened term argument types. Inference uses the
+constructor Poly binder and parameter indices, supports matching applied type
+constructors recursively, and combines constraints from curried clauses.
+Repeated equivalent constraints succeed; conflicts and unconstrained
+parameters are errors, without a `Nothing`/`Any` fallback or LUB. The inferred
+arguments pass through the same bounds checker and Poly instantiator as other
+generic calls. The typed `New` is finalized only after inference succeeds, so
+it and the final constructor application retain the same applied instance
+type. No synthetic source `TypeApply` is introduced. Constructor overload
+competition, expected-type inference, and contextual constructor applications
 remain explicit deferrals.
 
 An `if` condition is checked against canonical `Boolean`. Both branches are
@@ -209,7 +218,7 @@ are ready:
   statements;
 - generic overload inference, `using`/implicit argument insertion, dependent
   result application, and right-associative extension normalization;
-- inferring constructor type arguments, selecting constructor overloads, and
+- expected-type-driven constructor inference, selecting constructor overloads, and
   anonymous-class lowering;
 - enum semantics, case-class synthetic APIs, and `derives`;
 - context-bound evidence synthesis;
