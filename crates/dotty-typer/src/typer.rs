@@ -4958,8 +4958,14 @@ impl<'a> SourceTyper<'a> {
                 kind: "method definition",
             },
         )?;
-        let signature =
-            self.complete_local_method_signature(method, tree.index(), definition, info_journal)?;
+        let signature = match *self.store.symbols.info(method) {
+            SymbolInfo::Complete(signature) => signature,
+            SymbolInfo::Missing => self.complete_symbol_inner(method, info_journal)?,
+            SymbolInfo::Deferred(_) => {
+                return Err(TyperError::DeferredSymbolCompletion { symbol: method });
+            }
+            SymbolInfo::Error => return Err(TyperError::SymbolAlreadyErrored { symbol: method }),
+        };
         let result = match self.store.types.try_get(signature) {
             Some(Type::Method(method_type)) => method_type.result,
             _ => {
@@ -20267,6 +20273,39 @@ mod tests {
             typer.source_typed_index().get(source, method_tree),
             Some(typed_method)
         );
+    }
+
+    #[test]
+    fn typing_an_unused_local_method_publishes_its_signature() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def unused(value: Int): Int = value; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let method_tree = match &parsed.ast.get(block_tree).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("outer body should be a block"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        typer.type_expression(block_tree, context).unwrap();
+
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        let SymbolInfo::Complete(signature) = *typer.store().symbols.info(method) else {
+            panic!("typing the definition should publish its method signature");
+        };
+        assert!(matches!(
+            typer.store().types.get(signature),
+            Type::Method(_)
+        ));
     }
 
     #[test]
