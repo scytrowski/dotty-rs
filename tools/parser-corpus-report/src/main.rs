@@ -877,16 +877,7 @@ fn collect_deferred_features(
         features.entry(name.to_owned()).or_default();
     }
     let source = SourceId::from_index(0);
-    let attached_declarations = arena
-        .iter()
-        .filter_map(|(_, tree)| match &tree.kind {
-            TreeKind::Template(template) => Some(template.body.iter().copied()),
-            TreeKind::PackageDef(package) => Some(package.stats.iter().copied()),
-            TreeKind::Block(block) => Some(block.stats.iter().copied()),
-            _ => None,
-        })
-        .flatten()
-        .collect::<HashSet<_>>();
+    let scope_members = collect_scope_members(arena);
     let enum_case_ranges = arena
         .iter()
         .filter_map(|(_, tree)| {
@@ -997,7 +988,13 @@ fn collect_deferred_features(
                     let parser_blocked = enum_identity_is_parser_blocked(
                         !diagnostics.is_empty(),
                         symbol_materialized,
-                        attached_declarations.contains(&tree_id),
+                        scope_members.contains(&tree_id),
+                        tree.position.is_some_and(|span| {
+                            let position = span.span().range();
+                            method_rhs_ranges.iter().any(|rhs| {
+                                rhs.start() <= position.start() && position.end() <= rhs.end()
+                            })
+                        }),
                     ) && named.is_some();
                     record(
                         &mut features,
@@ -1210,9 +1207,38 @@ fn collect_deferred_features(
 fn enum_identity_is_parser_blocked(
     parser_recovered: bool,
     identity_materialized: bool,
-    is_attached_to_parent: bool,
+    is_scope_member: bool,
+    is_inside_method_body: bool,
 ) -> bool {
-    parser_recovered && !identity_materialized && !is_attached_to_parent
+    parser_recovered && !identity_materialized && !is_scope_member && !is_inside_method_body
+}
+
+fn collect_scope_members(arena: &AstArena<Untyped>) -> HashSet<dotty_core::TreeId<Untyped>> {
+    let mut attached = HashSet::new();
+    for (_, parent) in arena.iter() {
+        let members = match &parent.kind {
+            TreeKind::Template(template) => Some(template.body.as_slice()),
+            TreeKind::PackageDef(package) => Some(package.stats.as_slice()),
+            _ => None,
+        };
+        let Some(members) = members else {
+            continue;
+        };
+        for &member in members {
+            let contains_member = match (parent.position, arena.get(member).position) {
+                (Some(parent_span), Some(member_span)) => {
+                    let parent = parent_span.span().range();
+                    let member = member_span.span().range();
+                    parent.start() <= member.start() && member.end() <= parent.end()
+                }
+                _ => true,
+            };
+            if contains_member {
+                attached.insert(member);
+            }
+        }
+    }
+    attached
 }
 
 fn enum_companion_identity_pair(
@@ -1272,16 +1298,7 @@ fn validate_namer_audit_invariants(
     parser_recovered: bool,
 ) -> Vec<String> {
     let mut violations = Vec::new();
-    let attached_declarations = arena
-        .iter()
-        .filter_map(|(_, tree)| match &tree.kind {
-            TreeKind::Template(template) => Some(template.body.iter().copied()),
-            TreeKind::PackageDef(package) => Some(package.stats.iter().copied()),
-            TreeKind::Block(block) => Some(block.stats.iter().copied()),
-            _ => None,
-        })
-        .flatten()
-        .collect::<HashSet<_>>();
+    let scope_members = collect_scope_members(arena);
     let method_rhs_ranges = arena
         .iter()
         .filter_map(|(_, tree)| match &tree.kind {
@@ -1327,7 +1344,8 @@ fn validate_namer_audit_invariants(
             if enum_identity_is_parser_blocked(
                 parser_recovered,
                 false,
-                attached_declarations.contains(&tree_id),
+                scope_members.contains(&tree_id),
+                tree_is_inside_method_rhs,
             ) {
                 continue;
             }
@@ -2207,10 +2225,11 @@ mod tests {
 
     #[test]
     fn enum_identity_audit_only_classifies_recovered_orphans_as_parser_blocked() {
-        assert!(enum_identity_is_parser_blocked(true, false, false));
-        assert!(!enum_identity_is_parser_blocked(false, false, false));
-        assert!(!enum_identity_is_parser_blocked(true, true, false));
-        assert!(!enum_identity_is_parser_blocked(true, false, true));
+        assert!(enum_identity_is_parser_blocked(true, false, false, false));
+        assert!(!enum_identity_is_parser_blocked(false, false, false, false));
+        assert!(!enum_identity_is_parser_blocked(true, true, false, false));
+        assert!(!enum_identity_is_parser_blocked(true, false, true, false));
+        assert!(!enum_identity_is_parser_blocked(true, false, false, true));
     }
 
     #[test]
