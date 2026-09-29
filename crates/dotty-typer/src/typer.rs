@@ -300,6 +300,14 @@ pub enum TyperError {
         constructor: SymbolId,
         parameter_index: usize,
     },
+    /// A raw generic `New` selected a secondary constructor whose owner type
+    /// parameters cannot yet be inferred by overload resolution.
+    UnsupportedRawGenericSecondaryConstructorInference {
+        source: SourceId,
+        tree_index: u32,
+        constructor: SymbolId,
+        owner: SymbolId,
+    },
     /// Constructor arguments constrain one Poly parameter to non-equivalent types.
     ConflictingConstructorInferenceConstraints {
         source: SourceId,
@@ -317,13 +325,6 @@ pub enum TyperError {
         parameter_index: Option<usize>,
         formal: TypeId,
         actual: TypeId,
-    },
-    /// Competing constructors include a generic candidate that requires inference.
-    GenericConstructorOverloadResolutionDeferred {
-        source: SourceId,
-        tree_index: u32,
-        class: SymbolId,
-        candidates: Vec<SymbolId>,
     },
     /// A raw generic `New` could not be assigned a sound inferred instance type.
     UnableToFinalizeRawGenericNewInstanceType {
@@ -1234,7 +1235,6 @@ pub struct ConstructorCandidate {
 struct ConstructorApplicationCandidates {
     applicable_signatures: Vec<ConstructorCandidate>,
     rejected_incomplete: Vec<(SymbolId, OverloadRejection)>,
-    generic_deferred: bool,
 }
 
 struct ConstructorOverloadRequest<'a> {
@@ -1244,10 +1244,10 @@ struct ConstructorOverloadRequest<'a> {
     tree_index: u32,
     class: SymbolId,
     instance_type: TypeId,
+    type_arguments: &'a [TypeId],
     qualifier: Option<TreeId<Typed>>,
     candidates: &'a [ConstructorCandidate],
     rejected_incomplete: &'a [(SymbolId, OverloadRejection)],
-    generic_deferred: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -2980,7 +2980,6 @@ impl<'a> SourceTyper<'a> {
                         Err(TyperError::SecondaryConstructorTypeParametersUnsupported {
                             ..
                         }) => {
-                            result.generic_deferred = true;
                             result
                                 .rejected_incomplete
                                 .push((symbol, OverloadRejection::IncompleteSignature));
@@ -3132,22 +3131,6 @@ impl<'a> SourceTyper<'a> {
         let candidate_set =
             self.constructor_application_candidates_for_class(class, info_journal)?;
         let candidates = candidate_set.applicable_signatures;
-        if candidates.is_empty() && candidate_set.generic_deferred {
-            if candidate_set.rejected_incomplete.len() == 1 {
-                // Preserve the existing single-constructor generic boundary.
-                self.constructor_candidates_for_class(class, info_journal)?;
-            }
-            return Err(TyperError::GenericConstructorOverloadResolutionDeferred {
-                source: self.source,
-                tree_index: application_tree_index,
-                class,
-                candidates: candidate_set
-                    .rejected_incomplete
-                    .iter()
-                    .map(|(symbol, _)| *symbol)
-                    .collect(),
-            });
-        }
         let candidate = match candidates.as_slice() {
             [] if candidate_set.rejected_incomplete.is_empty() => {
                 return Err(TyperError::ConstructorApplicationUnavailable { class });
@@ -3162,27 +3145,6 @@ impl<'a> SourceTyper<'a> {
             }
             [candidate] if candidate_set.rejected_incomplete.is_empty() => candidate,
             _ => {
-                let generic = candidate_set.generic_deferred
-                    || candidates.iter().any(|candidate| {
-                        self.constructor_poly_may_apply(candidate.callable, argument_trees.len())
-                    });
-                if raw_new && generic {
-                    return Err(TyperError::GenericConstructorOverloadResolutionDeferred {
-                        source: self.source,
-                        tree_index: application_tree_index,
-                        class,
-                        candidates: candidates
-                            .iter()
-                            .map(|candidate| candidate.symbol)
-                            .chain(
-                                candidate_set
-                                    .rejected_incomplete
-                                    .iter()
-                                    .map(|(symbol, _)| *symbol),
-                            )
-                            .collect(),
-                    });
-                }
                 return self.resolve_constructor_overload_application(
                     ConstructorOverloadRequest {
                         function_tree,
@@ -3191,10 +3153,10 @@ impl<'a> SourceTyper<'a> {
                         tree_index: application_tree_index,
                         class,
                         instance_type,
+                        type_arguments: &type_arguments,
                         qualifier,
                         candidates: &candidates,
                         rejected_incomplete: &candidate_set.rejected_incomplete,
-                        generic_deferred: candidate_set.generic_deferred,
                     },
                     info_journal,
                     new_mappings,
@@ -3409,6 +3371,66 @@ impl<'a> SourceTyper<'a> {
         Ok((*class, arguments))
     }
 
+    fn constructor_overload_callable(
+        &mut self,
+        candidate: ConstructorCandidate,
+        instance_type: TypeId,
+        type_arguments: &[TypeId],
+        has_qualifier: bool,
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        if !has_qualifier || type_arguments.is_empty() {
+            return Ok(candidate.callable);
+        }
+        let adapt_owner = || MemberCandidate {
+            symbol: candidate.symbol,
+            declaring_class: candidate.owner,
+            receiver_view: instance_type,
+            inheritance_depth: 0,
+        };
+        let Some(Type::Poly(poly)) = self.store.types.try_get(candidate.callable).cloned() else {
+            return self.member_type_on_journaled(&adapt_owner(), info_journal);
+        };
+        let is_primary = self
+            .owner_primary_constructor_tree(candidate.symbol, candidate.owner)?
+            .is_some_and(|tree| self.index.symbol_at(self.source, tree) == Some(candidate.symbol));
+        if !is_primary {
+            return self.member_type_on_journaled(&adapt_owner(), info_journal);
+        }
+        if type_arguments.len() != poly.params.len() {
+            return Err(TyperError::ConstructorTypeArgumentArityMismatch {
+                source: self.source,
+                tree_index,
+                constructor: candidate.symbol,
+                expected: poly.params.len(),
+                actual: type_arguments.len(),
+            });
+        }
+        let instantiated =
+            dotty_core::types::instantiate_poly(self.store, candidate.callable, type_arguments)
+                .map_err(|error| TyperError::ConstructorPolyInstantiationFailed {
+                    constructor: candidate.symbol,
+                    error,
+                })?;
+        for (parameter_index, (argument, bounds)) in type_arguments
+            .iter()
+            .copied()
+            .zip(instantiated.bounds.iter().copied())
+            .enumerate()
+        {
+            self.check_constructor_type_argument_bounds(
+                candidate.symbol,
+                argument,
+                bounds,
+                parameter_index,
+                tree_index,
+                info_journal,
+            )?;
+        }
+        Ok(instantiated.result)
+    }
+
     fn resolve_constructor_overload_application(
         &mut self,
         request: ConstructorOverloadRequest<'_>,
@@ -3422,28 +3444,11 @@ impl<'a> SourceTyper<'a> {
             tree_index,
             class,
             instance_type,
+            type_arguments,
             qualifier,
             candidates,
             rejected_incomplete,
-            generic_deferred,
         } = request;
-        if generic_deferred
-            || candidates.iter().any(|candidate| {
-                self.constructor_poly_may_apply(candidate.callable, argument_trees.len())
-            })
-        {
-            return Err(TyperError::GenericConstructorOverloadResolutionDeferred {
-                source: self.source,
-                tree_index,
-                class,
-                candidates: candidates
-                    .iter()
-                    .map(|candidate| candidate.symbol)
-                    .chain(rejected_incomplete.iter().map(|(symbol, _)| *symbol))
-                    .collect(),
-            });
-        }
-
         let mut arguments = Vec::with_capacity(argument_trees.len());
         for argument_tree in argument_trees {
             let typed =
@@ -3466,9 +3471,21 @@ impl<'a> SourceTyper<'a> {
                 0,
             )?;
         }
+        let candidate_checkpoint = self.store.checkpoint();
+        let type_index_checkpoint = self.type_index.checkpoint();
+        let journal_checkpoint = info_journal.len();
         let mut application_candidates = Vec::with_capacity(candidates.len());
         for candidate in candidates {
-            match self.store.types.try_get(candidate.callable).cloned() {
+            let callable = self.constructor_overload_callable(
+                *candidate,
+                instance_type,
+                type_arguments,
+                qualifier.is_some(),
+                tree_index,
+                info_journal,
+            )?;
+            let rejection = None;
+            match self.store.types.try_get(callable).cloned() {
                 Some(Type::Method(method)) => {
                     for parameter in &method.params {
                         self.complete_relation_type(
@@ -3479,12 +3496,23 @@ impl<'a> SourceTyper<'a> {
                         )?;
                     }
                 }
-                Some(Type::Poly(poly))
-                    if matches!(
-                        self.store.types.try_get(poly.result),
-                        Some(Type::Method(method))
-                            if overload_arity_rejection(method, argument_trees.len()).is_some()
-                    ) => {}
+                Some(Type::Poly(poly)) => {
+                    let Some(Type::Method(method)) = self.store.types.try_get(poly.result).cloned()
+                    else {
+                        return Err(TyperError::MalformedConstructorCandidate {
+                            symbol: candidate.symbol,
+                            callable: candidate.callable,
+                        });
+                    };
+                    for parameter in &method.params {
+                        self.complete_relation_type(
+                            parameter.ty,
+                            info_journal,
+                            &mut completed_types,
+                            0,
+                        )?;
+                    }
+                }
                 _ => {
                     return Err(TyperError::MalformedConstructorCandidate {
                         symbol: candidate.symbol,
@@ -3494,18 +3522,18 @@ impl<'a> SourceTyper<'a> {
             }
             application_candidates.push(ApplicationCandidate {
                 symbol: candidate.symbol,
-                callable: candidate.callable,
+                callable,
                 member: None,
-                rejection: None,
+                rejection,
             });
         }
 
         let winner = self
-            .choose_overload_candidate_with_policy(
+            .choose_constructor_overload_candidate(
                 &mut application_candidates,
                 &arguments,
                 tree_index,
-                true,
+                info_journal,
             )
             .map_err(|error| match error {
                 TyperError::OverloadApplicationNoApplicable { candidates, .. } => {
@@ -3536,6 +3564,16 @@ impl<'a> SourceTyper<'a> {
                 },
                 other => other,
             })?;
+        let winner_symbol = winner.symbol;
+        for (symbol, previous) in info_journal[journal_checkpoint..].iter().rev().copied() {
+            if self.store.symbols.contains(symbol) {
+                self.store.symbols.set_info(symbol, previous);
+            }
+        }
+        info_journal.truncate(journal_checkpoint);
+        self.store.rollback_to(candidate_checkpoint);
+        self.type_index.restore(type_index_checkpoint);
+        completed_types.clear();
         if let Some((candidate, _)) = rejected_incomplete.first() {
             return Err(
                 TyperError::ConstructorOverloadResolutionRequiresUnsupportedCandidate {
@@ -3546,29 +3584,101 @@ impl<'a> SourceTyper<'a> {
                 },
             );
         }
-        let Some(qualifier) = qualifier else {
-            return Err(TyperError::GenericConstructorOverloadResolutionDeferred {
-                source: self.source,
-                tree_index,
-                class,
-                candidates: candidates
-                    .iter()
-                    .map(|candidate| candidate.symbol)
-                    .collect(),
-            });
-        };
+        let selected_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.symbol == winner_symbol)
+            .copied()
+            .ok_or(TyperError::MalformedConstructorCandidate {
+                symbol: winner_symbol,
+                callable: winner.callable,
+            })?;
+        if qualifier.is_none()
+            && type_arguments.is_empty()
+            && self
+                .constructor_target_class_arity(class)?
+                .is_some_and(|arity| arity > 0)
+            && self
+                .owner_primary_constructor_tree(selected_candidate.symbol, class)?
+                .is_none_or(|tree| {
+                    self.index.symbol_at(self.source, tree) != Some(selected_candidate.symbol)
+                })
+        {
+            return Err(
+                TyperError::UnsupportedRawGenericSecondaryConstructorInference {
+                    source: self.source,
+                    tree_index,
+                    constructor: selected_candidate.symbol,
+                    owner: class,
+                },
+            );
+        }
+        let selected_callable = self.constructor_overload_callable(
+            selected_candidate,
+            instance_type,
+            type_arguments,
+            qualifier.is_some(),
+            tree_index,
+            info_journal,
+        )?;
+        if let Some(Type::Method(method)) = self.store.types.try_get(selected_callable).cloned() {
+            for parameter in &method.params {
+                self.complete_relation_type(parameter.ty, info_journal, &mut completed_types, 0)?;
+            }
+        }
+        let mut selected_application = [ApplicationCandidate {
+            symbol: winner_symbol,
+            callable: selected_callable,
+            member: None,
+            rejection: None,
+        }];
+        let winner = self.choose_constructor_overload_candidate(
+            &mut selected_application,
+            &arguments,
+            tree_index,
+            info_journal,
+        )?;
         let result = self.validate_constructor_application_callable(
             winner.symbol,
             winner.callable,
             tree_index,
         )?;
-        self.require_constructor_result_matches_instance(
-            winner.symbol,
-            result,
-            instance_type,
-            tree_index,
-            info_journal,
-        )?;
+        let qualifier = match qualifier {
+            Some(qualifier) => {
+                self.require_constructor_result_matches_instance(
+                    winner.symbol,
+                    result,
+                    instance_type,
+                    tree_index,
+                    info_journal,
+                )?;
+                qualifier
+            }
+            None => {
+                let instance_type = self.constructor_result_instance_type(
+                    result,
+                    winner.symbol,
+                    tree_index,
+                    info_journal,
+                )?;
+                let Some(TreeKind::Select(selection)) =
+                    self.arena.try_get(function_tree).map(|tree| &tree.kind)
+                else {
+                    return Err(TyperError::MalformedConstructorCandidate {
+                        symbol: winner.symbol,
+                        callable: winner.callable,
+                    });
+                };
+                self.finalize_raw_generic_new(
+                    selection.qualifier,
+                    instance_type,
+                    winner.symbol,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?
+            }
+        };
+        let instance_type = self.typed_arena.get(qualifier).ty;
 
         let Some(function_node) = self.arena.try_get(function_tree).cloned() else {
             return Err(TyperError::TreeOutsideArena {
@@ -3680,15 +3790,7 @@ impl<'a> SourceTyper<'a> {
                 )
             }) =>
             {
-                return Err(TyperError::GenericConstructorOverloadResolutionDeferred {
-                    source: self.source,
-                    tree_index: root.index(),
-                    class,
-                    candidates: candidates
-                        .iter()
-                        .map(|candidate| candidate.symbol)
-                        .collect(),
-                });
+                return Ok(());
             }
             _ => {
                 return Err(TyperError::ConstructorOverloadResolutionDeferred {
@@ -4403,16 +4505,6 @@ impl<'a> SourceTyper<'a> {
             }
         }
         false
-    }
-
-    fn constructor_poly_may_apply(&self, callable: TypeId, actual_arity: usize) -> bool {
-        let Some(Type::Poly(poly)) = self.store.types.try_get(callable) else {
-            return false;
-        };
-        match self.store.types.try_get(poly.result) {
-            Some(Type::Method(method)) => overload_arity_rejection(method, actual_arity).is_none(),
-            _ => true,
-        }
     }
 
     fn ensure_constructor_class_info(
@@ -5506,6 +5598,55 @@ impl<'a> SourceTyper<'a> {
                 info_journal,
             )?;
             self.choose_overload_candidate(candidates, arguments, tree_index)
+        })();
+        let selected = resolution?;
+
+        for (symbol, previous) in info_journal[journal_checkpoint..].iter().rev().copied() {
+            if self.store.symbols.contains(symbol) {
+                self.store.symbols.set_info(symbol, previous);
+            }
+        }
+        info_journal.truncate(journal_checkpoint);
+        self.store.rollback_to(store_checkpoint);
+        self.type_index.restore(type_index_checkpoint);
+        candidates.copy_from_slice(&original_candidates);
+
+        let selected_index = candidates
+            .iter()
+            .position(|candidate| candidate.symbol == selected.symbol)
+            .ok_or(TyperError::MalformedOverloadCandidate {
+                symbol: selected.symbol,
+                callable: selected.callable,
+            })?;
+        self.instantiate_generic_overload_candidates(
+            &mut candidates[selected_index..=selected_index],
+            arguments,
+            tree_index,
+            info_journal,
+        )?;
+        Ok(candidates[selected_index])
+    }
+
+    fn choose_constructor_overload_candidate(
+        &mut self,
+        candidates: &mut [ApplicationCandidate],
+        arguments: &[TypedArgument],
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<ApplicationCandidate, TyperError> {
+        let store_checkpoint = self.store.checkpoint();
+        let type_index_checkpoint = self.type_index.checkpoint();
+        let journal_checkpoint = info_journal.len();
+        let original_candidates = candidates.to_vec();
+
+        let resolution = (|| {
+            self.instantiate_generic_overload_candidates(
+                candidates,
+                arguments,
+                tree_index,
+                info_journal,
+            )?;
+            self.choose_overload_candidate_with_policy(candidates, arguments, tree_index, true)
         })();
         let selected = resolution?;
 
@@ -17123,6 +17264,274 @@ mod tests {
     }
 
     #[test]
+    fn generic_primary_constructor_competes_with_explicit_owner_arguments() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C[A](value: A) { def this(value: Int) = this(value) }; class Use { def make: C[Boolean] = new C[Boolean](true) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructors = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&constructor_name)
+            .to_vec();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let mut primary = None;
+        let mut secondary = None;
+        for constructor in constructors.iter().copied() {
+            let callable = typer.complete_symbol(constructor).unwrap();
+            if matches!(typer.store().types.get(callable), Type::Poly(_)) {
+                primary = Some(constructor);
+            } else {
+                secondary = Some(constructor);
+            }
+        }
+        let primary = primary.unwrap();
+        let secondary = secondary.unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = typer.typed_ast().get(typed).kind.clone() else {
+            panic!("constructor call should remain an Apply")
+        };
+        assert!(
+            matches!(
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(application.function).ty),
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(selected),
+                    ..
+                } if *selected == primary
+            ),
+            "generic primary constructor should win over the monomorphic secondary {secondary:?}"
+        );
+    }
+
+    #[test]
+    fn monomorphic_secondary_constructor_competes_with_explicit_owner_arguments() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C[A](value: A) { def this(flag: Boolean) = this(1) }; class Use { def make: C[Int] = new C[Int](true) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructors = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&constructor_name)
+            .to_vec();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let secondary = constructors
+            .iter()
+            .copied()
+            .find(|constructor| {
+                let callable = typer.complete_symbol(*constructor).unwrap();
+                matches!(typer.store().types.get(callable), Type::Method(_))
+            })
+            .unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = typer.typed_ast().get(typed).kind.clone() else {
+            panic!("constructor call should remain an Apply")
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(selected),
+                ..
+            } if *selected == secondary
+        ));
+    }
+
+    #[test]
+    fn raw_generic_constructor_overload_infers_the_winning_instance_type() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C[A](value: A) { def this(value: Int) = this(value) }; class Use { def make = new C(true) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructors = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&constructor_name)
+            .to_vec();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let mut primary = None;
+        for constructor in constructors.iter().copied() {
+            let callable = typer.complete_symbol(constructor).unwrap();
+            if matches!(typer.store().types.get(callable), Type::Poly(_)) {
+                primary = Some(constructor);
+            }
+        }
+        let primary = primary.unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(application) = typer.typed_ast().get(typed).kind.clone() else {
+            panic!("constructor call should remain an Apply")
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(selected),
+                ..
+            } if *selected == primary
+        ));
+        let TreeKind::Select(selection) = typer.typed_ast().get(application.function).kind.clone()
+        else {
+            panic!("constructor application should select its winner")
+        };
+        assert!(matches!(
+            typer.typed_ast().get(selection.qualifier).kind,
+            TreeKind::New(_)
+        ));
+        let Type::Applied { args, .. } = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(selection.qualifier).ty)
+        else {
+            panic!("raw generic New should retain its inferred class type arguments")
+        };
+        assert_eq!(args, &[definitions.boolean]);
+    }
+
+    #[test]
+    fn raw_generic_secondary_constructor_rejects_uninferred_owner_arguments() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C[A](value: A, count: Int) { def this(flag: Boolean) = this(1, 1) }; class Use { def make = new C(true) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructors = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&constructor_name)
+            .to_vec();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let secondary = constructors
+            .into_iter()
+            .find(|constructor| {
+                let callable = typer.complete_symbol(*constructor).unwrap();
+                matches!(typer.store().types.get(callable), Type::Method(_))
+            })
+            .unwrap();
+
+        let error = typer.type_expression(rhs, context).unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                TyperError::UnsupportedRawGenericSecondaryConstructorInference {
+                    source: found_source,
+                    tree_index,
+                    constructor,
+                    owner,
+                } if found_source == source
+                    && tree_index == rhs.index()
+                    && constructor == secondary
+                    && owner == class
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert!(typer.typed_index.get(source, rhs).is_none());
+    }
+
+    #[test]
+    fn curried_raw_constructor_keeps_the_first_clause_winner() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C[A](value: A)(other: Int) { def this(value: Int)(other: Int) = this(value)(other) }; class Use { def make = new C(true)(1) }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+        let constructors = store
+            .scopes
+            .get(index.scope_of(class).unwrap())
+            .lookup_all(&constructor_name)
+            .to_vec();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let mut primary = None;
+        for constructor in constructors.iter().copied() {
+            let callable = typer.complete_symbol(constructor).unwrap();
+            if matches!(typer.store().types.get(callable), Type::Poly(_)) {
+                primary = Some(constructor);
+            }
+        }
+        let primary = primary.unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(outer) = typer.typed_ast().get(typed).kind.clone() else {
+            panic!("curried constructor call should retain its outer Apply")
+        };
+        let TreeKind::Apply(inner) = typer.typed_ast().get(outer.function).kind.clone() else {
+            panic!("curried constructor call should retain its constructor Apply")
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(inner.function).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(selected),
+                ..
+            } if *selected == primary
+        ));
+    }
+
+    #[test]
     fn overloaded_constructor_no_applicable_reports_each_rejection_and_rolls_back() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C(value: Int) { def this(flag: Boolean) = this(1) }; class Use { def make: C = new C() }",
@@ -17285,9 +17694,9 @@ mod tests {
     }
 
     #[test]
-    fn generic_secondary_constructor_competition_is_deferred() {
+    fn unsupported_generic_constructor_competitor_blocks_a_monomorphic_winner() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class C(value: Int, other: Int) { def this[A](value: A) = this(1, 1) }; class Use { def make: C = new C(1) }",
+            "class C(value: Int) { def this[A](using value: A) = this(1) }; class Use { def make: C = new C(1) }",
         );
         let class = class_symbol(&parsed, &store, &index, source, "C");
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
@@ -17300,20 +17709,21 @@ mod tests {
             &packages,
         );
         let context = typer.expression_context_for(method).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+        let typed_count = typer.typed_ast().iter().count();
 
         let error = typer.type_expression(rhs, context).unwrap_err();
 
-        assert!(
-            matches!(
-                error,
-                TyperError::GenericConstructorOverloadResolutionDeferred {
-                    class: error_class,
-                    ref candidates,
-                    ..
-                } if error_class == class && candidates.len() == 2
-            ),
-            "{error:?}"
-        );
+        assert!(matches!(
+            error,
+            TyperError::ConstructorOverloadResolutionRequiresUnsupportedCandidate {
+                class: error_class,
+                ..
+            } if error_class == class
+        ));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.typed_ast().iter().count(), typed_count);
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
     }
 
     #[test]
