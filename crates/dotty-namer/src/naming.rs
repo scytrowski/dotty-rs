@@ -1415,7 +1415,7 @@ impl Namer<'_> {
             .filter(|symbol| {
                 let symbol = self.store.symbols.get(*symbol);
                 matches!(symbol.kind, SymbolKind::Class | SymbolKind::Trait)
-                    && matches!(symbol.origin, SymbolOrigin::Source(_))
+                    && symbol.origin == SymbolOrigin::Source(self.source)
             });
         let candidate = candidates.next()?;
         candidates.next().is_none().then_some(candidate)
@@ -1462,7 +1462,7 @@ impl Namer<'_> {
             .filter(|candidate| {
                 let candidate = self.store.symbols.get(*candidate);
                 candidate.kind == SymbolKind::Object
-                    && matches!(candidate.origin, SymbolOrigin::Source(_))
+                    && candidate.origin == SymbolOrigin::Source(self.source)
             })
             .collect::<Vec<_>>();
 
@@ -1470,21 +1470,24 @@ impl Namer<'_> {
             let module_class_text = format!("{enum_text}$");
             let module_class_name =
                 *TypeName::new(self.store.names.intern(&module_class_text)).as_name();
-            let module_classes = self
-                .store
-                .scopes
-                .get(owner_scope)
-                .lookup_all(&module_class_name)
-                .iter()
-                .copied()
-                .filter(|candidate| {
-                    let candidate = self.store.symbols.get(*candidate);
-                    candidate.kind == SymbolKind::ModuleClass
-                        && candidate.owner == Some(owner)
-                        && matches!(candidate.origin, SymbolOrigin::Source(_))
-                })
-                .collect::<Vec<_>>();
-            if module_classes.len() == 1 {
+            let module_class = match self.index.definition_of(*object) {
+                Some(SourceDefinition::Canonical { source, tree }) if source == self.source => {
+                    self.index.derived_symbol_at(owner, source, tree)
+                }
+                _ => None,
+            };
+            if module_class.is_some_and(|module_class| {
+                let symbol = self.store.symbols.get(module_class);
+                symbol.kind == SymbolKind::ModuleClass
+                    && symbol.owner == Some(owner)
+                    && symbol.origin == SymbolOrigin::Source(self.source)
+                    && self
+                        .store
+                        .scopes
+                        .get(owner_scope)
+                        .lookup_all(&module_class_name)
+                        .contains(&module_class)
+            }) {
                 self.queue_companion_link(enum_symbol, *object);
                 return Ok(());
             }

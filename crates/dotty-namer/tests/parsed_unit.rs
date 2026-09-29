@@ -2037,6 +2037,105 @@ fn parsed_enum_uses_ordinary_class_constructor_and_member_identities() {
 }
 
 #[test]
+fn enum_companions_do_not_cross_source_file_boundaries() {
+    use dotty_core::SymbolOrigin;
+    use dotty_core::ast::UntypedNode;
+    use dotty_lexer::ContextualScanner;
+
+    fn name_text(
+        text: &str,
+        source: SourceId,
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+    ) -> (dotty_parser::ParseResult, SourceSemanticIndex) {
+        let scanner = ContextualScanner::new(text).expect("source should lex");
+        let parsed = parse_compilation_unit(
+            SourceText::new(text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let index = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "Separate.scala",
+            store,
+            packages,
+        )
+        .expect("source unit should be named");
+        (parsed, index)
+    }
+
+    fn assert_separate_companions(enum_first: bool) {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        let enum_source = SourceId::from_index(if enum_first { 491 } else { 493 });
+        let object_source = SourceId::from_index(if enum_first { 492 } else { 494 });
+        let (enum_parsed, enum_index, object_parsed, object_index) = if enum_first {
+            let (enum_parsed, enum_index) = name_text(
+                "enum Color { case Red }",
+                enum_source,
+                &mut store,
+                &mut packages,
+            );
+            let (object_parsed, object_index) =
+                name_text("object Color", object_source, &mut store, &mut packages);
+            (enum_parsed, enum_index, object_parsed, object_index)
+        } else {
+            let (object_parsed, object_index) =
+                name_text("object Color", object_source, &mut store, &mut packages);
+            let (enum_parsed, enum_index) = name_text(
+                "enum Color { case Red }",
+                enum_source,
+                &mut store,
+                &mut packages,
+            );
+            (enum_parsed, enum_index, object_parsed, object_index)
+        };
+        let TreeKind::PackageDef(enum_package) = &enum_parsed.ast.get(enum_parsed.root).kind else {
+            panic!("enum source should have a package root");
+        };
+        let TreeKind::PackageDef(object_package) = &object_parsed.ast.get(object_parsed.root).kind
+        else {
+            panic!("object source should have a package root");
+        };
+        let enum_symbol = enum_index
+            .symbol_at(enum_source, enum_package.stats[0])
+            .unwrap();
+        let object_tree = object_package.stats[0];
+        assert!(matches!(
+            object_parsed.ast.get(object_tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
+        ));
+        let object_symbol = object_index.symbol_at(object_source, object_tree).unwrap();
+        let enum_companion = store.symbols.get(enum_symbol).links.companion.unwrap();
+
+        assert_ne!(enum_companion, object_symbol);
+        assert_eq!(
+            store.symbols.get(enum_companion).origin,
+            SymbolOrigin::Synthetic
+        );
+        assert_eq!(
+            store.symbols.get(object_symbol).origin,
+            SymbolOrigin::Source(object_source)
+        );
+        assert_eq!(
+            store.symbols.get(enum_symbol).links.companion,
+            Some(enum_companion)
+        );
+        assert_ne!(
+            store.symbols.get(object_symbol).links.companion,
+            Some(enum_symbol)
+        );
+    }
+
+    assert_separate_companions(true);
+    assert_separate_companions(false);
+}
+
+#[test]
 fn parsed_pattern_val_binders_are_fields_of_the_source_wrapper() {
     use dotty_core::ast::UntypedNode;
     use dotty_core::{SymbolKind, TermName};
