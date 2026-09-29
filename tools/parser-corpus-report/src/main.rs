@@ -9,7 +9,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use dotty_core::ast::{AstArena, Modifier, TreeKind, Untyped, UntypedNode};
-use dotty_core::{Packages, SemanticStore, SourceId, SourceSemanticIndex, SourceText, TokenKind};
+use dotty_core::{
+    HardKeyword, Packages, SemanticStore, SourceId, SourceSemanticIndex, SourceText, SymbolId,
+    SymbolKind, TokenKind,
+};
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
 use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
@@ -97,6 +100,30 @@ struct NamerReport {
     clean_parse_vs_namer_success_delta: isize,
     namer_error_histogram: BTreeMap<String, NamerFailureBucket>,
     invariant_failure_histogram: BTreeMap<String, FailureBucket>,
+    enum_identity_audit: EnumIdentityAudit,
+    export_handoff_audit: ExportHandoffAudit,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct EnumIdentityAudit {
+    definitions_encountered: usize,
+    class_identities_materialized: usize,
+    companion_identity_pairs_materialized: usize,
+    singleton_cases_encountered: usize,
+    singleton_cases_materialized: usize,
+    comma_group_singleton_cases_encountered: usize,
+    comma_group_singleton_cases_materialized: usize,
+    parameterized_cases_encountered: usize,
+    parameterized_cases_materialized: usize,
+    case_clauses_blocked_by_parser_recovery: usize,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct ExportHandoffAudit {
+    syntax_occurrences: usize,
+    sites_recorded: usize,
+    sites_blocked_by_parser_recovery: usize,
+    forwarders_synthesized: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -632,6 +659,18 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
         }
     };
     let scanner_diagnostics = scanner.diagnostics().len();
+    let case_keyword_positions = scanner
+        .tokens()
+        .iter()
+        .filter(|token| token.kind == TokenKind::Keyword(HardKeyword::Case))
+        .map(|token| token.span.start())
+        .collect::<Vec<_>>();
+    let export_keyword_positions = scanner
+        .tokens()
+        .iter()
+        .filter(|token| token.kind == TokenKind::Keyword(HardKeyword::Export))
+        .map(|token| token.span.start())
+        .collect::<Vec<_>>();
     let has_caret_operator_token = scanner.tokens().iter().any(|token| {
         token.kind == TokenKind::Operator
             && source.get(token.span.start() as usize..token.span.end() as usize) == Some("^")
@@ -691,14 +730,34 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
             &mut packages,
         ) {
             Ok(index) => {
-                deferred_features =
-                    collect_deferred_features(&result.ast, &diagnostics, Some((&index, &store)));
+                deferred_features = collect_deferred_features(
+                    &result.ast,
+                    &diagnostics,
+                    &case_keyword_positions,
+                    &export_keyword_positions,
+                    Some((&index, &store)),
+                );
                 NamerOutcome::Success {
-                    invariant_violations: index.validate(&store, &packages),
+                    invariant_violations: {
+                        let mut violations = index.validate(&store, &packages);
+                        violations.extend(validate_namer_audit_invariants(
+                            &result.ast,
+                            SourceId::from_index(0),
+                            &index,
+                            &store,
+                        ));
+                        violations
+                    },
                 }
             }
             Err(error) => {
-                deferred_features = collect_deferred_features(&result.ast, &diagnostics, None);
+                deferred_features = collect_deferred_features(
+                    &result.ast,
+                    &diagnostics,
+                    &case_keyword_positions,
+                    &export_keyword_positions,
+                    None,
+                );
                 NamerOutcome::Error {
                     kind: namer_error_kind(&error),
                     message: error.to_string(),
@@ -773,6 +832,8 @@ fn type_name_path(
 fn collect_deferred_features(
     arena: &AstArena<Untyped>,
     diagnostics: &[DiagnosticSummary],
+    case_keyword_positions: &[u32],
+    export_keyword_positions: &[u32],
     named: Option<(&SourceSemanticIndex, &SemanticStore)>,
 ) -> BTreeMap<String, FeatureCount> {
     fn record(
@@ -790,11 +851,19 @@ fn collect_deferred_features(
 
     let mut features = BTreeMap::new();
     for name in [
-        "enum_definitions",
-        "enum_cases",
+        "enum_definitions_encountered",
+        "enum_class_identities",
+        "enum_companion_identity_pairs",
+        "enum_singleton_cases",
+        "enum_comma_group_singleton_cases",
+        "enum_parameterized_cases",
+        "enum_case_clauses_blocked_by_parser_recovery",
         "case_class_synthetic_apis",
         "context_bound_evidence_synthesis",
-        "export_forwarders",
+        "export_syntax_occurrences",
+        "export_sites_recorded",
+        "export_sites_blocked_by_parser_recovery",
+        "export_forwarders_synthesized",
         "derives_clauses",
         "local_definitions",
         "source_annotations",
@@ -802,6 +871,77 @@ fn collect_deferred_features(
         features.entry(name.to_owned()).or_default();
     }
     let source = SourceId::from_index(0);
+    let enum_case_ranges = arena
+        .iter()
+        .filter_map(|(_, tree)| {
+            let is_case = match &tree.kind {
+                TreeKind::TypeDef(definition) => {
+                    definition.metadata.modifiers.contains(&Modifier::EnumCase)
+                }
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) => {
+                    definition.metadata.modifiers.contains(&Modifier::EnumCase)
+                }
+                TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
+                    definition.modifiers.modifiers.contains(&Modifier::EnumCase)
+                }
+                _ => false,
+            };
+            (is_case)
+                .then(|| tree.position.map(|span| span.span().range()))
+                .flatten()
+        })
+        .map(|range| (range.start(), range.end()))
+        .collect::<Vec<_>>();
+    let enum_ranges = arena
+        .iter()
+        .filter_map(|(_, tree)| {
+            let is_enum = matches!(&tree.kind, TreeKind::TypeDef(definition)
+                if definition.metadata.modifiers.contains(&Modifier::Enum));
+            is_enum
+                .then(|| tree.position.map(|span| span.span().range()))
+                .flatten()
+        })
+        .map(|range| (range.start(), range.end()))
+        .collect::<Vec<_>>();
+    let match_case_ranges = arena
+        .iter()
+        .filter_map(|(_, tree)| {
+            matches!(tree.kind, TreeKind::CaseDef(_))
+                .then(|| tree.position.map(|span| span.span().range()))
+                .flatten()
+        })
+        .map(|range| (range.start(), range.end()))
+        .collect::<Vec<_>>();
+    let blocked_enum_case_clauses = case_keyword_positions
+        .iter()
+        .filter(|&&position| {
+            if match_case_ranges
+                .iter()
+                .any(|&(start, end)| start <= position && position < end)
+            {
+                return false;
+            }
+            let smallest_enum = enum_ranges
+                .iter()
+                .filter(|&&(start, end)| start <= position && position < end)
+                .min_by_key(|&&(start, end)| end - start);
+            let Some(&(enum_start, enum_end)) = smallest_enum else {
+                return false;
+            };
+            !enum_case_ranges.iter().any(|&(start, end)| {
+                enum_start <= start && end <= enum_end && start <= position && position < end
+            })
+        })
+        .count();
+    let export_ranges = arena
+        .iter()
+        .filter_map(|(_, tree)| {
+            matches!(tree.kind, TreeKind::Export(_))
+                .then(|| tree.position.map(|span| span.span().range()))
+                .flatten()
+        })
+        .map(|range| (range.start(), range.end()))
+        .collect::<Vec<_>>();
     let method_rhs_ranges = arena
         .iter()
         .filter_map(|(_, tree)| match &tree.kind {
@@ -816,10 +956,29 @@ fn collect_deferred_features(
         match &tree.kind {
             TreeKind::TypeDef(definition) => {
                 if definition.metadata.modifiers.contains(&Modifier::Enum) {
-                    record(&mut features, "enum_definitions", 1, |_| has_symbol);
+                    let class_identity = named.is_some_and(|(index, store)| {
+                        index.symbol_at(source, tree_id).is_some_and(|symbol| {
+                            let semantic = store.symbols.get(symbol);
+                            semantic.kind == SymbolKind::Class
+                                && semantic.flags.contains(dotty_core::SymbolFlags::ENUM)
+                        })
+                    });
+                    let companion_pair = named.is_some_and(|(index, store)| {
+                        index
+                            .symbol_at(source, tree_id)
+                            .and_then(|symbol| enum_companion_identity_pair(symbol, index, store))
+                            .is_some()
+                    });
+                    record(&mut features, "enum_definitions_encountered", 1, |_| true);
+                    record(&mut features, "enum_class_identities", 1, |_| {
+                        class_identity
+                    });
+                    record(&mut features, "enum_companion_identity_pairs", 1, |_| {
+                        companion_pair
+                    });
                 }
                 if definition.metadata.modifiers.contains(&Modifier::EnumCase) {
-                    record(&mut features, "enum_cases", 1, |_| has_symbol);
+                    record(&mut features, "enum_parameterized_cases", 1, |_| has_symbol);
                 }
                 if definition.metadata.modifiers.contains(&Modifier::Case)
                     && matches!(arena.get(definition.rhs).kind, TreeKind::Template(_))
@@ -844,7 +1003,9 @@ fn collect_deferred_features(
                     for case in &definition.patterns {
                         let mapped = named
                             .is_some_and(|(index, _)| index.symbol_at(source, *case).is_some());
-                        record(&mut features, "enum_cases", 1, |_| mapped);
+                        record(&mut features, "enum_comma_group_singleton_cases", 1, |_| {
+                            mapped
+                        });
                     }
                 }
                 record(
@@ -864,7 +1025,7 @@ fn collect_deferred_features(
             }
             TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) => {
                 if module.metadata.modifiers.contains(&Modifier::EnumCase) {
-                    record(&mut features, "enum_cases", 1, |_| has_symbol);
+                    record(&mut features, "enum_singleton_cases", 1, |_| has_symbol);
                 }
                 record(
                     &mut features,
@@ -881,13 +1042,10 @@ fn collect_deferred_features(
                     |_| false,
                 );
             }
-            TreeKind::Export(export) => {
-                record(
-                    &mut features,
-                    "export_forwarders",
-                    export.selectors.len(),
-                    |_| false,
-                );
+            TreeKind::Export(_) => {
+                record(&mut features, "export_sites_recorded", 1, |_| {
+                    named.is_some_and(|(index, _)| index.export_site_at(source, tree_id).is_some())
+                });
             }
             TreeKind::PhaseSpecific(UntypedNode::ContextBounds(bounds)) => {
                 record(
@@ -923,6 +1081,41 @@ fn collect_deferred_features(
         }
     }
 
+    record(
+        &mut features,
+        "export_syntax_occurrences",
+        export_keyword_positions.len(),
+        |i| {
+            export_keyword_positions.get(i).is_some_and(|position| {
+                export_ranges
+                    .iter()
+                    .any(|&(start, end)| start <= *position && *position < end)
+            })
+        },
+    );
+    let parsed_export_tokens = export_keyword_positions
+        .iter()
+        .filter(|&&position| {
+            export_ranges
+                .iter()
+                .any(|&(start, end)| start <= position && position < end)
+        })
+        .count();
+    record(
+        &mut features,
+        "export_sites_blocked_by_parser_recovery",
+        export_keyword_positions
+            .len()
+            .saturating_sub(parsed_export_tokens),
+        |_| false,
+    );
+    record(
+        &mut features,
+        "enum_case_clauses_blocked_by_parser_recovery",
+        blocked_enum_case_clauses,
+        |_| false,
+    );
+
     for diagnostic in diagnostics {
         if diagnostic.kind == "UnsupportedSyntax" {
             let bucket = format!("parser_blocked: {}", normalize_message(&diagnostic.message));
@@ -931,6 +1124,193 @@ fn collect_deferred_features(
     }
 
     features
+}
+
+fn enum_companion_identity_pair(
+    enum_id: SymbolId,
+    index: &SourceSemanticIndex,
+    store: &SemanticStore,
+) -> Option<(SymbolId, SymbolId)> {
+    let enum_symbol = store.symbols.get(enum_id);
+    let owner = enum_symbol.owner?;
+    let object = enum_symbol.links.companion?;
+    let object_symbol = store.symbols.get(object);
+    if object_symbol.kind != SymbolKind::Object
+        || object_symbol.owner != Some(owner)
+        || object_symbol.links.companion != Some(enum_id)
+    {
+        return None;
+    }
+
+    let owner_scope = store.scopes.get(index.scope_of(owner)?);
+    let enum_name = store.names.resolve(enum_symbol.name.text());
+    let objects = owner_scope
+        .entered_symbols()
+        .filter(|candidate| {
+            let symbol = store.symbols.get(*candidate);
+            symbol.kind == SymbolKind::Object
+                && symbol.owner == Some(owner)
+                && store.names.resolve(symbol.name.text()) == enum_name
+        })
+        .collect::<Vec<_>>();
+    if objects.as_slice() != [object] {
+        return None;
+    }
+
+    let module_class_name = format!("{enum_name}$");
+    let module_classes = owner_scope
+        .entered_symbols()
+        .filter(|candidate| {
+            let symbol = store.symbols.get(*candidate);
+            symbol.kind == SymbolKind::ModuleClass
+                && symbol.owner == Some(owner)
+                && store.names.resolve(symbol.name.text()) == module_class_name
+                && index.scope_of(*candidate).is_some()
+        })
+        .collect::<Vec<_>>();
+    let [module_class] = module_classes.as_slice() else {
+        return None;
+    };
+    Some((object, *module_class))
+}
+
+fn validate_namer_audit_invariants(
+    arena: &AstArena<Untyped>,
+    source: SourceId,
+    index: &SourceSemanticIndex,
+    store: &SemanticStore,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (tree_id, tree) in arena.iter() {
+        let TreeKind::TypeDef(definition) = &tree.kind else {
+            if matches!(tree.kind, TreeKind::Export(_))
+                && index.export_site_at(source, tree_id).is_none()
+            {
+                violations.push(format!(
+                    "export source {}/tree {} has no semantic handoff record",
+                    source.index(),
+                    tree_id.index()
+                ));
+            }
+            continue;
+        };
+        if !definition.metadata.modifiers.contains(&Modifier::Enum) {
+            continue;
+        }
+        let Some(enum_id) = index.symbol_at(source, tree_id) else {
+            violations.push(format!(
+                "enum source {}/tree {} has no class identity",
+                source.index(),
+                tree_id.index()
+            ));
+            continue;
+        };
+        let enum_symbol = store.symbols.get(enum_id);
+        if enum_symbol.kind != SymbolKind::Class
+            || !enum_symbol.flags.contains(dotty_core::SymbolFlags::ENUM)
+        {
+            violations.push(format!(
+                "enum source {}/tree {} does not map to an enum class identity",
+                source.index(),
+                tree_id.index()
+            ));
+        }
+        let Some((_, companion_module_class)) = enum_companion_identity_pair(enum_id, index, store)
+        else {
+            violations.push(format!(
+                "enum source {}/tree {} has no unique, consistently linked companion pair",
+                source.index(),
+                tree_id.index()
+            ));
+            continue;
+        };
+        let TreeKind::Template(template) = &arena.get(definition.rhs).kind else {
+            continue;
+        };
+        for member in &template.body {
+            match &arena.get(*member).kind {
+                TreeKind::TypeDef(case)
+                    if case.metadata.modifiers.contains(&Modifier::EnumCase) =>
+                {
+                    let Some(case_id) = index.symbol_at(source, *member) else {
+                        violations.push(format!(
+                            "parameterized enum case source {}/tree {} has no class identity",
+                            source.index(),
+                            member.index()
+                        ));
+                        continue;
+                    };
+                    let case_symbol = store.symbols.get(case_id);
+                    if case_symbol.kind != SymbolKind::Class
+                        || case_symbol.owner != Some(companion_module_class)
+                        || !case_symbol.flags.contains(dotty_core::SymbolFlags::CASE)
+                        || !case_symbol.flags.contains(dotty_core::SymbolFlags::ENUM)
+                        || !case_symbol.flags.contains(dotty_core::SymbolFlags::FINAL)
+                    {
+                        violations.push(format!(
+                            "parameterized enum case source {}/tree {} is not owned by its enum companion module class",
+                            source.index(),
+                            member.index()
+                        ));
+                    }
+                }
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(case))
+                    if case.metadata.modifiers.contains(&Modifier::EnumCase) =>
+                {
+                    validate_enum_singleton_case(
+                        source,
+                        *member,
+                        companion_module_class,
+                        index,
+                        store,
+                        &mut violations,
+                    );
+                }
+                TreeKind::PhaseSpecific(UntypedNode::PatDef(case))
+                    if case.modifiers.modifiers.contains(&Modifier::EnumCase) =>
+                {
+                    for pattern in &case.patterns {
+                        validate_enum_singleton_case(
+                            source,
+                            *pattern,
+                            companion_module_class,
+                            index,
+                            store,
+                            &mut violations,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    violations
+}
+
+fn validate_enum_singleton_case(
+    source: SourceId,
+    tree: dotty_core::TreeId<Untyped>,
+    companion_module_class: SymbolId,
+    index: &SourceSemanticIndex,
+    store: &SemanticStore,
+    violations: &mut Vec<String>,
+) {
+    let Some(case_id) = index.symbol_at(source, tree) else {
+        violations.push(format!(
+            "singleton enum case source {}/tree {} has no object identity",
+            source.index(),
+            tree.index()
+        ));
+        return;
+    };
+    let case_symbol = store.symbols.get(case_id);
+    if case_symbol.kind != SymbolKind::Object || case_symbol.owner != Some(companion_module_class) {
+        violations.push(format!(
+            "singleton enum case source {}/tree {} is not owned by its enum companion module class",
+            source.index(),
+            tree.index()
+        ));
+    }
 }
 
 fn namer_error_kind(error: &dotty_namer::NamerError) -> String {
@@ -988,7 +1368,7 @@ fn root_label(root: &Path) -> String {
 
 fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Report {
     let mut report = Report {
-        schema_version: 4,
+        schema_version: 5,
         corpus_roots: metadata.roots.iter().map(|root| root_label(root)).collect(),
         source_version: metadata.source_version,
         source_revision: metadata.source_revision,
@@ -1009,11 +1389,8 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
         namer: metadata.collect_namer.then(NamerReport::default),
         deferred_features: metadata.collect_namer.then(|| {
             [
-                "enum_definitions",
-                "enum_cases",
                 "case_class_synthetic_apis",
                 "context_bound_evidence_synthesis",
-                "export_forwarders",
                 "derives_clauses",
                 "local_definitions",
                 "source_annotations",
@@ -1108,7 +1485,7 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
 
         if let Some(features) = &mut report.deferred_features {
             for (name, counts) in &outcome.deferred_features {
-                if counts.occurrences == 0 {
+                if counts.occurrences == 0 || is_namer_audit_metric_feature(name) {
                     continue;
                 }
                 let bucket =
@@ -1126,6 +1503,7 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
                 bucket.materialized_occurrences += counts.materialized;
                 if matches!(&outcome.namer, Some(NamerOutcome::Success { .. }))
                     && !name.starts_with("parser_blocked:")
+                    && !name.ends_with("_blocked_by_parser_recovery")
                 {
                     bucket.deferred_occurrences += counts.occurrences - counts.materialized;
                 }
@@ -1133,6 +1511,51 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
                     bucket.examples.push(outcome.path.clone());
                 }
             }
+        }
+        if let Some(namer) = &mut report.namer {
+            let count = |name: &str| {
+                outcome
+                    .deferred_features
+                    .get(name)
+                    .copied()
+                    .unwrap_or_default()
+            };
+            let definitions = count("enum_definitions_encountered");
+            let classes = count("enum_class_identities");
+            let companions = count("enum_companion_identity_pairs");
+            let singleton_cases = count("enum_singleton_cases");
+            let comma_group_cases = count("enum_comma_group_singleton_cases");
+            let parameterized_cases = count("enum_parameterized_cases");
+            namer.enum_identity_audit.definitions_encountered += definitions.occurrences;
+            namer.enum_identity_audit.class_identities_materialized += classes.materialized;
+            namer
+                .enum_identity_audit
+                .companion_identity_pairs_materialized += companions.materialized;
+            namer.enum_identity_audit.singleton_cases_encountered += singleton_cases.occurrences;
+            namer.enum_identity_audit.singleton_cases_materialized += singleton_cases.materialized;
+            namer
+                .enum_identity_audit
+                .comma_group_singleton_cases_encountered += comma_group_cases.occurrences;
+            namer
+                .enum_identity_audit
+                .comma_group_singleton_cases_materialized += comma_group_cases.materialized;
+            namer.enum_identity_audit.parameterized_cases_encountered +=
+                parameterized_cases.occurrences;
+            namer.enum_identity_audit.parameterized_cases_materialized +=
+                parameterized_cases.materialized;
+            namer
+                .enum_identity_audit
+                .case_clauses_blocked_by_parser_recovery +=
+                count("enum_case_clauses_blocked_by_parser_recovery").occurrences;
+
+            let export_syntax = count("export_syntax_occurrences");
+            namer.export_handoff_audit.syntax_occurrences += export_syntax.occurrences;
+            namer.export_handoff_audit.sites_recorded +=
+                count("export_sites_recorded").materialized;
+            namer.export_handoff_audit.sites_blocked_by_parser_recovery +=
+                count("export_sites_blocked_by_parser_recovery").occurrences;
+            // Namer only records export sites; forwarder synthesis is owned by
+            // a later typed phase and must remain zero in this gate.
         }
         if let Some(namer) = &mut report.namer {
             match &outcome.namer {
@@ -1277,6 +1700,10 @@ fn first_failure_bucket(diagnostic: &DiagnosticSummary) -> String {
     }
 }
 
+fn is_namer_audit_metric_feature(name: &str) -> bool {
+    name.starts_with("enum_") || name.starts_with("export_")
+}
+
 fn normalize_message(message: &str) -> String {
     message
         .split_whitespace()
@@ -1418,10 +1845,38 @@ fn print_summary(report: &Report) {
                 println!("      - {example}");
             }
         }
+        let enums = &namer.enum_identity_audit;
+        println!(
+            "  enum identities: {} definitions; {} enum classes and {} companion object/module-class pairs materialized",
+            enums.definitions_encountered,
+            enums.class_identities_materialized,
+            enums.companion_identity_pairs_materialized
+        );
+        println!(
+            "  enum cases: singleton {}/{}, comma-group singleton {}/{}, parameterized {}/{}; {} case clauses blocked by parser recovery",
+            enums.singleton_cases_materialized,
+            enums.singleton_cases_encountered,
+            enums.comma_group_singleton_cases_materialized,
+            enums.comma_group_singleton_cases_encountered,
+            enums.parameterized_cases_materialized,
+            enums.parameterized_cases_encountered,
+            enums.case_clauses_blocked_by_parser_recovery
+        );
+        let exports = &namer.export_handoff_audit;
+        println!(
+            "  exports: {} syntax occurrences, {} sites recorded, {} blocked by parser recovery, {} forwarders synthesized",
+            exports.syntax_occurrences,
+            exports.sites_recorded,
+            exports.sites_blocked_by_parser_recovery,
+            exports.forwarders_synthesized
+        );
     }
     if let Some(features) = &report.deferred_features {
         println!("  deferred source-feature inventory:");
         for (feature, bucket) in features {
+            if is_namer_audit_metric_feature(feature) {
+                continue;
+            }
             println!(
                 "    {feature}: {} occurrences in {} files ({} materialized, {} deferred)",
                 bucket.occurrences,
@@ -1561,21 +2016,63 @@ mod tests {
     }
 
     #[test]
-    fn deferred_inventory_counts_materialized_enum_case_identities() {
-        let parsed = parse_source("enum Color { case Red, Green }", "Color.scala", true);
-        let enum_definition = parsed
+    fn enum_audit_splits_definition_companion_and_case_identities() {
+        let parsed = parse_source(
+            "enum Color { case Red, Green; case Yellow; case Blue(value: Int) }",
+            "Color.scala",
+            true,
+        );
+        let definitions = parsed
             .deferred_features
-            .get("enum_definitions")
+            .get("enum_definitions_encountered")
             .expect("enum definition counted");
-        let enum_cases = parsed
+        let classes = parsed
             .deferred_features
-            .get("enum_cases")
-            .expect("enum cases counted");
+            .get("enum_class_identities")
+            .expect("enum class identity counted");
+        let companions = parsed
+            .deferred_features
+            .get("enum_companion_identity_pairs")
+            .expect("enum companion identity pair counted");
+        let singleton_cases = parsed
+            .deferred_features
+            .get("enum_singleton_cases")
+            .expect("singleton enum cases counted");
+        let comma_cases = parsed
+            .deferred_features
+            .get("enum_comma_group_singleton_cases")
+            .expect("comma-group enum cases counted");
+        let parameterized_cases = parsed
+            .deferred_features
+            .get("enum_parameterized_cases")
+            .expect("parameterized enum cases counted");
 
-        assert_eq!(enum_definition.occurrences, 1);
-        assert_eq!(enum_definition.materialized, 1);
-        assert_eq!(enum_cases.occurrences, 2);
-        assert_eq!(enum_cases.materialized, 2);
+        assert_eq!(definitions.occurrences, 1);
+        assert_eq!(classes.materialized, 1);
+        assert_eq!(companions.materialized, 1);
+        assert_eq!(singleton_cases.occurrences, 1);
+        assert_eq!(singleton_cases.materialized, 1);
+        assert_eq!(comma_cases.occurrences, 2);
+        assert_eq!(comma_cases.materialized, 2);
+        assert_eq!(parameterized_cases.occurrences, 1);
+        assert_eq!(parameterized_cases.materialized, 1);
+        let Some(NamerOutcome::Success {
+            invariant_violations,
+        }) = parsed.namer
+        else {
+            panic!("valid enum fixture should be named successfully");
+        };
+        assert!(invariant_violations.is_empty(), "{invariant_violations:?}");
+    }
+
+    #[test]
+    fn enum_audit_counts_case_syntax_lost_during_parser_recovery() {
+        let parsed = parse_source("enum Color { case }", "Color.scala", true);
+        let blocked = parsed
+            .deferred_features
+            .get("enum_case_clauses_blocked_by_parser_recovery")
+            .expect("parser-blocked enum case clause counted");
+        assert_eq!(blocked.occurrences, 1);
     }
 
     #[test]
@@ -1638,19 +2135,35 @@ mod tests {
     }
 
     #[test]
-    fn deferred_inventory_counts_export_selectors_as_missing_forwarders() {
+    fn export_audit_distinguishes_recorded_sites_from_forwarders() {
         let parsed = parse_source(
             "object A { def value: Int = 1 }; object B { export A.value }",
             "Exports.scala",
             true,
         );
-        let exports = parsed
+        let syntax = parsed
             .deferred_features
-            .get("export_forwarders")
-            .expect("export forwarder occurrence counted");
+            .get("export_syntax_occurrences")
+            .expect("export syntax occurrence counted");
+        let sites = parsed
+            .deferred_features
+            .get("export_sites_recorded")
+            .expect("export semantic handoff counted");
+        let blocked = parsed
+            .deferred_features
+            .get("export_sites_blocked_by_parser_recovery")
+            .expect("parser-blocked export sites counted");
+        let forwarders = parsed
+            .deferred_features
+            .get("export_forwarders_synthesized")
+            .expect("forwarder synthesis count exists");
 
-        assert_eq!(exports.occurrences, 1);
-        assert_eq!(exports.materialized, 0);
+        assert_eq!(syntax.occurrences, 1);
+        assert_eq!(syntax.materialized, 1);
+        assert_eq!(sites.occurrences, 1);
+        assert_eq!(sites.materialized, 1);
+        assert_eq!(blocked.occurrences, 0);
+        assert_eq!(forwarders.occurrences, 0);
     }
 
     #[test]
