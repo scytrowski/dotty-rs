@@ -2994,7 +2994,7 @@ impl<'a> SourceTyper<'a> {
             .as_ref()
             .is_some_and(|node| matches!(node.kind, TreeKind::New(_)))
         {
-            self.raw_generic_new_class(selection.qualifier, context)?
+            self.raw_generic_new_class(selection.qualifier, context, info_journal)?
         } else {
             None
         };
@@ -3124,6 +3124,7 @@ impl<'a> SourceTyper<'a> {
                     result,
                     candidate.symbol,
                     application_tree_index,
+                    info_journal,
                 )?;
                 instance_type = inferred_instance_type;
                 self.finalize_raw_generic_new(
@@ -3265,6 +3266,7 @@ impl<'a> SourceTyper<'a> {
         &mut self,
         tree: TreeId<Untyped>,
         context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Option<(SymbolId, TypeId)>, TyperError> {
         if self.typed_index.get(self.source, tree).is_some() {
             return Ok(None);
@@ -3279,7 +3281,7 @@ impl<'a> SourceTyper<'a> {
         let type_context = self.expression_type_context(context)?;
         let raw_type = self.type_of_tpt_inner(new.tpt, type_context)?;
         let (class, arguments) =
-            self.constructor_instance_type_arguments(raw_type, &mut Vec::new())?;
+            self.constructor_instance_type_arguments(raw_type, info_journal)?;
         if !arguments.is_empty() {
             return Ok(None);
         }
@@ -3317,7 +3319,8 @@ impl<'a> SourceTyper<'a> {
         if self.store.names.resolve(selection.name.text()) != "<init>" || selection.backquoted {
             return Ok(());
         }
-        let Some((class, _raw_type)) = self.raw_generic_new_class(selection.qualifier, context)?
+        let Some((class, _raw_type)) =
+            self.raw_generic_new_class(selection.qualifier, context, info_journal)?
         else {
             return Ok(());
         };
@@ -3449,8 +3452,12 @@ impl<'a> SourceTyper<'a> {
             instantiated.result,
             root.index(),
         )?;
-        let instance_type =
-            self.constructor_result_instance_type(result, candidate.symbol, root.index())?;
+        let instance_type = self.constructor_result_instance_type(
+            result,
+            candidate.symbol,
+            root.index(),
+            info_journal,
+        )?;
         self.finalize_raw_generic_new(
             selection.qualifier,
             instance_type,
@@ -3471,14 +3478,14 @@ impl<'a> SourceTyper<'a> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let (class, _) = self.raw_generic_new_class(tree, context)?.ok_or(
-            TyperError::UnableToFinalizeRawGenericNewInstanceType {
+        let (class, _) = self
+            .raw_generic_new_class(tree, context, info_journal)?
+            .ok_or(TyperError::UnableToFinalizeRawGenericNewInstanceType {
                 source: self.source,
                 tree_index: tree.index(),
                 constructor,
                 result: instance_type,
-            },
-        )?;
+            })?;
         let inferred_class = self.instantiable_class_of_type(instance_type, info_journal)?;
         if inferred_class != class {
             return Err(TyperError::UnableToFinalizeRawGenericNewInstanceType {
@@ -3526,9 +3533,10 @@ impl<'a> SourceTyper<'a> {
         result: TypeId,
         constructor: SymbolId,
         tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
         let (class, arguments) = self
-            .constructor_instance_type_arguments(result, &mut Vec::new())
+            .constructor_instance_type_arguments(result, info_journal)
             .map_err(|_| TyperError::UnableToFinalizeRawGenericNewInstanceType {
                 source: self.source,
                 tree_index,
@@ -15556,6 +15564,36 @@ mod tests {
             assert_eq!(typer.typed_ast().iter().count(), typed_count);
             assert!(typer.source_typed_index().get(source, raw_new).is_none());
         }
+    }
+
+    #[test]
+    fn failed_generic_constructor_inference_rolls_back_alias_completion() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Pair[A](first: A, second: A); class Use { type RawPair = Pair; def make = new RawPair(1, true) }",
+        );
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "RawPair");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "make");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let semantic_checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ConflictingConstructorInferenceConstraints { .. })
+        ));
+
+        assert_eq!(typer.store().checkpoint(), semantic_checkpoint);
+        assert!(matches!(
+            typer.store().symbols.info(alias),
+            SymbolInfo::Missing
+        ));
     }
 
     #[test]
