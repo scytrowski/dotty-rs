@@ -34,6 +34,8 @@ for fixture in "${fixtures[@]}"; do
     fi
   elif [[ "$(basename "$(dirname "${fixture}")")" == "compilation" ]]; then
     mode=compilation
+  elif [[ "$(basename "$(dirname "${fixture}")")" == "oracle-only" ]]; then
+    mode=oracle-only
   fi
   printf '%s\t%s\n' "${mode}" "${fixture}" >>"${manifest}"
 done

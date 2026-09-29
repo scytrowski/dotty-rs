@@ -57,7 +57,18 @@ def compare_batch(manifest_path: pathlib.Path, scala_path: pathlib.Path, rust_pa
         )
         return 1
 
-    for index, (_, source_path) in enumerate(entries):
+    for index, (mode, source_path) in enumerate(entries):
+        if mode == "oracle-only":
+            scala = json.loads(scala_lines[index])
+            if isinstance(scala, dict) and scala.get("kind") == "OracleFailure":
+                print(
+                    f"Scala parser oracle failed on regression fixture {source_path}: "
+                    f"{scala.get('error', 'unknown error')}",
+                    file=sys.stderr,
+                )
+                return 1
+            continue
+
         result = compare_one(
             source_path,
             json.loads(scala_lines[index]),

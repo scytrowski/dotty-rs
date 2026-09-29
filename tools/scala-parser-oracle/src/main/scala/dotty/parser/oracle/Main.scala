@@ -60,10 +60,11 @@ object Main:
     val parser = new Parsers.Parser(sourceFile)(using unitContext)
     val tree = mode match
       case "pattern" => parser.pattern()
-      case "compilation" => parser.compilationUnit()
+      case "compilation" | "oracle-only" => parser.compilationUnit()
       case _ => parser.expr()
 
-    if mode == "compilation" && tree.getClass.getSimpleName.stripSuffix("$") == "EmptyTree" then
+    val isCompilation = mode == "compilation" || mode == "oracle-only"
+    if isCompilation && tree.getClass.getSimpleName.stripSuffix("$") == "EmptyTree" then
       renderEmptyCompilation(source)
     else
       render(tree, source, placeholderBase(tree, source))
