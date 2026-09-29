@@ -20922,6 +20922,88 @@ mod tests {
     }
 
     #[test]
+    fn losing_generic_local_overload_probe_rolls_back_speculative_state() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def pick[A](value: A): Int = 1; def pick(value: Int): Int = 2; pick(1) } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let generic_tree = block.stats[0];
+        let monomorphic_tree = block.stats[1];
+        let call_tree = block.expr;
+        let TreeKind::Apply(call) = &parsed.ast.get(call_tree).kind else {
+            panic!("call should be an Apply");
+        };
+        let argument_tree = call.args[0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        let (_, block_context) = preindex_block_for_test(&mut typer, block_tree, context);
+        let generic = typer.local_method_symbol_at(source, generic_tree).unwrap();
+        let monomorphic = typer
+            .local_method_symbol_at(source, monomorphic_tree)
+            .unwrap();
+        let generic_callable = typer.complete_symbol(generic).unwrap();
+        let monomorphic_callable = typer.complete_symbol(monomorphic).unwrap();
+        let typed_argument = typer.type_expression(argument_tree, block_context).unwrap();
+        let own_type = typer.typed_ast().get(typed_argument).ty;
+        let widened_type = typer.widen_expression_type(own_type).unwrap();
+        let mut candidates = [
+            ApplicationCandidate {
+                symbol: generic,
+                callable: generic_callable,
+                is_generic: true,
+                member: None,
+                rejection: None,
+            },
+            ApplicationCandidate {
+                symbol: monomorphic,
+                callable: monomorphic_callable,
+                is_generic: false,
+                member: None,
+                rejection: None,
+            },
+        ];
+        let arguments = [TypedArgument {
+            typed: typed_argument,
+            own_type,
+            widened_type,
+        }];
+        let store_checkpoint = typer.store.checkpoint();
+        let type_index_checkpoint = typer.type_index.checkpoint();
+        let mut info_journal = Vec::new();
+
+        let winner = typer
+            .choose_method_overload_candidate(
+                &mut candidates,
+                &arguments,
+                call_tree.index(),
+                ApplyKind::Regular,
+                &mut info_journal,
+            )
+            .unwrap();
+
+        assert_eq!(winner.symbol, monomorphic);
+        assert!(info_journal.is_empty());
+        assert_eq!(typer.store.checkpoint(), store_checkpoint);
+        for (tree, _) in parsed.ast.iter() {
+            assert_eq!(
+                typer.type_index.type_at(source, tree),
+                type_index_checkpoint.type_at(source, tree)
+            );
+        }
+    }
+
+    #[test]
     fn nested_local_method_shadows_same_named_outer_method() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def outer: Int = { def pick[A](value: A): A = value; { def pick(value: Int): Int = value; pick(1) } } }",
