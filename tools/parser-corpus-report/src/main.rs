@@ -9,9 +9,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use dotty_core::ast::{AstArena, Modifier, TreeKind, Untyped, UntypedNode};
-use dotty_core::{Packages, SemanticStore, SourceId, SourceText, TokenKind};
+use dotty_core::{Packages, SemanticStore, SourceId, SourceSemanticIndex, SourceText, TokenKind};
 use dotty_lexer::ContextualScanner;
-use dotty_namer::{SourceSemanticIndex, name_compilation_unit};
+use dotty_namer::name_compilation_unit;
 use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
 use serde::{Deserialize, Serialize};
 
@@ -1552,8 +1552,8 @@ mod tests {
         let source = SourceId::from_index(1);
         let error = dotty_namer::NamerError::ConflictingSourceProvenance {
             symbol,
-            existing: dotty_namer::SourceDefinition::Canonical { source, tree },
-            attempted: dotty_namer::SourceDefinition::Derived { source, tree },
+            existing: dotty_core::SourceDefinition::Canonical { source, tree },
+            attempted: dotty_core::SourceDefinition::Derived { source, tree },
         };
 
         assert_eq!(namer_error_kind(&error), "ConflictingSourceProvenance");

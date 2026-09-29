@@ -2,8 +2,7 @@
 
 use dotty_core::ast::TreeKind;
 use dotty_core::types::{Type, TypeRefTarget, substitute_type_symbols};
-use dotty_core::{SymbolId, SymbolInfo, SymbolKind, TypeId, Untyped};
-use dotty_namer::SourceDefinition;
+use dotty_core::{SourceDefinition, SymbolId, SymbolInfo, SymbolKind, TypeId, Untyped};
 
 use crate::types::TypeNormalizer;
 use crate::{MemberCandidate, SourceTyper, TyperError};

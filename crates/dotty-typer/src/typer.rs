@@ -14,10 +14,10 @@ use dotty_core::types::{
 };
 use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
-    ResolutionError, SemanticStore, SourceId, SourceSpan, SymbolFlags, SymbolId, SymbolInfo,
-    SymbolKind, SymbolOrigin, SymbolResolver, TreeId, TypeId, Typed, Untyped,
+    ResolutionError, SemanticStore, SourceContextId, SourceDefinition, SourceId,
+    SourceSemanticIndex, SourceSpan, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin,
+    SymbolResolver, TreeId, TypeId, Typed, Untyped,
 };
-use dotty_namer::{SourceContextId, SourceDefinition, SourceSemanticIndex};
 
 use crate::{SourceTypeIndex, SourceTypedIndex};
 

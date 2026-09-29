@@ -1504,6 +1504,11 @@ They usually agree but are not the same concept (e.g. an imported name is in
 scope somewhere it isn't owned). `Symbol` never gets a `children:
 Vec<SymbolId>` field; child membership is reconstructed via scopes.
 
+`SourceSemanticIndex` is also a `dotty-core` contract. It maps source trees to
+canonical and derived semantic identities and stores declaration scopes and
+source contexts. The namer populates this index, while the typer consumes it;
+keeping it in core lets the typer remain independent of the namer crate.
+
 `NamerState` (the `TreeId<Untyped> -> SymbolId` side table) explicitly does
 **not** live in `dotty-core`. It belongs to the future `dotty-typer` crate's
 namer, because it is intermediate compiler state, not part of the semantic
