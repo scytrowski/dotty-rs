@@ -1046,7 +1046,30 @@ where
     }
 
     pub(crate) fn parse_optional_template_body(&mut self) -> TemplateBodyResult {
+        self.parse_optional_template_body_with_feedback(None, false)
+    }
+
+    pub(crate) fn parse_optional_template_body_with_feedback(
+        &mut self,
+        feedback_indent: Option<u32>,
+        required: bool,
+    ) -> TemplateBodyResult {
         self.consume_newlines_before_template_body();
+        if required
+            && !matches!(
+                self.current().kind,
+                TokenKind::Indent | TokenKind::Punctuation(Punctuation::LeftBrace)
+            )
+        {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected a template body after `with`",
+            );
+            return TemplateBodyResult {
+                self_val: None,
+                members: Vec::new(),
+            };
+        }
         if matches!(
             self.current().kind,
             TokenKind::ColonFollow | TokenKind::ColonOp | TokenKind::ColonEol
@@ -1078,7 +1101,9 @@ where
             TokenKind::Punctuation(dotty_core::Punctuation::LeftBrace) => {
                 self.parse_template_body(TemplateBody::Braced)
             }
-            TokenKind::Indent => self.parse_template_body(TemplateBody::Indented),
+            TokenKind::Indent => {
+                self.parse_template_body_with_feedback(TemplateBody::Indented, feedback_indent)
+            }
             _ => TemplateBodyResult {
                 self_val: None,
                 members: Vec::new(),

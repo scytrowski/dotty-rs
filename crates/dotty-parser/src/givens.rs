@@ -89,7 +89,7 @@ where
             // their type-parameter clause and the implemented given type.
             self.advance();
         }
-        let (parents, has_with_template_body) = loop {
+        let (parents, has_with_template_body, template_body_feedback) = loop {
             if self.starts_given_parameter_clause() {
                 self.parse_given_parameter_clauses(
                     &mut value_param_clauses,
@@ -122,8 +122,9 @@ where
                 continue;
             }
             let mut parents = vec![candidate];
-            let has_with_template_body = self.parse_given_parent_suffixes(&mut parents, location);
-            break (parents, has_with_template_body);
+            let (has_with_template_body, template_body_feedback) =
+                self.parse_given_parent_suffixes(&mut parents, location);
+            break (parents, has_with_template_body, template_body_feedback);
         };
         let method_like = !type_params.is_empty()
             || has_explicit_parameter_clause
@@ -150,6 +151,8 @@ where
                 type_params,
                 value_param_clauses,
                 parents,
+                has_with_template_body,
+                template_body_feedback,
                 prefix.metadata,
             );
         }
@@ -225,6 +228,8 @@ where
         type_params: Vec<TreeId<Untyped>>,
         value_param_clauses: Vec<Vec<TreeId<Untyped>>>,
         parents: Vec<TreeId<Untyped>>,
+        has_with_template_body: bool,
+        template_body_feedback: Option<u32>,
         mut metadata: dotty_core::ast::Modifiers,
     ) -> ParsedStatement {
         if !metadata.modifiers.contains(&Modifier::Given) {
@@ -233,7 +238,12 @@ where
 
         let body = self
             .with_secondary_constructor_allowed(false, |parser| {
-                parser.with_enum_body(false, |parser| parser.parse_optional_template_body())
+                parser.with_enum_body(false, |parser| {
+                    parser.parse_optional_template_body_with_feedback(
+                        template_body_feedback,
+                        has_with_template_body,
+                    )
+                })
             })
             .members;
         let template = self.allocate_given_template(
@@ -275,7 +285,7 @@ where
         &mut self,
         parents: &mut Vec<TreeId<Untyped>>,
         location: Location,
-    ) -> bool {
+    ) -> (bool, Option<u32>) {
         loop {
             let newline_count = self.newlines_before_given_parent_separator();
             let separator = matches!(
@@ -283,16 +293,23 @@ where
                 TokenKind::Punctuation(Punctuation::Comma) | TokenKind::Keyword(HardKeyword::With)
             );
             if !separator {
-                return false;
+                return (false, None);
             }
             let is_with =
                 self.cursor.lookahead(newline_count).kind == TokenKind::Keyword(HardKeyword::With);
             for _ in 0..newline_count {
                 self.advance();
             }
+            let with_template_body = is_with && self.given_with_starts_template_body();
+            let template_body_feedback =
+                if with_template_body && self.given_with_ends_physical_line() {
+                    self.observe_indented_body_region()
+                } else {
+                    None
+                };
             self.advance();
-            if is_with && self.given_with_starts_template_body() {
-                return true;
+            if with_template_body {
+                return (true, template_body_feedback);
             }
             if matches!(
                 self.current().kind,
@@ -309,7 +326,7 @@ where
                     ParseDiagnosticKind::ExpectedType,
                     "expected a given parent after the separator",
                 );
-                return false;
+                return (false, None);
             }
             parents.push(self.parse_given_parent(location));
         }
@@ -319,13 +336,24 @@ where
     /// `with` on the same line. A line end or `{` after `with` starts the
     /// legacy `with` template body instead.
     fn given_with_starts_template_body(&mut self) -> bool {
-        matches!(
-            self.current().kind,
-            TokenKind::Indent
-                | TokenKind::Punctuation(Punctuation::LeftBrace)
-                | TokenKind::Newline
-                | TokenKind::Newlines
-        )
+        self.current().kind == TokenKind::Keyword(HardKeyword::With)
+            && (matches!(
+                self.cursor.lookahead(1).kind,
+                TokenKind::Indent | TokenKind::Punctuation(Punctuation::LeftBrace)
+            ) || self.given_with_ends_physical_line())
+    }
+
+    fn given_with_ends_physical_line(&mut self) -> bool {
+        let with_end = self.current().span.end();
+        let mut lookahead = 1;
+        while matches!(
+            self.cursor.lookahead(lookahead).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            lookahead += 1;
+        }
+        let next_start = self.cursor.lookahead(lookahead).span.start();
+        self.has_line_break_between(with_end, next_start)
     }
 
     fn parse_given_parent(&mut self, location: Location) -> TreeId<Untyped> {
@@ -1505,6 +1533,37 @@ mod tests {
         assert_eq!(template.body.len(), 1);
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_a_missing_with_body_without_consuming_the_next_member() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given A with\nval next = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::With), 8, 12),
+                token(TokenKind::Newline, 12, 13),
+                token(TokenKind::Keyword(HardKeyword::Val), 13, 16),
+                token(TokenKind::Identifier, 17, 21),
+                token(TokenKind::Operator, 22, 23),
+                token(TokenKind::IntegerLiteral, 24, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_given_definition(Location::Elsewhere);
+
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].message(),
+            "expected a template body after `with`"
+        );
+        assert_eq!(parser.current().kind, TokenKind::Newline);
+        parser.advance();
+        assert_eq!(parser.current().kind, TokenKind::Keyword(HardKeyword::Val));
     }
 
     #[test]
