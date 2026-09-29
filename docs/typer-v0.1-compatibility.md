@@ -80,16 +80,15 @@ transparent wrappers are normalized only to discover the class symbol; the
 typed `New` keeps the unnormalized projected type. Anonymous-template `new`
 is deferred. Constructor discovery reads only the target class's declaration
 scope, returns every `<init>` constructor in insertion order, and never walks
-parent classes. A primary constructor application is supported when exactly
-one direct constructor exists; it preserves the constructor symbol in the
-typed selection and reuses ordinary method argument checking, including
-nested curried clauses. For a generic primary constructor, explicit type
-arguments are read from the typed `New` instance type and instantiate the
+parent classes. A primary constructor application preserves its constructor
+symbol in the typed selection and reuses ordinary method argument checking,
+including nested curried clauses. For a generic primary constructor, explicit
+type arguments are read from the typed `New` instance type and instantiate the
 constructor's exact `Poly` binder by index. Ordinary lower and upper bounds
 use the same relation as explicit method type applications, and the
 instantiated final result must agree with the instance class and type
-arguments. When class type arguments are omitted, a unique generic primary
-constructor infers them from widened term argument types. Inference uses the
+arguments. When class type arguments are omitted, a generic primary
+constructor can infer them from widened term argument types. Inference uses the
 constructor Poly binder and parameter indices, supports matching applied type
 constructors recursively, and combines constraints from curried clauses.
 Repeated equivalent constraints succeed; conflicts and unconstrained
@@ -97,13 +96,19 @@ parameters are errors, without a `Nothing`/`Any` fallback or LUB. The inferred
 arguments pass through the same bounds checker and Poly instantiator as other
 generic calls. The typed `New` is finalized only after inference succeeds, so
 it and the final constructor application retain the same applied instance
-type. No synthetic source `TypeApply` is introduced. Monomorphic primary and
-secondary constructors participate in direct overload resolution: candidates
-are filtered by arity and argument conformance, then the unique most-specific
-applicable signature is selected. Ambiguity and no-applicable errors retain the
-candidate identities and rejection reasons. Generic constructor competition,
-expected-type inference, and contextual constructor applications remain
-explicit deferrals.
+type. No synthetic source `TypeApply` is introduced. Primary and secondary
+constructors participate in overload resolution. This includes competition
+between an inferable generic primary constructor and monomorphic secondary
+constructors. With explicit owner type arguments, the instantiated signature
+of a generic primary constructor competes with monomorphic secondary
+constructors. Candidates are filtered by arity and argument conformance, then
+the unique most-specific applicable signature is selected. Ambiguity and
+no-applicable errors retain candidate identities and rejection reasons.
+Inference for raw generic `new` is supported when a generic primary constructor
+wins. If a raw generic `new` selects a secondary constructor, typing is
+explicitly rejected because its signature has not been adapted using inferred
+owner type arguments. Expected-type inference and contextual constructor
+applications remain explicit deferrals.
 
 A secondary constructor in a generic class keeps the enclosing class's type
 parameters in its result, for example `C[A]`; those parameters remain owned by
