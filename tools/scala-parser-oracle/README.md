@@ -66,11 +66,15 @@ arguments, and binding around union, intersection, and parenthesized types.
 Refined-type fixtures cover `RefinedTypeTree` parents with abstract, aliased,
 and upper-bounded `TypeDef` members, declaration-only `val`, `var`, and `def`
 members, multiple members in source order, annotated and applied parents, and
-the parentless refinement form. Capture-checking compilation fixtures also
+the parentless refinement form. The `refined-declaration-members.scala` fixture
+compares retained abstract value, variable, and method declarations against
+Scala 3.9. Focused Rust recovery tests cover annotation/modifier prefixes,
+right-hand sides, and default arguments, which Scala 3.9 rejects and does not
+retain in the refinement list. Capture-checking compilation fixtures also
 compare caret disambiguation and pure function-type capture sets. RHS-bearing
-refined declarations, default arguments, class-like members, modifiers,
-refined type members, and capture-checking refinements remain outside this
-parser milestone. Core match types are compared in the type-definition fixtures,
+refined declarations, default arguments, class-like members, and modifiers
+remain unsupported. Refined type members and capture-checking refinements also
+remain outside this parser milestone. Core match types are compared in the type-definition fixtures,
 including ordered `CaseDef` children, applied/tuple/infix patterns, full type
 results, and upper-bounded match-type aliases. Generic symbolic and identifier
 infix types are compared in
