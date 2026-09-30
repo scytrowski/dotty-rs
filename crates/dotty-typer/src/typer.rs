@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use dotty_core::ast::{
     ApplyKind, DefDef, Ident, Modifier, NumberKind, NumberLiteral, Tree, TreeKind, TypeBoundsTree,
-    TypedAstBuilder, UntypedNode, ValDef,
+    TypeDef, TypedAstBuilder, UntypedNode, ValDef,
 };
 use dotty_core::types::{
     ClassInfo, MethodKind, MethodParamSpec, MethodType, PolyType, TermRefTarget, Type,
@@ -1225,6 +1225,8 @@ pub struct SourceTyper<'a> {
     type_index: SourceTypeIndex,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     local_methods: LocalMethodIndex,
+    active_local_type_scopes: Vec<(SourceContextId, ScopeId)>,
+    active_local_type_binders: Vec<(TypeId, Vec<SymbolId>)>,
     initializing_local_symbols: HashSet<SymbolId>,
     inferred_method_results_in_progress: HashSet<SymbolId>,
     typed_arena: AstArena<Typed>,
@@ -1328,6 +1330,9 @@ struct LocalMethodIndex {
     parameter_symbols_by_tree: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     parameter_definitions: HashMap<SymbolId, (SourceId, TreeId<Untyped>)>,
     parameter_contexts: HashMap<SymbolId, SourceContextId>,
+    type_parameter_symbols_by_tree: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
+    type_parameter_definitions: HashMap<SymbolId, (SourceId, TreeId<Untyped>)>,
+    type_parameter_contexts: HashMap<SymbolId, SourceContextId>,
 }
 
 impl LocalMethodIndex {
@@ -1389,6 +1394,38 @@ impl LocalMethodIndex {
 
     fn parameter_context(&self, symbol: SymbolId) -> Option<SourceContextId> {
         self.parameter_contexts.get(&symbol).copied()
+    }
+
+    fn insert_type_parameter(
+        &mut self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+        symbol: SymbolId,
+        context: SourceContextId,
+    ) {
+        self.type_parameter_symbols_by_tree
+            .insert((source, tree), symbol);
+        self.type_parameter_definitions
+            .insert(symbol, (source, tree));
+        self.type_parameter_contexts.insert(symbol, context);
+    }
+
+    fn type_parameter_symbol_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        self.type_parameter_symbols_by_tree
+            .get(&(source, tree))
+            .copied()
+    }
+
+    fn type_parameter_definition(&self, symbol: SymbolId) -> Option<(SourceId, TreeId<Untyped>)> {
+        self.type_parameter_definitions.get(&symbol).copied()
+    }
+
+    fn type_parameter_context(&self, symbol: SymbolId) -> Option<SourceContextId> {
+        self.type_parameter_contexts.get(&symbol).copied()
     }
 }
 
@@ -1538,6 +1575,8 @@ impl<'a> SourceTyper<'a> {
             type_index: SourceTypeIndex::default(),
             local_symbols: HashMap::new(),
             local_methods: LocalMethodIndex::default(),
+            active_local_type_scopes: Vec::new(),
+            active_local_type_binders: Vec::new(),
             initializing_local_symbols: HashSet::new(),
             inferred_method_results_in_progress: HashSet::new(),
             typed_arena: AstArena::new(),
@@ -1560,6 +1599,7 @@ impl<'a> SourceTyper<'a> {
         self.local_methods
             .definition(symbol)
             .or_else(|| self.local_methods.parameter_definition(symbol))
+            .or_else(|| self.local_methods.type_parameter_definition(symbol))
             .or_else(|| {
                 self.index
                     .definition_of(symbol)
@@ -1592,6 +1632,7 @@ impl<'a> SourceTyper<'a> {
     fn parameter_source_context(&self, parameter: SymbolId) -> Option<SourceContextId> {
         self.local_methods
             .parameter_context(parameter)
+            .or_else(|| self.local_methods.type_parameter_context(parameter))
             .or_else(|| self.index.declaration_context_of(parameter))
     }
 
@@ -1799,7 +1840,31 @@ impl<'a> SourceTyper<'a> {
     ) -> Result<TreeId<Typed>, TyperError> {
         let typed = self.type_expression_inner(tree, context, info_journal, new_mappings)?;
         let expression_type = self.typed_arena.get(typed).ty;
-        let actual = self.widen_expression_type_journaled(expression_type, info_journal, 0)?;
+        let mut actual = self.widen_expression_type_journaled(expression_type, info_journal, 0)?;
+        for (binder, parameters) in self.active_local_type_binders.iter().rev() {
+            if !self.type_contains_param_ref(expected, *binder)? {
+                continue;
+            }
+            let substitutions = parameters
+                .iter()
+                .enumerate()
+                .map(|(index, symbol)| {
+                    (
+                        *symbol,
+                        self.store.types.alloc(Type::ParamRef {
+                            binder: *binder,
+                            index: index as u32,
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>();
+            actual = dotty_core::types::substitute_type_symbols(self.store, actual, &substitutions)
+                .map_err(|error| TyperError::TypeRebinding {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    error,
+                })?;
+        }
         match self.conforms(actual, expected) {
             Ok(true) => Ok(typed),
             Ok(false) => Err(TyperError::ExpectedExpressionTypeMismatch {
@@ -4966,16 +5031,141 @@ impl<'a> SourceTyper<'a> {
             }
             SymbolInfo::Error => return Err(TyperError::SymbolAlreadyErrored { symbol: method }),
         };
-        let result = match self.store.types.try_get(signature) {
-            Some(Type::Method(method_type)) => method_type.result,
-            _ => {
+        let mut result = signature;
+        if !definition.type_params.is_empty() {
+            result = match self.store.types.try_get(result) {
+                Some(Type::Poly(poly)) if poly.params.len() == definition.type_params.len() => {
+                    poly.result
+                }
+                _ => {
+                    return Err(TyperError::LocalBlockDeclarationDeferred {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        kind: "method definition",
+                    });
+                }
+            };
+        }
+        for _ in &definition.value_param_clauses {
+            result = match self.store.types.try_get(result) {
+                Some(Type::Method(method_type)) => method_type.result,
+                _ => {
+                    return Err(TyperError::LocalBlockDeclarationDeferred {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        kind: "method definition",
+                    });
+                }
+            };
+        }
+        let mut typed_type_params = Vec::with_capacity(definition.type_params.len());
+        for type_parameter_tree in &definition.type_params {
+            let Some(parameter_node) = self.arena.try_get(*type_parameter_tree).cloned() else {
+                return Err(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: type_parameter_tree.index(),
+                });
+            };
+            let TreeKind::TypeDef(parameter) = parameter_node.kind else {
                 return Err(TyperError::LocalBlockDeclarationDeferred {
                     source: self.source,
-                    tree_index: tree.index(),
-                    kind: "method definition",
+                    tree_index: type_parameter_tree.index(),
+                    kind: "method type parameter",
                 });
-            }
-        };
+            };
+            let parameter_symbol = self
+                .local_methods
+                .type_parameter_symbol_at(self.source, *type_parameter_tree)
+                .ok_or(TyperError::MethodParameterSymbolMissing {
+                    method,
+                    parameter_tree_index: type_parameter_tree.index(),
+                })?;
+            let bounds = match *self.store.symbols.info(parameter_symbol) {
+                SymbolInfo::Complete(bounds) => bounds,
+                _ => {
+                    return Err(TyperError::MethodParameterSymbolMissing {
+                        method,
+                        parameter_tree_index: type_parameter_tree.index(),
+                    });
+                }
+            };
+            let (low, high) = match self.store.types.try_get(bounds).cloned() {
+                Some(Type::Bounds { low, high }) => (low, high),
+                _ => {
+                    return Err(TyperError::LocalBlockDeclarationDeferred {
+                        source: self.source,
+                        tree_index: type_parameter_tree.index(),
+                        kind: "method type parameter bounds",
+                    });
+                }
+            };
+            let Some(rhs_node) = self.arena.try_get(parameter.rhs) else {
+                return Err(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: parameter.rhs.index(),
+                });
+            };
+            let TreeKind::TypeBoundsTree(source_bounds) = rhs_node.kind else {
+                return Err(TyperError::LocalBlockDeclarationDeferred {
+                    source: self.source,
+                    tree_index: parameter.rhs.index(),
+                    kind: "method type parameter bounds",
+                });
+            };
+            let typed_low = match source_bounds.low {
+                Some(source_tree) => {
+                    Some(self.reify_constructor_type_tree(source_tree, low, new_mappings)?)
+                }
+                None => None,
+            };
+            let typed_high = match source_bounds.high {
+                Some(source_tree) => {
+                    Some(self.reify_constructor_type_tree(source_tree, high, new_mappings)?)
+                }
+                None => None,
+            };
+            let typed_rhs = self.typed_arena.alloc(Tree {
+                kind: TreeKind::TypeBoundsTree(TypeBoundsTree {
+                    low: typed_low,
+                    high: typed_high,
+                    alias: None,
+                }),
+                position: rhs_node.position,
+                ty: bounds,
+            });
+            self.typed_index
+                .insert(self.source, parameter.rhs, typed_rhs)
+                .map_err(|error| TyperError::ConflictingTypedExpression {
+                    source: error.source,
+                    tree_index: error.untyped.index(),
+                    existing: error.existing.index(),
+                    attempted: error.attempted.index(),
+                })?;
+            new_mappings.push((self.source, parameter.rhs));
+            let typed_parameter = self.typed_arena.alloc(Tree {
+                kind: TreeKind::TypeDef(TypeDef {
+                    name: parameter.name,
+                    rhs: typed_rhs,
+                    metadata: (),
+                    variance: parameter.variance,
+                }),
+                position: parameter_node.position,
+                ty: self.store.types.alloc(Type::TypeRef {
+                    prefix: self.definitions.no_prefix,
+                    target: TypeRefTarget::Symbol(parameter_symbol),
+                }),
+            });
+            self.typed_index
+                .insert(self.source, *type_parameter_tree, typed_parameter)
+                .map_err(|error| TyperError::ConflictingTypedExpression {
+                    source: error.source,
+                    tree_index: error.untyped.index(),
+                    existing: error.existing.index(),
+                    attempted: error.attempted.index(),
+                })?;
+            new_mappings.push((self.source, *type_parameter_tree));
+            typed_type_params.push(typed_parameter);
+        }
 
         let mut typed_clauses = Vec::with_capacity(definition.value_param_clauses.len());
         for clause in &definition.value_param_clauses {
@@ -5050,13 +5240,41 @@ impl<'a> SourceTyper<'a> {
                 kind: "method definition without body",
             })?;
         let method_context = self.expression_context_for(method)?;
+        let declaration_context = self
+            .local_methods
+            .declaration_context(method)
+            .ok_or(TyperError::DeclarationContextMissing { symbol: method })?;
+        let method_scope = self.method_scope(method)?;
+        if !definition.type_params.is_empty() {
+            let type_parameters = definition
+                .type_params
+                .iter()
+                .map(|parameter_tree| {
+                    self.local_methods
+                        .type_parameter_symbol_at(self.source, *parameter_tree)
+                        .ok_or(TyperError::MethodParameterSymbolMissing {
+                            method,
+                            parameter_tree_index: parameter_tree.index(),
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            self.active_local_type_binders
+                .push((signature, type_parameters));
+        }
+        self.active_local_type_scopes
+            .push((declaration_context.lexical, method_scope));
         let typed_rhs = self.type_expression_expected_inner(
             rhs,
             method_context,
             result,
             info_journal,
             new_mappings,
-        )?;
+        );
+        self.active_local_type_scopes.pop();
+        if !definition.type_params.is_empty() {
+            self.active_local_type_binders.pop();
+        }
+        let typed_rhs = typed_rhs?;
         let definition_type = self.store.types.alloc(Type::TermRef {
             prefix: self.definitions.no_prefix,
             target: TermRefTarget::Symbol(method),
@@ -5064,7 +5282,7 @@ impl<'a> SourceTyper<'a> {
         let typed = self.typed_arena.alloc(Tree {
             kind: TreeKind::DefDef(DefDef {
                 name: definition.name,
-                type_params: Vec::new(),
+                type_params: typed_type_params,
                 value_param_clauses: typed_clauses,
                 tpt: typed_result,
                 rhs: Some(typed_rhs),
@@ -7320,6 +7538,7 @@ impl<'a> SourceTyper<'a> {
                 let context = self
                     .index
                     .declaration_context_of(symbol)
+                    .or_else(|| self.local_methods.type_parameter_context(symbol))
                     .ok_or(TyperError::DeclarationContextMissing { symbol })?;
                 self.complete_type_parameter(symbol, rhs, context, info_journal)
             }
@@ -8008,17 +8227,46 @@ impl<'a> SourceTyper<'a> {
         definition: &dotty_core::ast::DefDef<Untyped>,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        let method_scope = self.method_scope(method)?;
+        let existing_symbols = self
+            .store
+            .scopes
+            .get(method_scope)
+            .entered_symbols()
+            .collect::<HashSet<_>>();
+        let result = self.complete_local_method_signature_inner(
+            method,
+            method_tree_index,
+            definition,
+            info_journal,
+        );
+        if result.is_err() {
+            let new_symbols = self
+                .store
+                .scopes
+                .get(method_scope)
+                .entered_symbols()
+                .filter(|symbol| !existing_symbols.contains(symbol))
+                .collect::<Vec<_>>();
+            for symbol in new_symbols {
+                self.store.scopes.get_mut(method_scope).remove(symbol);
+            }
+        }
+        result
+    }
+
+    fn complete_local_method_signature_inner(
+        &mut self,
+        method: SymbolId,
+        method_tree_index: u32,
+        definition: &dotty_core::ast::DefDef<Untyped>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
         let deferred = |feature| TyperError::LocalMethodSignatureDeferred {
             symbol: method,
             tree_index: method_tree_index,
             feature,
         };
-        if !definition.type_params.is_empty() {
-            return Err(deferred("type parameters"));
-        }
-        if definition.value_param_clauses.len() != 1 {
-            return Err(deferred("term parameter clause count"));
-        }
         if self
             .store
             .symbols
@@ -8048,55 +8296,19 @@ impl<'a> SourceTyper<'a> {
             .ok_or(TyperError::DeclarationContextMissing { symbol: method })?;
         let method_scope = self.method_scope(method)?;
         let mut parameters_to_enter = Vec::new();
-        for parameter_tree in &definition.value_param_clauses[0] {
-            let parameter_node =
-                self.arena
-                    .try_get(*parameter_tree)
-                    .ok_or(TyperError::TreeOutsideArena {
-                        source: self.source,
-                        tree_index: parameter_tree.index(),
-                    })?;
-            let TreeKind::ValDef(parameter) = &parameter_node.kind else {
-                return Err(deferred("non-value parameter"));
+        for type_parameter_tree in &definition.type_params {
+            let Some(parameter_node) = self.arena.try_get(*type_parameter_tree) else {
+                return Err(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: type_parameter_tree.index(),
+                });
             };
-            if parameter
-                .metadata
-                .modifiers
-                .iter()
-                .any(|modifier| matches!(modifier, Modifier::Given | Modifier::Implicit))
-            {
-                return Err(deferred("contextual parameters"));
-            }
-            if parameter.metadata.modifiers.contains(&Modifier::Erased) {
-                return Err(deferred("erased parameters"));
-            }
-            if parameter
-                .metadata
-                .modifiers
-                .iter()
-                .any(|modifier| *modifier != Modifier::Param)
-            {
-                return Err(deferred("parameter modifiers"));
-            }
-            let parameter_type =
-                self.arena
-                    .try_get(parameter.tpt)
-                    .ok_or(TyperError::TreeOutsideArena {
-                        source: self.source,
-                        tree_index: parameter.tpt.index(),
-                    })?;
-            if matches!(parameter_type.kind, TreeKind::ByNameTypeTree(_))
-                || matches!(
-                    &parameter_type.kind,
-                    TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix))
-                        if self.store.names.resolve(postfix.op.text()) == "*"
-                )
-            {
-                return Err(deferred("by-name or repeated parameters"));
-            }
+            let TreeKind::TypeDef(parameter) = &parameter_node.kind else {
+                return Err(deferred("non-type parameter"));
+            };
             if self
                 .local_methods
-                .parameter_symbol_at(self.source, *parameter_tree)
+                .type_parameter_symbol_at(self.source, *type_parameter_tree)
                 .is_some()
             {
                 continue;
@@ -8104,7 +8316,7 @@ impl<'a> SourceTyper<'a> {
             let symbol = self.store.symbols.alloc(dotty_core::Symbol {
                 name: *parameter.name.as_name(),
                 owner: Some(method),
-                kind: SymbolKind::Parameter,
+                kind: SymbolKind::TypeParameter,
                 flags: SymbolFlags::EMPTY,
                 visibility: dotty_core::Visibility::Public,
                 info: SymbolInfo::Missing,
@@ -8113,13 +8325,82 @@ impl<'a> SourceTyper<'a> {
                 position: parameter_node.position,
                 links: dotty_core::SymbolLinks::default(),
             });
-            parameters_to_enter.push((*parameter.name.as_name(), symbol));
-            self.local_methods.insert_parameter(
+            self.store
+                .scopes
+                .get_mut(method_scope)
+                .enter(*parameter.name.as_name(), symbol);
+            self.local_methods.insert_type_parameter(
                 self.source,
-                *parameter_tree,
+                *type_parameter_tree,
                 symbol,
                 declaration_context.lexical,
             );
+        }
+        for clause in &definition.value_param_clauses {
+            for parameter_tree in clause {
+                let Some(parameter_node) = self.arena.try_get(*parameter_tree) else {
+                    return Err(TyperError::TreeOutsideArena {
+                        source: self.source,
+                        tree_index: parameter_tree.index(),
+                    });
+                };
+                let TreeKind::ValDef(parameter) = &parameter_node.kind else {
+                    return Err(deferred("non-value parameter"));
+                };
+                if parameter.metadata.modifiers.contains(&Modifier::Erased) {
+                    return Err(deferred("erased parameters"));
+                }
+                if parameter.metadata.modifiers.iter().any(|modifier| {
+                    !matches!(
+                        modifier,
+                        Modifier::Param | Modifier::Given | Modifier::Implicit
+                    )
+                }) {
+                    return Err(deferred("parameter modifiers"));
+                }
+                let parameter_type =
+                    self.arena
+                        .try_get(parameter.tpt)
+                        .ok_or(TyperError::TreeOutsideArena {
+                            source: self.source,
+                            tree_index: parameter.tpt.index(),
+                        })?;
+                if matches!(parameter_type.kind, TreeKind::ByNameTypeTree(_))
+                    || matches!(
+                        &parameter_type.kind,
+                        TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix))
+                            if self.store.names.resolve(postfix.op.text()) == "*"
+                    )
+                {
+                    return Err(deferred("by-name or repeated parameters"));
+                }
+                if self
+                    .local_methods
+                    .parameter_symbol_at(self.source, *parameter_tree)
+                    .is_some()
+                {
+                    continue;
+                }
+                let symbol = self.store.symbols.alloc(dotty_core::Symbol {
+                    name: *parameter.name.as_name(),
+                    owner: Some(method),
+                    kind: SymbolKind::Parameter,
+                    flags: source_method_flags(&parameter.metadata.modifiers),
+                    visibility: dotty_core::Visibility::Public,
+                    info: SymbolInfo::Missing,
+                    origin: SymbolOrigin::Source(self.source),
+                    annotations: Vec::new(),
+                    position: parameter_node.position,
+                    links: dotty_core::SymbolLinks::default(),
+                });
+                parameters_to_enter.push((*parameter.name.as_name(), symbol));
+                self.local_methods.insert_parameter(
+                    self.source,
+                    *parameter_tree,
+                    symbol,
+                    declaration_context.lexical,
+                );
+            }
         }
         let parameter_names = parameters_to_enter
             .iter()
@@ -8128,20 +8409,23 @@ impl<'a> SourceTyper<'a> {
         if self.local_result_depends_on_parameters(definition.tpt, &parameter_names) {
             return Err(deferred("dependent result types"));
         }
-        let signature = self.complete_method_signature_body(
-            method,
-            method_tree_index,
-            definition,
-            false,
-            info_journal,
-        )?;
         for (name, parameter) in parameters_to_enter {
             self.store
                 .scopes
                 .get_mut(method_scope)
                 .enter(name, parameter);
         }
-        Ok(signature)
+        self.active_local_type_scopes
+            .push((declaration_context.lexical, method_scope));
+        let signature = self.complete_method_signature_body(
+            method,
+            method_tree_index,
+            definition,
+            false,
+            info_journal,
+        );
+        self.active_local_type_scopes.pop();
+        signature
     }
 
     fn local_result_depends_on_parameters(
@@ -8811,7 +9095,8 @@ impl<'a> SourceTyper<'a> {
             self.index.derived_symbol_at(method, self.source, tree)
         } else {
             self.local_methods
-                .parameter_symbol_at(self.source, tree)
+                .type_parameter_symbol_at(self.source, tree)
+                .or_else(|| self.local_methods.parameter_symbol_at(self.source, tree))
                 .or_else(|| self.index.symbol_at(self.source, tree))
         };
         symbol.ok_or(TyperError::MethodParameterSymbolMissing {
@@ -9278,6 +9563,23 @@ impl<'a> SourceTyper<'a> {
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
+        for (local_context, scope) in self.active_local_type_scopes.iter().rev() {
+            if *local_context != context {
+                continue;
+            }
+            let candidates = self
+                .store
+                .scopes
+                .get(*scope)
+                .lookup_all(&name)
+                .iter()
+                .copied()
+                .filter(|symbol| self.store.symbols.get(*symbol).kind == SymbolKind::TypeParameter)
+                .collect::<Vec<_>>();
+            if !candidates.is_empty() {
+                return self.unique_type_candidate(&candidates, name, tree_index, position);
+            }
+        }
         let contexts = self.source_context_chain(context, tree_index)?;
         let mut package_candidates = Vec::new();
         for context_id in &contexts {
@@ -9906,6 +10208,15 @@ impl<'a> SourceTyper<'a> {
         tree: TreeId<Untyped>,
     ) -> Option<SymbolId> {
         self.local_methods.parameter_symbol_at(source, tree)
+    }
+
+    /// Returns the typer-owned type parameter symbol for a local method tree.
+    pub fn local_method_type_parameter_symbol_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        self.local_methods.type_parameter_symbol_at(source, tree)
     }
 
     /// Exposes the package registry used by this driver.
@@ -19830,9 +20141,211 @@ mod tests {
     }
 
     #[test]
+    fn generic_local_method_signature_uses_owned_type_parameter_binders() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def identity[A](value: A): A = value; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let method_tree = match &parsed.ast.get(block_tree).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("outer body should be a block"),
+        };
+        let (type_parameter_tree, value_parameter_tree) = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => (
+                definition.type_params[0],
+                definition.value_param_clauses[0][0],
+            ),
+            _ => panic!("local declaration should be a DefDef"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let type_parameter = typer
+            .local_method_type_parameter_symbol_at(source, type_parameter_tree)
+            .unwrap();
+        let value_parameter = typer
+            .local_method_parameter_symbol_at(source, value_parameter_tree)
+            .unwrap();
+        let Type::Poly(poly) = typer.store().types.get(signature) else {
+            panic!("generic local method should have a Poly signature");
+        };
+        assert_eq!(poly.params.len(), 1);
+        assert_eq!(
+            poly.params[0].name,
+            match &parsed.ast.get(type_parameter_tree).kind {
+                TreeKind::TypeDef(definition) => definition.name,
+                _ => unreachable!(),
+            }
+        );
+        let Type::Method(method_type) = typer.store().types.get(poly.result) else {
+            panic!("generic local method should have a term clause");
+        };
+        assert_eq!(method_type.params.len(), 1);
+        assert!(matches!(
+            typer.store().types.get(method_type.params[0].ty),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+        assert!(matches!(
+            typer.store().types.get(method_type.result),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+        assert_eq!(
+            typer.store().symbols.get(type_parameter).owner,
+            Some(method)
+        );
+        assert_eq!(
+            typer.store().symbols.get(value_parameter).owner,
+            Some(method)
+        );
+        let SymbolInfo::Complete(parameter_info) = *typer.store().symbols.info(value_parameter)
+        else {
+            panic!("local parameter should have a completed type");
+        };
+        assert!(matches!(
+            typer.store().types.get(parameter_info),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == type_parameter
+        ));
+    }
+
+    #[test]
+    fn two_local_type_parameters_keep_distinct_poly_binder_indices() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def second[A, B](first: A)(last: B): B = last; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let method_tree = match &parsed.ast.get(block_tree).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("outer body should be a block"),
+        };
+        let (type_parameter_trees, first_parameter_tree, last_parameter_tree) =
+            match &parsed.ast.get(method_tree).kind {
+                TreeKind::DefDef(definition) => (
+                    definition.type_params.clone(),
+                    definition.value_param_clauses[0][0],
+                    definition.value_param_clauses[1][0],
+                ),
+                _ => panic!("local declaration should be a DefDef"),
+            };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Poly(poly) = typer.store().types.get(signature) else {
+            panic!("local method should have a Poly signature");
+        };
+        assert_eq!(poly.params.len(), 2);
+        let Type::Method(first_clause) = typer.store().types.get(poly.result) else {
+            panic!("first term clause should be a Method");
+        };
+        let Type::Method(second_clause) = typer.store().types.get(first_clause.result) else {
+            panic!("second term clause should remain nested");
+        };
+        assert!(matches!(
+            typer.store().types.get(first_clause.params[0].ty),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+        assert!(matches!(
+            typer.store().types.get(second_clause.params[0].ty),
+            Type::ParamRef { binder, index: 1 } if *binder == signature
+        ));
+        assert!(matches!(
+            typer.store().types.get(second_clause.result),
+            Type::ParamRef { binder, index: 1 } if *binder == signature
+        ));
+        for parameter_tree in type_parameter_trees {
+            let parameter = typer
+                .local_method_type_parameter_symbol_at(source, parameter_tree)
+                .unwrap();
+            assert_eq!(typer.store().symbols.get(parameter).owner, Some(method));
+        }
+        assert!(
+            typer
+                .local_method_parameter_symbol_at(source, first_parameter_tree)
+                .is_some()
+        );
+        assert!(
+            typer
+                .local_method_parameter_symbol_at(source, last_parameter_tree)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn local_method_signature_preserves_curried_and_contextual_clauses() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def local[A](first: A)(using context: Int)(last: A): A = last; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let method_tree = match &parsed.ast.get(block_tree).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("outer body should be a block"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Poly(poly) = typer.store().types.get(signature) else {
+            panic!("local method should preserve its type parameter clause");
+        };
+        let Type::Method(first_clause) = typer.store().types.get(poly.result) else {
+            panic!("first term clause should be a Method");
+        };
+        assert_eq!(first_clause.kind, MethodKind::Plain);
+        let Type::Method(contextual_clause) = typer.store().types.get(first_clause.result) else {
+            panic!("contextual term clause should remain nested");
+        };
+        assert_eq!(contextual_clause.kind, MethodKind::Contextual);
+        let Type::Method(last_clause) = typer.store().types.get(contextual_clause.result) else {
+            panic!("final term clause should remain nested");
+        };
+        assert_eq!(last_clause.kind, MethodKind::Plain);
+        assert!(matches!(
+            typer.store().types.get(last_clause.params[0].ty),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+        assert!(matches!(
+            typer.store().types.get(last_clause.result),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+    }
+
+    #[test]
     fn forward_local_method_call_completes_its_preentered_signature() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class C { def outer: Int = { local(1); def local(value: Int): Int = value; 0 } }",
+            "class C { def outer: Int = { local(1); def local[A](value: A): A = value; 0 } }",
         );
         let (outer, block_tree) =
             method_definition_and_rhs(&parsed, &store, &index, source, "outer");
@@ -19859,11 +20372,21 @@ mod tests {
         let SymbolInfo::Complete(local_info) = *typer.store().symbols.info(local) else {
             panic!("forward call should complete the local method symbol")
         };
-        let Type::Method(signature) = typer.store().types.get(local_info) else {
-            panic!("forward call should complete the local method signature")
+        let Type::Poly(poly) = typer.store().types.get(local_info) else {
+            panic!("forward call should complete the generic local method signature")
+        };
+        let Type::Method(signature) = typer.store().types.get(poly.result) else {
+            panic!("generic local method should contain a term clause")
         };
         assert_eq!(signature.params.len(), 1);
-        assert_eq!(signature.params[0].ty, definitions.int);
+        assert!(matches!(
+            typer.store().types.get(signature.params[0].ty),
+            Type::ParamRef { binder, index: 0 } if *binder == local_info
+        ));
+        assert!(matches!(
+            typer.store().types.get(signature.result),
+            Type::ParamRef { binder, index: 0 } if *binder == local_info
+        ));
     }
 
     #[test]
@@ -19968,7 +20491,6 @@ mod tests {
     fn local_methods_defer_inferred_and_unsupported_signature_shapes() {
         let cases = [
             ("def local(value: Int) = value", "result"),
-            ("def local[A](value: Int): Int = value", "type parameters"),
             (
                 "def local(value: => Int): Int = value",
                 "by-name or repeated parameters",
@@ -20032,7 +20554,6 @@ mod tests {
     #[test]
     fn local_unsupported_parameter_modifiers_remain_deferred() {
         for (unsupported_modifier, expected_feature) in [
-            (Modifier::Given, "contextual parameters"),
             (Modifier::Erased, "erased parameters"),
             (Modifier::Inline, "parameter modifiers"),
         ] {
@@ -20141,7 +20662,7 @@ mod tests {
     #[test]
     fn failed_local_signature_completion_rolls_back_parameters_and_types() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class C { def outer: Int = { def broken(value: MissingType): Int = 1; 0 } }",
+            "class C { def outer: Int = { def broken[A](value: MissingType): A = value; 0 } }",
         );
         let (outer, block_tree) =
             method_definition_and_rhs(&parsed, &store, &index, source, "outer");
@@ -20149,8 +20670,11 @@ mod tests {
             panic!("outer body should be a block")
         };
         let method_tree = block.stats[0];
-        let parameter_tree = match &parsed.ast.get(method_tree).kind {
-            TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+        let (type_parameter_tree, parameter_tree) = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => (
+                definition.type_params[0],
+                definition.value_param_clauses[0][0],
+            ),
             _ => panic!("local declaration should be a DefDef"),
         };
         let mut typer = SourceTyper::new(
@@ -20181,6 +20705,17 @@ mod tests {
                 .get(method_scope)
                 .lookup_all(&match &parsed.ast.get(parameter_tree).kind {
                     TreeKind::ValDef(parameter) => *parameter.name.as_name(),
+                    _ => unreachable!(),
+                })
+                .is_empty()
+        );
+        assert!(
+            typer
+                .store
+                .scopes
+                .get(method_scope)
+                .lookup_all(&match &parsed.ast.get(type_parameter_tree).kind {
+                    TreeKind::TypeDef(parameter) => *parameter.name.as_name(),
                     _ => unreachable!(),
                 })
                 .is_empty()
@@ -20273,6 +20808,341 @@ mod tests {
             typer.source_typed_index().get(source, method_tree),
             Some(typed_method)
         );
+    }
+
+    #[test]
+    fn generic_curried_local_method_reifies_all_definition_clauses() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def keep[A](first: A)(using context: Int)(last: A): A = last; keep(1)(using 2)(3); keep[Int](4)(using 5)(6) } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let method_tree = block.stats[0];
+        let (type_parameter_tree, parameter_trees, result_tree) =
+            match &parsed.ast.get(method_tree).kind {
+                TreeKind::DefDef(definition) => (
+                    definition.type_params[0],
+                    definition.value_param_clauses.clone(),
+                    definition.tpt,
+                ),
+                _ => panic!("local declaration should be a DefDef"),
+            };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        typer.type_expression(block_tree, context).unwrap();
+
+        let typed_method = typer.source_typed_index().get(source, method_tree).unwrap();
+        let TreeKind::DefDef(typed_definition) = &typer.typed_ast().get(typed_method).kind else {
+            panic!("generic local method should produce a typed DefDef");
+        };
+        assert_eq!(typed_definition.type_params.len(), 1);
+        assert_eq!(typed_definition.value_param_clauses.len(), 3);
+        assert!(
+            typed_definition
+                .value_param_clauses
+                .iter()
+                .all(|clause| clause.len() == 1)
+        );
+        assert_eq!(
+            typed_definition.type_params[0],
+            typer
+                .source_typed_index()
+                .get(source, type_parameter_tree)
+                .unwrap()
+        );
+        assert_eq!(
+            typed_definition.tpt,
+            typer.source_typed_index().get(source, result_tree).unwrap()
+        );
+        for (typed_clause, source_clause) in typed_definition
+            .value_param_clauses
+            .iter()
+            .zip(parameter_trees)
+        {
+            assert_eq!(
+                typed_clause[0],
+                typer
+                    .source_typed_index()
+                    .get(source, source_clause[0])
+                    .unwrap()
+            );
+        }
+        let last_parameter = typed_definition.value_param_clauses[2][0];
+        let type_parameter = typer
+            .local_method_type_parameter_symbol_at(source, type_parameter_tree)
+            .unwrap();
+        assert!(matches!(
+            typer.typed_ast().get(last_parameter).ty,
+            ty if matches!(typer.store().types.get(ty), Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == type_parameter)
+        ));
+    }
+
+    #[test]
+    fn local_generic_and_monomorphic_overloads_compete_through_shared_resolver() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def pick[A](value: A): Int = 1; def pick(value: Int): Int = 2; pick(1) } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let (generic_tree, monomorphic_tree) = (block.stats[0], block.stats[1]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let generic = typer.local_method_symbol_at(source, generic_tree).unwrap();
+        let monomorphic = typer
+            .local_method_symbol_at(source, monomorphic_tree)
+            .unwrap();
+        let result = typer.type_expression(block_tree, context);
+        assert!(
+            matches!(
+                &result,
+                Err(TyperError::AmbiguousOverloadApplication { candidates, .. })
+                    if candidates.len() == 2
+            ),
+            "unexpected generic overload result: {result:?}"
+        );
+
+        assert_ne!(generic, monomorphic);
+    }
+
+    #[test]
+    fn forward_local_monomorphic_overload_uses_argument_filtering() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { pick(1); def pick(value: Boolean): Int = 2; def pick(value: Int): Int = 1; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let call_tree = block.stats[0];
+        let boolean_method_tree = block.stats[1];
+        let integer_method_tree = block.stats[2];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        typer.type_expression(block_tree, context).unwrap();
+
+        let integer_method = typer
+            .local_method_symbol_at(source, integer_method_tree)
+            .unwrap();
+        let boolean_method = typer
+            .local_method_symbol_at(source, boolean_method_tree)
+            .unwrap();
+        let typed_call = typer.source_typed_index().get(source, call_tree).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_call).kind else {
+            panic!("forward local overload call should produce an Apply");
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == integer_method
+        ));
+        assert_ne!(integer_method, boolean_method);
+    }
+
+    #[test]
+    fn indistinguishable_local_overloads_remain_ambiguous() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def pick(value: Int): Int = 1; def pick(other: Int): Int = 2; pick(1) } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(block_tree, context),
+            Err(TyperError::AmbiguousOverloadApplication { .. })
+        ));
+    }
+
+    #[test]
+    fn losing_generic_local_overload_probe_rolls_back_speculative_state() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def pick[A](value: A, extra: Any): Int = 1; def pick(value: Int, extra: Int): Int = 2; pick(1, 1) } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let generic_tree = block.stats[0];
+        let monomorphic_tree = block.stats[1];
+        let call_tree = block.expr;
+        let TreeKind::Apply(call) = &parsed.ast.get(call_tree).kind else {
+            panic!("call should be an Apply");
+        };
+        let argument_trees = call.args.clone();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        let (_, block_context) = preindex_block_for_test(&mut typer, block_tree, context);
+        let generic = typer.local_method_symbol_at(source, generic_tree).unwrap();
+        let monomorphic = typer
+            .local_method_symbol_at(source, monomorphic_tree)
+            .unwrap();
+        let generic_callable = typer.complete_symbol(generic).unwrap();
+        let monomorphic_callable = typer.complete_symbol(monomorphic).unwrap();
+        let arguments = argument_trees
+            .into_iter()
+            .map(|argument_tree| {
+                let typed = typer.type_expression(argument_tree, block_context).unwrap();
+                let own_type = typer.typed_ast().get(typed).ty;
+                let widened_type = typer.widen_expression_type(own_type).unwrap();
+                TypedArgument {
+                    typed,
+                    own_type,
+                    widened_type,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut candidates = [
+            ApplicationCandidate {
+                symbol: generic,
+                callable: generic_callable,
+                member: None,
+                rejection: None,
+            },
+            ApplicationCandidate {
+                symbol: monomorphic,
+                callable: monomorphic_callable,
+                member: None,
+                rejection: None,
+            },
+        ];
+        let store_checkpoint = typer.store.checkpoint();
+        let type_index_checkpoint = typer.type_index.checkpoint();
+        let mut info_journal = Vec::new();
+
+        let winner = typer
+            .choose_method_overload_candidate(
+                &mut candidates,
+                &arguments,
+                call_tree.index(),
+                ApplyKind::Regular,
+                &mut info_journal,
+            )
+            .unwrap();
+
+        assert_eq!(winner.symbol, monomorphic);
+        assert!(info_journal.is_empty());
+        assert_eq!(typer.store.checkpoint(), store_checkpoint);
+        for (tree, _) in parsed.ast.iter() {
+            assert_eq!(
+                typer.type_index.type_at(source, tree),
+                type_index_checkpoint.type_at(source, tree)
+            );
+        }
+    }
+
+    #[test]
+    fn nested_local_method_shadows_same_named_outer_method() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def pick[A](value: A): A = value; { def pick(value: Int): Int = value; pick(1) } } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(outer_block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let outer_method_tree = outer_block.stats[0];
+        let TreeKind::Block(inner_block) = &parsed.ast.get(outer_block.expr).kind else {
+            panic!("nested block should be the outer expression");
+        };
+        let inner_method_tree = inner_block.stats[0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        typer.type_expression(block_tree, context).unwrap();
+
+        let outer_method = typer
+            .local_method_symbol_at(source, outer_method_tree)
+            .unwrap();
+        let inner_method = typer
+            .local_method_symbol_at(source, inner_method_tree)
+            .unwrap();
+        let typed_call = typer
+            .source_typed_index()
+            .get(source, inner_block.expr)
+            .unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_call).kind else {
+            panic!("nested call should produce an Apply");
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == inner_method
+        ));
+        assert_ne!(outer_method, inner_method);
+    }
+
+    #[test]
+    fn nested_non_generic_local_method_preserves_outer_type_parameter_reference() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def top: Int = { def outer[A](value: A): A = { def inner(nested: A): A = nested; inner(value) }; outer(1) } }",
+        );
+        let (top, block_tree) = method_definition_and_rhs(&parsed, &store, &index, source, "top");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(top).unwrap();
+
+        typer.type_expression(block_tree, context).unwrap();
     }
 
     #[test]

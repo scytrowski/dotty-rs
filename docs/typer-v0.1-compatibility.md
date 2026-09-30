@@ -61,7 +61,7 @@ For the tested subset, source Typer completion currently supports:
 Expression typing currently includes typed identifiers, stable term selections,
 literal expressions, plain method applications, `New` nodes, and blocks with
 expressions, local `val`/`var` definitions with or without explicit types, and
-plain local methods with explicit result types.
+local methods with explicit result types.
 It also supports expected-type conformance checks, source type ascriptions, direct
 assignments to mutable locals and fields, ordinary `if` expressions over the
 supported expression subset, condition-bearing `while` expressions, and local
@@ -171,26 +171,28 @@ order. A local method receives a typer-owned `Method` symbol and a distinct
 method-owned scope; the local method index retains its source tree, scope, and
 enclosing block expression context without modifying `SourceSemanticIndex`.
 This makes forward references and same-name overload buckets visible during
-name lookup. Plain local methods with no type parameters, one ordinary term
-parameter clause (which may be empty), and an explicit result type complete a
-`Method` signature using the shared method-signature builder. Each parameter
-gets a typer-owned `Parameter` symbol in that method's distinct scope, with
-source-tree identity and the declaration site's lexical type context retained
-without changing `SourceSemanticIndex`. Forward calls can complete and use
-these signatures on demand. Inferred or parameter-dependent result types,
-contextual, erased, by-name, or repeated parameters, multiple clauses, and type
-parameters remain explicitly deferred. For this supported signature shape, the
-body is typed in a method context that composes the declaration-site lexical
-context with the method-owned parameter scope. Its RHS is checked against the
-explicit result type, and the typed `DefDef`, typed parameter `ValDef`s, result
-`TypeTree`, and RHS are retained with source mappings. The definition tree type
-is a `TermRef` to the exact local `Method` symbol. Explicit recursion, forward
-calls, and reads of enclosing locals are supported. Nested method headers are
-indexed only by their own block. The block scope, local method and parameter
-symbols/scopes and metadata, typed nodes, local symbol mappings, and source
-mappings are rolled back when any part of the enclosing block fails. Failed
-signature completion also leaves the local method's pre-indexed scope and
-missing info intact. A local `val` or
+name lookup. Local methods with explicit result types complete generic,
+curried, ordinary, implicit, and contextual parameter clauses through the
+shared method-signature builder. Type parameters and term parameters receive
+typer-owned symbols in the method's distinct scope, with source-tree identity
+and the declaration site's lexical type context retained without changing
+`SourceSemanticIndex`. Forward calls can complete and use these signatures on
+demand; overload selection uses the shared application resolver. The typed
+`DefDef` retains its type parameters and each term clause. Inferred or
+parameter-dependent result types, erased, by-name, or repeated parameters,
+higher-kinded and aliased type-parameter bounds, and unsupported parameter
+modifiers remain explicitly deferred. A method body is typed in a method
+context that composes the declaration-site lexical context with the
+method-owned parameter scope. Its RHS is checked against the explicit result
+type, and the typed `DefDef`, typed type and value parameter definitions,
+result `TypeTree`, and RHS are retained with source mappings. The definition
+tree type is a `TermRef` to the exact local `Method` symbol. Explicit
+recursion, forward calls, and reads of enclosing locals are supported. Nested
+method headers are indexed only by their own block. The block scope, local
+method and parameter symbols/scopes and metadata, typed nodes, local symbol
+mappings, and source mappings are rolled back when any part of the enclosing
+block fails. Failed signature completion also leaves the local method's
+pre-indexed scope and missing info intact. A local `val` or
 `var` with a source-written type
 shadows outer bindings throughout the statement sequence, including its own
 initializer; a reference to the local while it is being initialized reports a
