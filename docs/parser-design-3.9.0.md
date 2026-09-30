@@ -542,9 +542,9 @@ Wildcard syntax is enabled in type arguments (`List[?]` and
 `List[? >: String <: Number]`), tuple-type elements (`(?, V)`), and function
 type parameter/result positions (`? => ?`). A standalone `?` or `(?)` remains
 an invalid type and produces a parser diagnostic. `type_expr()` parses arrows
-outside the infix-type layer using the shared Scala precedence buckets; `&` still binds
-tighter than `|`, and operators ending in `:` associate to the right. All
-infix type operators produce source-level `InfixOp` trees with type-namespace
+outside the infix-type layer using the shared Scala precedence buckets; `&`
+still binds tighter than `|`, and operators ending in `:` associate to the
+right. All infix type operators produce source-level `InfixOp` trees with type-namespace
 operator names; ordinary arrows produce `Function` trees and context arrows
 produce `FunctionWithMods`.
 Parenthesized
