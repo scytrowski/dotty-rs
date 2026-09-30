@@ -1,0 +1,272 @@
+{
+  "schema_version": 5,
+  "corpus_roots": [
+    "library/src",
+    "compiler/src"
+  ],
+  "source_version": "3.9.0",
+  "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "parser_revision": "c6061d1f4235dfb48514a0ac4e90c17df51f1cbc",
+  "scala_oracle_files": 1236,
+  "scala_oracle_failures": 0,
+  "files_attempted": 1236,
+  "files_parsed_without_diagnostics": 1135,
+  "files_parsed_with_recoverable_diagnostics": 101,
+  "hard_parser_failures": 0,
+  "process_failures": 0,
+  "panics": 0,
+  "hangs": 0,
+  "scanner_diagnostics": 13,
+  "diagnostic_histogram": {
+    "ExpectedExpression": 646,
+    "ExpectedPattern": 5,
+    "ExpectedToken": 179,
+    "ExpectedType": 7,
+    "UnexpectedToken": 339,
+    "UnsupportedSyntax": 251
+  },
+  "first_failure_histogram": {
+    "ExpectedExpression": {
+      "count": 38,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/Run.scala",
+        "compiler/src/dotty/tools/dotc/ast/Desugar.scala",
+        "compiler/src/dotty/tools/dotc/ast/tpd.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureOps.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala"
+      ]
+    },
+    "ExpectedPattern": {
+      "count": 2,
+      "examples": [
+        "compiler/src/dotty/tools/debug/ResolveReflectEval.scala",
+        "compiler/src/dotty/tools/dotc/transform/localopt/StringInterpolatorOpt.scala"
+      ]
+    },
+    "ExpectedToken": {
+      "count": 24,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
+        "compiler/src/dotty/tools/dotc/ast/TreeTypeMap.scala",
+        "compiler/src/dotty/tools/dotc/cc/Capability.scala",
+        "compiler/src/dotty/tools/dotc/cc/SepCheck.scala",
+        "compiler/src/dotty/tools/dotc/cc/Setup.scala"
+      ]
+    },
+    "ExpectedType": {
+      "count": 5,
+      "examples": [
+        "library/src/scala/collection/immutable/TreeSeqMap.scala",
+        "library/src/scala/collection/mutable/ArrayBuilder.scala",
+        "library/src/scala/collection/mutable/TreeSet.scala",
+        "library/src/scala/collection/mutable/UnrolledBuffer.scala",
+        "library/src/scala/concurrent/impl/Promise.scala"
+      ]
+    },
+    "UnexpectedToken": {
+      "count": 29,
+      "examples": [
+        "compiler/src/dotty/tools/backend/jvm/BTypeLoader.scala",
+        "compiler/src/dotty/tools/backend/jvm/BackendUtils.scala",
+        "compiler/src/dotty/tools/backend/jvm/analysis/AliasingAnalyzer.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureAnnotation.scala"
+      ]
+    },
+    "UnsupportedSyntax: interleaved type parameter clauses are not supported; put type parameters before term clauses": {
+      "count": 1,
+      "examples": [
+        "library/src/scala/NamedTuple.scala"
+      ]
+    },
+    "UnsupportedSyntax: syntax beginning with keyword(match) is not supported by this parser milestone": {
+      "count": 1,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/util/Signatures.scala"
+      ]
+    },
+    "UnsupportedSyntax: this contextual modifier is not supported yet": {
+      "count": 1,
+      "examples": [
+        "library/src/scala/caps/package.scala"
+      ]
+    }
+  },
+  "capture_checking_cohorts": {
+    "disabled": {
+      "files": 994,
+      "clean": 903,
+      "recoverable": 91,
+      "hard_failures": 0,
+      "scanner_diagnostics": 13,
+      "diagnostic_histogram": {
+        "ExpectedExpression": 610,
+        "ExpectedPattern": 5,
+        "ExpectedToken": 159,
+        "ExpectedType": 1,
+        "UnexpectedToken": 311,
+        "UnsupportedSyntax": 234
+      },
+      "first_failure_histogram": {
+        "ExpectedExpression": {
+          "count": 38,
+          "examples": [
+            "compiler/src/dotty/tools/dotc/Run.scala",
+            "compiler/src/dotty/tools/dotc/ast/Desugar.scala",
+            "compiler/src/dotty/tools/dotc/ast/tpd.scala",
+            "compiler/src/dotty/tools/dotc/cc/CaptureOps.scala",
+            "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala"
+          ]
+        },
+        "ExpectedPattern": {
+          "count": 2,
+          "examples": [
+            "compiler/src/dotty/tools/debug/ResolveReflectEval.scala",
+            "compiler/src/dotty/tools/dotc/transform/localopt/StringInterpolatorOpt.scala"
+          ]
+        },
+        "ExpectedToken": {
+          "count": 20,
+          "examples": [
+            "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
+            "compiler/src/dotty/tools/dotc/ast/TreeTypeMap.scala",
+            "compiler/src/dotty/tools/dotc/cc/Capability.scala",
+            "compiler/src/dotty/tools/dotc/cc/SepCheck.scala",
+            "compiler/src/dotty/tools/dotc/cc/Setup.scala"
+          ]
+        },
+        "ExpectedType": {
+          "count": 1,
+          "examples": [
+            "library/src/scala/concurrent/impl/Promise.scala"
+          ]
+        },
+        "UnexpectedToken": {
+          "count": 29,
+          "examples": [
+            "compiler/src/dotty/tools/backend/jvm/BTypeLoader.scala",
+            "compiler/src/dotty/tools/backend/jvm/BackendUtils.scala",
+            "compiler/src/dotty/tools/backend/jvm/analysis/AliasingAnalyzer.scala",
+            "compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala",
+            "compiler/src/dotty/tools/dotc/cc/CaptureAnnotation.scala"
+          ]
+        },
+        "UnsupportedSyntax: syntax beginning with keyword(match) is not supported by this parser milestone": {
+          "count": 1,
+          "examples": [
+            "compiler/src/dotty/tools/dotc/util/Signatures.scala"
+          ]
+        }
+      },
+      "files_with_raw_caret_character": 83,
+      "files_with_caret_operator_token": 21,
+      "files_with_parser_capture_syntax": 0,
+      "raw_caret_without_operator_examples": [
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/ScalaPrimitivesOps.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatureVisitor.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala",
+        "compiler/src/dotty/tools/backend/jvm/analysis/package.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/CopyProp.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/InlinerHeuristics.scala",
+        "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        "compiler/src/dotty/tools/dotc/cc/Capability.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureOps.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala",
+        "compiler/src/dotty/tools/dotc/cc/CapturingType.scala",
+        "compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala",
+        "compiler/src/dotty/tools/dotc/cc/Mutability.scala",
+        "compiler/src/dotty/tools/dotc/cc/RetainingAnnotation.scala",
+        "compiler/src/dotty/tools/dotc/cc/SepCheck.scala",
+        "compiler/src/dotty/tools/dotc/cc/Setup.scala",
+        "compiler/src/dotty/tools/dotc/cc/Synthetics.scala",
+        "compiler/src/dotty/tools/dotc/config/PathResolver.scala",
+        "compiler/src/dotty/tools/dotc/config/ScalaVersion.scala"
+      ],
+      "operator_without_capture_ast_examples": [
+        "compiler/src/dotty/tools/dotc/core/Flags.scala",
+        "compiler/src/dotty/tools/dotc/core/Periods.scala",
+        "compiler/src/dotty/tools/dotc/core/TypeEval.scala",
+        "compiler/src/dotty/tools/dotc/core/tasty/TastyPickler.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/internal/SemanticdbInputStream.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/internal/SemanticdbOutputStream.scala",
+        "compiler/src/dotty/tools/dotc/transform/sjs/JSSymUtils.scala",
+        "compiler/src/dotty/tools/dotc/typer/ConstFold.scala",
+        "compiler/src/dotty/tools/dotc/typer/Typer.scala",
+        "compiler/src/dotty/tools/dotc/util/HashMap.scala",
+        "compiler/src/dotty/tools/dotc/util/HashSet.scala",
+        "compiler/src/dotty/tools/dotc/util/PerfectHashing.scala",
+        "library/src/scala/Boolean.scala",
+        "library/src/scala/Byte.scala",
+        "library/src/scala/Char.scala",
+        "library/src/scala/Int.scala",
+        "library/src/scala/Long.scala",
+        "library/src/scala/Short.scala",
+        "library/src/scala/concurrent/duration/Duration.scala",
+        "library/src/scala/math/BigInt.scala"
+      ]
+    },
+    "enabled": {
+      "files": 242,
+      "clean": 232,
+      "recoverable": 10,
+      "hard_failures": 0,
+      "scanner_diagnostics": 0,
+      "diagnostic_histogram": {
+        "ExpectedExpression": 36,
+        "ExpectedToken": 20,
+        "ExpectedType": 6,
+        "UnexpectedToken": 28,
+        "UnsupportedSyntax": 17
+      },
+      "first_failure_histogram": {
+        "ExpectedToken": {
+          "count": 4,
+          "examples": [
+            "library/src/scala/Tuple.scala",
+            "library/src/scala/collection/Iterator.scala",
+            "library/src/scala/collection/MapView.scala",
+            "library/src/scala/collection/mutable/StringBuilder.scala"
+          ]
+        },
+        "ExpectedType": {
+          "count": 4,
+          "examples": [
+            "library/src/scala/collection/immutable/TreeSeqMap.scala",
+            "library/src/scala/collection/mutable/ArrayBuilder.scala",
+            "library/src/scala/collection/mutable/TreeSet.scala",
+            "library/src/scala/collection/mutable/UnrolledBuffer.scala"
+          ]
+        },
+        "UnsupportedSyntax: interleaved type parameter clauses are not supported; put type parameters before term clauses": {
+          "count": 1,
+          "examples": [
+            "library/src/scala/NamedTuple.scala"
+          ]
+        },
+        "UnsupportedSyntax: this contextual modifier is not supported yet": {
+          "count": 1,
+          "examples": [
+            "library/src/scala/caps/package.scala"
+          ]
+        }
+      },
+      "files_with_raw_caret_character": 113,
+      "files_with_caret_operator_token": 109,
+      "files_with_parser_capture_syntax": 104,
+      "raw_caret_without_operator_examples": [
+        "library/src/scala/annotation/retains.scala",
+        "library/src/scala/caps/package.scala",
+        "library/src/scala/quoted/Quotes.scala",
+        "library/src/scala/util/Either.scala"
+      ],
+      "operator_without_capture_ast_examples": [
+        "library/src/scala/collection/Hashing.scala",
+        "library/src/scala/collection/generic/BitOperations.scala",
+        "library/src/scala/compiletime/ops/boolean.scala",
+        "library/src/scala/compiletime/ops/int.scala",
+        "library/src/scala/compiletime/ops/long.scala"
+      ]
+    }
+  }
+}

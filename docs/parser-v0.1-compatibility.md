@@ -683,3 +683,44 @@ Issue #516 reran the same pinned Scala 3.9.0 corpus at parser merge revision `c0
 Diagnostic occurrences increased from 1,471 to 1,557 (+86, or 5.85%), even though the first-failure histogram is unchanged. The change is concentrated in `ExpectedExpression` (+51), `UnsupportedSyntax` (+25), and `UnexpectedToken` (+10); `ExpectedPattern`, `ExpectedToken`, and `ExpectedType` are unchanged. Capture-checking cohorts are also unchanged: disabled 895/994 clean and enabled 232/242 clean.
 
 `compiler/src/dotty/tools/dotc/cc/SafeRefs.scala`, previously reported with `ExpectedToken` and `UnexpectedToken`, is now clean in the full corpus and in a focused single-file run. Since the overall clean count remains unchanged, that gain is offset by at least one newly diagnostic file. The aggregate report does not retain per-file outcomes, so this measurement alone cannot identify it. Treat the result as a targeted fix with no net corpus-coverage gain yet; investigate the diagnostic-occurrence increase and offsetting file change before attributing broader improvement.
+
+## Corpus rerun after PR #538
+
+Issue #541 reran the same corpus at parser revision
+`c6061d1f4235dfb48514a0ac4e90c17df51f1cbc` (main after PR #538). The immutable
+report is [`parser-post-issue-541-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-541-scala3-3.9.0.json).
+The pinned Scala revision and sorted 1,236-file inventory are unchanged.
+
+| Measure | After #510 / PR #516 | After #538 | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parses | 1,127 (91.18%) | 1,135 (91.83%) | +8 (+0.65 pp) |
+| Recoverable files | 109 (8.82%) | 101 (8.17%) | -8 |
+| Hard failures / process failures / panics / hangs | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | unchanged |
+| Scanner diagnostics | 13 | 13 | 0 |
+| Scala oracle files / failures | 1,236 / 0 | 1,236 / 0 | unchanged |
+
+Diagnostic occurrences fell from 1,557 to 1,427 (-130, or 8.35%). The category
+changes were `ExpectedExpression` 628 → 646 (+18), `ExpectedPattern` 5 → 5
+(0), `ExpectedToken` 185 → 179 (-6), `ExpectedType` 7 → 7 (0),
+`UnexpectedToken` 346 → 339 (-7), and `UnsupportedSyntax` 386 → 251 (-135).
+Thus the net reduction is driven by unsupported syntax, despite an increase in
+expression diagnostics. The first-failure buckets also move slightly:
+`ExpectedExpression` 35 → 38, `ExpectedPattern` 2 → 2, `ExpectedToken` 28 → 24,
+`ExpectedType` 4 → 5, and `UnexpectedToken` 28 → 29. Clean parses rose from
+895/994 to 903/994 in the capture-checking-disabled cohort and stayed at
+232/242 in the enabled cohort.
+
+This compares a range of changes between PR #510 and PR #538, not the isolated
+effect of one parser increment. It is a useful coverage gain, but not a blanket
+correctness claim: the rise in `ExpectedExpression` and the new first-failure
+examples should be investigated separately. The baseline has zero hard parser
+failures, worker failures, panics, or hangs, and the Scala oracle completed all
+files without exceptions.
+
+Recreate the report from the pinned checkout with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-541-scala3-3.9.0.json
+```

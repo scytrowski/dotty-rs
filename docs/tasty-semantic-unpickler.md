@@ -1,66 +1,24 @@
 # TASTy semantic unpickler
 
-Status (`crates/dotty-tasty-unpickler`):
+Status: semantic entry, type decoding and symbol completion are implemented
+for the supported shapes described below. The compatibility audit in §8 is the
+current completion gate; it measures Scala library and compiler TASTy under
+multiple completion orders and records external-resolution and deferred cases.
 
-- Milestone 1, semantic index and symbol entering: complete.
-- Milestone 2a, core type identity and reference resolution: implemented
-  (§4, "Types").
-- Milestone 2b, semantic name resolution (canonical session identities, the
-  package contract, the resolver boundary, name-based `TYPEREF`/`TERMREF`):
-  implemented (§4, "Name-based references").
-- Milestone 2c1, compositional non-binder types (`Applied`, `And`, `Or`,
-  `SuperType`, `ByName`): implemented (§4, "Types").
-- Milestone 2c2, the non-binder core-model gaps (`TYPEBOUNDS` as `Bounds` or
-  `AliasingBounds`, `Flexible`, lossless constants and `CLASSconst`):
-  implemented (§4, "Bounds, flexible and constant types").
-- Milestone 3a, binder identity (`TYPELAMBDAtype`, `PARAMtype`): implemented
-  (§4, "Binders").
-- Milestone 3b, the other two binder forms (`METHODtype`, `POLYtype`) on the
-  same machinery: implemented (§4, "Binders").
-- Milestone 3c, binder rebinding and variance-bearing `TYPEBOUNDS`:
-  implemented (§4, "Variance-bearing `TYPEBOUNDS`"). This closes the binder
-  milestone.
-- Milestone 4a, recursive and refined types (`REFINEDtype`, `RECtype`,
-  `RECthis`): implemented (§4, "Recursive and refined types").
-- Milestone 4b1, compact annotated types (`ANNOTATEDtype` whose annotation is a
-  type): implemented (§4, "Annotated types").
-- Milestone 4b2a, full annotation constructor applications (`APPLY`/`NEW`) with
-  semantic literal arguments, and `MethodParam.erased`: implemented (§4,
-  "Full annotation applications").
-- Milestone 4b2b, `SHAREDterm` annotation roots: implemented (§4, "Shared
-  annotation trees"). No term-tree identity was needed: the link is followed
-  and the tree read again, as Dotty does.
-- Milestone 4c1, owner-space references (`TYPEREFin`, unsigned `TERMREFin`):
-  implemented (§4, "Owner-space references"). It decodes 0 real nodes from the
-  corpora, because the declaring classes belong to other units; see the
-  measurement in §8.
-- Milestone 4c2, name-designated references for refined and recursive members:
-  implemented (§4, "Name-designated references"). The real `C { type T1; type
-  T2 = T1 }` decodes.
-- Milestone 4d, `MATCHtype` / `MATCHCASEtype`, and the regular-TASTy
-  type-language audit: implemented (§4, "Match types"; §8). Milestone 4 is
-  closed; the next work is Milestone 5 (symbol completion).
-- Milestone 5a, type-tree projection and simple symbol completion: implemented
-  (§4, "Type trees and simple completion"; §8). `VALDEF`, `PARAM`, `TYPEPARAM`
-  and non-opaque non-template `TYPEDEF` symbols can now be completed; methods,
-  constructors and classes stay `Missing`.
-- Milestone 5b, selected, singleton and annotated type trees: implemented (§4,
-  "Selected, singleton and annotated type trees"; §8). `SELECTtpt`,
-  `SINGLETONtpt` and `ANNOTATEDtpt` project, over a narrow term-`tpe`
-  projection; `REFINEDtpt`, `LAMBDAtpt`, `MATCHtpt`, `BLOCK` and `HOLE` stay
-  explicit refusals.
-- Milestone 5c, lambda type trees and method completion: implemented (§4,
-  "Lambda type trees and method completion"; §8). `LAMBDAtpt` projects to a
-  `TypeLambda` (its type parameters are entered in pass 1) and ordinary `DEFDEF`
-  methods complete to `Poly`/`Method`/`ByName` infos built by a format-agnostic
-  parameter-symbol abstraction in `dotty-core`. Constructors, classes,
-  `REFINEDtpt` and `MATCHtpt` stay deferred.
+| Feature area | Current capability | Boundary |
+|---|---|---|
+| Semantic identity and entry | Address-indexed definitions, scopes, packages, metadata and canonical `SymbolId`s | Method-body locals and typed AST are outside this projection |
+| Types and binders | Address-indexed type identity; compound, constant, binder, recursive, refined, match, annotated and supported type-tree forms | Unsupported forms produce typed errors |
+| Symbol completion | Values, parameters, type parameters, aliases, methods, constructors, classes, traits and module classes | Completion can remain pending when a dependency needs external resolution |
+| Metadata | Qualified visibility, flags, enum/export facts, annotations, companions and opaque aliases | Accessor/default-argument relations and source/typed-tree semantics remain deferred |
+| Cross-unit operation | `TastySession` shares package identities, owner scopes and pending opaque aliases | Loading absent units is owned by a caller-provided `SymbolResolver` |
 
-Entered symbols start `SymbolInfo::Missing`; only an explicit
-`complete_symbol` (the simple kinds above) changes that. Types are otherwise
-decoded on request by address.
+Entered symbols start `SymbolInfo::Missing`. `complete_symbol` projects one
+definition into the canonical core model and can leave it Missing when a
+dependency cannot yet be resolved. Type nodes are decoded on demand by address.
 
-Target: Scala 3.9.0 / TASTy 28.9.0. The wire format is documented in
+Target: Scala 3.9.0 semantics; the pinned corpora contain TASTy 28.9 library
+files and TASTy 28.8 compiler files. The wire format is documented in
 [`tasty-format-3.9.0.md`](tasty-format-3.9.0.md) and the decoding API in
 [`tasty-api.md`](tasty-api.md); this document does not repeat either.
 
@@ -83,10 +41,10 @@ The unpickler interprets TASTy that is already decoded. It does not:
 - introduce a second semantic model: it fills the canonical `Symbol`, `Type`,
   `Scope` and `ClassInfo` values of `dotty-core`.
 
-References to symbols defined outside the current TASTy unit go through the
-`SymbolResolver` port of `dotty-core` (Milestone 2b defines the port; the
-classloader implements it in Milestone 6). The unpickler never loads files
-itself.
+References absent from the entered state go through the `SymbolResolver`
+port of `dotty-core`. The port exists; `dotty-classloader` does not implement
+it yet. The unpickler never loads files itself and does not infer candidates
+from rendered names.
 
 ## 2. Multi-pass architecture
 
@@ -94,28 +52,14 @@ TASTy has forward references, shared nodes, recursive binders and mutually
 referencing symbols, so the unpickler is not a `RawTree -> Tree<Typed>`
 function. It follows an enter-before-complete model:
 
-| Pass | Result | Milestone |
-|------|--------|-----------|
-| 1. Enter | symbols, owners, declaration scopes; `SymbolInfo::Missing` | 1 |
-| 2a. Type identity | address-keyed `TypeId`s; references, `THIS`, `SHAREDtype` | 2a |
-| 2b. Name resolution | name-based `TYPEREF`/`TERMREF` through the prefix scope and the `SymbolResolver` port | 2b |
-| 2c1. Compound types | `Applied`, `And`, `Or`, `SuperType`, `ByName` | 2c1 |
-| 2c2. Core-model gaps | `Bounds`, `AliasingBounds`, `Flexible`, lossless constants, `CLASSconst` | 2c2 |
-| 3a. Binder identity | `TypeLambda`, `ParamRef`, with `TypeArena::reserve`/`fill` | 3a |
-| 3b. Methodic binders | `Method`, `Poly` on the shared binder machinery; `PARAMtype` to all three binder kinds | 3b |
-| 3c. Binder rebinding | `dotty_core::rebind_type_lambda`; variance-bearing `TYPEBOUNDS`; `declared_variance: Option<Variance>` | 3c |
-| 4a. Refined and recursive | `Refined`, `Recursive`, `RecThis` | 4a |
-| 4b1. Compact annotated types | `Annotated` with `Annotation::compact(ty)`; full trees deferred | 4b1 |
-| 4b2a. Full annotation applications | `APPLY`/`NEW` annotations with `AnnotationArguments`; `MethodParam.erased` from `ErasedParam` | 4b2a |
-| 4b2b. `SHAREDterm` annotations | `AstView::resolve_shared_term`; shared `APPLY`/`NEW` reuse the direct decoder | 4b2b |
-| 4c1. `*REFin` | `TYPEREFin` / unsigned `TERMREFin` owner-space resolution; `MemberSpace` in `MemberRequest` | 4c1 |
-| 4c2. Name-designated refs | `TypeRefTarget` / `TermRefTarget` (`Symbol \| Name`); `lookup_structural_member` | 4c2 |
-| 4d. Match types | `MATCHtype` / `MATCHCASEtype` to `Match` / `MatchCase`; type-language audit | 4d |
-| 5a. Simple completion | type-tree projection; `Complete` for `VALDEF`/`PARAM`/`TYPEPARAM`/plain `TYPEDEF`; stable-term prefixes | 5a |
-| 5b. Selected, singleton, annotated trees | `SELECTtpt`, `SINGLETONtpt`, `ANNOTATEDtpt`; term-`tpe` projection (`type_of_term`) | 5b |
-| 5c. Lambdas and methods | `LAMBDAtpt` -> `TypeLambda`; `DEFDEF` -> `Poly`/`Method`/`ByName`; `method_type_from_symbols` and friends in `dotty-core` | 5c |
-| 3. Complete | `SymbolInfo::Complete(TypeId)` for constructors, `ClassInfo`, annotations | 5d-5e |
-| 4. Typed AST | `AstArena<Typed>`, rehydrated without type inference | 7 |
+| Pass | Result |
+|------|--------|
+| Enter | Symbols, owners, declaration scopes and indexed metadata; symbols initially `Missing` |
+| Decode types | Address-keyed `TypeId`s, supported references, type forms, binders and type trees |
+| Complete symbols | `SymbolInfo` and `ClassInfo` for supported definitions; completion can be repeated after entering more units |
+| Publish relationships | Companion links, annotations, qualified visibility, opaque aliases and other indexed facts |
+
+This pipeline projects semantics, not a typed syntax tree and not source typing.
 
 ## 3. Identity invariant
 
@@ -145,6 +89,10 @@ Owner and scope membership stay distinct, as in `dotty-core`: a symbol's
 found by name. Symbols have no `children` field.
 
 ## 4. Reading TASTy definitions
+
+Historical subsection labels such as “pass 2a” or “Milestone 5d1” identify the
+increment when the behavior was first added. The active status and remaining
+work live in §§7–8; those labels are not a current roadmap.
 
 ### Names
 
@@ -370,7 +318,7 @@ root, so the unit's package is the session root, not a package named
 `<empty>`. Its top-level classes are owned by and declared in the root, where
 the classloader also puts a class with no `/`; a name-based reference to a
 default-package class of another unit resolves in the root's scope. Which adapter runs first, and who owns the
-registry between them, stays a caller decision until Milestone 6.
+registry between them, stays a caller decision until resolver integration defines that handoff.
 
 The semantic index differs from the sketch of the project document in two
 deliberate ways. Scopes are keyed by the owning `SymbolId`, not by address,
@@ -968,7 +916,7 @@ A body is never inspected, and a `ByName` or methodic right-hand side of a
 type definition is `InvalidCompletedBounds`. `suppressIntoIfParam` (upstream)
 is not applied; no real case was measured, so nothing was guessed.
 
-### Opaque aliases (Scala 3.9 contract; implementation tracked by #529)
+### Opaque aliases (Scala 3.9 contract)
 
 The pinned Scala 3.9 `TreeUnpickler` first gives an alias provisional empty
 bounds while reading its right-hand side, then calls `toBounds` and
@@ -1487,7 +1435,7 @@ addresses the corresponding projection function would read next:
 |------|---------|---------------------|
 | `TypeTree` | `type_of_tpt` | `SELECTtpt`/`SINGLETONtpt` → `TermType`; an unhandled tag (a bare semantic type node in tpt position) → `SemanticType`; `MATCHtpt`/`BLOCK`/`HOLE` stay unwalked |
 | `TermType` | `type_of_term` | `IDENT`'s embedded type → `SemanticType`; `SELECT`'s qualifier → `TermType`; `QUALTHIS`'s qualifier `IDENTtpt`'s embedded type → `ClassRef`; an unsupported term shape (`APPLY`, `BLOCK`, ...) has no arm and the walk simply stops there — pass 1 never becomes a general term-body walker |
-| `SemanticType` | `type_at`/`decode_type` | `SHAREDtype` → same mode, bounded; `TYPEREF`/`TERMREF` prefix → `SemanticType` (the member itself is never resolved, §15 below); `THIS` → `ClassRef`; `RECthis`/`PARAMtype` are left alone (binder identities, not pass-1 symbols) |
+| `SemanticType` | `type_at`/`decode_type` | `SHAREDtype` → same mode, bounded; `TYPEREF`/`TERMREF` prefix → `SemanticType` (pass 1 follows the prefix; member lookup happens during type decoding); `THIS` → `ClassRef`; `RECthis`/`PARAMtype` are left alone (binder identities, not pass-1 symbols) |
 | `ClassRef` | `this_class` | `TYPEREFdirect`/`TYPEREFsymbol`/`SHAREDtype` mirror `this_class`'s own grammar; a `REFINEDtpt` reached directly (the critical case, below) enters it |
 
 Discovery still allocates only the two identity-bearing forms
@@ -1638,7 +1586,7 @@ original PR body to be closed before merge:
 * **Route attribution** (`DiscoveryRoute`, in `discovery.rs`): every recursive
   call threads a small enum naming the nearest named hop it is about to visit
   through (`SHAREDterm`, `SHAREDtype`, `IDENTtpt`, `IDENT`, `SELECTtpt`,
-  `SINGLETONtpt`, `SELECT`, `QUALTHIS`, `THIS`, a §11 reference target, an
+  `SINGLETONtpt`, `SELECT`, `QUALTHIS`, `THIS`, a name-designated member target, an
   ordinary structural descent, or the root declared-type position itself). The
   route active when a `LAMBDAtpt`/`REFINEDtpt`'s *first* owner is recorded is
   kept in the index (`lambda_route`/`refined_route`) purely for reporting — no
@@ -1650,8 +1598,9 @@ original PR body to be closed before merge:
   the real library shape this milestone was built for), the route is
   `SELECTtpt` itself. `tests/discovery.rs`'s
   `each_entered_identity_is_attributed_to_the_hop_that_led_to_it` fixes both
-  shapes, plus the `THIS`-direct (§11 reference target) and `THIS → SHAREDtype`
-  (§10 critical case) distinction, and the direct declared-type-position case.
+  shapes, plus the `THIS`-direct member target versus
+  `THIS → SHAREDtype → REFINEDtpt` distinction, and the direct declared-type
+  position case.
 * **A projection-reachability oracle** (`reachability.rs`, new module): an
   independent cross-check, run after `enter_symbols`, that starts from the
   *wire* rather than from the walker's own traversal. It finds every
@@ -1755,7 +1704,7 @@ they answer only namespace/flags/visibility.
 entered at `address`, in wire order — `Some(&[])` when it was entered with no
 `ANNOTATION` children, `None` when no symbol was ever entered there at all.
 Distinguishing "entered, zero annotations" from "never entered" here (rather
-than only at the eventual completion-state layer, §5e-to-come) means a survey
+than only at the completion-state layer) means a survey
 or a later completion call can tell a `TYPEPARAM`/`PARAM`/local definition
 pass 1 skipped from one it indexed and found empty, without re-parsing the
 tail itself. It is populated once, when `enter_symbol` allocates the symbol
@@ -1772,8 +1721,8 @@ annotated method type parameter, a term parameter with two annotations
 unannotated parameter and an unannotated class — the last one showing that
 Scala 3.9 always attaches a compiler-synthesized `@SourceFile` annotation to
 every top-level class, a genuine `ANNOTATION` wire entry rather than one of
-the compiler-internal, non-serialized annotations §5e-to-come's completion
-must not synthesize (`LazyBodyAnnotation` and friends). Eleven `enter.rs` unit
+the compiler-internal annotations that completion must not synthesize;
+these annotations are not serialized (`LazyBodyAnnotation` and friends). Eleven `enter.rs` unit
 tests pin the exact indexed addresses and counts over these fixtures, each
 mutation-tested.
 
@@ -1906,8 +1855,7 @@ occurs in either corpus.
 share the "attach `AnnotationId`s to `Symbol.annotations`, `tree` always
 `None`, annotation type always class-like" contract (issue #129 §33) —
 `ClassLoader::enter_annotations` (JVM classfile `RuntimeVisibleAnnotations`)
-on one side, `complete_symbol_annotations` on the other. Milestone 6
-(classloader/`SymbolResolver` integration) has not landed, so the two
+on one side, `complete_symbol_annotations` on the other. Classloader/`SymbolResolver` integration has not landed, so the two
 adapters cannot yet run against one shared `SemanticStore` — `ClassLoader::new`
 bootstraps its own `Definitions` internally, and `Definitions::bootstrap` is
 documented as exactly-once per store — so the test runs each adapter over its
@@ -1918,10 +1866,9 @@ into `AnnotationArguments::Known` (they stay exclusively in its own
 JVM-facing `SemanticAnnotation` sidecar), so every classfile annotation is
 `Unavailable` regardless of its real element count, while an argument-free
 TASTy annotation is `Known([])` — a real, allowed divergence per §33 ("do not
-require equal payloads"), not a bug either side needs to fix for Milestone
-5e1.
+require equal payloads"), not a bug either side needs to fix for annotation convergence.
 
-Milestone 5e1 is complete.
+The serialized-annotation implementation increment is complete.
 
 ### Owner-space references (Milestone 4c1)
 
@@ -2157,7 +2104,8 @@ and `TERMREFpkg` are one identity, and `Type::ThisType` may name a package
 (the core doc comment says so). `LoadingSession::with_packages` /
 `into_packages` carry the registry between the two adapters; the convergence
 tests live in `dotty-classloader`. Which adapter runs first, and who owns the
-registry between them, stays a caller decision until Milestone 6.
+registry between them, stays a caller decision until resolver integration
+defines that handoff.
 
 ### Name-based references (pass 2b)
 
@@ -2220,128 +2168,181 @@ bugs, not for external input.
 
 ## 6. Relationship with `dotty-classloader`
 
-`dotty-classloader/src/tasty_symbol.rs` holds a best-effort, name-based
-`.tasty` reader. It is a compatibility bridge, not the target model: it is
-maintained (issues #11 and #16 fixed constructor fields and qualified
-visibility there) but is replaced only when the unpickler reproduces its
-behaviour with tests (Milestone 6). The unpickler crate does not depend on
-`dotty-classloader`.
+`dotty-classloader` loads `.class` and `.tasty` resources into its classpath
+model, but its `.tasty` path still uses the separate best-effort reader in
+`src/tasty_symbol.rs`. It does not implement `SymbolResolver` or lower its
+class metadata through `TastyUnpickler`. Keep this adapter until the canonical
+store path covers the metadata the loader consumes and has equivalent focused
+regression coverage; then migrate consumers and remove the legacy reader in a
+separate change.
 
-## 7. Milestones
+The resolver API is read-only and consumes already available semantic state.
+`MemberRequest` carries a prefix `TypeId`, namespaced `Name`, `Unique` selector
+and a declaration space. `MemberSpace::Explicit(owner_type)` means search that
+declaring owner and forbids fallback to the prefix. `Ok(Some(id))` is an exact
+answer, `Ok(None)` means this resolver cannot answer (not proof of absence),
+and `Err(ResolutionError)` preserves ambiguity or malformed resolver state.
+`NoResolver` always answers `None`. Resolver results are validated for the
+requested namespace/owner; invalid answers and resolver errors are reported as
+`ResolverFailure`, not silently accepted.
 
-1. **Semantic index and symbol entering** — complete.
-2. **Core types**, in increments:
-   - 2a: type identity and reference resolution (`TypeRef`, `TermRef`,
-     prefixes, `ThisType`, `SHAREDtype`) — complete;
-   - 2b: semantic name resolution (canonical `Definitions`/`NoPrefix`, the
-     package contract, the `SymbolResolver` port, name-based
-     `TYPEREF`/`TERMREF`) — complete. The resolver *interface* moves earlier
-     than classloader *integration*, which stays in Milestone 6;
-   - 2c1: compositional non-binder types (`Applied`, `And`, `Or`,
-     `SuperType`, `ByName`) — complete;
-   - 2c2: the core-model gaps the 2c1 measurement exposed (`Bounds`,
-     `AliasingBounds`, `Flexible`, lossless constants, `CLASSconst`) —
-     complete.
-3. Binder types, in two steps:
-   - 3a: binder identity (`TypeLambda`, `ParamRef`, reserve/publish/fill) —
-     complete;
-   - 3b: `Method` and `Poly` on the same machinery, `PARAMtype` to all three
-     binder kinds, and the `MethodParam` audit (`erased`/`varargs`) — complete;
-   - 3c: binder rebinding and variance-bearing `TYPEBOUNDS` — complete.
-4. Advanced types, in steps:
-   - 4a: `Refined`, `Recursive`, `RecThis` — complete;
-   - 4b1: compact `ANNOTATEDtype` and the annotation corpus survey — complete;
-   - 4b2a: full `APPLY`/`NEW` annotations with semantic arguments, and
-     `MethodParam.erased` from `ErasedParam` — complete;
-   - 4b2b: `SHAREDterm` annotation roots, followed to their constructor tree
-     — complete;
-   - 4c1: `TYPEREFin` / unsigned `TERMREFin` owner-space resolution — complete;
-   - 4c2: name-designated refined / recursive member references and
-     `lookup_structural_member` — complete;
-   - 4d: `Match` / `MatchCase` and the final type-language audit — complete;
-     Milestone 4 is closed.
-5. Symbol completion, in steps:
-   - 5a: type-tree projection, simple symbol infos and completed stable-term
-     prefixes — complete;
-   - 5b: `SELECTtpt`, `SINGLETONtpt`, `ANNOTATEDtpt` and the narrow term-`tpe`
-     projection they need — complete;
-   - 5c: ordinary `DEFDEF` methods and `LAMBDAtpt` with its local type
-     parameters, over a symbol-abstraction primitive in `dotty-core` — complete;
-   - 5d1: `ClassInfo` for classes, traits and module classes, parents, self
-     types and cross-unit declaration scopes — complete;
-   - 5d2a: constructor completion (`normalizeIfConstructor`, the effective
-     owner-class result) — complete;
-   - 5d2b: `REFINEDtpt`'s synthetic refinement class, `close_over_this` and the
-     `Refined`/`Recursive` projection — complete;
-   - 5d2c: semantic identity discovery parity — a mode-aware pass-1 walker
-     mirroring every supported projection route to `LAMBDAtpt`/`REFINEDtpt`
-     — complete; Milestone 5d is closed;
-   - 5e: symbol annotations, companion links, opaque aliases and the
-     remaining tails, in steps:
-     - 5e1: serialized symbol annotations — pass-1 `ANNOTATION` tail
-       indexing, the corpus survey, the shared payload decoder,
-       `complete_symbol_annotations`/`complete_symbols_annotations`, the
-       completion-outcome corpus survey and the `dotty-classloader`
-       storage-convergence check all landed — complete;
-     - 5e2: companion links — identity discovery, pair validation and
-       `SymbolLinks::companion` publication after the complete identity walk —
-       complete;
-     - 5e3: opaque aliases and the remaining tails.
-6. Classloader integration and the `SymbolResolver` boundary.
-7. Typed AST.
+For classpath-wide operation, bootstrap `Definitions` once and reuse one
+`SemanticStore`. Pass each returned `TastySession` to the next unpickler using
+`with_session` / `into_session_parts`; it carries package identities, owner
+scopes and pending opaque aliases across units. Use `with_session_and_index`
+when callers need to preserve each unit's index while entering all units and
+completing later. The session belongs with that store and its symbol/type IDs;
+it is not a detached cache. Each unpickler borrows its file and store. Entry
+and public completion calls are transactional: on failure, semantic allocations
+and corresponding scope/index/session updates are rolled back. A resolver only
+reads the store, so resolving itself cannot leave transaction residue.
 
-Each milestone is delivered as one or more reviewable PRs that keep the whole
-workspace green.
+The classloader integration follow-up should implement this contract by
+loading needed resources before or alongside semantic completion under an
+explicit transaction/lifetime policy. Until then, unresolved packages/members
+and missing symbols are reported as such; no name heuristic is applied.
 
-## 8. Current state and known unsupported forms
+## 7. Active roadmap
 
-Milestone 1 delivers `TastyUnpickler::enter_symbols`, `TastySemanticIndex`
-(`symbol_at`, `scope_of`, `symbol_count`) and the mappings of §4. Definition
-addresses map to exactly one `SymbolId`; a second entry for an address is
-`UnpickleError::DuplicateDefinition`. Milestone 2a adds
-`TastyUnpickler::unpickle_type` and `TastySemanticIndex::type_at` /
-`type_count`; a second `TypeId` for an address is
-`UnpickleError::DuplicateType`.
+The supported areas are semantic identity and entry, type decoding, symbol
+completion, metadata projection and cross-unit lookup. Their current support is
+summarized at the top of this document and the regression corpus below is the
+acceptance gate. Next integration work is to connect the classloader to the
+resolver and migrate its `.tasty` consumer to the canonical `SemanticStore`.
 
-Measured on real compiler output: all 37 small `dotty-tasty` fixtures enter
-without error. On the manifest-backed corpora (`scala3-library` and
-`scala3-compiler`, 2089 units, TASTy 28.8 — parsed leniently, outside the 3.9
-target) all 2089 units enter (941 and 1148). The last one to do so,
-`scala/package.tasty`, has a nested `PACKAGE` whose path is a `SHAREDtype`
-link (issue #29).
+Explicit boundaries for this gate:
 
-Deliberately not supported yet:
+- classpath discovery/loading inside the unpickler;
+- signed overload disambiguation where the core request only provides a unique
+  selector;
+- method-body local definitions and a complete typed AST;
+- source typing, inference and code generation;
+- metadata relationships not represented by the current core model, including
+  setter/accessor, default-getter and export-forwarder synthesis;
+- unsupported or malformed wire/semantic forms, which remain typed errors;
+- external classpath references until a resolver can answer them.
 
-- qualified-access qualifiers other than a package name or an enclosing
-  definition — `UnsupportedQualifier` (none occur in the corpora);
-- `PACKAGE` paths other than a direct `TERMREFpkg` or a `SHAREDtype` link to
-  one — `UnsupportedPackagePath`;
-- the modifiers listed in §4 (no matching core flag, variance, accessor roles);
-- an abstract type member is entered as `TypeAlias`; `SymbolKind` has no
-  abstract-type kind;
-- definitions inside method bodies (locals) and the parameters of type-lambda
-  aliases;
-- signed `TERMREFin`, and every other type form beyond §4 "Types" —
-  `UnsupportedType`;
-- signed term references and inherited members (§4, "Name-based references");
-  cross-unit class members resolve through a completed `ClassInfo` only;
-- a `REFINEDtpt` reached only through a `SELECTtpt` qualifier's own type
-  resolution, or only through a `SHAREDtype` (rather than `SHAREDterm`) link
-  to it, is not entered in pass 1 and fails projection with the explicit
-  `MissingRefinementClass`/`InvalidRefinementClass` rather than completing (2
-  library self-types measured, §5d2b below);
-- packages and members outside the entered state with no resolver that knows
-  them — `UnresolvedPackage`, `UnresolvedMember`;
-- wiring the classloader in as a `SymbolResolver` (Milestone 6).
+The legacy `tasty_symbol` reader retires only after the semantic-store adapter
+covers its useful behavior with focused tests and the classloader uses that
+path. Typed AST and source typing are separate roadmap areas, not blockers for
+this semantic handoff.
 
-Defects this work found in neighbouring crates were fixed there: `NameRef`
-is zero-based (#9), qualified visibility is `Visibility::PrivateWithin` /
-`ProtectedWithin` (#10), and a category-five node with a padded length prefix
-(`161, 0, 253`) is indexed at its tag instead of one byte later (found by the
-Milestone 2a corpus measurement, which saw references to real addresses that
-named no node).
+## 8. Semantic completion compatibility gate
 
-### Type pass measurement
+### Reproduction and versions
+
+Run from the repository root:
+
+```sh
+./tools/tasty-semantic-gate.sh
+```
+
+The script runs the existing ignored corpus surveys in release mode, with the
+locked dependency graph. It was run against dotty-rs base revision
+`28d8bddf8e201e309fed3c1decfcf9b9121649ca` (the issue branch adds the gate and
+this report); the unit suite and all five corpus surveys passed. Both
+manifest-backed corpora are from Scala 3.9.0 commit
+`777528f19a58e794c9954a42f433373472ec57f8`: 941 library units with TASTy 28.9
+and 1,148 compiler units with TASTy 28.8 (the compiler artifact was
+bootstrapped by Scala 3.8.4). The test output contains the detailed per-tag,
+per-error and per-symbol summaries; the tables below retain the gate-level
+results and can be reproduced by the command above.
+
+### Identity, errors and determinism
+
+| Corpus | LAMBDAtpt entered | conflicts | out of scope | unaccounted | REFINEDtpt entered | conflicts | out of scope | unaccounted |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Library | 370 | 0 | 20 | 0 | 39 | 0 | 2 | 0 |
+| Compiler | 83 | 0 | 0 | 0 | 5 | 0 | 5 | 0 |
+
+The gate also reports zero unexpected errors for type decoding and completion,
+zero identity conflicts and unaccounted in-scope nodes, and zero
+companion-link ambiguities/conflicts. The definition-tail survey enters all
+2,089 files and accounts for qualified visibility, enum/export flags and
+omitted modifier tails using the Scala 3.9.0 pin (see §4's modifier audit).
+The unit-test phase runs the unpickler's rollback and malformed-input tests
+(174 passed); forward and reverse file orders preserve the
+identity/companion/opaque audit results. The corpus runner completes without a
+panic or hang.
+
+### Completion by symbol kind
+
+The figures below are the state after the established permutation that
+provides compiler builtins and completes simple symbols and classes first.
+`Complete` and `Missing` are counts in the final store; Missing includes
+external dependencies and deliberately incomplete definitions. Opaque alias
+completion is also broken out in the next table.
+
+| `SymbolKind` | Library Complete | Library Missing | Compiler Complete | Compiler Missing |
+|---|---:|---:|---:|---:|
+| Class | 577 | 696 | 442 | 1,643 |
+| Constructor | 2,264 | 657 | 0 | 4,525 |
+| Field | 1,963 | 724 | 4,517 | 4,830 |
+| Method | 11,181 | 4,472 | 5,423 | 27,503 |
+| ModuleClass | 861 | 83 | 1,081 | 1,089 |
+| Object | 944 | 0 | 2,170 | 0 |
+| Package | 0 | 1,490 | 0 | 2,617 |
+| Parameter | 14,162 | 4,998 | 17,365 | 21,343 |
+| Trait | 560 | 109 | 182 | 60 |
+| TypeAlias | 386 | 110 | 933 | 191 |
+| TypeParameter | 15,491 | 208 | 1,243 | 150 |
+
+Permutation matters: e.g. completing without class infos first leaves many
+more methods, constructors and members Missing. This is measured explicitly by
+the class-completion ablation and is why the gate records multiple orders
+rather than treating one completion count as an order-independent promise.
+
+### Types, metadata and opaque aliases
+
+| Survey | Library | Compiler | Interpretation |
+|---|---:|---:|---|
+| Type identity: LAMBDAtpt accounted for | 370 / 370 | 83 / 83 | no conflicts or unaccounted in-scope definitions |
+| Type identity: REFINEDtpt accounted for | 39 / 39 | 5 / 5 | 2 library and 5 compiler nodes are intentionally out of scope |
+| Serialized annotations | 4,091 entries among 60,407 definitions/parameters; 3,431 attempted | 4,652 entries among 94,685; 3,349 attempted | compiler: 0 decoded, 3,341 external, 8 unsupported constructors; unexpected/malformed 0 |
+| Annotation completion (library) | 2,108 decoded; 1,111 external; 176 unsupported constructors; 36 unsupported arguments | — | reverse order changes counts (943 decoded); no unexpected errors |
+| Companion pairs | 575 | 1,191 | forward/reverse pair differences 0; ambiguity, conflict and malformed links 0 |
+| Opaque aliases | 4 (3 generic); 4 completed | 24 (5 generic); 22 completed | stable forward/reverse shapes; no cycles or unexpected outcomes |
+| Opaque alias external/malformed | 0 / 0 | 1 / 1 | external is `package:scala.reflect`; malformed is a recognized malformed definition clause |
+
+The alias surveys also verify that public opaque bounds and owner-local aliases
+are published in their intended roles. Representative decoded forms include
+`Bounds(Nothing, Any)`, bounded generic aliases using `TypeLambda`/`ParamRef`,
+and owner-local `Alias(...)` implementations. The compiler opaque survey's one
+malformed clause is counted separately from the one external `scala.reflect`
+reference; neither is hidden as success, and the test records no unexpected
+error.
+
+### External resolution, deferred work and readiness
+
+With `NoResolver`, the type-corpus first pass reports 90,292 external nodes in
+the library and 231,390 unresolved member plus 155,306 unresolved package
+requests in the compiler corpus (the type-completion survey also records
+missing local/type-lambda symbol references separately). These are not guessed
+or counted as decoder errors: they are inputs for the classloader's future
+`SymbolResolver` integration. The per-tag survey has zero missing symbols that
+are neither locals nor type-lambda parameters in the library/compiler
+classification. The 1,314 library signed references and unsupported prefixes
+are reported separately by the survey; signed overload selection is deferred
+until the resolver contract can represent it without guessing.
+
+The gate is ready as a semantic projection/handoff gate: its invariants pass,
+and unresolved references are assigned to resolver integration. Signed
+reference overload selection, method-body locals, typed AST/source typing,
+and metadata relationships absent from the core model (setter/accessor,
+default-getter and export-forwarder links) remain explicit follow-up or
+intentional-deferment categories. Unsupported parameter semantics, unsupported
+type-tree shapes and the single malformed compiler opaque clause remain
+observable as typed unsupported/malformed outcomes; they are not folded into
+successful completion. The gate is not a claim that the unpickler alone can
+load a complete classpath or build a typed AST.
+
+### Historical implementation-stage measurements
+
+The following subsections retain incremental measurements for context; their
+“after 2a/3a/…” captions describe older snapshots. Use the semantic gate above
+for current readiness and current corpus totals.
+
+#### Type pass measurement
 
 `type_corpus.rs` enters every unit of the two corpora (one store and one
 package registry per corpus, in path order, as a classpath would have) and
@@ -2389,7 +2390,7 @@ entered: a local definition (inside a `val`/`def` body, a block, or a pattern
 type-lambda alias (34,215 / 117,268). The measurement asserts that no target is
 anything else.
 
-### Compound types after 2c1 (library / compiler)
+#### Compound types after 2c1 (library / compiler)
 
 Each row is a node of the corpus decoded as its own root. "Child failures"
 name the first failing child, so a node that did not decode is not an
@@ -2415,7 +2416,7 @@ fail on an external constructor or argument, which a classpath resolver
 (Milestone 6) is expected to turn into decodes. The real `SUPERtype` does not
 occur in either corpus, so the decoder is covered by a retagged node.
 
-### Bounds, flexible and constant types after 2c2 (library / compiler)
+#### Bounds, flexible and constant types after 2c2 (library / compiler)
 
 Same method: each node decoded as its own root, with `NoResolver`.
 
@@ -2434,7 +2435,7 @@ primitive and string constant decodes. Order dependence still applies: the
 counts are a lower bound, since a unit decodes against the types earlier units
 entered. There were 0 unexpected errors in either corpus.
 
-### Binder types after 3a (library / compiler)
+#### Binder types after 3a (library / compiler)
 
 Same method: each node decoded as its own root. The library's TASTy does not
 declare `scala.Any` or `scala.Nothing` (the compiler defines them), yet every
@@ -2469,7 +2470,7 @@ lambdas' parameter infos among them.
 
 `ANNOTATEDtype` had no decoder at 3a; see "Annotated types after 4b1".
 
-### Binder types after 3b (library / compiler)
+#### Binder types after 3b (library / compiler)
 
 Same method, same two runs. `METHODtype` and `POLYtype` are rare as type nodes
 (most method types are in `DEFDEF` trees, not in the type language), so the
@@ -2492,7 +2493,7 @@ errors: 0, and no binder form is reported as an unsupported form in any run.
 The `PARAMtype` counts of 3a moved by one (1,431, and 241 decoded on demand)
 because the one library `POLYtype` now decodes.
 
-### Variance-bearing `TYPEBOUNDS` after 3c (library / compiler)
+#### Variance-bearing `TYPEBOUNDS` after 3c (library / compiler)
 
 Same method, same two runs. The compiler corpus has none (0). The library has 90.
 
@@ -2513,7 +2514,7 @@ library `TYPEBOUNDS` decode 716 (from 639), `PARAMtype` 1,445 (from 1,431), of
 which `TYPELAMBDAtype` binders 1,444 and `POLYtype` 1. `TYPELAMBDAtype` counts as
 "standalone" when it is not the direct child of a variance-bearing `TYPEBOUNDS`.
 
-### Refined and recursive types after 4a (library / compiler)
+#### Refined and recursive types after 4a (library / compiler)
 
 Same method, same two runs (each node decoded as its own root; "builtins" =
 `scala.Any`/`Nothing`/`Null` entered).
@@ -2540,7 +2541,7 @@ below), the rest on an external type. Recursive
 binder errors: 0, unexpected errors: 0 in every run, and none of the three forms
 is reported as an unsupported form.
 
-### Annotated types after 4b1 (library / compiler)
+#### Annotated types after 4b1 (library / compiler)
 
 Same method, same two runs (each `ANNOTATEDtype` decoded as its own root;
 "builtins" = `scala.Any`/`Nothing`/`Null` entered). Every node is classified by
@@ -2594,7 +2595,7 @@ errors in any run. The unsupported forms still reached are `TYPEREFin` (13 in
 the library, 12 in the compiler; Milestone 4c) and, in the library, 5
 `REFINEDtpt`.
 
-### Full annotation applications after 4b2a (library / compiler)
+#### Full annotation applications after 4b2a (library / compiler)
 
 Same method, same two runs (each `ANNOTATEDtype` decoded as its own root; the
 parent is asked for first to tell a parent failure from the annotation's own).
@@ -2655,7 +2656,7 @@ so the corpus decodes 0 erased `MethodParam`s; the real-compiler fixture
 `Erased.scala` carries that coverage, and the survey asserts that no decoded
 method type is erased without naming `ErasedParam`.
 
-### Shared annotation trees after 4b2b (library / compiler)
+#### Shared annotation trees after 4b2b (library / compiler)
 
 All 77 `SHAREDterm` roots follow one link to an `APPLY` (library 21, compiler
 56): link depth 1 for all, no link whose target is another `SHAREDterm`, no
@@ -2686,7 +2687,7 @@ is unsupported. What remains inside supported roots is a `SELECTtpt` class tree
 (2 direct + 3 shared, library) and everything that needs a classpath or symbol
 completion.
 
-### Simple completion after 5a (library / compiler)
+#### Simple completion after 5a (library / compiler)
 
 Completion was measured by completing every eligible symbol of a unit, in
 document order, before decoding its reference nodes (`type_corpus`, "simple
@@ -2735,7 +2736,7 @@ library and 329,361 -> 350,003 in the compiler without builtins; named `TYPEREF`
 run, with and without completion, so the completion figures above are
 completion alone.
 
-### Selected, singleton and annotated trees after 5b (library / compiler)
+#### Selected, singleton and annotated trees after 5b (library / compiler)
 
 Wire shapes (all real nodes, whatever they decode to; identical with and
 without builtins). `SHAREDterm` roots are reported by the tag their chain ends
@@ -2802,7 +2803,7 @@ that outcome is now 0). Every path that gets past the prefix still meets a
 class declared in another unit: cross-unit declaration scopes (5d) remain the
 next blocker for reference decoding, not the projection.
 
-### Lambdas and methods after 5c (library / compiler)
+#### Lambdas and methods after 5c (library / compiler)
 
 `LAMBDAtpt` roots: 390 (library) / 83 (compiler). Contexts: type alias
 right-hand side or class parent 233 + 3 nested / 83; type parameter bounds
@@ -2893,7 +2894,7 @@ unchanged, and so are `APPLIEDtype`, `TYPEBOUNDS`, `ANNOTATEDtype` and
 declared in other units (cross-unit `ClassInfo`/scopes, 5d) remain the
 dominant blocker (most method failures are `UnresolvedMember` / `UnresolvedPackage`).
 
-### Classes after 5d1 (library / compiler)
+#### Classes after 5d1 (library / compiler)
 
 Wire survey (independent of what completes), library / compiler. Classes by
 number of parents: `Class` 1 / 2 / 3 / 4 / 5+ = 508 / 467 / 90 / 133 / 36 (lib)
@@ -2996,7 +2997,7 @@ sorts later) or to a library the compiler corpus does not contain (549 of 584
 compiler references are to `scala.package`); they need the retry/orchestration
 layer and the classpath, not a fix here.
 
-### Constructors after 5d2a (library / compiler)
+#### Constructors after 5d2a (library / compiler)
 
 7,446 constructors total (2,921 library / 4,525 compiler, matching PR #85's
 count exactly — no constructor gained or lost an entry). Completion, path
@@ -3045,7 +3046,7 @@ now fail one step later on an `UnresolvedMember` (`parent` failures rise from
 `scala.*` members against. The `package` (package-object) finding above is
 unaffected and remains open for the orchestration layer, not this fix.
 
-### Match types after 4d (library / compiler)
+#### Match types after 4d (library / compiler)
 
 `MATCHtype` and `MATCHCASEtype` occur in neither corpus (0 / 0 in both), so 4d
 changes no decode count; the decoder is covered by synthetic wire only. Real
@@ -3074,7 +3075,7 @@ full TASTy support: signed overload selection, typed trees, symbol completion
 resolution are separate milestones (5, 6, 7), and most real nodes still fail
 only because they name symbols outside the entered state.
 
-### Owner-space references after 4c1 (library / compiler)
+#### Owner-space references after 4c1 (library / compiler)
 
 Same four runs (`--ignored --nocapture`). Each `REFin` root is measured with its
 two children first decoded on their own, so a failure is attributed to the prefix
@@ -3123,7 +3124,7 @@ The two library `RECtype`/`RECthis` roots still fail on
 `UnsupportedResolutionPrefix`: that is input for 4c2. 0 unexpected errors in any
 run.
 
-### Name-designated references after 4c2 (library / compiler)
+#### Name-designated references after 4c2 (library / compiler)
 
 Same four runs. `UnsupportedResolutionPrefix` is surveyed on the wire shape of
 the prefix of each name-based `TYPEREF`/`TERMREF` root (before / after 4c2):
@@ -3158,7 +3159,7 @@ Roots (library, no builtins -> builtins; the compiler is unchanged):
 
 Both real `RECtype`/`RECthis` roots now decode. 0 unexpected errors in any run.
 
-## 10. Opaque aliases (Milestone 5e3)
+## Appendix A. Opaque alias implementation notes
 
 Opaque alias completion follows the Scala 3.9 `opaqueToBounds` split. The
 alias symbol publishes only external `Bounds` (or a `TypeLambda` returning
@@ -3192,10 +3193,10 @@ unsupported, cyclic and unexpected cases. Run it with:
 cargo test -p dotty-tasty-unpickler --release --test opaque_corpus -- --ignored --nocapture
 ```
 
-## 11. Review of Milestone 1
+## Appendix B. Initial semantic-entry review
 
-This is a record of the review made when Milestone 1 was delivered; §8 is the
-current state. Answers to the review questions asked before Milestone 2:
+This is a record of the review made when semantic entry was first delivered;
+the compatibility gate above is the current state. Answers to the review questions asked before Milestone 2:
 
 1. **Does every TASTy definition have a stable `SymbolId`?** Every package,
    class, trait, object, module class, type member, `val`/`var`, method,
