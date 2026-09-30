@@ -449,7 +449,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 declared_variance: self.declared_variance(ast, *parameter)?,
             });
         }
-        type_lambda_from_symbols(&mut self.store, &specs, result)
+        type_lambda_from_symbols(self.store, &specs, result)
             .map_err(|error| UnpickleError::ParameterAbstraction { address: at, error })
     }
 
@@ -465,15 +465,12 @@ impl TastyUnpickler<'_, '_, '_> {
         let mut parent =
             self_type.unwrap_or_else(|| self.store.types.alloc(Type::ThisType { class: owner }));
         let mut opaque_refinements = Vec::new();
-        loop {
-            let Type::Refined {
-                parent: next,
-                name: old_name,
-                info: old_info,
-            } = self.store.types.get(parent).clone()
-            else {
-                break;
-            };
+        while let Type::Refined {
+            parent: next,
+            name: old_name,
+            info: old_info,
+        } = self.store.types.get(parent).clone()
+        {
             let is_opaque = self
                 .store
                 .scopes

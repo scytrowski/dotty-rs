@@ -75,11 +75,10 @@ fn provide_java_object(store: &mut SemanticStore, packages: &mut Packages) {
         (&["java", "lang"][..], "Object"),
         (&["scala"][..], "AnyRef"),
     ] {
-        let package = packages
+        let package = *packages
             .enter(store, SymbolOrigin::Synthetic, path)
             .last()
-            .unwrap()
-            .clone();
+            .unwrap();
         let name = Name::new(store.names.intern(class), Namespace::Type);
         let symbol = store.symbols.alloc(Symbol {
             name,
@@ -103,11 +102,10 @@ fn provide_compiler_builtins(store: &mut SemanticStore, packages: &mut Packages)
         Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
     };
 
-    let scala = packages
+    let scala = *packages
         .enter(store, SymbolOrigin::Synthetic, &["scala"])
         .last()
-        .unwrap()
-        .clone();
+        .unwrap();
     for class in ["Any", "Nothing", "Null"] {
         let name = Name::new(store.names.intern(class), Namespace::Type);
         let symbol = store.symbols.alloc(Symbol {
