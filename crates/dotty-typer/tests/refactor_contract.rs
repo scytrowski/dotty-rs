@@ -370,7 +370,7 @@ fn equally_specific_generic_and_monomorphic_overloads_remain_ambiguous() {
     assert_eq!(candidates.len(), 2);
     assert_eq!(
         error_snapshot(&typer, &error),
-        "AmbiguousOverloadApplication"
+        "AmbiguousOverloadApplication(Method:C.choose=Missing|Method:C.choose=Missing)"
     );
 }
 
@@ -577,7 +577,7 @@ fn equally_applicable_constructor_candidates_remain_ambiguous() {
 
     assert_eq!(
         error_snapshot(&typer, &error),
-        "AmbiguousConstructorApplication(C, 2)"
+        "AmbiguousConstructorApplication(C;Constructor:C.<init>=Missing|Constructor:C.<init>=Missing)"
     );
     assert_eq!(typer.store().checkpoint(), checkpoint);
     assert!(typer.source_typed_index().get(SOURCE, rhs).is_none());
@@ -836,6 +836,158 @@ fn while_and_return_preserve_unit_nothing_and_their_children() {
         type_snapshot(&typer, typer.typed_ast().get(while_tree.body).ty),
         "Constant(Unit)"
     );
+}
+
+#[test]
+fn failed_expression_typing_rolls_back_publicly_observable_state() {
+    let mut fixture = Fixture::new("class C { def use: Int = { val local = 1; missing } }");
+    let (_, method, rhs) = fixture.method("use");
+    let local_tree = fixture
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::ValDef(definition) = &node.kind else {
+                return None;
+            };
+            (fixture
+                .store
+                .names
+                .resolve(definition.name.as_name().text())
+                == "local"
+                && fixture.index.symbol_at(SOURCE, tree).is_none())
+            .then_some(tree)
+        })
+        .unwrap();
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let checkpoint = typer.store().checkpoint();
+    let typed_count = typer.typed_ast().iter().count();
+    let index_count = typer.source_typed_index().len();
+
+    let error = typer.type_expression(rhs, context).unwrap_err();
+
+    assert_eq!(error_snapshot(&typer, &error), "TermNameNotFound(missing)");
+    assert_eq!(typer.store().checkpoint(), checkpoint);
+    assert_eq!(typer.typed_ast().iter().count(), typed_count);
+    assert_eq!(typer.source_typed_index().len(), index_count);
+    assert_eq!(typer.local_symbol_at(SOURCE, local_tree), None);
+}
+
+#[test]
+fn losing_generic_overload_probe_does_not_change_candidate_state() {
+    let mut fixture = Fixture::new(
+        "class C { def pick[A](value: A, extra: Any): Int = 1; def pick(value: Int, extra: Int): Int = 2; def use: Int = pick(1, 1) }",
+    );
+    let candidates = fixture.methods_named("pick");
+    assert_eq!(candidates.len(), 2);
+    let generic = candidates
+        .iter()
+        .find(|(tree, _, _)| matches!(&fixture.ast.get(*tree).kind, TreeKind::DefDef(def) if !def.type_params.is_empty()))
+        .unwrap()
+        .1;
+    let monomorphic = candidates
+        .iter()
+        .find(|(tree, _, _)| matches!(&fixture.ast.get(*tree).kind, TreeKind::DefDef(def) if def.type_params.is_empty()))
+        .unwrap()
+        .1;
+    let (_, use_method, rhs) = fixture.method("use");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(use_method).unwrap();
+    let generic_signature = typer.complete_symbol(generic).unwrap();
+    let generic_snapshot = type_snapshot(&typer, generic_signature);
+    let candidate_info = *typer.store().symbols.info(generic);
+
+    let typed = typer.type_expression(rhs, context).unwrap();
+
+    assert_eq!(call_target(&typer, typed), Some(monomorphic));
+    assert_eq!(*typer.store().symbols.info(generic), candidate_info);
+    let generic_after = typer.complete_symbol(generic).unwrap();
+    assert_eq!(type_snapshot(&typer, generic_after), generic_snapshot,);
+    assert_eq!(typer.source_typed_index().get(SOURCE, rhs), Some(typed));
+}
+
+#[test]
+fn self_recursive_inferred_local_result_fails_deterministically() {
+    let mut fixture = Fixture::new("class C { def outer: Int = { def loop = loop; loop } }");
+    let (_, outer, rhs) = fixture.method("outer");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(outer).unwrap();
+    let checkpoint = typer.store().checkpoint();
+
+    let first = typer.type_expression(rhs, context).unwrap_err();
+    let first_symbol = match first {
+        TyperError::RecursiveInferredMethodResult { symbol } => symbol,
+        other => panic!("expected recursive-result error, got {other:?}"),
+    };
+    assert_eq!(typer.store().checkpoint(), checkpoint);
+    assert_eq!(typer.typed_ast().iter().count(), 0);
+    let second = typer.type_expression(rhs, context).unwrap_err();
+    let second_symbol = match second {
+        TyperError::RecursiveInferredMethodResult { symbol } => symbol,
+        other => panic!("expected recursive-result error, got {other:?}"),
+    };
+    assert_eq!(first_symbol, second_symbol);
+}
+
+#[test]
+fn mutual_inferred_local_result_cycle_fails_deterministically() {
+    let mut fixture = Fixture::new(
+        "class C { def outer: Int = { def first = second; def second = first; first } }",
+    );
+    let (_, outer, rhs) = fixture.method("outer");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(outer).unwrap();
+
+    let first_error = typer.type_expression(rhs, context).unwrap_err();
+    let first_symbol = match first_error {
+        TyperError::RecursiveInferredMethodResult { symbol } => symbol,
+        other => panic!("expected recursive-result error, got {other:?}"),
+    };
+    let second_error = typer.type_expression(rhs, context).unwrap_err();
+    let second_symbol = match second_error {
+        TyperError::RecursiveInferredMethodResult { symbol } => symbol,
+        other => panic!("expected recursive-result error, got {other:?}"),
+    };
+
+    assert_eq!(first_symbol, second_symbol);
+    assert_eq!(typer.typed_ast().iter().count(), 0);
+    assert!(typer.source_typed_index().is_empty());
+}
+
+#[test]
+fn repeated_complete_symbol_returns_the_same_signature_without_new_state() {
+    let mut fixture = Fixture::new("class C { def identity[A](value: A): A = value }");
+    let (_, identity, _) = fixture.method("identity");
+    let mut typer = fixture.typer();
+
+    let first = typer.complete_symbol(identity).unwrap();
+    let checkpoint = typer.store().checkpoint();
+    let second = typer.complete_symbol(identity).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(typer.store().checkpoint(), checkpoint);
+    assert_eq!(
+        symbol_info_snapshot(&typer, identity),
+        "Complete(Poly[A](Bounds(TypeRef(Class:Nothing),TypeRef(Class:Any)))->Method<Plain>(value:A)->A)"
+    );
+}
+
+#[test]
+fn repeated_type_expression_returns_the_same_typed_tree_identity() {
+    let mut fixture = Fixture::new("class C { def use: Int = 42 }");
+    let (_, method, rhs) = fixture.method("use");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+
+    let first = typer.type_expression(rhs, context).unwrap();
+    let checkpoint = typer.store().checkpoint();
+    let typed_count = typer.typed_ast().iter().count();
+    let second = typer.type_expression(rhs, context).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(typer.source_typed_index().get(SOURCE, rhs), Some(first));
+    assert_eq!(typer.store().checkpoint(), checkpoint);
+    assert_eq!(typer.typed_ast().iter().count(), typed_count);
 }
 
 fn tree_snapshot(typer: &SourceTyper<'_>, tree: TreeId<Typed>) -> String {
@@ -1189,12 +1341,31 @@ fn error_snapshot(typer: &SourceTyper<'_>, error: &TyperError) -> String {
         TyperError::AmbiguousConstructorApplication {
             class, candidates, ..
         } => format!(
-            "AmbiguousConstructorApplication({}, {})",
+            "AmbiguousConstructorApplication({};{})",
             symbol_path(typer, *class, &mut HashSet::new()),
-            candidates.len()
+            candidate_snapshot(typer, candidates)
+        ),
+        TyperError::AmbiguousOverloadApplication { candidates, .. } => format!(
+            "AmbiguousOverloadApplication({})",
+            candidate_snapshot(typer, candidates)
         ),
         _ => error_variant(error),
     }
+}
+
+fn candidate_snapshot(typer: &SourceTyper<'_>, candidates: &[SymbolId]) -> String {
+    let mut candidates = candidates
+        .iter()
+        .map(|symbol| {
+            format!(
+                "{}={}",
+                symbol_label(typer, *symbol),
+                symbol_info_snapshot(typer, *symbol)
+            )
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.join("|")
 }
 
 fn constructors_of(fixture: &mut Fixture, class: SymbolId) -> Vec<SymbolId> {
