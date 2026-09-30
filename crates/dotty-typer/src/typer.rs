@@ -20686,10 +20686,11 @@ mod tests {
     }
 
     #[test]
-    fn explicitly_typed_recursive_local_methods_still_complete() {
-        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class C { def outer: Int = { def first: Int = second; def second: Int = first; first } }",
-        );
+    fn explicit_result_breaks_a_local_inference_cycle() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(include_str!(
+                "../tests/fixtures/local-method-results/explicit-breaks-inference-cycle.scala"
+            ));
         let (outer, block_tree) =
             method_definition_and_rhs(&parsed, &store, &index, source, "outer");
         let mut typer = SourceTyper::new(
@@ -20732,8 +20733,8 @@ mod tests {
             panic!("outer body should be a block");
         };
         let method_tree = block.stats[1];
-        let type_parameter_tree = match &parsed.ast.get(method_tree).kind {
-            TreeKind::DefDef(definition) => definition.type_params[0],
+        let (type_parameter_tree, result_tree) = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => (definition.type_params[0], definition.tpt),
             _ => panic!("local declaration should be a DefDef"),
         };
         let mut typer = SourceTyper::new(
@@ -20761,6 +20762,18 @@ mod tests {
         assert_eq!(method_type.params.len(), 1);
         assert!(matches!(
             typer.store().types.get(method_type.result),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+        let typed_method = typer.source_typed_index().get(source, method_tree).unwrap();
+        let TreeKind::DefDef(typed_definition) = &typer.typed_ast().get(typed_method).kind else {
+            panic!("generic local method should produce a typed DefDef");
+        };
+        assert_eq!(
+            typed_definition.tpt,
+            typer.source_typed_index().get(source, result_tree).unwrap()
+        );
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_definition.tpt).ty),
             Type::ParamRef { binder, index: 0 } if *binder == signature
         ));
         assert_eq!(poly.params.len(), 1);
