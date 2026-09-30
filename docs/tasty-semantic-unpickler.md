@@ -1169,8 +1169,9 @@ ClassInfo {
   `SHAREDterm` from a second class is refused for both. (`SharedLambdaOwnerConflict`
   is per address, as in 5c.)
 * **Deferred.** Constructors complete as of 5d2a (below), and `REFINEDtpt` as
-  of 5d2b (below); `MATCHtpt` stays an unsupported tree (Milestone 7), and
-  nothing sets symbol annotations or companion links (5e).
+  of 5d2b (below); `MATCHtpt` stays an unsupported tree (Milestone 7).
+  Symbol annotations are complete as of 5e1, and companion links as of 5e2;
+  opaque aliases and the remaining tails are tracked in 5e3.
 
 New errors: `MissingClassScope`, `UnsupportedParentTree`, `MalformedParentTree`,
 `InvalidSelfTypeTree`; everything else is the existing external, unsupported or
@@ -2205,7 +2206,9 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
        `complete_symbol_annotations`/`complete_symbols_annotations`, the
        completion-outcome corpus survey and the `dotty-classloader`
        storage-convergence check all landed — complete;
-     - 5e2: companion links;
+     - 5e2: companion links — identity discovery, pair validation and
+       `SymbolLinks::companion` publication after the complete identity walk —
+       complete;
      - 5e3: opaque aliases and the remaining tails.
 6. Classloader integration and the `SymbolResolver` boundary.
 7. Typed AST.
@@ -2236,13 +2239,11 @@ Deliberately not supported yet:
   definition — `UnsupportedQualifier` (none occur in the corpora);
 - `PACKAGE` paths other than a direct `TERMREFpkg` or a `SHAREDtype` link to
   one — `UnsupportedPackagePath`;
-- the modifiers listed in §4 (no matching core flag, variance, accessor roles)
-  and annotations;
+- the modifiers listed in §4 (no matching core flag, variance, accessor roles);
 - an abstract type member is entered as `TypeAlias`; `SymbolKind` has no
   abstract-type kind;
 - definitions inside method bodies (locals) and the parameters of type-lambda
   aliases;
-- companion links (`SymbolLinks::companion`);
 - signed `TERMREFin`, and every other type form beyond §4 "Types" —
   `UnsupportedType`;
 - signed term references and inherited members (§4, "Name-based references");
