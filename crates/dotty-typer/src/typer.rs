@@ -1842,6 +1842,9 @@ impl<'a> SourceTyper<'a> {
         let expression_type = self.typed_arena.get(typed).ty;
         let mut actual = self.widen_expression_type_journaled(expression_type, info_journal, 0)?;
         for (binder, parameters) in self.active_local_type_binders.iter().rev() {
+            if !self.type_contains_param_ref(expected, *binder)? {
+                continue;
+            }
             let substitutions = parameters
                 .iter()
                 .enumerate()
@@ -21121,6 +21124,25 @@ mod tests {
             Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == inner_method
         ));
         assert_ne!(outer_method, inner_method);
+    }
+
+    #[test]
+    fn nested_non_generic_local_method_preserves_outer_type_parameter_reference() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def top: Int = { def outer[A](value: A): A = { def inner(nested: A): A = nested; inner(value) }; outer(1) } }",
+        );
+        let (top, block_tree) = method_definition_and_rhs(&parsed, &store, &index, source, "top");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(top).unwrap();
+
+        typer.type_expression(block_tree, context).unwrap();
     }
 
     #[test]
