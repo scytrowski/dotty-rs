@@ -142,7 +142,8 @@ fn report_definition_tail_modifiers_in_scala_corpora() {
                     .iter()
                     .filter_map(|entry| match entry {
                         DefinitionTail::Modifier(tag) => modifier_name(*tag),
-                        _ => None,
+                        DefinitionTail::QualifiedModifier(modifier) => modifier_name(modifier.tag),
+                        DefinitionTail::Annotation(_) => None,
                     })
                     .collect();
                 modifiers.sort_unstable();
@@ -181,6 +182,29 @@ fn report_definition_tail_modifiers_in_scala_corpora() {
         "entered files: {entered}; parse failures: {parse_failures}; enter failures: {enter_failures}"
     );
     println!("first parse failure: {first_parse_failure:?}");
+    assert_eq!(entered, 2_089);
+    assert_eq!(parse_failures, 0);
+    assert_eq!(enter_failures, 0);
+    for (name, expected) in [
+        ("ARTIFACT", 35),
+        ("INLINEPROXY", 0),
+        ("MACRO", 4),
+        ("OPEN", 0),
+        ("INFIX", 66),
+        ("INVISIBLE", 0),
+        ("TRACKED", 0),
+        ("INTO", 0),
+        ("COVARIANT", 1_081),
+        ("CONTRAVARIANT", 546),
+        ("FIELDACCESSOR", 491),
+        ("CASEACCESSOR", 1_775),
+        ("PARAMSETTER", 94),
+        ("PARAMALIAS", 554),
+        ("HASDEFAULT", 3_253),
+        ("STABLE", 3_178),
+    ] {
+        assert_eq!(report[name].total, expected, "{name} occurrences");
+    }
     for (name, count) in report {
         println!("{name}: {}", count.total);
         println!("  corpora: {:?}", count.by_corpus);
@@ -232,6 +256,8 @@ fn modifier_name(tag: u8) -> Option<&'static str> {
         44 => "INVISIBLE",
         47 => "TRACKED",
         49 => "INTO",
+        98 => "PRIVATEQUALIFIED",
+        99 => "PROTECTEDQUALIFIED",
         _ => return None,
     })
 }
