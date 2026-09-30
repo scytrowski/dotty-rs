@@ -3124,15 +3124,15 @@ the completion transaction rolls back both public and owner state.
 
 The ignored corpus survey `opaque_corpus` uses the pinned Scala 3.9 library and
 compiler fixtures, with only `scala.Any`/`Nothing`/`Null`, `java.lang.Object`,
-and `scala.AnyRef` supplied as synthetic classpath stubs. It walks the units in
-both path orders. Of 4 library opaque type aliases (3 generic), public info
-completed for 3/4 units in forward order and 4/4 in reverse; the remaining
-external lookup was `Tuple` in one order. Of 24 compiler aliases (5 generic),
-22/24 completed in both orders; one needs an unavailable `scala.reflect`
-package and one is malformed. Three aliases in each corpus had a resolvable
-implementation retained in an owner self type. The different completion rate
-for the library reflects classpath members available at the point of unit
-entry, while alias population and genericity are the same in both orders.
+and `scala.AnyRef` supplied as synthetic classpath stubs. It first enters every
+unit, then completes aliases using each unit's saved address index; this keeps
+all cross-unit declarations available before type projection. The audit asserts
+that the complete semantic result is identical in both path orders. All 4
+library aliases (3 generic) complete with public bounds and owner-local
+implementations. Of 24 compiler aliases (5 generic), 22 complete in both
+orders; one needs the unavailable `scala.reflect` package and one is malformed.
+Three compiler aliases had a resolvable implementation retained in an owner
+self type.
 
 The survey filters opaque-marked class definitions out of the alias count and
 reports unresolved external references separately from malformed,

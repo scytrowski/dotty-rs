@@ -169,6 +169,25 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
         unpickler
     }
 
+    /// Resumes completion for a unit whose symbols were already entered with
+    /// [`with_session`](Self::with_session), preserving that unit's address
+    /// index while carrying the session updated by other entered units.
+    ///
+    /// This supports a whole-classpath entry pass followed by a completion
+    /// pass: every unit's definitions are visible before any signature is
+    /// projected, without re-entering definitions or losing their addresses.
+    pub fn with_session_and_index(
+        file: &'file TastyFile<'bytes>,
+        store: &'store mut SemanticStore,
+        definitions: Definitions,
+        session: TastySession,
+        index: TastySemanticIndex,
+    ) -> Self {
+        let mut unpickler = Self::with_session(file, store, definitions, session);
+        unpickler.index = index;
+        unpickler
+    }
+
     /// The origin stamped on every symbol this unpickler enters.
     pub fn origin(&self) -> SymbolOrigin {
         self.origin

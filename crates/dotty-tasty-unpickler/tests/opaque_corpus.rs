@@ -15,9 +15,11 @@ use dotty_tasty::tasty::{
     DefinitionBody, DefinitionTail, LAMBDATPT_TAG, OPAQUE_TAG, RawTree, TYPEBOUNDSTPT_TAG,
     TYPEDEF_TAG, TastyFile,
 };
-use dotty_tasty_unpickler::tasty_unpickler::{TastySession, TastyUnpickler, UnpickleError};
+use dotty_tasty_unpickler::tasty_unpickler::{
+    TastySemanticIndex, TastySession, TastyUnpickler, UnpickleError,
+};
 
-#[derive(Clone, Default, Debug, PartialEq, Eq)]
+#[derive(Default, Debug, PartialEq, Eq)]
 struct Audit {
     aliases: usize,
     generic: usize,
@@ -34,6 +36,8 @@ struct Audit {
     unsupported: usize,
     unexpected: BTreeMap<String, usize>,
     owner_local_aliases: usize,
+    public_shapes: BTreeMap<String, String>,
+    owner_alias_shapes: BTreeMap<String, String>,
     public_bounds: usize,
 }
 
@@ -43,6 +47,108 @@ struct Alias {
     explicit_bounds: bool,
     bounded_alias: bool,
     bounded_without_alias: bool,
+}
+
+struct EnteredUnit {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    aliases: Vec<Alias>,
+    index: TastySemanticIndex,
+}
+
+fn qualified_symbol(symbol: dotty_core::ids::SymbolId, store: &SemanticStore) -> String {
+    let mut names = Vec::new();
+    let mut current = Some(symbol);
+    while let Some(symbol) = current {
+        let data = store.symbols.get(symbol);
+        names.push(store.names.resolve(data.name.text()).to_owned());
+        current = data.owner;
+    }
+    names.reverse();
+    names.join(".")
+}
+
+fn semantic_type_shape(
+    root: dotty_core::ids::TypeId,
+    store: &SemanticStore,
+    binder: Option<dotty_core::ids::TypeId>,
+    depth: usize,
+) -> String {
+    use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
+
+    if depth > 128 {
+        return "<depth-limit>".to_owned();
+    }
+    let child = |id| semantic_type_shape(id, store, binder, depth + 1);
+    match store.types.get(root) {
+        Type::NoType => "NoType".to_owned(),
+        Type::NoPrefix => "NoPrefix".to_owned(),
+        Type::TypeRef { prefix, target } => {
+            let target = match target {
+                TypeRefTarget::Symbol(symbol) => qualified_symbol(*symbol, store),
+                TypeRefTarget::Name(name) => store.names.resolve(name.as_name().text()).to_owned(),
+            };
+            if matches!(store.types.get(*prefix), Type::NoPrefix) {
+                format!("TypeRef({target})")
+            } else {
+                format!("TypeRef({}, {target})", child(*prefix))
+            }
+        }
+        Type::TermRef { prefix, target } => {
+            let target = match target {
+                TermRefTarget::Symbol(symbol) => qualified_symbol(*symbol, store),
+                TermRefTarget::Name(name) => store.names.resolve(name.as_name().text()).to_owned(),
+            };
+            format!("TermRef({}, {target})", child(*prefix))
+        }
+        Type::Bounds { low, high } => format!("Bounds({}, {})", child(*low), child(*high)),
+        Type::AliasingBounds { alias } => format!("Alias({})", child(*alias)),
+        Type::Applied { tycon, args } => format!(
+            "Applied({}, [{}])",
+            child(*tycon),
+            args.iter()
+                .map(|arg| child(*arg))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Type::TypeLambda(lambda) => {
+            let params = lambda
+                .params
+                .iter()
+                .map(|param| {
+                    format!(
+                        "{}:{:?}:{}",
+                        store.names.resolve(param.name.as_name().text()),
+                        param.declared_variance,
+                        semantic_type_shape(param.bounds, store, Some(root), depth + 1)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "Lambda([{params}], {})",
+                semantic_type_shape(lambda.result, store, Some(root), depth + 1)
+            )
+        }
+        Type::ParamRef {
+            binder: owner,
+            index,
+        } if Some(*owner) == binder => {
+            format!("ParamRef({index})")
+        }
+        Type::ParamRef { index, .. } => format!("OuterParamRef({index})"),
+        Type::And { left, right } => format!("And({}, {})", child(*left), child(*right)),
+        Type::Or { left, right } => format!("Or({}, {})", child(*left), child(*right)),
+        Type::ThisType { class } => format!("This({})", qualified_symbol(*class, store)),
+        Type::Recursive { parent } => format!("Recursive({})", child(*parent)),
+        Type::Refined { parent, name, info } => format!(
+            "Refined({}, {}, {})",
+            child(*parent),
+            store.names.resolve(name.text()),
+            child(*info)
+        ),
+        other => format!("Other({other:?})"),
+    }
 }
 
 fn tasty_files(root: &Path) -> Vec<PathBuf> {
@@ -195,8 +301,10 @@ fn audit(root: &Path, corpus: &str, reverse: bool) -> Audit {
     provide_java_object(&mut store, &mut packages);
     let mut packages = Some(packages);
     let mut session = TastySession::new();
-    let mut audit = Audit::default();
+    let mut entered_units = Vec::with_capacity(paths.len());
 
+    // Enter the entire classpath before completing any alias. This keeps
+    // cross-unit name resolution independent of file traversal order.
     for path in paths {
         let bytes = fs::read(&path).unwrap();
         let file = TastyFile::parse_compatible_with(&bytes, 28, 9, 0)
@@ -211,9 +319,36 @@ fn audit(root: &Path, corpus: &str, reverse: bool) -> Audit {
             .enter_symbols()
             .unwrap_or_else(|error| panic!("{}: {error:?}", path.display()))
             .clone();
-        let symbols: Vec<_> = aliases
+        let (_, next_session) = unpickler.into_session_parts();
+        session = next_session;
+        entered_units.push(EnteredUnit {
+            path,
+            bytes,
+            aliases,
+            index,
+        });
+    }
+
+    let mut audit = Audit::default();
+    for unit in entered_units {
+        let file = TastyFile::parse_compatible_with(&unit.bytes, 28, 9, 0)
+            .unwrap_or_else(|error| panic!("{}: {error}", unit.path.display()));
+        let mut unpickler = TastyUnpickler::with_session_and_index(
+            &file,
+            &mut store,
+            definitions,
+            session,
+            unit.index,
+        );
+        let symbols: Vec<_> = unit
+            .aliases
             .iter()
-            .filter_map(|alias| index.symbol_at(alias.address).map(|symbol| (alias, symbol)))
+            .filter_map(|alias| {
+                unpickler
+                    .index()
+                    .symbol_at(alias.address)
+                    .map(|symbol| (alias, symbol))
+            })
             .filter(|(alias, _)| {
                 matches!(
                     unpickler.symbol_state_at(alias.address),
@@ -279,6 +414,11 @@ fn audit(root: &Path, corpus: &str, reverse: bool) -> Audit {
             }
         }
         for (symbol, info) in completed {
+            let qualified_name = qualified_symbol(symbol, &store);
+            audit.public_shapes.insert(
+                qualified_name.clone(),
+                semantic_type_shape(info, &store, None, 0),
+            );
             if matches!(
                 store.types.get(info),
                 dotty_core::Type::Bounds { .. } | dotty_core::Type::TypeLambda(_)
@@ -299,10 +439,14 @@ fn audit(root: &Path, corpus: &str, reverse: bool) -> Audit {
                     let alias_name = store.symbols.get(symbol).name;
                     loop {
                         match store.types.get(self_type) {
-                            dotty_core::Type::Refined { parent, name, .. }
+                            dotty_core::Type::Refined { parent, name, info }
                                 if *name == alias_name =>
                             {
                                 audit.owner_local_aliases += 1;
+                                audit.owner_alias_shapes.insert(
+                                    qualified_name.clone(),
+                                    semantic_type_shape(*info, &store, None, 0),
+                                );
                                 break;
                             }
                             dotty_core::Type::Refined { parent, .. } => self_type = *parent,
@@ -326,12 +470,10 @@ fn measure_opaque_alias_completion_in_both_corpus_orders() {
         let reverse = audit(&root, corpus, true);
         println!("{corpus} opaque aliases (forward): {forward:#?}");
         println!("{corpus} opaque aliases (reverse): {reverse:#?}");
-        // Report both orders because this no-classpath survey intentionally
-        // exposes the external symbols available at each point in entry.
-        // The raw opaque declaration population itself must be stable.
-        assert_eq!(forward.aliases, reverse.aliases);
-        assert_eq!(forward.generic, reverse.generic);
-        assert_eq!(forward.non_generic, reverse.non_generic);
+        assert_eq!(
+            forward, reverse,
+            "opaque completion graph depends on unit entry order"
+        );
         assert_eq!(
             forward.completed
                 + forward.external_failures
