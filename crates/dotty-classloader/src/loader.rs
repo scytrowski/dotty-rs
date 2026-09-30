@@ -31,6 +31,57 @@ use dotty_core::{
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// Resolves an alias in a package object's TASTy and accepts its target only
+/// when exactly one plausible binary name is present on the configured
+/// classpath. Bare names in alias RHS trees can be relative to the defining
+/// package, so both the decoded name and that package-qualified name are
+/// checked; ambiguity remains unresolved instead of choosing by guess.
+fn resolve_tasty_alias<E: ClassPathEntry>(
+    class_path: &E,
+    owner: &BinaryName,
+    alias: &str,
+) -> Result<Option<BinaryName>, crate::class_path::ClassPathError> {
+    if !matches!(owner.simple_name(), "package" | "package$") {
+        return Ok(None);
+    }
+    let package_object = owner
+        .as_internal()
+        .strip_suffix('$')
+        .unwrap_or(owner.as_internal());
+    let package_tasty = class_path.find_class(&BinaryName::from_internal(package_object))?;
+    let Some(resource) = package_tasty.filter(|resource| resource.format() == ClassFormat::Tasty)
+    else {
+        return Ok(None);
+    };
+    let Ok(file) = dotty_tasty::tasty::TastyFile::parse_scala_3_9(resource.bytes()) else {
+        return Ok(None);
+    };
+    let package = owner.package_path();
+    let Some(candidate) = tasty_symbol::resolve_type_alias_candidate(&file, alias, package) else {
+        return Ok(None);
+    };
+
+    let raw = candidate.clone();
+    let relative = if package.is_empty() || raw.as_internal().starts_with(&format!("{package}/")) {
+        None
+    } else {
+        Some(BinaryName::from_internal(format!(
+            "{package}/{}",
+            raw.as_internal()
+        )))
+    };
+    let mut resolved = None;
+    for candidate in std::iter::once(raw).chain(relative) {
+        if class_path.find_class(&candidate)?.is_some() {
+            if resolved.is_some() {
+                return Ok(None);
+            }
+            resolved = Some(candidate);
+        }
+    }
+    Ok(resolved)
+}
+
 /// Loads `.class`/`.tasty`-backed classes from a [`ClassPathEntry`] into a
 /// [`SemanticStore`], caching results in a `ClassRepository`.
 ///
@@ -833,8 +884,22 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         bytes: &[u8],
         resource_origin: ClassOrigin,
     ) -> Result<SymbolId, ClassLoadError> {
-        let decoded = tasty_symbol::decode(bytes, name)
-            .map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
+        let mut alias_error = None;
+        let class_path = &self.class_path;
+        let decoded = tasty_symbol::decode_with_alias_resolver(bytes, name, |owner, alias| {
+            match resolve_tasty_alias(class_path, owner, alias) {
+                Ok(target) => target,
+                Err(error) => {
+                    alias_error = Some(error);
+                    None
+                }
+            }
+        });
+        if let Some(error) = alias_error {
+            return Err(ClassLoadError::Io(name.clone(), Rc::new(error)));
+        }
+        let decoded =
+            decoded.map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
 
         let origin = SymbolOrigin::Tasty(self.store.origins.register_tasty());
         let (class_symbol, declarations) = self.enter_class(name, decoded.flags, origin);
@@ -2176,7 +2241,6 @@ mod tests {
     use crate::class_path::{
         ClassFormat, ClassOrigin, ClassPathError, ClassResource, CompositeClassPath,
     };
-    use crate::tasty_symbol::TastyDecodeError;
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -4598,31 +4662,27 @@ mod tests {
         assert!(matches!(error, ClassLoadError::DependencyFailure { .. }));
     }
 
-    /// End-to-end regression for `resolve_reference_name`
-    /// (`tasty_symbol.rs`): loads the real `scala/io/Source.tasty`
-    /// fixture through a full `ClassLoader`. `Closeable`'s own reference
-    /// carries a real `TERMREFpkg` prefix and would resolve to the real
-    /// `java/io/Closeable` classpath `Symbol` (that same real-classpath-
-    /// resolution proof, via `Dog`/`Animal`'s own real `TERMREFpkg`
-    /// mixin, still stands end-to-end in `tasty_loading.rs`'s
-    /// `loads_dog_with_animal_resolved_through_tasty_as_a_real_interface`
-    /// — `Dog.tasty` has no implicit-import mixin) — but `Source` also
-    /// mixes in `Iterator`, an unresolvable implicit-import reference
-    /// (`tasty_symbol::tests::decoding_fails_when_a_generic_mixins_tycon_is_an_unresolvable_implicit_import_reference`
-    /// documents this at the decode-only level), so loading `Source`
-    /// itself now fails outright rather than silently entering a
-    /// same-package-guessed `Iterator` dependency, per the same
-    /// explicit-unresolved-over-misleading-guess reasoning.
+    /// The generic `Iterator` mixin in `Source.tasty` is an alias owned by
+    /// `scala.package$`. The loader follows the alias definition and verifies
+    /// its target against the configured classpath.
     #[test]
-    fn loading_source_tasty_fails_on_its_unresolvable_iterator_mixin() {
+    fn loading_source_tasty_resolves_iterator_through_package_alias() {
         let mut tasty = HashMap::new();
         tasty.insert(
             BinaryName::from_internal("Source"),
             dotty_tasty_fixture_bytes("scala3-library/scala/io/Source.tasty"),
         );
+        tasty.insert(
+            BinaryName::from_internal("scala/package"),
+            dotty_tasty_fixture_bytes("scala3-library/scala/package.tasty"),
+        );
 
         let mut classes = HashMap::new();
-        for stub in ["java/lang/Object", "Iterator", "java/io/Closeable"] {
+        for stub in [
+            "java/lang/Object",
+            "scala/collection/Iterator",
+            "java/io/Closeable",
+        ] {
             classes.insert(BinaryName::from_internal(stub), synthetic_class(stub, None));
         }
 
@@ -4633,15 +4693,45 @@ mod tests {
 
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(class_path, &mut store);
-        let error = loader
+        let source = loader
             .load_class(&BinaryName::from_internal("Source"))
-            .expect_err("Source should fail to load, via its own unresolved Iterator mixin");
-        drop(loader);
-
+            .expect("Source should load through its package-object Iterator alias");
         assert!(matches!(
-            error,
-            ClassLoadError::InvalidTastyFile(_, TastyDecodeError::UnresolvedSupertype)
+            loader
+                .repository
+                .get(&BinaryName::from_internal("scala/collection/Iterator")),
+            Some(ClassEntry::Loaded(iterator)) if *iterator != source
         ));
+    }
+
+    #[test]
+    fn package_alias_stays_unresolved_when_two_classpath_targets_match() {
+        let mut tasty = HashMap::new();
+        tasty.insert(
+            BinaryName::from_internal("scala/package"),
+            dotty_tasty_fixture_bytes("scala3-library/scala/package.tasty"),
+        );
+        let mut classes = HashMap::new();
+        for target in ["collection/Iterator", "scala/collection/Iterator"] {
+            classes.insert(
+                BinaryName::from_internal(target),
+                synthetic_class(target, None),
+            );
+        }
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(tasty)),
+            Box::new(InMemoryClassPath(classes)),
+        ]);
+
+        assert_eq!(
+            resolve_tasty_alias(
+                &class_path,
+                &BinaryName::from_internal("scala/package$"),
+                "Iterator"
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]
