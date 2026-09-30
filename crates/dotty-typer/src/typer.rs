@@ -20611,6 +20611,8 @@ mod tests {
             typer.store().types.get(typer.typed_ast().get(rhs).ty),
             Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == parameter
         ));
+        assert_eq!(typer.complete_symbol(method).unwrap(), signature);
+        assert!(typer.inferred_method_results_in_progress.is_empty());
         assert_eq!(
             typer.type_expression(block_tree, context).unwrap(),
             typed_block
