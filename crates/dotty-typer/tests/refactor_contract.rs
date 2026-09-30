@@ -72,6 +72,24 @@ impl Fixture {
             .collect()
     }
 
+    fn declaration_tree(&self, name: &str, kind: SymbolKind) -> TreeId<Untyped> {
+        self.ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let declaration_name = match &node.kind {
+                    TreeKind::ValDef(definition) => definition.name.as_name(),
+                    TreeKind::DefDef(definition) => definition.name.as_name(),
+                    _ => return None,
+                };
+                if self.store.names.resolve(declaration_name.text()) != name {
+                    return None;
+                }
+                let symbol = self.index.symbol_at(SOURCE, tree)?;
+                (self.store.symbols.get(symbol).kind == kind).then_some(tree)
+            })
+            .expect("expected source declaration tree")
+    }
+
     fn method(&self, name: &str) -> (TreeId<Untyped>, SymbolId, TreeId<Untyped>) {
         let matches = self.methods_named(name);
         assert_eq!(matches.len(), 1, "expected one method named {name}");
@@ -142,9 +160,175 @@ fn normalized_errors_keep_variants_and_semantic_payloads() {
     let error = typer.type_expression(rhs, context).unwrap_err();
 
     assert_eq!(
-        error_snapshot(&error),
+        error_snapshot(&typer, &error),
         "ApplicationArityMismatch(expected=1,actual=0)"
     );
+}
+
+#[test]
+fn local_val_shadows_a_method_parameter() {
+    let mut fixture =
+        Fixture::new("class C { def use(value: Int): Int = { val value = 2; value } }");
+    let (method_tree, method, rhs) = fixture.method("use");
+    let parameter_tree = match &fixture.ast.get(method_tree).kind {
+        TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+        _ => unreachable!(),
+    };
+    let parameter = fixture.index.symbol_at(SOURCE, parameter_tree).unwrap();
+    let local_tree = fixture
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::ValDef(definition) = &node.kind else {
+                return None;
+            };
+            (fixture
+                .store
+                .names
+                .resolve(definition.name.as_name().text())
+                == "value"
+                && fixture.index.symbol_at(SOURCE, tree).is_none())
+            .then_some(tree)
+        })
+        .unwrap();
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+    let local = typer.local_symbol_at(SOURCE, local_tree).unwrap();
+    let block_expr = match &typer.typed_ast().get(typed).kind {
+        TreeKind::Block(block) => block.expr,
+        _ => panic!("method body should remain a block"),
+    };
+
+    assert_ne!(local, parameter);
+    assert_eq!(term_ref_symbol(&typer, block_expr), Some(local));
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(block_expr).ty),
+        "TermRef(Local:C.use.value)"
+    );
+}
+
+#[test]
+fn method_parameter_shadows_a_class_member() {
+    let mut fixture =
+        Fixture::new("class C { val value: Int = 1; def use(value: Int): Int = value }");
+    let (method_tree, method, rhs) = fixture.method("use");
+    let parameter_tree = match &fixture.ast.get(method_tree).kind {
+        TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+        _ => unreachable!(),
+    };
+    let parameter = fixture.index.symbol_at(SOURCE, parameter_tree).unwrap();
+    let field_tree = fixture.declaration_tree("value", SymbolKind::Field);
+    let field = fixture.index.symbol_at(SOURCE, field_tree).unwrap();
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+
+    assert_ne!(parameter, field);
+    assert_eq!(term_ref_symbol(&typer, typed), Some(parameter));
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(typed).ty),
+        "TermRef(Parameter:C.use.value)"
+    );
+}
+
+#[test]
+fn local_method_forward_reference_resolves_to_its_later_declaration() {
+    let mut fixture = Fixture::new(
+        "object C { def outer: Int = { val before = later(); def later(): Int = 1; before } }",
+    );
+    let (_, method, rhs) = fixture.method("outer");
+    let later_tree = fixture
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (fixture
+                .store
+                .names
+                .resolve(definition.name.as_name().text())
+                == "later")
+                .then_some(tree)
+        })
+        .unwrap();
+    let reference_tree = fixture
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::Ident(ident) = &node.kind else {
+                return None;
+            };
+            (fixture.store.names.resolve(ident.name.text()) == "later").then_some(tree)
+        })
+        .unwrap();
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    typer.type_expression(rhs, context).unwrap();
+    let local_method = typer.local_method_symbol_at(SOURCE, later_tree).unwrap();
+    let typed_reference = typer
+        .source_typed_index()
+        .get(SOURCE, reference_tree)
+        .unwrap();
+
+    assert_eq!(term_ref_symbol(&typer, typed_reference), Some(local_method));
+    assert_eq!(symbol_label(&typer, local_method), "Method:C$.outer.later");
+}
+
+#[test]
+fn nested_block_declarations_do_not_leak_to_the_outer_block() {
+    let mut fixture =
+        Fixture::new("class C { def use: Int = { { val hidden = 1; hidden }; hidden } }");
+    let (_, method, rhs) = fixture.method("use");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+
+    let error = typer.type_expression(rhs, context).unwrap_err();
+
+    assert_eq!(error_snapshot(&typer, &error), "TermNameNotFound(hidden)");
+}
+
+#[test]
+fn imported_source_name_is_used_after_local_scopes_miss() {
+    let mut fixture = Fixture::new(
+        "object Library { val answer: Int = 42 }; object User { import Library.answer; def fallback: Int = answer; def local: Int = { val answer = 1; answer } }",
+    );
+    let (_, fallback_method, fallback_rhs) = fixture.method("fallback");
+    let (_, local_method, local_rhs) = fixture.method("local");
+    let imported = fixture.declaration_tree("answer", SymbolKind::Field);
+    let imported_symbol = fixture.index.symbol_at(SOURCE, imported).unwrap();
+    let local_tree = fixture
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::ValDef(definition) = &node.kind else {
+                return None;
+            };
+            (fixture
+                .store
+                .names
+                .resolve(definition.name.as_name().text())
+                == "answer"
+                && fixture.index.symbol_at(SOURCE, tree).is_none())
+            .then_some(tree)
+        })
+        .unwrap();
+    let mut typer = fixture.typer();
+    let fallback_context = typer.expression_context_for(fallback_method).unwrap();
+    let fallback = typer
+        .type_expression(fallback_rhs, fallback_context)
+        .unwrap();
+    let local_context = typer.expression_context_for(local_method).unwrap();
+    let local = typer.type_expression(local_rhs, local_context).unwrap();
+    let local_symbol = typer.local_symbol_at(SOURCE, local_tree).unwrap();
+
+    assert_eq!(term_ref_symbol(&typer, fallback), Some(imported_symbol));
+    let local_expr = match &typer.typed_ast().get(local).kind {
+        TreeKind::Block(block) => block.expr,
+        _ => panic!("local method body should remain a block"),
+    };
+    assert_eq!(term_ref_symbol(&typer, local_expr), Some(local_symbol));
 }
 
 fn tree_snapshot(typer: &SourceTyper<'_>, tree: TreeId<Typed>) -> String {
@@ -484,7 +668,7 @@ fn error_variant(error: &TyperError) -> String {
     debug[..end].trim().to_owned()
 }
 
-fn error_snapshot(error: &TyperError) -> String {
+fn error_snapshot(typer: &SourceTyper<'_>, error: &TyperError) -> String {
     match error {
         TyperError::ApplicationArityMismatch {
             expected, actual, ..
@@ -492,6 +676,16 @@ fn error_snapshot(error: &TyperError) -> String {
             "{}(expected={expected},actual={actual})",
             error_variant(error)
         ),
+        TyperError::TermNameNotFound { name: missing, .. } => {
+            format!("TermNameNotFound({})", name(typer, missing.text()))
+        }
         _ => error_variant(error),
+    }
+}
+
+fn term_ref_symbol(typer: &SourceTyper<'_>, tree: TreeId<Typed>) -> Option<SymbolId> {
+    match typer.store().types.get(typer.typed_ast().get(tree).ty) {
+        Type::TermRef { target, .. } => target.symbol(),
+        _ => None,
     }
 }
