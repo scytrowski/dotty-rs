@@ -180,6 +180,7 @@ where
         let mut selectors = Vec::new();
         let mut names_allowed = true;
         let mut expect_selector = true;
+        let mut trailing_comma = false;
 
         while !matches!(
             self.current().kind,
@@ -187,6 +188,7 @@ where
         ) {
             if expect_selector && self.current().kind == TokenKind::Punctuation(Punctuation::Comma)
             {
+                trailing_comma = false;
                 let position = self.current_span();
                 self.advance();
                 if !matches!(
@@ -205,6 +207,8 @@ where
             if !expect_selector {
                 if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                     expect_selector = true;
+                    trailing_comma =
+                        self.current().kind == TokenKind::Punctuation(Punctuation::RightBrace);
                     continue;
                 }
                 self.report(
@@ -248,9 +252,10 @@ where
             names_allowed &= !wildcard;
             selectors.push(selector);
             expect_selector = false;
+            trailing_comma = false;
         }
 
-        if expect_selector {
+        if expect_selector && !trailing_comma {
             let position = self.current_span();
             self.report(
                 ParseDiagnosticKind::ExpectedToken,
@@ -757,8 +762,73 @@ mod tests {
     }
 
     #[test]
-    fn diagnoses_a_trailing_comma_in_braced_selectors() {
+    fn diagnoses_repeated_commas_before_the_closing_brace() {
         assert_malformed_selector_list(
+            "import foo.{bar,,}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Punctuation(Punctuation::Comma), 15, 16),
+                token(TokenKind::Punctuation(Punctuation::Comma), 16, 17),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+        );
+    }
+
+    #[test]
+    fn diagnoses_a_missing_selector_between_commas_and_continues() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.{bar,,baz}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Punctuation(Punctuation::Comma), 15, 16),
+                token(TokenKind::Punctuation(Punctuation::Comma), 16, 17),
+                token(TokenKind::Identifier, 17, 20),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected an import tree");
+        };
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedToken)
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(import.selectors.len(), 3);
+
+        let selector_names = import
+            .selectors
+            .iter()
+            .map(|selector| selector.imported.text())
+            .collect::<Vec<_>>();
+        drop(parser);
+        let selector_names = selector_names
+            .into_iter()
+            .map(|name| names.resolve(name).to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(selector_names, ["bar", "", "baz"]);
+    }
+
+    #[test]
+    fn accepts_a_trailing_comma_in_braced_selectors() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
             "import foo.{bar,}",
             vec![
                 token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
@@ -770,7 +840,43 @@ mod tests {
                 token(TokenKind::Punctuation(Punctuation::RightBrace), 16, 17),
                 token(TokenKind::Eof, 17, 17),
             ],
+            &mut names,
         );
+
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected an import tree");
+        };
+        assert_eq!(import.selectors.len(), 1);
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn accepts_a_trailing_comma_in_braced_export_selectors() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "export foo.{bar,}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Export), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Punctuation(Punctuation::Comma), 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let ids = parser.parse_export_clause(Location::Elsewhere);
+        let TreeKind::Export(export) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected an export tree");
+        };
+        assert_eq!(export.selectors.len(), 1);
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
