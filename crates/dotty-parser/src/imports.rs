@@ -781,7 +781,8 @@ mod tests {
 
     #[test]
     fn diagnoses_a_missing_selector_between_commas_and_continues() {
-        assert_malformed_selector_list(
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
             "import foo.{bar,,baz}",
             vec![
                 token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
@@ -795,7 +796,33 @@ mod tests {
                 token(TokenKind::Punctuation(Punctuation::RightBrace), 20, 21),
                 token(TokenKind::Eof, 21, 21),
             ],
+            &mut names,
         );
+
+        let ids = parser.parse_import_clause(Location::Elsewhere);
+        let TreeKind::Import(import) = &parser.ast().get(ids[0]).kind else {
+            panic!("expected an import tree");
+        };
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedToken)
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(import.selectors.len(), 3);
+
+        let selector_names = import
+            .selectors
+            .iter()
+            .map(|selector| selector.imported.text())
+            .collect::<Vec<_>>();
+        drop(parser);
+        let selector_names = selector_names
+            .into_iter()
+            .map(|name| names.resolve(name).to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(selector_names, ["bar", "", "baz"]);
     }
 
     #[test]
