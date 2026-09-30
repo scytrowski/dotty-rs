@@ -1024,15 +1024,21 @@ fn resolve_applied_type_name_in_package(
     resolve_parent_name_in_package(file, &tycon, package, package_scope)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TypeAliasTarget {
+    Alias { owner: BinaryName, name: String },
+    Candidate(BinaryName),
+}
+
 /// Reads a type-alias definition from a `.tasty` file and reduces its
-/// right-hand side to a candidate name. The name may still be relative to
-/// `current_package`; the classpath-aware caller validates the candidate
-/// before returning it as a resolved parent.
-pub(crate) fn resolve_type_alias_candidate(
+/// right-hand side to either another package-object alias or a candidate
+/// name. The classpath-aware caller follows aliases and validates the final
+/// candidate before returning it as a resolved parent.
+pub(crate) fn resolve_type_alias_target(
     file: &TastyFile<'_>,
     alias_name: &str,
     current_package: &str,
-) -> Option<BinaryName> {
+) -> Option<TypeAliasTarget> {
     for node in file.ast_address_index().ok()?.iter() {
         if node.tag != TYPEDEF_TAG {
             continue;
@@ -1055,9 +1061,28 @@ pub(crate) fn resolve_type_alias_candidate(
             RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG => continue,
             rhs => rhs,
         };
-        return resolve_parent_name_in_package(file, &rhs, current_package, Some(current_package));
+        if let Some((owner, name)) = unresolved_alias_reference(file, &rhs)
+            && matches!(owner.simple_name(), "package" | "package$")
+        {
+            return Some(TypeAliasTarget::Alias { owner, name });
+        }
+        return resolve_parent_name_in_package(file, &rhs, current_package, Some(current_package))
+            .map(TypeAliasTarget::Candidate);
     }
     None
+}
+
+/// Compatibility helper for unit coverage that only needs a direct target.
+#[cfg(test)]
+fn resolve_type_alias_candidate(
+    file: &TastyFile<'_>,
+    alias_name: &str,
+    current_package: &str,
+) -> Option<BinaryName> {
+    match resolve_type_alias_target(file, alias_name, current_package)? {
+        TypeAliasTarget::Candidate(candidate) => Some(candidate),
+        TypeAliasTarget::Alias { .. } => None,
+    }
 }
 
 /// Reads a raw AST name-table reference: AST fields such as

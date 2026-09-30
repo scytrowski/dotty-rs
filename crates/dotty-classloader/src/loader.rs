@@ -28,7 +28,7 @@ use dotty_core::{
     SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TermName, Type, TypeId, TypeName,
     TypeParam, Visibility,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// Resolves an alias in a package object's TASTy and accepts its target only
@@ -41,6 +41,52 @@ fn resolve_tasty_alias<E: ClassPathEntry>(
     owner: &BinaryName,
     alias: &str,
 ) -> Result<Option<BinaryName>, crate::class_path::ClassPathError> {
+    let Some((target_owner, candidate)) =
+        follow_tasty_alias_chain(owner.clone(), alias.to_owned(), |owner, alias| {
+            resolve_tasty_alias_target(class_path, owner, alias)
+        })?
+    else {
+        return Ok(None);
+    };
+    validate_alias_candidate(class_path, target_owner.package_path(), candidate)
+}
+
+fn follow_tasty_alias_chain<E>(
+    owner: BinaryName,
+    alias: String,
+    mut lookup: impl FnMut(&BinaryName, &str) -> Result<Option<tasty_symbol::TypeAliasTarget>, E>,
+) -> Result<Option<(BinaryName, BinaryName)>, E> {
+    let mut seen = HashSet::new();
+    let mut owner = owner;
+    let mut alias = alias;
+    const MAX_PACKAGE_ALIAS_DEPTH: usize = 64;
+
+    for _ in 0..MAX_PACKAGE_ALIAS_DEPTH {
+        if !seen.insert((owner.clone(), alias.clone())) {
+            return Ok(None);
+        }
+        match lookup(&owner, &alias)? {
+            None => return Ok(None),
+            Some(tasty_symbol::TypeAliasTarget::Alias {
+                owner: next_owner,
+                name: next_alias,
+            }) => {
+                owner = next_owner;
+                alias = next_alias;
+            }
+            Some(tasty_symbol::TypeAliasTarget::Candidate(candidate)) => {
+                return Ok(Some((owner, candidate)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn resolve_tasty_alias_target<E: ClassPathEntry>(
+    class_path: &E,
+    owner: &BinaryName,
+    alias: &str,
+) -> Result<Option<tasty_symbol::TypeAliasTarget>, crate::class_path::ClassPathError> {
     if !matches!(owner.simple_name(), "package" | "package$") {
         return Ok(None);
     }
@@ -56,11 +102,18 @@ fn resolve_tasty_alias<E: ClassPathEntry>(
     let Ok(file) = dotty_tasty::tasty::TastyFile::parse_scala_3_9(resource.bytes()) else {
         return Ok(None);
     };
-    let package = owner.package_path();
-    let Some(candidate) = tasty_symbol::resolve_type_alias_candidate(&file, alias, package) else {
-        return Ok(None);
-    };
+    Ok(tasty_symbol::resolve_type_alias_target(
+        &file,
+        alias,
+        owner.package_path(),
+    ))
+}
 
+fn validate_alias_candidate<E: ClassPathEntry>(
+    class_path: &E,
+    package: &str,
+    candidate: BinaryName,
+) -> Result<Option<BinaryName>, crate::class_path::ClassPathError> {
     let raw = candidate.clone();
     let relative = if package.is_empty() || raw.as_internal().starts_with(&format!("{package}/")) {
         None
@@ -4732,6 +4785,68 @@ mod tests {
             .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn follows_a_two_hop_package_alias_chain() {
+        let first_owner = BinaryName::from_internal("scala/package$");
+        let second_owner = BinaryName::from_internal("library/package$");
+        let target_owner = BinaryName::from_internal("library/package$");
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            (first_owner.clone(), "First".to_owned()),
+            tasty_symbol::TypeAliasTarget::Alias {
+                owner: second_owner.clone(),
+                name: "Second".to_owned(),
+            },
+        );
+        aliases.insert(
+            (second_owner.clone(), "Second".to_owned()),
+            tasty_symbol::TypeAliasTarget::Candidate(BinaryName::from_internal(
+                "collection/Iterator",
+            )),
+        );
+
+        let resolved = follow_tasty_alias_chain(first_owner, "First".to_owned(), |owner, alias| {
+            Ok::<_, ()>(aliases.get(&(owner.clone(), alias.to_owned())).cloned())
+        })
+        .unwrap();
+
+        assert_eq!(
+            resolved,
+            Some((
+                target_owner,
+                BinaryName::from_internal("collection/Iterator")
+            ))
+        );
+    }
+
+    #[test]
+    fn stops_a_cyclic_package_alias_chain() {
+        let first_owner = BinaryName::from_internal("scala/package$");
+        let second_owner = BinaryName::from_internal("library/package$");
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            (first_owner.clone(), "First".to_owned()),
+            tasty_symbol::TypeAliasTarget::Alias {
+                owner: second_owner.clone(),
+                name: "Second".to_owned(),
+            },
+        );
+        aliases.insert(
+            (second_owner.clone(), "Second".to_owned()),
+            tasty_symbol::TypeAliasTarget::Alias {
+                owner: first_owner.clone(),
+                name: "First".to_owned(),
+            },
+        );
+
+        let resolved = follow_tasty_alias_chain(first_owner, "First".to_owned(), |owner, alias| {
+            Ok::<_, ()>(aliases.get(&(owner.clone(), alias.to_owned())).cloned())
+        })
+        .unwrap();
+
+        assert_eq!(resolved, None);
     }
 
     #[test]
