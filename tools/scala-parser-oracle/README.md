@@ -34,6 +34,16 @@ that condition while deliberately skipping tree equivalence for those fixtures.
 The capture-checking fixture guards against regressions in the initialized
 definitions needed to build retaining annotations with multiple references.
 
+For retaining capture suffixes (`T^` and `T^{...}`), the Scala parser builds
+generated annotation-constructor application trees while the Rust AST stores
+the equivalent annotation as `New` with an applied `retains` type. Both
+renderers normalize only those generated wrappers to `Annotated` with a
+`Retains` child. Capture references and source spans remain compared. Dotty's
+synthetic argument for an explicit empty set is normalized to no capture
+children; the Rust AST represents the same empty set as `retains[Nothing]`.
+This keeps the differential check focused on source syntax rather than
+compiler-generated constructor scaffolding.
+
 With no argument, `run` reads the source from standard input. The output keeps
 only parser-facing information: node kind, source span, names, literal source
 text, application kind, operators, and child nodes. It does not use `Tree.show`, because that output is a

@@ -78,6 +78,13 @@ object Main:
       source: String,
       placeholderBase: Int
   ): String =
+    normalizedCaptureRetains(tree) match
+      case Some((parent, explicit, captures)) =>
+        val renderedCaptures = captures.map(capture => render(capture, source, placeholderBase)).mkString(",")
+        return
+          s"""{"kind":"Annotated","span":${span(tree, source)},"children":[${render(parent, source, placeholderBase)},{"kind":"Retains","span":${span(tree, source)},"explicit":$explicit,"children":[$renderedCaptures]}]}"""
+      case None => ()
+
     val fields = collection.mutable.ArrayBuffer.empty[String]
     val normalizedKind = tree match
       case tuple: dotty.tools.dotc.ast.untpd.Tuple if childTrees(tuple).isEmpty => "Literal"
@@ -249,6 +256,57 @@ object Main:
       .mkString("[", ",", "]")
     fields += field("children", children)
     fields.mkString("{", ",", "}")
+
+  private def normalizedCaptureRetains(
+      tree: dotty.tools.dotc.ast.Trees.Tree[?]
+  ): Option[(dotty.tools.dotc.ast.Trees.Tree[?], Boolean, List[dotty.tools.dotc.ast.Trees.Tree[?]])] =
+    if tree.getClass.getSimpleName.stripSuffix("$") != "Annotated" then None
+    else
+      childTrees(tree) match
+        case parent :: annotation :: Nil =>
+          captureRetainsArguments(annotation).map: (explicit, captures) =>
+            (parent, explicit, captures)
+        case _ => None
+
+  private def captureRetainsArguments(
+      annotation: dotty.tools.dotc.ast.Trees.Tree[?]
+  ): Option[(Boolean, List[dotty.tools.dotc.ast.Trees.Tree[?]])] =
+    if annotation.getClass.getSimpleName.stripSuffix("$") != "Apply" then None
+    else
+      childTrees(annotation).headOption.flatMap: typeApply =>
+        if !Set("TypeApply", "AppliedTypeTree").contains(typeApply.getClass.getSimpleName.stripSuffix("$")) then None
+        else
+          childTrees(typeApply).headOption.flatMap: constructor =>
+            constructor match
+              case select: dotty.tools.dotc.ast.Trees.Select[?]
+                  if select.name.toString == "<init>" =>
+                val newTree = childTrees(constructor).headOption
+                  .filter(_.getClass.getSimpleName.stripSuffix("$") == "New")
+                newTree.toList
+                  .flatMap(childTrees)
+                  .headOption
+                  .flatMap(typePath)
+                  .map(_.stripPrefix("_root_."))
+                  .filter(name => Set("scala.annotation.retains", "scala.annotation.retainsCap").contains(name))
+                  .map: name =>
+                    val explicit = name == "scala.annotation.retains"
+                    val captures = if explicit then nestedCaptureReferences(typeApply) else Nil
+                    (explicit, captures)
+              case _ => None
+
+  private def typePath(tree: dotty.tools.dotc.ast.Trees.Tree[?]): Option[String] = tree match
+    case ident: dotty.tools.dotc.ast.Trees.Ident[?] => Some(ident.name.toString)
+    case select: dotty.tools.dotc.ast.Trees.Select[?] =>
+      childTrees(select).headOption.flatMap(typePath).map(_ + "." + select.name.toString)
+    case _ => None
+
+  private def nestedCaptureReferences(
+      tree: dotty.tools.dotc.ast.Trees.Tree[?]
+  ): List[dotty.tools.dotc.ast.Trees.Tree[?]] =
+    tree.getClass.getSimpleName.stripSuffix("$") match
+      case "SingletonTypeTree" => childTrees(tree).headOption.toList
+      case "TypeTree" | "EmptyTree" => Nil
+      case _ => childTrees(tree).flatMap(nestedCaptureReferences)
 
   private def renderDefinitionMetadata(
       mods: dotty.tools.dotc.ast.untpd.Modifiers,
