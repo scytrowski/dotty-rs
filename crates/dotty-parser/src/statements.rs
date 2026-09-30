@@ -594,20 +594,95 @@ where
         marker_start: u32,
         include_marked: bool,
     ) -> Option<TreeId<Untyped>> {
-        let root_range = self.ast.get(tree).position?.span().range();
-        self.ast
-            .iter()
-            .filter_map(|(candidate, node)| {
-                let range = node.position?.span().range();
-                (range.start() >= root_range.start()
-                    && range.end() <= root_range.end()
-                    && range.end() <= marker_start
-                    && (include_marked || !self.end_marked_trees.contains(&candidate))
-                    && self.end_marker_matches(candidate, target_kind, target_text))
-                .then_some((range.start(), u32::MAX - range.end(), candidate))
+        let node = self.ast.get(tree);
+        let children: Vec<TreeId<Untyped>> = match &node.kind {
+            TreeKind::Block(block) => vec![block.expr],
+            TreeKind::If(conditional) => {
+                // An end marker after a nested branch closes that branch's
+                // construct first; the next marker can then close this `if`.
+                return [conditional.then_branch, conditional.else_branch]
+                    .into_iter()
+                    .filter_map(|child| {
+                        self.end_marker_owner(
+                            child,
+                            target_kind,
+                            target_text,
+                            marker_start,
+                            include_marked,
+                        )
+                    })
+                    .max_by_key(|child| {
+                        self.ast
+                            .get(*child)
+                            .position
+                            .map(|position| position.span().range().start())
+                    })
+                    .or_else(|| {
+                        self.end_marker_is_eligible(
+                            tree,
+                            target_kind,
+                            target_text,
+                            marker_start,
+                            include_marked,
+                        )
+                        .then_some(tree)
+                    });
+            }
+            TreeKind::Match(matching) => matching.cases.last().copied().into_iter().collect(),
+            TreeKind::CaseDef(case) => vec![case.body],
+            TreeKind::Try(try_expr) => vec![
+                try_expr
+                    .finalizer
+                    .or_else(|| try_expr.cases.last().copied())
+                    .unwrap_or(try_expr.expr),
+            ],
+            TreeKind::While(loop_expr) => vec![loop_expr.body],
+            _ => Vec::new(),
+        };
+
+        children
+            .into_iter()
+            .filter_map(|child| {
+                self.end_marker_owner(
+                    child,
+                    target_kind,
+                    target_text,
+                    marker_start,
+                    include_marked,
+                )
             })
-            .max_by_key(|(start, shorter_end, _)| (*start, *shorter_end))
-            .map(|(_, _, candidate)| candidate)
+            .max_by_key(|child| {
+                self.ast
+                    .get(*child)
+                    .position
+                    .map(|position| position.span().range().start())
+            })
+            .or_else(|| {
+                self.end_marker_is_eligible(
+                    tree,
+                    target_kind,
+                    target_text,
+                    marker_start,
+                    include_marked,
+                )
+                .then_some(tree)
+            })
+    }
+
+    fn end_marker_is_eligible(
+        &self,
+        tree: TreeId<Untyped>,
+        target_kind: TokenKind,
+        target_text: &str,
+        marker_start: u32,
+        include_marked: bool,
+    ) -> bool {
+        self.ast
+            .get(tree)
+            .position
+            .is_some_and(|position| position.span().range().end() <= marker_start)
+            && (include_marked || !self.end_marked_trees.contains(&tree))
+            && self.end_marker_matches(tree, target_kind, target_text)
     }
 
     fn marker_target_text(&self, kind: TokenKind, span: TextRange) -> String {
@@ -933,6 +1008,34 @@ mod tests {
         };
         assert_eq!(parser.names.resolve(result.name.text()), "y");
         assert!(parser.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn end_marker_owner_does_not_reach_an_earlier_block_sibling() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ if a then x; y }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Keyword(HardKeyword::If), 2, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Keyword(HardKeyword::Then), 7, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 13, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+        let block = parser.expr();
+
+        assert!(matches!(parser.ast.get(block).kind, TreeKind::Block(_)));
+        assert!(
+            parser
+                .end_marker_owner(block, TokenKind::Keyword(HardKeyword::If), "if", 18, false,)
+                .is_none()
+        );
     }
 
     #[test]
