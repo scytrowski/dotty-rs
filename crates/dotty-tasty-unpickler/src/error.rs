@@ -25,6 +25,13 @@ pub enum UnpickleError {
     /// A second declaration scope was entered for a symbol that already owns
     /// one.
     DuplicateScope { symbol: SymbolId },
+    /// A class-like symbol was discovered with a companion that conflicts
+    /// with a link already published on either endpoint.
+    ConflictingCompanion {
+        symbol: SymbolId,
+        existing: SymbolId,
+        candidate: SymbolId,
+    },
     /// A name reference does not resolve to a name-table entry, or resolves
     /// through an unreasonably deep (possibly cyclic) chain of entries.
     InvalidNameReference { reference: u32 },
@@ -625,6 +632,17 @@ impl fmt::Display for UnpickleError {
                 "a declaration scope was already entered for symbol {}",
                 symbol.index()
             ),
+            Self::ConflictingCompanion {
+                symbol,
+                existing,
+                candidate,
+            } => write!(
+                formatter,
+                "symbol {} already links to companion {}, conflicting with {}",
+                symbol.index(),
+                existing.index(),
+                candidate.index()
+            ),
         }
     }
 }
@@ -637,6 +655,7 @@ impl std::error::Error for UnpickleError {
             Self::RebindFailed { error, .. } => Some(error),
             Self::DuplicateDefinition { .. }
             | Self::DuplicateScope { .. }
+            | Self::ConflictingCompanion { .. }
             | Self::InvalidNameReference { .. }
             | Self::UnsupportedName { .. }
             | Self::UnsupportedQualifier { .. }

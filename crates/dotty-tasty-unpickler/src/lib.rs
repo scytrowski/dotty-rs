@@ -24,6 +24,7 @@ mod annotated;
 mod ast_view;
 mod binders;
 mod class;
+mod companions;
 mod completion;
 mod constructor;
 mod discovery;
@@ -39,6 +40,7 @@ mod reachability;
 mod recursive;
 mod refined;
 mod refinement;
+mod session;
 mod symbol_annotations;
 mod term_type;
 mod type_tree;
@@ -50,5 +52,6 @@ pub mod tasty_unpickler {
     pub use crate::error::UnpickleError;
     pub use crate::index::TastySemanticIndex;
     pub use crate::reachability::{IdentityNode, IdentityOutcome, identity_reachability};
+    pub use crate::session::TastySession;
     pub use crate::unpickler::TastyUnpickler;
 }
