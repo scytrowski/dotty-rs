@@ -835,6 +835,52 @@ mod tests {
     }
 
     #[test]
+    fn recovers_selector_match_case_without_arrow_before_following_block_statement() {
+        let source = "{ value.match { case A case B => b }; after }";
+        let tokens = vec![
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+            token(TokenKind::Identifier, 2, 7),
+            token(TokenKind::Punctuation(Punctuation::Dot), 7, 8),
+            token(TokenKind::Keyword(HardKeyword::Match), 8, 13),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 14, 15),
+            token(TokenKind::Keyword(HardKeyword::Case), 16, 20),
+            token(TokenKind::Identifier, 21, 22),
+            token(TokenKind::Keyword(HardKeyword::Case), 23, 27),
+            token(TokenKind::Identifier, 28, 29),
+            token(TokenKind::Operator, 30, 32),
+            token(TokenKind::Identifier, 33, 34),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 35, 36),
+            token(TokenKind::Punctuation(Punctuation::Semicolon), 36, 37),
+            token(TokenKind::Identifier, 38, 43),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 44, 45),
+            token(TokenKind::Eof, 45, 45),
+        ];
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(source, tokens, &mut names);
+
+        let tree = parser.expr();
+
+        let TreeKind::Block(Block { ref stats, expr }) = parser.ast().get(tree).kind else {
+            panic!("expected surrounding block");
+        };
+        assert_eq!(
+            stats.len(),
+            1,
+            "stats: {stats:?}, expr: {:?}, current: {:?}, diagnostics: {:?}",
+            parser.ast().get(expr).kind,
+            parser.current().kind,
+            parser.diagnostics()
+        );
+        let TreeKind::Match(MatchTree { ref cases, .. }) = parser.ast().get(stats[0]).kind else {
+            panic!("expected selector match");
+        };
+        assert_eq!(cases.len(), 2);
+        assert!(matches!(parser.ast().get(expr).kind, TreeKind::Ident(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(!parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn parenthesized_match_cases_stop_before_the_following_block_statement() {
         let source = "{\n  (x match\n    case A => 1\n    case _ => 2)\n  after\n}";
         let tokens = vec![
