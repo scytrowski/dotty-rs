@@ -20650,6 +20650,78 @@ mod tests {
     }
 
     #[test]
+    fn mutually_recursive_inferred_local_methods_fail_without_leaking_state() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def first = second; def second = first; first } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let first_tree = block.stats[0];
+        let second_tree = block.stats[1];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let first = typer.local_method_symbol_at(source, first_tree).unwrap();
+        let second = typer.local_method_symbol_at(source, second_tree).unwrap();
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.complete_symbol(first),
+            Err(TyperError::RecursiveInferredMethodResult { symbol }) if symbol == first
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(*typer.store().symbols.info(first), SymbolInfo::Missing);
+        assert_eq!(*typer.store().symbols.info(second), SymbolInfo::Missing);
+        assert!(typer.inferred_method_results_in_progress.is_empty());
+    }
+
+    #[test]
+    fn explicitly_typed_recursive_local_methods_still_complete() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def first: Int = second; def second: Int = first; first } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        typer.type_expression(block_tree, context).unwrap();
+
+        for method_tree in [
+            match &parsed.ast.get(block_tree).kind {
+                TreeKind::Block(block) => block.stats[0],
+                _ => unreachable!(),
+            },
+            match &parsed.ast.get(block_tree).kind {
+                TreeKind::Block(block) => block.stats[1],
+                _ => unreachable!(),
+            },
+        ] {
+            let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+            if !matches!(*typer.store().symbols.info(method), SymbolInfo::Complete(_)) {
+                panic!("explicitly typed recursive method should be complete");
+            }
+        }
+    }
+
+    #[test]
     fn inferred_generic_local_method_rebinds_result_and_supports_forward_call() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def outer: Int = { local(1); def local[A](value: A) = value; 0 } }",
