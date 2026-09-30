@@ -109,6 +109,18 @@ impl TastySemanticIndex {
         self.symbols.get(&address).copied()
     }
 
+    /// The definition address for an entered symbol, if this unit entered it.
+    /// Package symbols may be reached from more than one package node; the
+    /// lowest address is returned deterministically. Class-like owners have
+    /// one definition and use this to complete before publishing owner-local
+    /// semantic information.
+    pub(crate) fn definition_address(&self, symbol: SymbolId) -> Option<u32> {
+        self.symbols
+            .iter()
+            .filter_map(|(address, entered)| (*entered == symbol).then_some(*address))
+            .min()
+    }
+
     /// The declaration scope of `symbol`, for symbols that own one (packages
     /// and classes).
     pub fn scope_of(&self, symbol: SymbolId) -> Option<ScopeId> {

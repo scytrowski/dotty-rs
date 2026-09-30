@@ -911,12 +911,12 @@ application with other than two arguments.
 | `TYPEPARAM` | its bounds tree; bounds are reused, another type is wrapped in a fresh `AliasingBounds` |
 | non-template, non-opaque `TYPEDEF` | `toBounds` of the right-hand side: `type A = Int` is `AliasingBounds(Int)` while its right-hand side still projects to `Int` |
 
-Opaque aliases are `OpaqueAliasDeferred`; methods, constructors, classes,
-traits, modules and packages are `UnsupportedSymbolCompletion { kind }`, with no
-info written and no empty `ClassInfo`. A body is never inspected, and a
-`ByName` or methodic right-hand side of a type definition is
-`InvalidCompletedBounds`. `suppressIntoIfParam` (upstream) is not applied; no
-real case was measured, so nothing was guessed.
+Opaque aliases follow the Scala 3.9 bounds/self-type contract below. Methods,
+constructors, classes, traits, modules and packages are still refused by this
+simple completion entry point, with no info written and no empty `ClassInfo`.
+A body is never inspected, and a `ByName` or methodic right-hand side of a
+type definition is `InvalidCompletedBounds`. `suppressIntoIfParam` (upstream)
+is not applied; no real case was measured, so nothing was guessed.
 
 ### Opaque aliases (Scala 3.9 contract; implementation tracked by #529)
 

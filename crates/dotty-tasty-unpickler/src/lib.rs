@@ -35,6 +35,7 @@ mod lookup;
 mod mapping;
 mod method;
 mod names;
+mod opaque;
 mod packages;
 mod reachability;
 mod recursive;
