@@ -267,3 +267,19 @@ Recreate this report at merge revision c08a2f4880fa687167f288fc50bbc5e94a98de6a 
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-516-scala3-3.9.0.json
 ```
+
+`parser-post-issue-541-scala3-3.9.0.json` reruns the corpus after PR #538 at
+parser revision `c6061d1f4235dfb48514a0ac4e90c17df51f1cbc`, using the same
+pinned Scala source revision and 1,236-file manifest. It records 1,135 clean
+parses (91.83%), 101 recoverable files, and zero hard failures, process
+failures, panics, or hangs. The Scala oracle emitted all 1,236 files with zero
+failures. Compared with the post-#510 report, clean parses increased by eight
+and diagnostic occurrences fell by 130; `UnsupportedSyntax` fell by 135 while
+`ExpectedExpression` rose by 18. The detailed comparison is in
+[`parser-v0.1-compatibility.md`](../../docs/parser-v0.1-compatibility.md).
+Recreate it with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-541-scala3-3.9.0.json
+```
