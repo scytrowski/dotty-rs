@@ -8,10 +8,10 @@ use dotty_tasty::tasty::{
     CASEACCESSOR_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionTail, FIELDACCESSOR_TAG,
     FINAL_TAG, IdentNode, LOCAL_TAG, MUTABLE_TAG, PRIVATE_TAG, PRIVATEQUALIFIED_TAG, PROTECTED_TAG,
     PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree, Reader, ReferenceNode, SHAREDTERM_TAG,
-    SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG, StandardSection, StructuredNode, StructuredTree,
-    TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG,
-    TYPEREF_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError, TermValue,
-    VALDEF_TAG,
+    SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode,
+    StructuredTree, TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG,
+    TYPEDEF_TAG, TYPEREF_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError,
+    TermValue, VALDEF_TAG,
 };
 use std::fmt;
 
@@ -210,9 +210,21 @@ impl From<AstError> for TastyDecodeError {
 /// parent/member-type name reference is resolved relative to — see
 /// [`resolve_parent_name`]'s doc comment for why that's the right
 /// context to use.
+#[cfg(test)]
 pub(crate) fn decode(
     bytes: &[u8],
     requested: &BinaryName,
+) -> Result<DecodedTastyClass, TastyDecodeError> {
+    decode_with_alias_resolver(bytes, requested, |_, _| None)
+}
+
+/// Decodes a class while allowing the classpath owner to resolve a named
+/// alias when an otherwise real TASTy reference has a class prefix this
+/// structural decoder cannot follow (for example `scala.package$.Iterator`).
+pub(crate) fn decode_with_alias_resolver(
+    bytes: &[u8],
+    requested: &BinaryName,
+    mut resolve_alias: impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
 ) -> Result<DecodedTastyClass, TastyDecodeError> {
     let file = TastyFile::parse_scala_3_9(bytes)?;
     let index = file.ast_address_index()?;
@@ -263,7 +275,7 @@ pub(crate) fn decode(
 
     let mut parents = template.parents.iter();
     let super_class = match parents.next() {
-        Some(parent) => resolve_parent_name(&file, parent, package)
+        Some(parent) => resolve_parent_name_with_alias(&file, parent, package, &mut resolve_alias)
             .unwrap_or_else(|| BinaryName::from_internal("java/lang/Object")),
         None => BinaryName::from_internal("java/lang/Object"),
     };
@@ -271,7 +283,7 @@ pub(crate) fn decode(
     let mut interfaces = Vec::new();
     for parent in parents {
         interfaces.push(
-            resolve_parent_name(&file, parent, package)
+            resolve_parent_name_with_alias(&file, parent, package, &mut resolve_alias)
                 .ok_or(TastyDecodeError::UnresolvedSupertype)?,
         );
     }
@@ -631,14 +643,31 @@ fn decode_shared_tree<'a>(file: &TastyFile<'a>, address: u32) -> Option<RawTree<
 /// as if this function did not exist, rather than fabricating a
 /// plausible-looking but wrong answer.
 fn resolve_reference_prefix(file: &TastyFile<'_>, prefix: &RawTree<'_>) -> Option<String> {
+    resolve_reference_prefix_in_package(file, prefix, None)
+}
+
+fn resolve_reference_prefix_in_package(
+    file: &TastyFile<'_>,
+    prefix: &RawTree<'_>,
+    current_package: Option<&str>,
+) -> Option<String> {
     match prefix {
         RawTree::Leaf(term) if term.tag == TERMREFPKG_TAG => {
-            resolve_qualified_name(file, term.name_ref()?)
+            let reference = term.name_ref()?;
+            let package = resolve_qualified_name(file, reference)?;
+            match current_package {
+                Some(current)
+                    if !current.is_empty() && !package.contains('/') && package != "_root_" =>
+                {
+                    Some(format!("{current}/{package}"))
+                }
+                _ => Some(package),
+            }
         }
         RawTree::Leaf(term) if matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG) => {
             let reference = term.ast_ref()?;
             let shared = decode_shared_tree(file, reference.address)?;
-            resolve_reference_prefix(file, &shared)
+            resolve_reference_prefix_in_package(file, &shared, current_package)
         }
         _ => None,
     }
@@ -663,9 +692,10 @@ enum ReferenceResolution {
     Resolved(BinaryName),
     /// Definitely a real, post-typecheck reference (a `TERMREF`/`TYPEREF`/
     /// `TERMREFsymbol`/`TYPEREFsymbol` node), but this decoder cannot name
-    /// its prefix — real scope/import resolution is needed, which this
-    /// best-effort decoder does not have (see [`resolve_reference_prefix`]'s
-    /// doc comment for exactly which prefix shapes it does understand).
+    /// its prefix — classpath-aware alias lookup may resolve package-object
+    /// aliases, but general scope/import resolution is still outside this
+    /// best-effort decoder (see [`resolve_reference_prefix`]'s doc comment
+    /// for exactly which prefix shapes it does understand).
     Unresolved,
     /// Not a reference shape this function recognizes at all — the caller
     /// should fall back to its own heuristic exactly as if this function
@@ -691,6 +721,14 @@ enum ReferenceResolution {
 /// be a wrong answer being presented as a real one, not a best-effort
 /// fallback — see [`ReferenceResolution`]'s own doc comment.
 fn resolve_reference_name(file: &TastyFile<'_>, tree: &RawTree<'_>) -> ReferenceResolution {
+    resolve_reference_name_in_package(file, tree, None)
+}
+
+fn resolve_reference_name_in_package(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    current_package: Option<&str>,
+) -> ReferenceResolution {
     let Ok(structured) = tree.decode_structured() else {
         return ReferenceResolution::NotAReference;
     };
@@ -703,7 +741,11 @@ fn resolve_reference_name(file: &TastyFile<'_>, tree: &RawTree<'_>) -> Reference
             let Some(simple_name) = resolve_qualified_name(file, reference) else {
                 return ReferenceResolution::Unresolved;
             };
-            match resolve_reference_prefix(file, &qualifier) {
+            let prefix = match current_package {
+                Some(_) => resolve_reference_prefix_in_package(file, &qualifier, current_package),
+                None => resolve_reference_prefix(file, &qualifier),
+            };
+            match prefix {
                 Some(package) => ReferenceResolution::Resolved(BinaryName::from_internal(format!(
                     "{package}/{simple_name}"
                 ))),
@@ -715,7 +757,7 @@ fn resolve_reference_name(file: &TastyFile<'_>, tree: &RawTree<'_>) -> Reference
             ..
         }) => ReferenceResolution::Unresolved,
         StructuredTree::Ident(IdentNode { type_tree, .. }) => {
-            resolve_reference_name(file, &type_tree)
+            resolve_reference_name_in_package(file, &type_tree, current_package)
         }
         _ => ReferenceResolution::NotAReference,
     }
@@ -777,7 +819,20 @@ fn resolve_parent_name(
     parent: &RawTree<'_>,
     package: &str,
 ) -> Option<BinaryName> {
-    match resolve_reference_name(file, parent) {
+    resolve_parent_name_in_package(file, parent, package, None)
+}
+
+fn resolve_parent_name_in_package(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+    package_scope: Option<&str>,
+) -> Option<BinaryName> {
+    let reference = match package_scope {
+        Some(_) => resolve_reference_name_in_package(file, parent, package_scope),
+        None => resolve_reference_name(file, parent),
+    };
+    match reference {
         ReferenceResolution::Resolved(resolved) => return Some(resolved),
         // A real reference this decoder cannot fully qualify (an
         // implicit-import reference such as `scala.package$.Iterator`,
@@ -795,7 +850,10 @@ fn resolve_parent_name(
         .collect();
 
     if names.is_empty() {
-        return resolve_applied_type_name(file, parent, package);
+        return match package_scope {
+            Some(_) => resolve_applied_type_name_in_package(file, parent, package, package_scope),
+            None => resolve_applied_type_name(file, parent, package),
+        };
     }
 
     names.reverse();
@@ -816,6 +874,118 @@ fn resolve_parent_name(
     Some(BinaryName::from_internal(qualified))
 }
 
+fn resolve_parent_name_with_alias(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+    resolve_alias: &mut impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
+) -> Option<BinaryName> {
+    resolve_parent_name(file, parent, package).or_else(|| {
+        let (owner, alias) = unresolved_alias_reference(file, parent)?;
+        resolve_alias(&owner, &alias)
+    })
+}
+
+/// Extracts the owner and simple name of a reference that could not be
+/// resolved by the ordinary TASTy prefix reader. Applied type arguments and
+/// the `Ident` wrapper used by extends clauses are transparent here.
+fn unresolved_alias_reference(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+) -> Option<(BinaryName, String)> {
+    unresolved_alias_reference_at_depth(file, tree, 0)
+}
+
+fn unresolved_alias_reference_at_depth(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    depth: usize,
+) -> Option<(BinaryName, String)> {
+    const MAX_ALIAS_TREE_DEPTH: usize = 128;
+    if depth >= MAX_ALIAS_TREE_DEPTH {
+        return None;
+    }
+    if let RawTree::LengthNode(node) = tree {
+        if node.tag == dotty_tasty::tasty::SELECTIN_TAG {
+            let StructuredNode::SelectIn(selection) = node.decode_structured().ok()? else {
+                return None;
+            };
+            let alias = wire_name(file, selection.name)?;
+            let owner = resolve_selection_path_at_depth(file, &selection.qualifier, depth + 1)?;
+            return Some((owner, alias));
+        }
+        if matches!(node.tag, APPLIEDTPT_TAG | APPLIEDTYPE_TAG) {
+            let StructuredNode::AppliedType(AppliedTypeNode { tycon, .. }) =
+                node.decode_structured().ok()?
+            else {
+                return None;
+            };
+            return unresolved_alias_reference_at_depth(file, &tycon, depth + 1);
+        }
+    }
+    let structured = tree.decode_structured().ok()?;
+    match structured {
+        StructuredTree::Ident(IdentNode { type_tree, .. }) => {
+            unresolved_alias_reference_at_depth(file, &type_tree, depth + 1)
+        }
+        StructuredTree::Reference(ReferenceNode {
+            tag: TERMREF_TAG | TYPEREF_TAG,
+            reference,
+            qualifier,
+        }) => {
+            let alias = resolve_qualified_name(file, reference)?;
+            let owner = resolve_selection_path_at_depth(file, &qualifier, depth + 1)?;
+            Some((owner, alias))
+        }
+        StructuredTree::Select(SelectNode {
+            name, qualifier, ..
+        }) => {
+            let alias = wire_name(file, name)?;
+            let owner = resolve_selection_path_at_depth(file, &qualifier, depth + 1)?;
+            Some((owner, alias))
+        }
+        _ => None,
+    }
+}
+
+fn resolve_selection_path_at_depth(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    depth: usize,
+) -> Option<BinaryName> {
+    const MAX_ALIAS_TREE_DEPTH: usize = 128;
+    if depth >= MAX_ALIAS_TREE_DEPTH {
+        return None;
+    }
+    match resolve_reference_name(file, tree) {
+        ReferenceResolution::Resolved(name) => return Some(name),
+        ReferenceResolution::Unresolved => {}
+        ReferenceResolution::NotAReference => {}
+    }
+    if let RawTree::Leaf(term) = tree
+        && matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG)
+    {
+        let reference = term.ast_ref()?;
+        let shared = decode_shared_tree(file, reference.address)?;
+        return resolve_selection_path_at_depth(file, &shared, depth + 1);
+    }
+    if let Some(package) = resolve_reference_prefix(file, tree) {
+        return Some(BinaryName::from_internal(package));
+    }
+    let StructuredTree::Select(SelectNode {
+        name, qualifier, ..
+    }) = tree.decode_structured().ok()?
+    else {
+        return None;
+    };
+    let prefix = resolve_selection_path_at_depth(file, &qualifier, depth + 1)?;
+    let simple = wire_name(file, name)?;
+    Some(BinaryName::from_internal(format!(
+        "{}/{simple}",
+        prefix.as_internal()
+    )))
+}
+
 /// A generic mixin (e.g. `Iterable[Char]`) is encoded as an
 /// `AppliedTpt`/`AppliedType` node — a category-5 payload
 /// [`RawTree::name_refs`] deliberately treats as opaque (per its own
@@ -828,6 +998,15 @@ fn resolve_applied_type_name(
     file: &TastyFile<'_>,
     parent: &RawTree<'_>,
     package: &str,
+) -> Option<BinaryName> {
+    resolve_applied_type_name_in_package(file, parent, package, None)
+}
+
+fn resolve_applied_type_name_in_package(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+    package_scope: Option<&str>,
 ) -> Option<BinaryName> {
     let RawTree::LengthNode(node) = parent else {
         return None;
@@ -842,7 +1021,74 @@ fn resolve_applied_type_name(
         return None;
     };
 
-    resolve_parent_name(file, &tycon, package)
+    resolve_parent_name_in_package(file, &tycon, package, package_scope)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TypeAliasTarget {
+    Alias { owner: BinaryName, name: String },
+    Candidate(BinaryName),
+}
+
+/// Reads a type-alias definition from a `.tasty` file and reduces its
+/// right-hand side to either another package-object alias or a candidate
+/// name. The classpath-aware caller follows aliases and validates the final
+/// candidate before returning it as a resolved parent.
+pub(crate) fn resolve_type_alias_target(
+    file: &TastyFile<'_>,
+    alias_name: &str,
+    current_package: &str,
+) -> Result<Option<TypeAliasTarget>, TastyDecodeError> {
+    let index = file.ast_address_index()?;
+    for node in index.iter() {
+        if node.tag != TYPEDEF_TAG {
+            continue;
+        }
+        let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+            name,
+            type_or_template,
+            ..
+        }) = node.decode_structured()?
+        else {
+            continue;
+        };
+        if file.render_name(name).ok().as_deref() != Some(alias_name) {
+            continue;
+        }
+        let rhs = match type_or_template {
+            RawTree::LengthNode(lambda) if lambda.tag == dotty_tasty::tasty::LAMBDATPT_TAG => {
+                lambda.decode_lambda_tpt()?.body
+            }
+            RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG => continue,
+            rhs => rhs,
+        };
+        if let Some((owner, name)) = unresolved_alias_reference(file, &rhs)
+            && matches!(owner.simple_name(), "package" | "package$")
+        {
+            return Ok(Some(TypeAliasTarget::Alias { owner, name }));
+        }
+        return Ok(resolve_parent_name_in_package(
+            file,
+            &rhs,
+            current_package,
+            Some(current_package),
+        )
+        .map(TypeAliasTarget::Candidate));
+    }
+    Ok(None)
+}
+
+/// Compatibility helper for unit coverage that only needs a direct target.
+#[cfg(test)]
+fn resolve_type_alias_candidate(
+    file: &TastyFile<'_>,
+    alias_name: &str,
+    current_package: &str,
+) -> Option<BinaryName> {
+    match resolve_type_alias_target(file, alias_name, current_package).ok()?? {
+        TypeAliasTarget::Candidate(candidate) => Some(candidate),
+        TypeAliasTarget::Alias { .. } => None,
+    }
 }
 
 /// Reads a raw AST name-table reference: AST fields such as
@@ -867,6 +1113,17 @@ mod tests {
                 .join(relative_path),
         )
         .unwrap_or_else(|error| panic!("fixture {relative_path} should exist: {error}"))
+    }
+
+    #[test]
+    fn resolves_package_object_aliases_in_their_defining_package() {
+        let bytes = fixture_bytes("scala3-library/scala/package.tasty");
+        let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+
+        assert_eq!(
+            resolve_type_alias_candidate(&file, "Iterator", "scala"),
+            Some(BinaryName::from_internal("collection/Iterator"))
+        );
     }
 
     #[test]
@@ -978,15 +1235,11 @@ mod tests {
     /// resolves fully, proving that machinery works. `Iterator`'s tycon
     /// does not — it is `scala.package$.Iterator`, a reference through
     /// Scala's compiler-synthesized `package object scala` (a type-alias
-    /// member, not a direct package-qualified class reference), which
-    /// resolving needs real scope/import resolution this best-effort
-    /// decoder does not have (tracked in
-    /// https://github.com/scytrowski/dotty-rs/issues/7). Per
-    /// `ReferenceResolution`'s own doc comment, that unresolvable-but-
-    /// unambiguously-real reference now fails the whole decode with
-    /// `UnresolvedSupertype` rather than silently falling back to a
-    /// same-package guess (a misleading `BinaryName` naming *some* class,
-    /// just not the right one).
+    /// member, not a direct package-qualified class reference). The
+    /// structural decoder alone cannot resolve this alias, so this
+    /// decode-only entry point still reports `UnresolvedSupertype`; the
+    /// classloader's classpath-aware entry point follows the alias and
+    /// validates its target.
     #[test]
     fn decoding_fails_when_a_generic_mixins_tycon_is_an_unresolvable_implicit_import_reference() {
         let error = decode(
