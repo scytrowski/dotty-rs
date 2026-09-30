@@ -40,24 +40,30 @@ where
         let body = if expr_only {
             self.advance();
             self.consume_case_newlines();
-            let indented = self.accept(TokenKind::Indent);
-            let body = self.with_case_body(|parser| {
-                parser.with_location(Location::InBlock, |parser| parser.expr())
-            });
-            if indented {
-                self.consume_case_newlines();
-                if !self.accept(TokenKind::Outdent) {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedToken,
-                        "expected an outdent to close an expression-only case body",
-                    );
+            self.with_case_body(|parser| {
+                if parser.current().kind == TokenKind::Indent {
+                    // Dotty's expression-only case production still parses an
+                    // indented expression as a BlockExpr. Keep the indentation
+                    // token visible so the shared case-body parser consumes
+                    // the complete statement sequence and its matching outdent.
+                    let body_indent = (parser.current().kind == TokenKind::Indent)
+                        .then(|| parser.current().span.start());
+                    let body = parser.parse_case_body(body_mark, body_indent);
+                    if let TreeKind::Block(Block { stats, expr }) = &parser.ast.get(body).kind
+                        && stats.is_empty()
+                    {
+                        *expr
+                    } else {
+                        body
+                    }
+                } else {
+                    parser.with_location(Location::InBlock, |parser| parser.expr())
                 }
-            }
-            body
+            })
         } else {
-            self.observe_case_body_indented(mark.start);
+            let body_indent_offset = self.observe_case_body_indented(mark.start);
             self.advance();
-            self.parse_case_body(body_mark)
+            self.parse_case_body(body_mark, body_indent_offset)
         };
         self.alloc_from(
             mark,
@@ -71,9 +77,26 @@ where
 
     /// Parses a consecutive case list, leaving its enclosing `}`/`Outdent` untouched.
     pub(crate) fn case_clauses(&mut self) -> Vec<TreeId<Untyped>> {
+        self.case_clauses_in_region(None)
+    }
+
+    /// Parses cases while allowing the scanner to end a parser- or scanner-opened case
+    /// region before a less-indented outer `case` clause.
+    pub(crate) fn case_clauses_in_region(
+        &mut self,
+        region_indent_offset: Option<u32>,
+    ) -> Vec<TreeId<Untyped>> {
         let mut cases = Vec::new();
         self.consume_case_separators();
-        while self.current().kind == TokenKind::Keyword(HardKeyword::Case) {
+        loop {
+            if self.current().kind == TokenKind::Keyword(HardKeyword::Case)
+                && let Some(indent_offset) = region_indent_offset
+            {
+                self.observe_outdented_layout_region(indent_offset);
+            }
+            if self.current().kind != TokenKind::Keyword(HardKeyword::Case) {
+                break;
+            }
             let checkpoint = self.cursor.checkpoint();
             cases.push(self.case_clause(false));
             self.consume_case_separators();
@@ -121,7 +144,11 @@ where
         self.parse_guard()
     }
 
-    fn parse_case_body(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+    fn parse_case_body(
+        &mut self,
+        mark: crate::Mark,
+        body_indent_offset: Option<u32>,
+    ) -> TreeId<Untyped> {
         self.consume_case_newlines();
         if matches!(
             self.current().kind,
@@ -146,7 +173,11 @@ where
             self.advance();
             let result = self
                 .with_case_body(|parser| parser.parse_expression_block_body(TokenKind::Outdent));
-            if !self.cursor.at(TokenKind::Outdent) {
+            if !self.cursor.at(TokenKind::Outdent)
+                && let Some(indent_offset) = body_indent_offset
+            {
+                self.observe_outdented_layout_region(indent_offset);
+            } else if !self.cursor.at(TokenKind::Outdent) {
                 self.observe_outdented();
             }
             if !self.accept(TokenKind::Outdent) {
@@ -322,6 +353,46 @@ mod tests {
         assert!(matches!(parser.ast().get(body).kind, TreeKind::Ident(_)));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(observed.borrow().is_empty());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn expression_only_case_with_an_indent_parses_the_whole_block_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case x =>\n  first\n  second",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Newline, 9, 10),
+                token(TokenKind::Indent, 12, 12),
+                token(TokenKind::Identifier, 12, 17),
+                token(TokenKind::Newline, 17, 18),
+                token(TokenKind::Identifier, 20, 26),
+                token(TokenKind::Outdent, 26, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        );
+
+        let case = parser.case_clause(true);
+        let TreeKind::CaseDef(case) = &parser.ast().get(case).kind else {
+            panic!("expected a case clause");
+        };
+        let TreeKind::Block(body) = &parser.ast().get(case.body).kind else {
+            panic!("an indented expression-only case body should retain its block");
+        };
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(body.stats[0]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(body.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
     }
 

@@ -114,6 +114,10 @@ braced scope; the scanner distinguishes their boundary from outdents requested
 while parsing an individual case body. Indented `match` case regions also
 retain their ownership when opened by eager layout, so a same-indentation
 `catch` closes the match cases before the enclosing `try` parses its handler.
+At a known case/body boundary, the parser can request closure of the named
+innermost layout region regardless of whether eager scanning or parser
+feedback opened it; ordinary outdent feedback remains restricted to
+parser-opened regions.
 The parser balances the match region before parsing the following sibling
 statement. If a matching parenthesis closes the case region first, the parser
 closes the feedback state without exposing an `Outdent` token inside the
@@ -813,6 +817,13 @@ patterns, optional guards (including line breaks between a pattern and its
 `Block` nodes, and extractor-looking source patterns remain
 `Apply`/`TypeApply` until later semantic lowering. Full case-clause features
 and pattern semantics remain future work.
+
+Nested match and case-body boundaries are closed by their active scanner
+`Indent` region, not by treating every encountered `case` as belonging to the
+innermost match. The parser requests closure at a less-indented case boundary;
+the scanner decides from source layout whether to materialize the `Outdent`.
+This applies both to eager layout tokens and to regions opened through parser
+feedback, including layout suppressed inside braces.
 
 The complete-expression boundary also recognizes the initial explicit function
 literal subset:

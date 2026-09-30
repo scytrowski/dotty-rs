@@ -17,6 +17,11 @@ pub enum ScannerEvent {
     OutdentedRegion {
         indent_offset: u32,
     },
+    /// Closes the named innermost layout region, whether it was emitted by
+    /// eager scanning or opened through parser feedback.
+    OutdentedLayoutRegion {
+        indent_offset: u32,
+    },
     /// Opens the case region following a `match`, including same-indent cases
     /// in braced scopes where eager scanner layout is suppressed.
     MatchCasesIndented,
