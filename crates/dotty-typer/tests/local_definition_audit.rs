@@ -97,6 +97,16 @@ fn local_definition_audit_is_deterministic() {
     assert_eq!(first.buckets.get("local_val_defs"), Some(&1));
 }
 
+#[test]
+fn local_definition_audit_excludes_local_class_members() {
+    let source = "object Audit { def outer: Int = { class Local { def member = 1 }; def local = 2; local } }";
+    let audit = audit_source(source, "Audit.scala");
+
+    assert_eq!(audit.local_defdefs, 1);
+    assert_eq!(audit.buckets.get("local_def_defs"), Some(&1));
+    assert_eq!(audit.buckets.get("local_classes"), Some(&1));
+}
+
 fn audit_source(text: &str, path: &str) -> Audit {
     let source = SourceId::from_index(0);
     let mut store = SemanticStore::new();
@@ -154,20 +164,7 @@ fn audit_source(text: &str, path: &str) -> Audit {
         })
         .collect::<Vec<_>>();
 
-    let rhs_ranges = method_rhs_ranges(&parsed.ast);
-    let local_method_trees = parsed
-        .ast
-        .iter()
-        .filter_map(|(tree, node)| {
-            matches!(node.kind, TreeKind::DefDef(_))
-                .then_some((tree, node.position?.span().range()))
-        })
-        .filter(|(_, range)| {
-            rhs_ranges
-                .iter()
-                .any(|parent| parent.start() <= range.start() && range.end() <= parent.end())
-        })
-        .collect::<Vec<_>>();
+    let local_method_trees = local_method_trees(&parsed.ast);
 
     let mut typer = SourceTyper::new(
         &parsed.ast,
@@ -206,7 +203,7 @@ fn audit_source(text: &str, path: &str) -> Audit {
 }
 
 fn collect_local_nodes(arena: &dotty_core::AstArena<Untyped>) -> Audit {
-    let ranges = method_rhs_ranges(arena);
+    let local_stats = local_stat_trees(arena);
     let parameter_trees = arena
         .iter()
         .flat_map(|(_, node)| match &node.kind {
@@ -224,14 +221,7 @@ fn collect_local_nodes(arena: &dotty_core::AstArena<Untyped>) -> Audit {
         if parameter_trees.contains(&tree) {
             continue;
         }
-        let Some(position) = node.position else {
-            continue;
-        };
-        let range = position.span().range();
-        if !ranges
-            .iter()
-            .any(|parent| parent.start() <= range.start() && range.end() <= parent.end())
-        {
+        if !local_stats.contains(&tree) {
             continue;
         }
         let bucket = match &node.kind {
@@ -260,15 +250,25 @@ fn collect_local_nodes(arena: &dotty_core::AstArena<Untyped>) -> Audit {
     audit
 }
 
-fn method_rhs_ranges(arena: &dotty_core::AstArena<Untyped>) -> Vec<TextRange> {
+fn local_method_trees(
+    arena: &dotty_core::AstArena<Untyped>,
+) -> Vec<(dotty_core::TreeId<Untyped>, TextRange)> {
+    local_stat_trees(arena)
+        .into_iter()
+        .filter_map(|tree| {
+            let node = arena.get(tree);
+            matches!(node.kind, TreeKind::DefDef(_))
+                .then_some((tree, node.position?.span().range()))
+        })
+        .collect()
+}
+
+fn local_stat_trees(arena: &dotty_core::AstArena<Untyped>) -> HashSet<dotty_core::TreeId<Untyped>> {
     arena
         .iter()
-        .filter_map(|(_, node)| {
-            let TreeKind::DefDef(definition) = &node.kind else {
-                return None;
-            };
-            let rhs = definition.rhs?;
-            Some(arena.get(rhs).position?.span().range())
+        .flat_map(|(_, node)| match &node.kind {
+            TreeKind::Block(block) => block.stats.clone(),
+            _ => Vec::new(),
         })
         .collect()
 }

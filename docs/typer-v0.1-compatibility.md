@@ -226,30 +226,30 @@ SCALA39_ROOT=/tmp/scala3-3.9.0 \
 ```
 
 The corpus contains 1,236 Scala files at source revision
-`777528f19a58e794c9954a42f433373472ec57f8`. At this typer revision, the AST
-audit found 31,357 local declaration nodes: 24,902 local values, 4,970 local
-methods, 90 local type definitions, 39 local classes, 44 local objects, 226
-local imports, and 1,086 local pattern bindings. No local method body typed
-successfully in this source-corpus run (0/4,970). This conservative corpus
-number measures methods for which an enclosing named method body can be typed
-as a whole without the classpath/session loader; it does not contradict the
-focused local-method regressions, which type supported examples against their
-complete in-memory source context.
+`777528f19a58e794c9954a42f433373472ec57f8`. The audit identifies local
+declarations from block statement lists, so members of a local class are not
+misclassified as enclosing-method locals. At this typer revision, it found
+23,194 local declaration nodes: 19,020 local values, 3,778 local methods, 36
+local type definitions, 74 local classes, 58 local objects, and 228 local
+imports. No local method body typed successfully in this source-corpus run
+(0/3,778). This conservative corpus number measures methods for which an
+enclosing named method body can be typed as a whole without the classpath/session
+loader; it does not contradict the focused local-method regressions, which type
+supported examples against their complete in-memory source context.
 
 The five largest local-method failure categories were `ImportQualifierNotFound`
-(2,264; `BCodeBodyBuilder.scala`, `BCodeHelpers.scala`, `BCodeSkelBuilder.scala`,
-`BCodeUtils.scala`, `BTypeLoader.scala`),
-`AnonymousClassInstantiationDeferred` (826; `BCodeHelpers.scala`,
-`BTypeLoader.scala`, `Desugar.scala`, `TreeInfo.scala`, `TreeTypeMap.scala`),
-`UnsupportedExpression` (775; `BCodeBodyBuilder.scala`, `BCodeSkelBuilder.scala`,
-`BCodeSyncAndTry.scala`, `BTypes.scala`, `GenBCode.scala`),
-`LocalBlockDeclarationDeferred` (418; `ScalaPrimitives.scala`,
-`BCodeBodyBuilder.scala`, `BCodeHelpers.scala`, `BackendUtils.scala`,
-`ClosureOptimizer.scala`), and `NoSuccessfulEnclosingMethodTyping` (173;
-`TreeInfo.scala`, `Annotations.scala`, `ClassfileParser.scala`, `Parsers.scala`,
-`Reporter.scala`). The audit reports stable sorted buckets and representative
-paths. Its fixture test runs the same source twice and asserts identical
-counts, typed results, and failure categories.
+(2,046; `BCodeBodyBuilder.scala`, `BCodeHelpers.scala`, `BCodeSkelBuilder.scala`,
+`BCodeUtils.scala`, `BTypeLoader.scala`), `UnsupportedExpression` (572;
+`BCodeBodyBuilder.scala`, `BCodeSkelBuilder.scala`, `BCodeSyncAndTry.scala`,
+`BTypes.scala`, `GenBCode.scala`), `NoSuccessfulEnclosingMethodTyping` (483;
+`BackendUtils.scala`, `GenericSignatureVisitor.scala`, `BoxUnbox.scala`,
+`Desugar.scala`, `TreeInfo.scala`), `LocalBlockDeclarationDeferred` (272;
+`ScalaPrimitives.scala`, `BCodeBodyBuilder.scala`, `BCodeHelpers.scala`,
+`BackendUtils.scala`, `ClosureOptimizer.scala`), and
+`NamerError::InvalidVisibilityQualifier` (127; `TypeComparer.scala`,
+`ProtoTypes.scala`). The audit reports stable sorted buckets and representative
+paths. Its fixture tests repeated-run determinism and excludes local-class
+members from the enclosing method's local-definition counts.
 
 Application sites can resolve lexical, imported, and selected overload buckets
 for supported monomorphic methods and `Poly -> Method` candidates. Generic
