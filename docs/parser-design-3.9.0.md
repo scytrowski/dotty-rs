@@ -97,10 +97,12 @@ the parser activates its per-unit policy for the top-level
 `language.experimental.captureChecking` import (or when explicitly enabled by
 the caller). A misplaced global language import receives Dotty's toplevel
 placement diagnostic while still marking the compilation unit, as in Dotty
-3.9. The implemented capture-checking type subset includes capture suffixes,
-capture references/sets, and pure function arrows; capture-aware refinements,
-`.rd`, and semantic capability checking remain deferred. The other feature
-switches remain disabled policy boundaries for future grammar.
+3.9. The implemented capture-checking type subset includes capture suffixes
+in aliases, applied types, and template self-types; capture references/sets
+(including explicit empty sets and `this` references); and pure function
+arrows. Capture-aware refinements, `.rd`, and semantic capability checking
+remain deferred. The other feature switches remain disabled policy boundaries
+for future grammar.
 
 The parser forwards `ColonEol`, `Indented`, `Outdented`,
 `OutdentedByDelimiter`, `ArrowIndented`, and the template-specific `SelfArrow`
@@ -463,7 +465,10 @@ annotation. Ordinary `=>` is marked `Impure` under capture checking. For
 non-function types, `T^` and `T^{...}` use the existing `Annotated` node with
 Dotty's `retainsCap`/`retains` annotation shapes. Capture refs support
 qualified term paths, reach `*`, and `.only[QualId]`; explicit empty sets
-lower to `retains[Nothing]`. Dotty's lookahead distinguishes a capture suffix
+lower to `retains[Nothing]`. The oracle normalizes Dotty's generated
+annotation-constructor wrappers to a `Retains` node; the explicit-empty
+placeholder is normalized to no capture children, matching this parser's
+`Nothing` representation. Dotty's lookahead distinguishes a capture suffix
 `^` from an infix type operator, including physical line breaks. The lookahead
 for a following `=>`, `?=>`, `->`, or `?->` selects the named function-parameter
 path instead.

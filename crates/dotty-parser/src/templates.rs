@@ -295,6 +295,31 @@ where
         let mut offset = 2;
         loop {
             let token = self.cursor.lookahead(offset);
+            if token.kind == TokenKind::Punctuation(Punctuation::LeftBrace) {
+                let previous = self.cursor.lookahead(offset.saturating_sub(1));
+                if previous.kind == TokenKind::Operator
+                    && self.source.slice(previous.span).ok() == Some("^")
+                {
+                    let mut depth = 0usize;
+                    loop {
+                        match self.cursor.lookahead(offset).kind {
+                            TokenKind::Punctuation(Punctuation::LeftBrace) => depth += 1,
+                            TokenKind::Punctuation(Punctuation::RightBrace) => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    offset = offset.saturating_add(1);
+                                    break;
+                                }
+                            }
+                            TokenKind::Eof => return false,
+                            _ => {}
+                        }
+                        offset = offset.saturating_add(1);
+                    }
+                    continue;
+                }
+                return false;
+            }
             if matches!(
                 token.kind,
                 TokenKind::Newline
@@ -302,7 +327,6 @@ where
                     | TokenKind::Indent
                     | TokenKind::Outdent
                     | TokenKind::Eof
-                    | TokenKind::Punctuation(Punctuation::LeftBrace)
                     | TokenKind::Punctuation(Punctuation::RightBrace)
             ) {
                 return false;
@@ -909,6 +933,52 @@ mod tests {
         assert!(result.self_val.is_some());
         assert_eq!(result.members.len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_empty_capture_set_in_a_template_self_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ this: ofBoolean^{} => value }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Keyword(HardKeyword::This), 2, 6),
+                token(TokenKind::Punctuation(Punctuation::Colon), 6, 7),
+                token(TokenKind::Identifier, 8, 17),
+                token(TokenKind::Operator, 17, 18),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 18, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 19, 20),
+                token(TokenKind::Operator, 21, 23),
+                token(TokenKind::Identifier, 24, 29),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 30, 31),
+                token(TokenKind::Eof, 31, 31),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            capture_checking: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let result = parser.parse_template_body(TemplateBody::Braced);
+
+        assert!(
+            result.self_val.is_some(),
+            "current={:?}, diagnostics={:?}",
+            parser.current().kind,
+            parser.diagnostics()
+        );
+        assert_eq!(result.members.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        let self_value = result.self_val.expect("self type should be retained");
+        let TreeKind::ValDef(self_value) = &parser.ast().get(self_value).kind else {
+            panic!("expected the template self value");
+        };
+        assert!(matches!(
+            parser.ast().get(self_value.tpt).kind,
+            TreeKind::Annotated(_)
+        ));
         assert!(parser.diagnostics().is_empty());
     }
 

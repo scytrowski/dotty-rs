@@ -151,6 +151,21 @@ fn render_tree(
     source: &str,
 ) -> String {
     let tree = arena.get(id);
+    if let Some((parent, explicit, captures)) = capture_retaining_parts(id, arena, names) {
+        let children = captures
+            .into_iter()
+            .map(|capture| render_tree(capture, arena, names, source))
+            .collect::<Vec<_>>()
+            .join(",");
+        return format!(
+            "{{\"kind\":\"Annotated\",\"span\":{},\"children\":[{},{{\"kind\":\"Retains\",\"span\":{},\"explicit\":{},\"children\":[{}]}}]}}",
+            render_span(tree),
+            render_tree(parent, arena, names, source),
+            render_span(tree),
+            explicit,
+            children
+        );
+    }
     let mut fields = Vec::new();
     fields.push(format!("\"kind\":{}", quote(kind_name(&tree.kind))));
     fields.push(format!("\"span\":{}", render_span(tree)));
@@ -598,6 +613,75 @@ fn render_tree(
     }
     fields.push(format!("\"children\":[{}]", rendered_children.join(",")));
     format!("{{{}}}", fields.join(","))
+}
+
+fn capture_retaining_parts(
+    id: TreeId<Untyped>,
+    arena: &AstArena<Untyped>,
+    names: &NameInterner,
+) -> Option<(TreeId<Untyped>, bool, Vec<TreeId<Untyped>>)> {
+    let TreeKind::Annotated(annotated) = &arena.get(id).kind else {
+        return None;
+    };
+    let TreeKind::New(new_tree) = &arena.get(annotated.annotation).kind else {
+        return None;
+    };
+    let (annotation_name, captures) = match &arena.get(new_tree.tpt).kind {
+        TreeKind::AppliedTypeTree(applied) => (
+            type_path_text(applied.tpt, arena, names)?,
+            Some(applied.args.as_slice()),
+        ),
+        _ => (type_path_text(new_tree.tpt, arena, names)?, None),
+    };
+    let explicit = match annotation_name.as_str() {
+        "scala.annotation.retains" => true,
+        "scala.annotation.retainsCap" => false,
+        _ => return None,
+    };
+    let mut references = Vec::new();
+    if let Some(captures) = captures {
+        for capture in captures {
+            collect_capture_references(*capture, arena, names, &mut references);
+        }
+    }
+    Some((annotated.expr, explicit, references))
+}
+
+fn type_path_text(
+    id: TreeId<Untyped>,
+    arena: &AstArena<Untyped>,
+    names: &NameInterner,
+) -> Option<String> {
+    match &arena.get(id).kind {
+        TreeKind::Ident(ident) => Some(names.resolve(ident.name.text()).to_owned()),
+        TreeKind::Select(selection) => Some(format!(
+            "{}.{}",
+            type_path_text(selection.qualifier, arena, names)?,
+            names.resolve(selection.name.text())
+        )),
+        _ => None,
+    }
+}
+
+fn collect_capture_references(
+    id: TreeId<Untyped>,
+    arena: &AstArena<Untyped>,
+    names: &NameInterner,
+    references: &mut Vec<TreeId<Untyped>>,
+) {
+    match &arena.get(id).kind {
+        TreeKind::SingletonTypeTree(singleton) => references.push(singleton.reference),
+        TreeKind::AppliedTypeTree(applied)
+            if type_path_text(applied.tpt, arena, names).as_deref() == Some("scala.|") =>
+        {
+            for capture in &applied.args {
+                collect_capture_references(*capture, arena, names, references);
+            }
+        }
+        TreeKind::Select(_) | TreeKind::Ident(_)
+            if type_path_text(id, arena, names).as_deref() == Some("scala.Nothing") => {}
+        _ => references.push(id),
+    }
 }
 
 fn render_template_children(
