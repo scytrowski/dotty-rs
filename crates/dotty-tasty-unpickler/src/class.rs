@@ -142,7 +142,7 @@ impl TastyUnpickler<'_, '_, '_> {
             self_type,
         }));
         self.set_symbol_info(class, SymbolInfo::Complete(info));
-        Ok(info)
+        self.apply_pending_opaque_aliases(class, info, at)
     }
 
     /// The semantic type of the template parent at `at`, in the template at

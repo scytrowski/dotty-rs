@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use dotty_core::Packages;
-use dotty_core::ids::{ScopeId, SymbolId};
+use dotty_core::ids::{ScopeId, SymbolId, TypeId};
+use dotty_core::names::Name;
 
 /// Package identities and owner scopes shared by several TASTy units.
 ///
@@ -17,6 +18,8 @@ pub struct TastySession {
     pub(crate) packages: Packages,
     pub(crate) owner_scopes: HashMap<SymbolId, ScopeId>,
     pub(crate) scope_order: Vec<SymbolId>,
+    /// Opaque implementations waiting for their owner's complete ClassInfo.
+    pub(crate) pending_opaque_aliases: Vec<(SymbolId, Name, TypeId)>,
 }
 
 impl TastySession {

@@ -3108,7 +3108,41 @@ Roots (library, no builtins -> builtins; the compiler is unchanged):
 
 Both real `RECtype`/`RECthis` roots now decode. 0 unexpected errors in any run.
 
-## 9. Review of Milestone 1
+## 10. Opaque aliases (Milestone 5e3)
+
+Opaque alias completion follows the Scala 3.9 `opaqueToBounds` split. The
+alias symbol publishes only external `Bounds` (or a `TypeLambda` returning
+bounds). If the RHS can be resolved, its implementation is retained as a
+same-named `AliasingBounds` refinement in the defining class's self type.
+Generic public bounds and implementations use type lambdas whose parameter
+references point to their own canonical binders. Bounds are projected before
+the private implementation, so an unavailable implementation type does not
+hide public bounds. The owner is completed when possible; otherwise its
+implementation is held in the TASTy session and applied when the owner's full
+`ClassInfo` is later completed. A cycle or malformed tree remains an error and
+the completion transaction rolls back both public and owner state.
+
+The ignored corpus survey `opaque_corpus` uses the pinned Scala 3.9 library and
+compiler fixtures, with only `scala.Any`/`Nothing`/`Null`, `java.lang.Object`,
+and `scala.AnyRef` supplied as synthetic classpath stubs. It walks the units in
+both path orders. Of 4 library opaque type aliases (3 generic), public info
+completed for 3/4 units in forward order and 4/4 in reverse; the remaining
+external lookup was `Tuple` in one order. Of 24 compiler aliases (5 generic),
+22/24 completed in both orders; one needs an unavailable `scala.reflect`
+package and one is malformed. Three aliases in each corpus had a resolvable
+implementation retained in an owner self type. The different completion rate
+for the library reflects classpath members available at the point of unit
+entry, while alias population and genericity are the same in both orders.
+
+The survey filters opaque-marked class definitions out of the alias count and
+reports unresolved external references separately from malformed,
+unsupported, cyclic and unexpected cases. Run it with:
+
+```text
+cargo test -p dotty-tasty-unpickler --release --test opaque_corpus -- --ignored --nocapture
+```
+
+## 11. Review of Milestone 1
 
 This is a record of the review made when Milestone 1 was delivered; §8 is the
 current state. Answers to the review questions asked before Milestone 2:

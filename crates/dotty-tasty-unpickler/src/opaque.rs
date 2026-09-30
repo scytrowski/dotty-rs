@@ -9,10 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind};
-use dotty_core::types::{
-    MatchType, Type, TypeParamSpec, TypeRefTarget, type_lambda_from_symbols,
-    type_lambda_with_result,
-};
+use dotty_core::types::{MatchType, Type, TypeParamSpec, TypeRefTarget, type_lambda_from_symbols};
 use dotty_tasty::tasty::{LAMBDATPT_TAG, TYPEBOUNDSTPT_TAG};
 
 use crate::ast_view::{AstView, address};
@@ -46,28 +43,6 @@ impl TastyUnpickler<'_, '_, '_> {
             });
         }
 
-        if matches!(self.store.symbols.get(owner).info, SymbolInfo::Missing) {
-            let owner_at = self
-                .index
-                .definition_address(owner)
-                .ok_or(UnpickleError::OpaqueAliasOwnerNotEntered { address: at, owner })?;
-            self.complete_in(ast, owner_at, depth)?;
-        }
-        let owner_info_type = match self.store.symbols.get(owner).info {
-            SymbolInfo::Complete(info) => info,
-            _ => return Err(UnpickleError::OpaqueAliasOwnerNotEntered { address: at, owner }),
-        };
-        let mut owner_info = match self.store.types.get(owner_info_type) {
-            Type::ClassInfo(info) => info.clone(),
-            _ => {
-                return Err(UnpickleError::MalformedOwnerClassInfo {
-                    address: at,
-                    owner,
-                    info: owner_info_type,
-                });
-            }
-        };
-
         let [rhs_child] = ast.children(at) else {
             return Err(UnpickleError::MalformedDefinition {
                 address: at,
@@ -75,8 +50,6 @@ impl TastyUnpickler<'_, '_, '_> {
             });
         };
         let rhs_at = address(rhs_child.offset);
-        let projected = self.type_of_tpt(ast, rhs_at, at, depth)?;
-        self.ensure_alias_graph_acyclic(ast, symbol, projected, at, depth)?;
         let (body_at, lambda_params) = self.unwrap_lambda_tpt(ast, rhs_at)?;
         let body_tag = ast
             .tag_at(body_at)
@@ -103,65 +76,179 @@ impl TastyUnpickler<'_, '_, '_> {
                     self.opaque_type_lambda(ast, &lambda_params, bounds, at, depth)?
                 };
                 let implementation = if shape.alias.is_some() {
-                    let alias =
-                        self.type_of_tpt(ast, address(children[2].offset), body_at, depth)?;
-                    Some(if lambda_params.is_empty() {
-                        alias
-                    } else {
-                        self.opaque_type_lambda(ast, &lambda_params, alias, at, depth)?
-                    })
+                    self.try_project_opaque_implementation(
+                        ast,
+                        symbol,
+                        address(children[2].offset),
+                        &lambda_params,
+                        at,
+                        depth,
+                    )?
                 } else {
                     None
                 };
                 (public, implementation)
             } else {
-                let alias = match self.store.types.get(projected) {
-                    Type::AliasingBounds { alias } => *alias,
-                    Type::TypeLambda(_) => projected,
-                    _ => projected,
-                };
+                let implementation =
+                    self.try_project_opaque_implementation(ast, symbol, rhs_at, &[], at, depth)?;
                 let empty = self.empty_opaque_bounds();
                 let public = if lambda_params.is_empty() {
                     empty
                 } else {
                     self.opaque_type_lambda(ast, &lambda_params, empty, at, depth)?
                 };
-                (public, Some(alias))
+                (public, implementation)
             }
         } else {
-            let alias = match self.store.types.get(projected) {
-                Type::TypeLambda(_) => projected,
-                Type::AliasingBounds { alias } => *alias,
-                _ => projected,
-            };
+            let implementation =
+                self.try_project_opaque_implementation(ast, symbol, rhs_at, &[], at, depth)?;
             let empty = self.empty_opaque_bounds();
             let public = if lambda_params.is_empty() {
                 empty
             } else {
-                type_lambda_with_result(&mut self.store, projected, empty)
-                    .map_err(|error| UnpickleError::ParameterAbstraction { address: at, error })?
+                self.opaque_type_lambda(ast, &lambda_params, empty, at, depth)?
             };
-            (public, Some(alias))
+            (public, implementation)
         };
 
+        // Prefer an immediately available owner self type. If completing
+        // unrelated parents or members needs an external classpath entry,
+        // retain the implementation until this owner completes later.
+        if matches!(self.store.symbols.get(owner).info, SymbolInfo::Missing) {
+            let owner_at = self
+                .index
+                .definition_address(owner)
+                .ok_or(UnpickleError::OpaqueAliasOwnerNotEntered { address: at, owner })?;
+            let transaction = self.begin_transaction();
+            let owner_result = self.complete_in(ast, owner_at, depth);
+            match self.finish_transaction(transaction, owner_result) {
+                Ok(_) => {}
+                Err(
+                    UnpickleError::UnresolvedPackage { .. }
+                    | UnpickleError::UnresolvedMember { .. },
+                ) => {}
+                Err(error) => return Err(error),
+            }
+        }
         if let Some(implementation) = implementation {
             let name = self.store.symbols.get(symbol).name;
             let alias_bounds = self.store.types.alloc(Type::AliasingBounds {
                 alias: implementation,
             });
+            if !self
+                .pending_opaque_aliases
+                .iter()
+                .any(|(pending_owner, pending_name, _)| {
+                    *pending_owner == owner && *pending_name == name
+                })
+            {
+                self.pending_opaque_aliases
+                    .push((owner, name, alias_bounds));
+            }
+            if let SymbolInfo::Complete(owner_info) = self.store.symbols.get(owner).info {
+                self.apply_pending_opaque_aliases(owner, owner_info, at)?;
+            }
+        }
+        self.set_symbol_info(symbol, SymbolInfo::Complete(public_bounds));
+        Ok(public_bounds)
+    }
+
+    fn try_project_opaque_implementation(
+        &mut self,
+        ast: &AstView<'_>,
+        symbol: SymbolId,
+        tree: u32,
+        lambda_params: &[u32],
+        at: u32,
+        depth: usize,
+    ) -> Result<Option<TypeId>, UnpickleError> {
+        let transaction = self.begin_transaction();
+        let result = (|| {
+            let projected = self.type_of_tpt(ast, tree, at, depth)?;
+            self.ensure_alias_graph_acyclic(ast, symbol, projected, at, depth)?;
+            let projected = match self.store.types.get(projected) {
+                Type::AliasingBounds { alias } => *alias,
+                _ => projected,
+            };
+            if lambda_params.is_empty()
+                || matches!(self.store.types.get(projected), Type::TypeLambda(_))
+            {
+                Ok(projected)
+            } else {
+                self.opaque_type_lambda(ast, lambda_params, projected, at, depth)
+            }
+        })();
+        match self.finish_transaction(transaction, result) {
+            Ok(implementation) => Ok(Some(implementation)),
+            Err(
+                UnpickleError::UnresolvedPackage { .. } | UnpickleError::UnresolvedMember { .. },
+            ) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Adds waiting opaque implementations after the owner's full ClassInfo
+    /// has been completed. This avoids making public alias bounds depend on
+    /// unrelated external parents or members of the owner.
+    pub(crate) fn apply_pending_opaque_aliases(
+        &mut self,
+        owner: SymbolId,
+        owner_info_type: TypeId,
+        address: u32,
+    ) -> Result<TypeId, UnpickleError> {
+        let Type::ClassInfo(mut owner_info) = self.store.types.get(owner_info_type).clone() else {
+            return Err(UnpickleError::MalformedOwnerClassInfo {
+                address,
+                owner,
+                info: owner_info_type,
+            });
+        };
+        let pending: Vec<_> = self
+            .pending_opaque_aliases
+            .iter()
+            .filter(|(pending_owner, _, _)| *pending_owner == owner)
+            .copied()
+            .collect();
+        if pending.is_empty() {
+            return Ok(owner_info_type);
+        }
+        for (_, name, info) in pending {
+            if self.owner_self_type_has_alias(owner_info.self_type, name) {
+                continue;
+            }
             owner_info.self_type = Some(self.insert_owner_alias(
                 owner,
                 owner_info.declarations,
                 owner_info.self_type,
                 name,
-                alias_bounds,
-                at,
+                info,
+                address,
             )?);
-            let updated = self.store.types.alloc(Type::ClassInfo(owner_info));
-            self.set_symbol_info(owner, SymbolInfo::Complete(updated));
         }
-        self.set_symbol_info(symbol, SymbolInfo::Complete(public_bounds));
-        Ok(public_bounds)
+        let updated = self.store.types.alloc(Type::ClassInfo(owner_info));
+        self.set_symbol_info(owner, SymbolInfo::Complete(updated));
+        Ok(updated)
+    }
+
+    fn owner_self_type_has_alias(
+        &self,
+        mut self_type: Option<TypeId>,
+        name: dotty_core::names::Name,
+    ) -> bool {
+        let Some(mut current) = self_type.take() else {
+            return false;
+        };
+        loop {
+            match self.store.types.get(current) {
+                Type::Refined {
+                    parent,
+                    name: old_name,
+                    ..
+                } if *old_name == name => return true,
+                Type::Refined { parent, .. } | Type::Recursive { parent } => current = *parent,
+                _ => return false,
+            }
+        }
     }
 
     fn empty_opaque_bounds(&mut self) -> TypeId {
