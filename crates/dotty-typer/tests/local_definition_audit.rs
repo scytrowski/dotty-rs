@@ -107,6 +107,18 @@ fn local_definition_audit_excludes_local_class_members() {
     assert_eq!(audit.buckets.get("local_classes"), Some(&1));
 }
 
+#[test]
+fn local_definition_audit_counts_pattern_bindings_in_local_definitions() {
+    let source = "object Audit { def outer: Int = { val captured @ _ = 1; 0 } }";
+    let audit = audit_source(source, "Audit.scala");
+
+    assert_eq!(
+        audit.buckets.get("local_pattern_bindings"),
+        Some(&1),
+        "{audit:?}"
+    );
+}
+
 fn audit_source(text: &str, path: &str) -> Audit {
     let source = SourceId::from_index(0);
     let mut store = SemanticStore::new();
@@ -204,6 +216,7 @@ fn audit_source(text: &str, path: &str) -> Audit {
 
 fn collect_local_nodes(arena: &dotty_core::AstArena<Untyped>) -> Audit {
     let local_stats = local_stat_trees(arena);
+    let local_pattern_binds = local_pattern_bind_trees(arena);
     let parameter_trees = arena
         .iter()
         .flat_map(|(_, node)| match &node.kind {
@@ -221,7 +234,7 @@ fn collect_local_nodes(arena: &dotty_core::AstArena<Untyped>) -> Audit {
         if parameter_trees.contains(&tree) {
             continue;
         }
-        if !local_stats.contains(&tree) {
+        if !local_stats.contains(&tree) && !local_pattern_binds.contains(&tree) {
             continue;
         }
         let bucket = match &node.kind {
@@ -271,6 +284,47 @@ fn local_stat_trees(arena: &dotty_core::AstArena<Untyped>) -> HashSet<dotty_core
             _ => Vec::new(),
         })
         .collect()
+}
+
+fn local_pattern_bind_trees(
+    arena: &dotty_core::AstArena<Untyped>,
+) -> HashSet<dotty_core::TreeId<Untyped>> {
+    let roots = local_stat_trees(arena)
+        .into_iter()
+        .flat_map(|tree| match &arena.get(tree).kind {
+            TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => definition.patterns.clone(),
+            _ => Vec::new(),
+        });
+    let mut pending = roots.collect::<Vec<_>>();
+    let mut visited = HashSet::new();
+    let mut binds = HashSet::new();
+    while let Some(tree) = pending.pop() {
+        if !visited.insert(tree) {
+            continue;
+        }
+        match &arena.get(tree).kind {
+            TreeKind::Bind(binding) => {
+                binds.insert(tree);
+                pending.push(binding.body);
+            }
+            TreeKind::Alternative(alternative) => {
+                pending.extend(alternative.alternatives.iter().copied());
+            }
+            TreeKind::UnApply(unapply) => pending.extend(unapply.patterns.iter().copied()),
+            TreeKind::Typed(typed) => pending.push(typed.expr),
+            TreeKind::Annotated(annotated) => pending.push(annotated.expr),
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => pending.push(parens.inner),
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+                pending.extend(tuple.elements.iter().copied());
+            }
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
+                pending.push(infix.left);
+                pending.push(infix.right);
+            }
+            _ => {}
+        }
+    }
+    binds
 }
 
 fn record_failure(audit: &mut Audit, kind: String, path: &str) {

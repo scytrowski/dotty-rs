@@ -229,10 +229,11 @@ The corpus contains 1,236 Scala files at source revision
 `777528f19a58e794c9954a42f433373472ec57f8`. The audit identifies local
 declarations from block statement lists, so members of a local class are not
 misclassified as enclosing-method locals. At this typer revision, it found
-23,194 local declaration nodes: 19,020 local values, 3,778 local methods, 36
-local type definitions, 74 local classes, 58 local objects, and 228 local
-imports. No local method body typed successfully in this source-corpus run
-(0/3,778). This conservative corpus number measures methods for which an
+23,218 local declaration nodes: 19,020 local values, 3,778 local methods, 36
+local type definitions, 74 local classes, 58 local objects, 228 local imports,
+and 24 pattern bindings found by traversing local pattern definitions. No local
+method body typed successfully in this source-corpus run (0/3,778). This
+conservative corpus number measures methods for which an
 enclosing named method body can be typed as a whole without the classpath/session
 loader; it does not contradict the focused local-method regressions, which type
 supported examples against their complete in-memory source context.
