@@ -222,7 +222,7 @@ this audit.
 | --- | ---: | --- | --- | --- | --- | --- |
 | `ARTIFACT` | 35 (21 / 14) | `DEFDEF` Method: 35 | Trait: 35 | `ARTIFACT`: 35 | `BitSetOps.scala$collection$BitSetOps$$super$max` | D — bridge/artifact identity may matter to member lookup or lowering; defer until that consumer has a model. |
 | `INLINEPROXY` | 0 (0 / 0) | — | — | — | — | C — absent in both pinned artifacts and has no unpickler consumer. |
-| `MACRO` | 4 (4 / 0) | `DEFDEF` Method: 4 | Class: 3; ModuleClass: 1 | `ERASED+MACRO`: 4 | `StringContext.s`, `.raw`, `.f`; `reflect.package.materializeClassTag` | D — keep the macro-method distinction available for a future macro expansion/implementation consumer. |
+| `MACRO` | 4 (4 / 0) | `DEFDEF` Method: 4 | Class: 3; ModuleClass: 1 | `ERASED+MACRO`: 3; `ERASED+MACRO+PRIVATEQUALIFIED`: 1 | `StringContext.s`, `.raw`, `.f`; `reflect.package.materializeClassTag` | D — keep the macro-method distinction available for a future macro expansion/implementation consumer. |
 | `OPEN` | 0 (0 / 0) | — | — | — | — | D — source/typer inheritance policy; absent from these artifacts, so no core fact is added yet. |
 | `INFIX` | 66 (60 / 6) | `DEFDEF` Method: 10; `TYPEDEF` TypeAlias: 56 | ModuleClass: 60; Class: 6 | `INFIX`: 58; `INFIX+INLINE`: 2; `EXTENSION+INFIX+INLINE`: 6 | `Predef.eq`, `Predef.ne`, `Tuple.++` | D — preserve for the source-facing infix eligibility/warning rules owned by the typer. |
 | `INVISIBLE` | 0 (0 / 0) | — | — | — | — | C — absent in both pinned artifacts and has no unpickler consumer. |
