@@ -583,6 +583,261 @@ fn equally_applicable_constructor_candidates_remain_ambiguous() {
     assert!(typer.source_typed_index().get(SOURCE, rhs).is_none());
 }
 
+#[test]
+fn inferred_local_value_widens_symbol_info_but_keeps_rhs_constant_type() {
+    let mut fixture = Fixture::new("class C { def use = { val value = 1; value } }");
+    let (_, method, rhs) = fixture.method("use");
+    let local_tree = fixture
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::ValDef(definition) = &node.kind else {
+                return None;
+            };
+            (fixture
+                .store
+                .names
+                .resolve(definition.name.as_name().text())
+                == "value"
+                && fixture.index.symbol_at(SOURCE, tree).is_none())
+            .then_some(tree)
+        })
+        .unwrap();
+    let source_rhs = match &fixture.ast.get(local_tree).kind {
+        TreeKind::ValDef(definition) => definition.rhs.unwrap(),
+        _ => unreachable!(),
+    };
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    typer.type_expression(rhs, context).unwrap();
+    let local = typer.local_symbol_at(SOURCE, local_tree).unwrap();
+    let typed_rhs = typer.source_typed_index().get(SOURCE, source_rhs).unwrap();
+
+    assert_eq!(
+        symbol_info_snapshot(&typer, local),
+        "Complete(TypeRef(Class:Int))"
+    );
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(typed_rhs).ty),
+        "Constant(Int(1))"
+    );
+}
+
+#[test]
+fn inferred_local_method_keeps_a_poly_method_signature() {
+    let mut fixture =
+        Fixture::new("object C { def outer: Int = { def local[A](value: A) = value; local(1) } }");
+    let (_, outer, rhs) = fixture.method("outer");
+    let local_tree = fixture
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (fixture
+                .store
+                .names
+                .resolve(definition.name.as_name().text())
+                == "local")
+                .then_some(tree)
+        })
+        .unwrap();
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(outer).unwrap();
+    typer.type_expression(rhs, context).unwrap();
+    let local = typer.local_method_symbol_at(SOURCE, local_tree).unwrap();
+    let SymbolInfo::Complete(signature) = *typer.store().symbols.info(local) else {
+        panic!("inferred local method should have a completed signature")
+    };
+    let Type::Poly(poly) = typer.store().types.get(signature) else {
+        panic!("generic local method should retain its Poly binder")
+    };
+    let Type::Method(method) = typer.store().types.get(poly.result) else {
+        panic!("Poly result should retain the method clause")
+    };
+
+    assert_eq!(
+        type_snapshot(&typer, signature),
+        "Poly[A](Bounds(TypeRef(Class:Nothing),TypeRef(Class:Any)))->Method<Plain>(value:A)->A"
+    );
+    assert_eq!(poly.params.len(), 1);
+    assert!(
+        matches!(typer.store().types.get(method.params[0].ty), Type::ParamRef { binder, index: 0 } if *binder == signature)
+    );
+    assert!(
+        matches!(typer.store().types.get(method.result), Type::ParamRef { binder, index: 0 } if *binder == signature)
+    );
+}
+
+#[test]
+fn if_branch_join_preserves_supertype_and_union_shapes() {
+    let mut common_fixture = Fixture::new(
+        "class Parent; class Child extends Parent; def common(flag: Boolean, child: Child, parent: Parent) = if flag then child else parent",
+    );
+    let parent = common_fixture.symbol_named("Parent", SymbolKind::Class);
+    let child = common_fixture.symbol_named("Child", SymbolKind::Class);
+    let (_, common_method, common_rhs) = common_fixture.method("common");
+    let mut common_typer = common_fixture.typer();
+    common_typer.complete_symbol(parent).unwrap();
+    common_typer.complete_symbol(child).unwrap();
+    let common_context = common_typer.expression_context_for(common_method).unwrap();
+    let common = common_typer
+        .type_expression(common_rhs, common_context)
+        .unwrap();
+    assert_eq!(
+        type_snapshot(&common_typer, common_typer.typed_ast().get(common).ty),
+        "TypeRef(Class:Parent)"
+    );
+
+    let mut union_fixture = Fixture::new(
+        "trait Parent; class Left extends Parent; class Right extends Parent; def union(flag: Boolean, left: Left, right: Right) = if flag then left else right",
+    );
+    let parent = union_fixture.symbol_named("Parent", SymbolKind::Trait);
+    let left = union_fixture.symbol_named("Left", SymbolKind::Class);
+    let right = union_fixture.symbol_named("Right", SymbolKind::Class);
+    let (_, union_method, union_rhs) = union_fixture.method("union");
+    let mut union_typer = union_fixture.typer();
+    for symbol in [parent, left, right] {
+        union_typer.complete_symbol(symbol).unwrap();
+    }
+    let union_context = union_typer.expression_context_for(union_method).unwrap();
+    let union = union_typer
+        .type_expression(union_rhs, union_context)
+        .unwrap();
+    assert_eq!(
+        type_snapshot(&union_typer, union_typer.typed_ast().get(union).ty),
+        "Or(TypeRef(Class:Left),TypeRef(Class:Right))"
+    );
+}
+
+#[test]
+fn assignment_preserves_unit_result_and_exact_local_target() {
+    let mut fixture = Fixture::new("class C { def use: Unit = { var value = 1; value = 2 } }");
+    let (_, method, rhs) = fixture.method("use");
+    let source_assignment = match &fixture.ast.get(rhs).kind {
+        TreeKind::Block(block) => block.expr,
+        _ => panic!("source method body should remain a block"),
+    };
+    let (source_lhs, source_rhs) = match &fixture.ast.get(source_assignment).kind {
+        TreeKind::Assign(assignment) => (assignment.lhs, assignment.rhs),
+        _ => panic!("source block result should be an assignment"),
+    };
+    let local_tree = fixture
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::ValDef(definition) = &node.kind else {
+                return None;
+            };
+            (fixture
+                .store
+                .names
+                .resolve(definition.name.as_name().text())
+                == "value"
+                && fixture.index.symbol_at(SOURCE, tree).is_none())
+            .then_some(tree)
+        })
+        .unwrap();
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+    let local = typer.local_symbol_at(SOURCE, local_tree).unwrap();
+    let TreeKind::Block(block) = &typer.typed_ast().get(typed).kind else {
+        panic!("method body should preserve its block")
+    };
+    let TreeKind::Assign(assignment) = &typer.typed_ast().get(block.expr).kind else {
+        panic!("block result should remain an assignment")
+    };
+
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(block.expr).ty),
+        "TypeRef(Class:Unit)"
+    );
+    assert_eq!(term_ref_symbol(&typer, assignment.lhs), Some(local));
+    assert_eq!(typer.source_typed_index().get(SOURCE, rhs), Some(typed));
+    assert_eq!(
+        typer.source_typed_index().get(SOURCE, source_lhs),
+        Some(assignment.lhs)
+    );
+    assert_eq!(
+        typer.source_typed_index().get(SOURCE, source_rhs),
+        Some(assignment.rhs)
+    );
+}
+
+#[test]
+fn while_and_return_preserve_unit_nothing_and_their_children() {
+    let mut fixture = Fixture::new(
+        "class C { def loop(flag: Boolean): Unit = while flag do (); def leave(value: Int): Int = return value }",
+    );
+    let (loop_tree, loop_method, loop_rhs) = fixture.method("loop");
+    let (leave_tree, leave_method, leave_rhs) = fixture.method("leave");
+    let loop_ast = match &fixture.ast.get(loop_tree).kind {
+        TreeKind::DefDef(_) => loop_rhs,
+        _ => unreachable!(),
+    };
+    let (source_condition, source_body) = match &fixture.ast.get(loop_ast).kind {
+        TreeKind::While(while_tree) => (while_tree.cond, while_tree.body),
+        _ => panic!("source expression should remain a While"),
+    };
+    let leave_param_tree = match &fixture.ast.get(leave_tree).kind {
+        TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+        _ => unreachable!(),
+    };
+    let leave_param = fixture.index.symbol_at(SOURCE, leave_param_tree).unwrap();
+    let source_return_value = match &fixture.ast.get(leave_rhs).kind {
+        TreeKind::Return(return_tree) => return_tree.expr.unwrap(),
+        _ => panic!("source expression should remain a Return"),
+    };
+    let nothing_class = fixture.definitions.nothing_class;
+    let mut typer = fixture.typer();
+    let loop_context = typer.expression_context_for(loop_method).unwrap();
+    let typed_loop = typer.type_expression(loop_ast, loop_context).unwrap();
+    let leave_context = typer.expression_context_for(leave_method).unwrap();
+    let typed_return = typer.type_expression(leave_rhs, leave_context).unwrap();
+    let TreeKind::While(while_tree) = &typer.typed_ast().get(typed_loop).kind else {
+        panic!("while body should remain a While")
+    };
+    let TreeKind::Return(return_tree) = &typer.typed_ast().get(typed_return).kind else {
+        panic!("return expression should remain a Return")
+    };
+    let returned = return_tree.expr.unwrap();
+
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(typed_loop).ty),
+        "TypeRef(Class:Unit)"
+    );
+    assert!(
+        matches!(typer.store().types.get(typer.typed_ast().get(typed_return).ty), Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == nothing_class)
+    );
+    assert_eq!(term_ref_symbol(&typer, returned), Some(leave_param));
+    assert_eq!(
+        typer.source_typed_index().get(SOURCE, loop_rhs),
+        Some(typed_loop)
+    );
+    assert_eq!(
+        typer.source_typed_index().get(SOURCE, leave_rhs),
+        Some(typed_return)
+    );
+    assert_eq!(
+        typer.source_typed_index().get(SOURCE, source_condition),
+        Some(while_tree.cond)
+    );
+    assert_eq!(
+        typer.source_typed_index().get(SOURCE, source_body),
+        Some(while_tree.body)
+    );
+    assert_eq!(
+        typer.source_typed_index().get(SOURCE, source_return_value),
+        Some(returned)
+    );
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(while_tree.body).ty),
+        "Constant(Unit)"
+    );
+}
+
 fn tree_snapshot(typer: &SourceTyper<'_>, tree: TreeId<Typed>) -> String {
     let node = typer.typed_ast().get(tree);
     let ty = type_snapshot(typer, node.ty);
