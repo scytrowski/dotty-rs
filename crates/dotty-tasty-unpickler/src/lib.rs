@@ -2,23 +2,14 @@
 //!
 //! This crate interprets TASTy; it does not decode the wire format (that is
 //! `dotty-tasty`), own a classpath (that is `dotty-classloader`), or define
-//! the semantic model (that is `dotty-core`). It is built as a multi-pass
-//! pipeline — enter symbols, build types, complete signatures — rather than a
-//! one-pass tree decoder, because TASTy has forward references, shared nodes
-//! and recursive binders. See `docs/tasty-semantic-unpickler.md`.
-//!
-//! Two passes exist so far. Pass 1, `TastyUnpickler::enter_symbols`, enters
-//! packages, classes, their members and parameters into the store, and records
-//! each definition address in a `TastySemanticIndex`; entered symbols have no
-//! type yet (`SymbolInfo::Missing`). Pass 2a, `TastyUnpickler::unpickle_type`,
-//! gives each type node address at most one `TypeId` and resolves reference
-//! types (`TypeRef`, `TermRef`, `ThisType`, `SHAREDtype`) through the index by
-//! address, never by name; other type forms are an explicit
-//! `UnpickleError::UnsupportedType`. Pass 5a projects type trees
-//! (`unpickle_type_tree_type`) and completes simple symbols
-//! (`complete_symbol`): `VALDEF`, `PARAM`, `TYPEPARAM` and plain `TYPEDEF`
-//! become `SymbolInfo::Complete`, and (5c/5d1/5d2a) ordinary methods, classes,
-//! traits, module classes and constructors do too (`Poly`/`Method`/`ClassInfo`).
+//! the semantic model (that is `dotty-core`). It uses an enter-before-complete
+//! pipeline because TASTy has forward references, shared nodes and recursive
+//! binders. Entry records symbols and metadata in a `TastySemanticIndex`;
+//! type decoding and `complete_symbol` project supported forms into the
+//! canonical core model. Completion can remain pending when a dependency is
+//! outside the entered state and no `SymbolResolver` can supply it. See
+//! `docs/tasty-semantic-unpickler.md` for the compatibility gate and the
+//! supported/deferred boundary.
 
 mod annotated;
 mod ast_view;
