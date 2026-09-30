@@ -1,11 +1,11 @@
 //! Classpath loader unifying TASTy and JVM class file entries.
 //!
-//! This crate will index classpath entries (directories and archives)
-//! containing `.tasty` and `.class` files and resolve symbol lookups against
-//! them, preferring `.tasty` over `.class` when a symbol is defined in both.
-//! It is the entry point the compiler backend and semantic analysis will use
-//! to load classpath dependencies. Implementation is not yet started; this
-//! crate is scaffolding built on top of `dotty-tasty` and `dotty-classfile`.
+//! This crate indexes directories and archives containing `.tasty` and
+//! `.class` files and loads classpath resources into its class model. It owns
+//! classpath discovery and binary loading; format adapters and semantic
+//! projections remain in `dotty-tasty`, `dotty-classfile`, and
+//! `dotty-tasty-unpickler`. The current TASTy semantic resolver handoff is
+//! described in `docs/tasty-semantic-unpickler.md`.
 
 mod annotation;
 mod binary_name;
