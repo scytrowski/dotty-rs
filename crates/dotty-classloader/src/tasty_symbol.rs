@@ -631,14 +631,31 @@ fn decode_shared_tree<'a>(file: &TastyFile<'a>, address: u32) -> Option<RawTree<
 /// as if this function did not exist, rather than fabricating a
 /// plausible-looking but wrong answer.
 fn resolve_reference_prefix(file: &TastyFile<'_>, prefix: &RawTree<'_>) -> Option<String> {
+    resolve_reference_prefix_in_package(file, prefix, None)
+}
+
+fn resolve_reference_prefix_in_package(
+    file: &TastyFile<'_>,
+    prefix: &RawTree<'_>,
+    current_package: Option<&str>,
+) -> Option<String> {
     match prefix {
         RawTree::Leaf(term) if term.tag == TERMREFPKG_TAG => {
-            resolve_qualified_name(file, term.name_ref()?)
+            let reference = term.name_ref()?;
+            let package = resolve_qualified_name(file, reference)?;
+            match current_package {
+                Some(current)
+                    if !current.is_empty() && !package.contains('/') && package != "_root_" =>
+                {
+                    Some(format!("{current}/{package}"))
+                }
+                _ => Some(package),
+            }
         }
         RawTree::Leaf(term) if matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG) => {
             let reference = term.ast_ref()?;
             let shared = decode_shared_tree(file, reference.address)?;
-            resolve_reference_prefix(file, &shared)
+            resolve_reference_prefix_in_package(file, &shared, current_package)
         }
         _ => None,
     }
@@ -691,6 +708,14 @@ enum ReferenceResolution {
 /// be a wrong answer being presented as a real one, not a best-effort
 /// fallback — see [`ReferenceResolution`]'s own doc comment.
 fn resolve_reference_name(file: &TastyFile<'_>, tree: &RawTree<'_>) -> ReferenceResolution {
+    resolve_reference_name_in_package(file, tree, None)
+}
+
+fn resolve_reference_name_in_package(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    current_package: Option<&str>,
+) -> ReferenceResolution {
     let Ok(structured) = tree.decode_structured() else {
         return ReferenceResolution::NotAReference;
     };
@@ -703,7 +728,11 @@ fn resolve_reference_name(file: &TastyFile<'_>, tree: &RawTree<'_>) -> Reference
             let Some(simple_name) = resolve_qualified_name(file, reference) else {
                 return ReferenceResolution::Unresolved;
             };
-            match resolve_reference_prefix(file, &qualifier) {
+            let prefix = match current_package {
+                Some(_) => resolve_reference_prefix_in_package(file, &qualifier, current_package),
+                None => resolve_reference_prefix(file, &qualifier),
+            };
+            match prefix {
                 Some(package) => ReferenceResolution::Resolved(BinaryName::from_internal(format!(
                     "{package}/{simple_name}"
                 ))),
@@ -715,7 +744,7 @@ fn resolve_reference_name(file: &TastyFile<'_>, tree: &RawTree<'_>) -> Reference
             ..
         }) => ReferenceResolution::Unresolved,
         StructuredTree::Ident(IdentNode { type_tree, .. }) => {
-            resolve_reference_name(file, &type_tree)
+            resolve_reference_name_in_package(file, &type_tree, current_package)
         }
         _ => ReferenceResolution::NotAReference,
     }
@@ -777,7 +806,20 @@ fn resolve_parent_name(
     parent: &RawTree<'_>,
     package: &str,
 ) -> Option<BinaryName> {
-    match resolve_reference_name(file, parent) {
+    resolve_parent_name_in_package(file, parent, package, None)
+}
+
+fn resolve_parent_name_in_package(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+    package_scope: Option<&str>,
+) -> Option<BinaryName> {
+    let reference = match package_scope {
+        Some(_) => resolve_reference_name_in_package(file, parent, package_scope),
+        None => resolve_reference_name(file, parent),
+    };
+    match reference {
         ReferenceResolution::Resolved(resolved) => return Some(resolved),
         // A real reference this decoder cannot fully qualify (an
         // implicit-import reference such as `scala.package$.Iterator`,
@@ -795,7 +837,10 @@ fn resolve_parent_name(
         .collect();
 
     if names.is_empty() {
-        return resolve_applied_type_name(file, parent, package);
+        return match package_scope {
+            Some(_) => resolve_applied_type_name_in_package(file, parent, package, package_scope),
+            None => resolve_applied_type_name(file, parent, package),
+        };
     }
 
     names.reverse();
@@ -829,6 +874,15 @@ fn resolve_applied_type_name(
     parent: &RawTree<'_>,
     package: &str,
 ) -> Option<BinaryName> {
+    resolve_applied_type_name_in_package(file, parent, package, None)
+}
+
+fn resolve_applied_type_name_in_package(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+    package_scope: Option<&str>,
+) -> Option<BinaryName> {
     let RawTree::LengthNode(node) = parent else {
         return None;
     };
@@ -842,7 +896,43 @@ fn resolve_applied_type_name(
         return None;
     };
 
-    resolve_parent_name(file, &tycon, package)
+    resolve_parent_name_in_package(file, &tycon, package, package_scope)
+}
+
+/// Reads a type-alias definition from a `.tasty` file and reduces its
+/// right-hand side to a candidate name. The name may still be relative to
+/// `current_package`; the classpath-aware caller validates the candidate
+/// before returning it as a resolved parent.
+fn resolve_type_alias_candidate(
+    file: &TastyFile<'_>,
+    alias_name: &str,
+    current_package: &str,
+) -> Option<BinaryName> {
+    for node in file.ast_address_index().ok()?.iter() {
+        if node.tag != TYPEDEF_TAG {
+            continue;
+        }
+        let Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef {
+            name,
+            type_or_template,
+            ..
+        })) = node.decode_structured()
+        else {
+            continue;
+        };
+        if file.render_name(name).ok().as_deref() != Some(alias_name) {
+            continue;
+        }
+        let rhs = match type_or_template {
+            RawTree::LengthNode(lambda) if lambda.tag == dotty_tasty::tasty::LAMBDATPT_TAG => {
+                lambda.decode_lambda_tpt().ok()?.body
+            }
+            RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG => continue,
+            rhs => rhs,
+        };
+        return resolve_parent_name_in_package(file, &rhs, current_package, Some(current_package));
+    }
+    None
 }
 
 /// Reads a raw AST name-table reference: AST fields such as
@@ -867,6 +957,17 @@ mod tests {
                 .join(relative_path),
         )
         .unwrap_or_else(|error| panic!("fixture {relative_path} should exist: {error}"))
+    }
+
+    #[test]
+    fn resolves_package_object_aliases_in_their_defining_package() {
+        let bytes = fixture_bytes("scala3-library/scala/package.tasty");
+        let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+
+        assert_eq!(
+            resolve_type_alias_candidate(&file, "Iterator", "scala"),
+            Some(BinaryName::from_internal("collection/Iterator"))
+        );
     }
 
     #[test]
