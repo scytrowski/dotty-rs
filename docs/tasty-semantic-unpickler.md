@@ -918,6 +918,33 @@ info written and no empty `ClassInfo`. A body is never inspected, and a
 `InvalidCompletedBounds`. `suppressIntoIfParam` (upstream) is not applied; no
 real case was measured, so nothing was guessed.
 
+### Opaque aliases (Scala 3.9 contract; implementation tracked by #529)
+
+The pinned Scala 3.9 `TreeUnpickler` first gives an alias provisional empty
+bounds while reading its right-hand side, then calls `toBounds` and
+`SymDenotation.opaqueToBounds`. For an opaque alias owned by a class-like
+symbol, `opaqueToBounds` replaces the public info with abstract bounds and
+stores the implementation alias in a same-named refinement of the owner's
+self type. The two views must remain distinct: external lookup sees the
+bounds, while the defining owner retains the alias.
+
+For an explicit `TypeBoundsTree`, the public bounds are its projected lower and
+upper types; an alias RHS without explicit bounds gets Scala's empty bounds.
+Generic aliases abstract those bounds over the RHS `LambdaTypeTree`'s type
+parameters using Scala's higher-kinded type-lambda machinery. The implementation
+alias kept on the owner uses the same canonical binders as the completed public
+info. The source uses provisional bounds during RHS completion to break
+self-reference; a completed same-named refinement is a true cyclic-reference
+error.
+
+The existing core model has the format-agnostic pieces for this contract:
+`Bounds` for external bounds, `AliasingBounds` for ordinary alias payloads,
+`TypeLambda`/`ParamRef` for generic binders, and `Refined` (or `Recursive`)
+for owner-local self-type refinements. Do not expose the implementation alias
+as the opaque symbol's public `AliasingBounds`. The unpickler must journal
+changes to an already-completed owner's `ClassInfo` and preserve any existing
+self type and refinements.
+
 Each public call is one atomic transaction (the store checkpoint, the type and
 tree caches, the `RecThis` journal and a **`SymbolInfo` journal**: arena
 truncation cannot restore a field of a symbol that already existed, so the old
