@@ -128,7 +128,8 @@ Fixtures under `fixtures/patterns/` use the explicit `pattern` mode. This
 includes quote-pattern syntax and nested term splices. Scala mode calls
 Dotty's real `Parser.pattern()` entry and Rust mode calls the
 parser's standalone pattern-fragment entry; pattern fixtures are not wrapped
-in synthetic `match` expressions. The normalized tree compares `Bind`,
+in synthetic `match` expressions. The normalized tree compares `Bind` names
+and the `given`-pattern marker,
 `Alternative`, `Typed`, extractor-style source `Apply`, and named pattern
 arguments as they appear before semantic extractor lowering. Type-pattern
 fixtures cover `@unchecked` on bound variables, wildcards, and qualified types;

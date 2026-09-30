@@ -151,6 +151,7 @@ where
             TreeKind::Bind(Bind {
                 name: binder_name,
                 body,
+                given: false,
             }),
         )
     }
@@ -325,9 +326,8 @@ where
             }
             TokenKind::Keyword(HardKeyword::Super) => self.parse_super(mark, None),
             TokenKind::Quote => self.simple_expr(),
-            TokenKind::Keyword(HardKeyword::Given) | TokenKind::XmlStart => {
-                self.unsupported_pattern()
-            }
+            TokenKind::Keyword(HardKeyword::Given) => self.parse_given_pattern(mark),
+            TokenKind::XmlStart => self.unsupported_pattern(),
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_pattern_parens(mark),
             _ => self.unexpected_pattern(),
         };
@@ -380,6 +380,39 @@ where
             }
         }
         tree
+    }
+
+    fn parse_given_pattern(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        let typed_mark = self.mark();
+        let wildcard = *TermName::new(self.names.intern("_")).as_name();
+        let wildcard_ident = self.alloc_from(
+            typed_mark,
+            TreeKind::Ident(Ident {
+                name: wildcard,
+                backquoted: false,
+            }),
+        );
+        let tpt = self.parse_refined_type();
+        let typed = self.alloc_from(
+            typed_mark,
+            TreeKind::Typed(TypedExpr {
+                expr: wildcard_ident,
+                tpt,
+            }),
+        );
+
+        // Dotty encodes `given T` as a wildcard Bind around a typed wildcard,
+        // with a `Given` modifier on the Bind. The shared node keeps that
+        // source-level distinction in its `given` bit.
+        self.alloc_from(
+            mark,
+            TreeKind::Bind(Bind {
+                name: wildcard,
+                body: typed,
+                given: true,
+            }),
+        )
     }
 
     fn parse_pattern_parens(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
@@ -1298,9 +1331,10 @@ mod tests {
         );
         let result = parser.parse_pattern_fragment();
 
-        let TreeKind::Bind(Bind { name, body }) = result.ast.get(result.root).kind else {
+        let TreeKind::Bind(Bind { name, body, given }) = result.ast.get(result.root).kind else {
             panic!("expected bind pattern");
         };
+        assert!(!given);
         assert_eq!(names.resolve(name.text()), "x");
         assert!(matches!(result.ast.get(body).kind, TreeKind::Apply(_)));
         assert!(result.diagnostics.is_empty());
@@ -1695,25 +1729,66 @@ mod tests {
     }
 
     #[test]
-    fn diagnoses_deferred_given_patterns_as_unsupported() {
+    fn parses_given_patterns_as_marked_typed_wildcard_binders() {
         let mut names = NameInterner::new();
         let parser = parser_for(
-            "given T",
+            "given Context",
             vec![
                 token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
-                token(TokenKind::Identifier, 6, 7),
-                token(TokenKind::Eof, 7, 7),
+                token(TokenKind::Identifier, 6, 13),
+                token(TokenKind::Eof, 13, 13),
             ],
             &mut names,
         );
         let result = parser.parse_pattern_fragment();
 
-        assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax })
+        assert!(result.diagnostics.is_empty());
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 13).unwrap()
         );
+        let TreeKind::Bind(Bind { name, body, given }) = result.ast.get(result.root).kind else {
+            panic!("Dotty represents a given pattern as a marked wildcard Bind");
+        };
+        assert!(given);
+        assert_eq!(names.resolve(name.text()), "_");
+
+        let typed = result.ast.get(body);
+        assert_eq!(
+            typed.position.unwrap().span().range(),
+            TextRange::new(6, 13).unwrap()
+        );
+        let TreeKind::Typed(typed) = typed.kind else {
+            panic!("given pattern body should be typed");
+        };
+        let TreeKind::Ident(wildcard) = result.ast.get(typed.expr).kind else {
+            panic!("typed pattern should contain a wildcard");
+        };
+        assert_eq!(names.resolve(wildcard.name.text()), "_");
+        assert_eq!(
+            result.ast.get(typed.expr).position.unwrap().span().range(),
+            TextRange::new(6, 6).unwrap()
+        );
+    }
+
+    #[test]
+    fn missing_given_pattern_type_recovers_with_a_diagnostic() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "given",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(!result.diagnostics.is_empty());
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Bind(Bind { given: true, .. })
+        ));
     }
 
     #[test]

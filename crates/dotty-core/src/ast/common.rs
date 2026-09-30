@@ -318,6 +318,9 @@ pub struct TypeBoundsTree<P: AstPhase> {
 pub struct Bind<P: AstPhase> {
     pub name: Name,
     pub body: TreeId<P>,
+    /// Marks Scala's `given T` pattern form, which Dotty represents as a
+    /// wildcard bind carrying the `Given` modifier.
+    pub given: bool,
 }
 
 /// `alt_1 | ... | alt_n`.

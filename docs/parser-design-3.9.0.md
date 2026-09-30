@@ -804,11 +804,14 @@ the next token starts a pattern. A trailing
 variable or wildcard followed by `*`
 inside extractor arguments is represented as `Typed(pattern, Ident(_*))`,
 matching Dotty's parser tree; sequence markers elsewhere remain invalid.
+Scala `given T` patterns are represented as a `Bind` with the parser-level
+`given` marker, containing a typed wildcard; the parser does not resolve a
+contextual value or type.
 Extractor-looking source patterns intentionally remain `Apply`/`TypeApply`;
 semantic `UnApply` lowering belongs to later phases. Quoted patterns preserve
 Dotty's parser-level `Quote` plus nested `SplicePattern` representation;
 `QuotePattern` construction and staging semantics remain later-phase work.
-`given` and XML patterns, remaining refined-type forms, remaining definition forms and full
+XML patterns, remaining refined-type forms, remaining definition forms and full
 template semantics, other legacy given migration syntax, remaining control flow (`do`/`while`),
 macros, and staging semantics remain follow-up increments.
 
