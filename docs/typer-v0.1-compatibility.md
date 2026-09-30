@@ -178,10 +178,19 @@ typer-owned symbols in the method's distinct scope, with source-tree identity
 and the declaration site's lexical type context retained without changing
 `SourceSemanticIndex`. Forward calls can complete and use these signatures on
 demand; overload selection uses the shared application resolver. The typed
-`DefDef` retains its type parameters and each term clause. Inferred or
-parameter-dependent result types, erased, by-name, or repeated parameters,
-higher-kinded and aliased type-parameter bounds, and unsupported parameter
-modifiers remain explicitly deferred. A method body is typed in a method
+`DefDef` retains its type parameters and each term clause. Local methods can
+infer plain, generic, and curried result types from their typed bodies. Generic
+results are rebound to the final `Poly` binder, and the synthetic source result
+`TypeTree` maps to a typed node carrying that result. Forward calls can trigger
+inference before the definition statement. Self and mutual inferred-result
+cycles fail deterministically and roll back completion state; an explicit
+result type can break a mixed recursive cycle, as confirmed against the pinned
+Scala 3.9.0 compiler by
+[`explicit-breaks-inference-cycle.scala`](../crates/dotty-typer/tests/fixtures/local-method-results/explicit-breaks-inference-cycle.scala).
+Parameter-dependent result
+types, erased, by-name, or repeated parameters, higher-kinded and aliased
+type-parameter bounds, and unsupported parameter modifiers remain explicitly
+deferred. A method body is typed in a method
 context that composes the declaration-site lexical context with the
 method-owned parameter scope. Its RHS is checked against the explicit result
 type, and the typed `DefDef`, typed type and value parameter definitions,
@@ -203,6 +212,44 @@ name lookup failure. Unsupported methodic, bounds, incomplete, and other
 non-value inferred infos return a focused error. Both typed explicit and
 inferred locals are entered with one stable symbol identity; a later failure in
 the block rolls back local symbols, source mappings, and typed nodes.
+
+### Local-definition source audit
+
+The focused audit scans the pinned Scala 3.9.0 `library/src` and `compiler/src`
+trees and tries source typing for named method bodies that contain local
+definitions. Reproduce it with:
+
+```text
+SCALA39_ROOT=/tmp/scala3-3.9.0 \
+  cargo test -p dotty-typer --test local_definition_audit --locked \
+  -- --ignored --nocapture
+```
+
+The corpus contains 1,236 Scala files at source revision
+`777528f19a58e794c9954a42f433373472ec57f8`. At this typer revision, the AST
+audit found 31,357 local declaration nodes: 24,902 local values, 4,970 local
+methods, 90 local type definitions, 39 local classes, 44 local objects, 226
+local imports, and 1,086 local pattern bindings. No local method body typed
+successfully in this source-corpus run (0/4,970). This conservative corpus
+number measures methods for which an enclosing named method body can be typed
+as a whole without the classpath/session loader; it does not contradict the
+focused local-method regressions, which type supported examples against their
+complete in-memory source context.
+
+The five largest local-method failure categories were `ImportQualifierNotFound`
+(2,264; `BCodeBodyBuilder.scala`, `BCodeHelpers.scala`, `BCodeSkelBuilder.scala`,
+`BCodeUtils.scala`, `BTypeLoader.scala`),
+`AnonymousClassInstantiationDeferred` (826; `BCodeHelpers.scala`,
+`BTypeLoader.scala`, `Desugar.scala`, `TreeInfo.scala`, `TreeTypeMap.scala`),
+`UnsupportedExpression` (775; `BCodeBodyBuilder.scala`, `BCodeSkelBuilder.scala`,
+`BCodeSyncAndTry.scala`, `BTypes.scala`, `GenBCode.scala`),
+`LocalBlockDeclarationDeferred` (418; `ScalaPrimitives.scala`,
+`BCodeBodyBuilder.scala`, `BCodeHelpers.scala`, `BackendUtils.scala`,
+`ClosureOptimizer.scala`), and `NoSuccessfulEnclosingMethodTyping` (173;
+`TreeInfo.scala`, `Annotations.scala`, `ClassfileParser.scala`, `Parsers.scala`,
+`Reporter.scala`). The audit reports stable sorted buckets and representative
+paths. Its fixture test runs the same source twice and asserts identical
+counts, typed results, and failure categories.
 
 Application sites can resolve lexical, imported, and selected overload buckets
 for supported monomorphic methods and `Poly -> Method` candidates. Generic
