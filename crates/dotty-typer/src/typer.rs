@@ -20650,6 +20650,96 @@ mod tests {
     }
 
     #[test]
+    fn inferred_generic_local_method_rebinds_result_and_supports_forward_call() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { local(1); def local[A](value: A) = value; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let method_tree = block.stats[1];
+        let type_parameter_tree = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => definition.type_params[0],
+            _ => panic!("local declaration should be a DefDef"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        typer.type_expression(block_tree, context).unwrap();
+
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        let SymbolInfo::Complete(signature) = *typer.store().symbols.info(method) else {
+            panic!("inferred local method should be complete after its forward call");
+        };
+        let Type::Poly(poly) = typer.store().types.get(signature) else {
+            panic!("generic local method should have a Poly signature");
+        };
+        let Type::Method(method_type) = typer.store().types.get(poly.result) else {
+            panic!("generic local method should retain its term clause");
+        };
+        assert_eq!(method_type.params.len(), 1);
+        assert!(matches!(
+            typer.store().types.get(method_type.result),
+            Type::ParamRef { binder, index: 0 } if *binder == signature
+        ));
+        assert_eq!(poly.params.len(), 1);
+        let type_parameter = typer
+            .local_method_type_parameter_symbol_at(source, type_parameter_tree)
+            .unwrap();
+        assert_eq!(
+            typer.store().symbols.get(type_parameter).owner,
+            Some(method)
+        );
+    }
+
+    #[test]
+    fn inferred_curried_local_method_preserves_clause_results() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def local(first: Int)(last: Int) = last; local(1)(2) } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let method_tree = block.stats[0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        typer.type_expression(block_tree, context).unwrap();
+
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        let SymbolInfo::Complete(signature) = *typer.store().symbols.info(method) else {
+            panic!("inferred local method should be complete");
+        };
+        let Type::Method(first_clause) = typer.store().types.get(signature) else {
+            panic!("local method should retain its first clause");
+        };
+        let Type::Method(second_clause) = typer.store().types.get(first_clause.result) else {
+            panic!("local method should retain its second clause");
+        };
+        assert_eq!(first_clause.params.len(), 1);
+        assert_eq!(second_clause.params.len(), 1);
+        assert_eq!(second_clause.result, definitions.int);
+    }
+
+    #[test]
     fn local_unsupported_parameter_modifiers_remain_deferred() {
         for (unsupported_modifier, expected_feature) in [
             (Modifier::Erased, "erased parameters"),
