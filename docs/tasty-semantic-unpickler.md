@@ -195,11 +195,61 @@ an identity.
 `SymbolFlags::EXPORTED`. These flags preserve the modifier facts only; this
 does not name enum cases or synthesize export forwarders.
 
-Not mapped yet: `ARTIFACT`, `INLINEPROXY`, `MACRO`, `OPEN`, `INFIX`,
-`INVISIBLE`, `TRACKED`, `INTO` (no core flag),
-`COVARIANT`/`CONTRAVARIANT` (variance is set when type parameters are
-completed), the accessor roles `FIELDACCESSOR`, `CASEACCESSOR`,
-`PARAMSETTER`, `PARAMALIAS`, `HASDEFAULT`, `STABLE`, and annotations.
+### Definition-tail modifier audit (Scala 3.9.0)
+
+The pinned corpus has 941 library and 1,148 compiler TASTy files, both from
+Scala commit `777528f19a58e794c9954a42f433373472ec57f8`. The library artifact
+uses TASTy 28.9; the nonbootstrapped compiler artifact uses 28.8 because it
+was bootstrapped by Scala 3.8.4. The audit therefore uses the format-neutral
+structural parser, then enters all 2,089 files successfully. Run the reproducible
+survey with:
+
+```text
+cargo test --locked -p dotty-tasty-unpickler --test definition_tail_corpus -- --ignored --nocapture
+```
+
+The table counts every occurrence in a definition or parameter tail. The
+definition column gives wire definition kind and entered `SymbolKind`; the
+owner column gives the entered owner's kind. Modifier combinations include
+all recognized modifiers on that same tail, not just the tag being counted.
+Examples show representative file and entered symbol. `A` means represented
+by a shared-core semantic fact, `B` represented elsewhere in the existing
+model, `C` intentionally omitted as an internal/harmless detail, and `D` an
+explicitly deferred semantic distinction. No new core flag is warranted by
+this audit.
+
+| Tag | Total (library / compiler) | Definition kind | Owner kind | Modifier combinations | Examples | Disposition |
+| --- | ---: | --- | --- | --- | --- | --- |
+| `ARTIFACT` | 35 (21 / 14) | `DEFDEF` Method: 35 | Trait: 35 | `ARTIFACT`: 35 | `BitSetOps.scala$collection$BitSetOps$$super$max` | D — bridge/artifact identity may matter to member lookup or lowering; defer until that consumer has a model. |
+| `INLINEPROXY` | 0 (0 / 0) | — | — | — | — | C — absent in both pinned artifacts and has no unpickler consumer. |
+| `MACRO` | 4 (4 / 0) | `DEFDEF` Method: 4 | Class: 3; ModuleClass: 1 | `ERASED+MACRO`: 3; `ERASED+MACRO+PRIVATEQUALIFIED`: 1 | `StringContext.s`, `.raw`, `.f`; `reflect.package.materializeClassTag` | D — keep the macro-method distinction available for a future macro expansion/implementation consumer. |
+| `OPEN` | 0 (0 / 0) | — | — | — | — | D — source/typer inheritance policy; absent from these artifacts, so no core fact is added yet. |
+| `INFIX` | 66 (60 / 6) | `DEFDEF` Method: 10; `TYPEDEF` TypeAlias: 56 | ModuleClass: 60; Class: 6 | `INFIX`: 58; `INFIX+INLINE`: 2; `EXTENSION+INFIX+INLINE`: 6 | `Predef.eq`, `Predef.ne`, `Tuple.++` | D — preserve for the source-facing infix eligibility/warning rules owned by the typer. |
+| `INVISIBLE` | 0 (0 / 0) | — | — | — | — | C — absent in both pinned artifacts and has no unpickler consumer. |
+| `TRACKED` | 0 (0 / 0) | — | — | — | — | D — capture-checking parameter semantics; method completion already returns `UnsupportedMethodParameterSemantics` instead of silently accepting it. |
+| `INTO` | 0 (0 / 0) | — | — | — | — | D — capture-checking parameter semantics; method completion already returns `UnsupportedMethodParameterSemantics` instead of silently accepting it. |
+| `COVARIANT` | 1,081 (927 / 154) | `TYPEPARAM` TypeParameter: 1,081 | Class: 512; Trait: 449; TypeAlias: 112; TypeParameter: 8 | `COVARIANT`: 120; `COVARIANT+LOCAL+PRIVATE`: 961 | `$less$colon$less.To`, `$less$colon$less._$2` | B — `TypeParam.declared_variance` stores the declaration; binder and higher-kinded type-bound decoding use the same canonical `Variance` machinery. |
+| `CONTRAVARIANT` | 546 (544 / 2) | `TYPEPARAM` TypeParameter: 546 | Trait: 269; Class: 268; TypeAlias: 6; TypeParameter: 3 | `CONTRAVARIANT`: 9; `CONTRAVARIANT+LOCAL+PRIVATE`: 537 | `$less$colon$less.From`, `$less$colon$less._$1` | B — same canonical declaration/binder representation as `COVARIANT`. |
+| `FIELDACCESSOR` | 491 (156 / 335) | `DEFDEF` Method: 491 | Class: 398; Trait: 85; ModuleClass: 8 | `FINAL+MUTABLE+PARAMSETTER+PROTECTED`: 3; same with `PROTECTEDQUALIFIED`: 1; `FINAL+MUTABLE+PROTECTED`: 2; `HASDEFAULT+MUTABLE+PARAMSETTER`: 1; `LOCAL+MUTABLE+PRIVATE`: 60; `MUTABLE`: 197; `MUTABLE+PARAMSETTER`: 65; same with `PRIVATEQUALIFIED`: 7 or `PROTECTED`: 17; `MUTABLE+PRIVATEQUALIFIED`: 49; `MUTABLE+PROTECTED`: 84; `MUTABLE+PROTECTEDQUALIFIED`: 5 | `App._args_=`, `Enumeration.nextId_=` | D — these are setter methods. `SymbolKind::Method` alone does not link a setter to its field, so defer that relation to member lowering. |
+| `CASEACCESSOR` | 1,775 (385 / 1,390) | `PARAM` Field: 1,775 | Class: 1,775 | `CASEACCESSOR`: 1,590; `CASEACCESSOR+HASDEFAULT`: 156; `CASEACCESSOR+HASDEFAULT+OVERRIDE`: 2; `CASEACCESSOR+MUTABLE`: 11; `CASEACCESSOR+MUTABLE+PRIVATE`: 7; `CASEACCESSOR+MUTABLE+PRIVATEQUALIFIED`: 1; `CASEACCESSOR+OVERRIDE`: 8 | `Some.value`, `Tuple1._1` | D — the parameter is entered as a `Field`, but case-accessor generation/lookup is a distinct role and is not fully represented by that kind. |
+| `PARAMSETTER` | 94 (67 / 27) | `DEFDEF` Method: 94 | Class: 94 | `FIELDACCESSOR+FINAL+MUTABLE+PARAMSETTER+PROTECTED`: 3; same with `PROTECTEDQUALIFIED`: 1; `FIELDACCESSOR+HASDEFAULT+MUTABLE+PARAMSETTER`: 1; `FIELDACCESSOR+MUTABLE+PARAMSETTER`: 65; same with `PRIVATEQUALIFIED`: 7; same with `PROTECTED`: 17 | `Iterator.tail_=`, `TrieMapIterator.level_=` | D — preserve the setter-to-parameter/field relation for a later member-lowering consumer. |
+| `PARAMALIAS` | 554 (129 / 425) | `PARAM` Parameter: 554 | Class: 554 | `LOCAL+PARAMALIAS+PRIVATE`: 298; `IMPLICIT+LOCAL+PARAMALIAS+PRIVATE`: 129; `GIVEN+LOCAL+PARAMALIAS+PRIVATE+SYNTHETIC`: 104; `GIVEN+LOCAL+PARAMALIAS+PRIVATE`: 4; `HASDEFAULT+LOCAL+PARAMALIAS+PRIVATE`: 19 | `ClassTagIterableFactory.delegate`, `IndexedSeqView.underlying` | D — retain the super-parameter alias distinction for constructor/member inheritance; it is not the same as `PARAMSETTER`. |
+| `HASDEFAULT` | 3,253 (555 / 2,698) | `PARAM` Parameter: 3,070; `PARAM` Field: 182; `DEFDEF` Method: 1 | Method: 2,713; Class: 269; Constructor: 271 | `HASDEFAULT`: 2,991; `CASEACCESSOR+HASDEFAULT`: 156; same with `OVERRIDE`: 2; `FIELDACCESSOR+HASDEFAULT+MUTABLE+PARAMSETTER`: 1; `GIVEN+HASDEFAULT`: 10; `HASDEFAULT+INLINE`: 3; `HASDEFAULT+LOCAL+PARAMALIAS+PRIVATE`: 19; `HASDEFAULT+LOCAL+PRIVATE`: 67; `HASDEFAULT+MUTABLE`: 1; `HASDEFAULT+OVERRIDE`: 2; `HASDEFAULT+PRIVATEQUALIFIED`: 1 | `IArray$package.from`, `IArray$package.end` | D — default getter/argument behavior needs a relation to the owning parameter and method, not a generic flag. |
+| `STABLE` | 3,178 (810 / 2,368) | `DEFDEF` Constructor: 3,001; `DEFDEF` Method: 177 | ModuleClass: 1,871; Class: 893; Trait: 414 | `STABLE`: 2,979; `EXPORTED+FINAL+STABLE`: 177; `PRIVATE+STABLE`: 15; `PRIVATEQUALIFIED+STABLE`: 7 | `Array.<init>`, `AnyValCompanion.<init>` | D — definition-tail uses are the compiler's stable-realizable property (mostly constructors), not variance. The typer/inliner trait-initialization and purity consumers need a dedicated interpretation. For variance, `STABLE` remains the explicit invariant marker only in a `TYPEPARAM` or variance-bearing `TYPEBOUNDS` context. |
+
+The zero rows are exact observations for these two artifacts, not claims that
+the modifiers cannot occur in user TASTy. `INLINEPROXY` and `INVISIBLE` have
+no current semantic consumer. `OPEN` and `TRACKED`/`INTO` have potential
+language/capture-checking consumers and are explicit deferrals even though the
+baseline corpus contains none. The method parameter guard remains an explicit
+error for `INLINE`, `TRACKED` and `INTO`; this audit did not relax it.
+
+`STABLE` is Dotty's stable-realizable flag ([pinned Scala 3.9 `Flags.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/core/Flags.scala)); it demonstrates why modifier tags cannot be flattened into generic
+flags: definition tails have 3,178 stable-realizable uses, whereas variance
+decoding reads the same wire tag only in its parameter/bounds context. The
+canonical parameter path is `type_tree::declared_variance`, and higher-kinded
+variance markers flow through `binders::declared_variances`; neither writes a
+`SymbolFlags` bit.
 
 Qualified access maps to `Visibility::PrivateWithin(Q)` /
 `ProtectedWithin(Q)`. The modifier's qualifier tree is one of `TYPEREFpkg`

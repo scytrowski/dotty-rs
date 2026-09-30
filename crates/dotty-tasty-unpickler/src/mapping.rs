@@ -2,16 +2,16 @@
 //!
 //! Nothing here touches a `SemanticStore` or decodes a type: it turns the
 //! modifiers, tags and names of a definition node into a namespace, flags,
-//! visibility and a [`SymbolKind`]. Only facts that TASTy states directly are
-//! mapped; a modifier that needs semantic interpretation (variance, accessor
-//! roles, ...) is left for the milestone that owns it and listed below.
+//! visibility and a [`SymbolKind`]. Only facts that have a direct shared-core
+//! representation are mapped here. The audit and disposition of every other
+//! definition-tail modifier is in `docs/tasty-semantic-unpickler.md` §2.
 //!
-//! Modifiers deliberately **not** mapped yet: `ARTIFACT`,
-//! `INLINEPROXY`, `MACRO`, `OPEN`, `INFIX`, `INVISIBLE`,
-//! `TRACKED`, `INTO` (no matching core flag), `COVARIANT`/`CONTRAVARIANT`
-//! (variance belongs to type-parameter completion), and the accessor roles
-//! `FIELDACCESSOR`, `CASEACCESSOR`, `PARAMSETTER`, `PARAMALIAS`,
-//! `HASDEFAULT`, `STABLE`. Annotations are not read here: `from_tail` skips
+//! Variance is recorded by type-parameter completion, not as a symbol flag.
+//! Accessor/default/stability roles are not interchangeable boolean flags;
+//! until their downstream consumers have a shared representation, this pass
+//! leaves them out as documented deferrals. `INLINEPROXY` and `INVISIBLE` are
+//! currently harmless internal tags with no observed Scala 3.9 corpus uses.
+//! Annotations are not read here: `from_tail` skips
 //! `DefinitionTail::Annotation` entirely, including for the wire position it
 //! carries, because that position is relative to the definition's own
 //! payload, not an absolute AST address (`RawNode::reader` always starts a
@@ -523,9 +523,30 @@ mod tests {
 
     #[test]
     fn modifiers_without_core_flags_are_skipped() {
-        use dotty_tasty::tasty::{COVARIANT_TAG, FIELDACCESSOR_TAG};
+        use dotty_tasty::tasty::{
+            ARTIFACT_TAG, CASEACCESSOR_TAG, CONTRAVARIANT_TAG, COVARIANT_TAG, FIELDACCESSOR_TAG,
+            HASDEFAULT_TAG, INFIX_TAG, INLINEPROXY_TAG, INTO_TAG, INVISIBLE_TAG, MACRO_TAG,
+            OPEN_TAG, PARAMALIAS_TAG, PARAMSETTER_TAG, STABLE_TAG, TRACKED_TAG,
+        };
 
-        for tag in [FIELDACCESSOR_TAG, COVARIANT_TAG] {
+        for tag in [
+            ARTIFACT_TAG,
+            INLINEPROXY_TAG,
+            MACRO_TAG,
+            OPEN_TAG,
+            INFIX_TAG,
+            INVISIBLE_TAG,
+            TRACKED_TAG,
+            INTO_TAG,
+            COVARIANT_TAG,
+            CONTRAVARIANT_TAG,
+            FIELDACCESSOR_TAG,
+            CASEACCESSOR_TAG,
+            PARAMSETTER_TAG,
+            PARAMALIAS_TAG,
+            HASDEFAULT_TAG,
+            STABLE_TAG,
+        ] {
             assert_eq!(modifiers(&[tag]), DeclaredModifiers::NONE, "tag {tag}");
         }
     }
