@@ -1182,6 +1182,40 @@ fn a_failed_opaque_completion_rolls_back_owner_info_and_allocated_types() {
 }
 
 #[test]
+fn a_failed_batch_rolls_back_successful_nested_opaque_completions() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut untouched = Session::new();
+    drop(entered(&file, &mut untouched));
+    let expected_next_type = next_type(&mut untouched);
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+    let symbols = symbols_of(&unpickler, &unit);
+    let initial_types = unpickler.index().type_count();
+
+    assert!(matches!(
+        unpickler.complete_symbols(&[unit.at("Holder.Op"), unit.at("Holder.BadOp"),]),
+        Err(UnpickleError::UnsupportedTypeTree { tag: HOLE, .. })
+    ));
+
+    assert_eq!(unpickler.index().type_count(), initial_types);
+    for label in ["Holder", "Holder.A", "Holder.Op", "Holder.BadOp"] {
+        assert_eq!(
+            unpickler
+                .symbol_state_at(unit.at(label))
+                .map(|(_, info)| info),
+            Some(SymbolInfo::Missing),
+            "{label} kept nested completion state after batch rollback"
+        );
+    }
+    drop(unpickler);
+    for label in ["Holder", "Holder.A", "Holder.Op", "Holder.BadOp"] {
+        assert_eq!(info(&session, symbols[label]), SymbolInfo::Missing);
+    }
+    assert_eq!(next_type(&mut session), expected_next_type);
+}
+
+#[test]
 fn direct_and_indirect_opaque_alias_cycles_fail_deterministically() {
     let unit = Unit::new();
     let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();

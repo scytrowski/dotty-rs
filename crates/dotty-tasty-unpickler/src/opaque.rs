@@ -121,13 +121,15 @@ impl TastyUnpickler<'_, '_, '_> {
                 .ok_or(UnpickleError::OpaqueAliasOwnerNotEntered { address: at, owner })?;
             let transaction = self.begin_transaction();
             let owner_result = self.complete_in(ast, owner_at, depth);
-            match self.finish_transaction(transaction, owner_result) {
-                Ok(_) => {}
-                Err(
+            if let Err(error) = owner_result {
+                let error = self
+                    .finish_transaction::<()>(transaction, Err(error))
+                    .expect_err("an owner completion error remains an error after rollback");
+                match error {
                     UnpickleError::UnresolvedPackage { .. }
-                    | UnpickleError::UnresolvedMember { .. },
-                ) => {}
-                Err(error) => return Err(error),
+                    | UnpickleError::UnresolvedMember { .. } => {}
+                    error => return Err(error),
+                }
             }
         }
         if let Some(implementation) = implementation {
@@ -178,12 +180,20 @@ impl TastyUnpickler<'_, '_, '_> {
                 self.opaque_type_lambda(ast, lambda_params, projected, at, depth)
             }
         })();
-        match self.finish_transaction(transaction, result) {
+        match result {
             Ok(implementation) => Ok(Some(implementation)),
-            Err(
-                UnpickleError::UnresolvedPackage { .. } | UnpickleError::UnresolvedMember { .. },
-            ) => Ok(None),
-            Err(error) => Err(error),
+            Err(error) => {
+                let error = self
+                    .finish_transaction::<()>(transaction, Err(error))
+                    .expect_err(
+                        "an implementation projection error remains an error after rollback",
+                    );
+                match error {
+                    UnpickleError::UnresolvedPackage { .. }
+                    | UnpickleError::UnresolvedMember { .. } => Ok(None),
+                    error => Err(error),
+                }
+            }
         }
     }
 
