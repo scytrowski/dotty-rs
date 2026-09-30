@@ -212,7 +212,6 @@ where
         boundary: StatementSequenceBoundary,
     ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
         let mut statements = Vec::new();
-        let mut end_marker_seen = false;
         self.consume_sequence_separators(boundary);
 
         while !self.sequence_ended(boundary) {
@@ -231,14 +230,12 @@ where
                 {
                     return self.finish_statement_sequence(statements);
                 }
-                if !self.consume_end_marker(last, end_marker_seen) {
+                if !self.consume_end_marker(last) {
                     return self.finish_statement_sequence(statements);
                 }
-                end_marker_seen = true;
                 self.consume_sequence_separators(boundary);
                 continue;
             }
-            end_marker_seen = false;
             let checkpoint = self.cursor.checkpoint();
             let location = match boundary {
                 StatementSequenceBoundary::CompilationUnit => Location::Elsewhere,
@@ -311,10 +308,9 @@ where
                 {
                     return self.finish_statement_sequence(statements);
                 }
-                if !self.consume_end_marker(last, end_marker_seen) {
+                if !self.consume_end_marker(last) {
                     return self.finish_statement_sequence(statements);
                 }
-                end_marker_seen = true;
                 self.consume_sequence_separators(boundary);
             }
         }
@@ -341,20 +337,17 @@ where
         location: Location,
     ) -> Vec<TreeId<Untyped>> {
         let mut statements = Vec::new();
-        let mut end_marker_seen = false;
         self.consume_sequence_separators(boundary);
 
         while !self.sequence_ended(boundary) {
             if self.current().kind == TokenKind::EndMarker {
                 let last = statements.last().copied();
-                if !self.consume_end_marker(last, end_marker_seen) {
+                if !self.consume_end_marker(last) {
                     return statements;
                 }
-                end_marker_seen = true;
                 self.consume_sequence_separators(boundary);
                 continue;
             }
-            end_marker_seen = false;
             let checkpoint = self.cursor.checkpoint();
             match self.parse_top_level_statement(location) {
                 ParsedStatement::Definition(tree) | ParsedStatement::Expression(tree) => {
@@ -390,10 +383,9 @@ where
 
             while self.current().kind == TokenKind::EndMarker {
                 let last = statements.last().copied();
-                if !self.consume_end_marker(last, end_marker_seen) {
+                if !self.consume_end_marker(last) {
                     return statements;
                 }
-                end_marker_seen = true;
                 self.consume_sequence_separators(boundary);
             }
         }
@@ -509,11 +501,7 @@ where
     /// expression parsing or recovery. Only the marker and its target are
     /// consumed, so an unrelated next statement remains available to the
     /// enclosing sequence.
-    pub(crate) fn consume_end_marker(
-        &mut self,
-        last: Option<TreeId<Untyped>>,
-        duplicate: bool,
-    ) -> bool {
+    pub(crate) fn consume_end_marker(&mut self, last: Option<TreeId<Untyped>>) -> bool {
         let checkpoint = self.cursor.checkpoint();
         let marker = self.current().span;
         self.advance();
@@ -545,17 +533,21 @@ where
         }
 
         let target_text = self.marker_target_text(target_kind, self.current().span);
-        let matching_tree =
-            last.filter(|tree| self.end_marker_matches(*tree, target_kind, &target_text));
+        let matching_tree = last.and_then(|tree| {
+            self.end_marker_owner(tree, target_kind, &target_text, marker.start(), false)
+        });
         if let Some(tree) = matching_tree {
-            if duplicate {
-                self.report_at(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    SourceSpan::new(self.source_id, Span::without_point(marker)),
-                    "duplicate end marker",
-                );
-            }
+            self.end_marked_trees.insert(tree);
             self.extend_tree_end(tree, target_end);
+        } else if last.is_some_and(|tree| {
+            self.end_marker_owner(tree, target_kind, &target_text, marker.start(), true)
+                .is_some()
+        }) {
+            self.report_at(
+                ParseDiagnosticKind::UnexpectedToken,
+                SourceSpan::new(self.source_id, Span::without_point(marker)),
+                "duplicate end marker",
+            );
         } else {
             let range = TextRange::new(marker.start(), target_end).expect("marker span is ordered");
             self.report_at(
@@ -579,7 +571,118 @@ where
         let target_kind = target.kind;
         let target_span = target.span;
         let target_text = self.marker_target_text(target_kind, target_span);
-        self.end_marker_matches(tree, target_kind, &target_text)
+        self.end_marker_owner(
+            tree,
+            target_kind,
+            &target_text,
+            self.current().span.start(),
+            false,
+        )
+        .is_some()
+    }
+
+    /// Finds the innermost still-unmarked construct represented by `tree` that
+    /// matches an `end` target before the marker position. The parser's AST
+    /// spans encode the nested source ownership; selecting the latest-starting
+    /// eligible owner lets consecutive `end if` markers close nested controls
+    /// one at a time instead of repeatedly extending the outer statement.
+    fn end_marker_owner(
+        &self,
+        tree: TreeId<Untyped>,
+        target_kind: TokenKind,
+        target_text: &str,
+        marker_start: u32,
+        include_marked: bool,
+    ) -> Option<TreeId<Untyped>> {
+        let node = self.ast.get(tree);
+        let children: Vec<TreeId<Untyped>> = match &node.kind {
+            TreeKind::Block(block) => vec![block.expr],
+            TreeKind::If(conditional) => {
+                // An end marker after a nested branch closes that branch's
+                // construct first; the next marker can then close this `if`.
+                return [conditional.then_branch, conditional.else_branch]
+                    .into_iter()
+                    .filter_map(|child| {
+                        self.end_marker_owner(
+                            child,
+                            target_kind,
+                            target_text,
+                            marker_start,
+                            include_marked,
+                        )
+                    })
+                    .max_by_key(|child| {
+                        self.ast
+                            .get(*child)
+                            .position
+                            .map(|position| position.span().range().start())
+                    })
+                    .or_else(|| {
+                        self.end_marker_is_eligible(
+                            tree,
+                            target_kind,
+                            target_text,
+                            marker_start,
+                            include_marked,
+                        )
+                        .then_some(tree)
+                    });
+            }
+            TreeKind::Match(matching) => matching.cases.last().copied().into_iter().collect(),
+            TreeKind::CaseDef(case) => vec![case.body],
+            TreeKind::Try(try_expr) => vec![
+                try_expr
+                    .finalizer
+                    .or_else(|| try_expr.cases.last().copied())
+                    .unwrap_or(try_expr.expr),
+            ],
+            TreeKind::While(loop_expr) => vec![loop_expr.body],
+            _ => Vec::new(),
+        };
+
+        children
+            .into_iter()
+            .filter_map(|child| {
+                self.end_marker_owner(
+                    child,
+                    target_kind,
+                    target_text,
+                    marker_start,
+                    include_marked,
+                )
+            })
+            .max_by_key(|child| {
+                self.ast
+                    .get(*child)
+                    .position
+                    .map(|position| position.span().range().start())
+            })
+            .or_else(|| {
+                self.end_marker_is_eligible(
+                    tree,
+                    target_kind,
+                    target_text,
+                    marker_start,
+                    include_marked,
+                )
+                .then_some(tree)
+            })
+    }
+
+    fn end_marker_is_eligible(
+        &self,
+        tree: TreeId<Untyped>,
+        target_kind: TokenKind,
+        target_text: &str,
+        marker_start: u32,
+        include_marked: bool,
+    ) -> bool {
+        self.ast
+            .get(tree)
+            .position
+            .is_some_and(|position| position.span().range().end() <= marker_start)
+            && (include_marked || !self.end_marked_trees.contains(&tree))
+            && self.end_marker_matches(tree, target_kind, target_text)
     }
 
     fn marker_target_text(&self, kind: TokenKind, span: TextRange) -> String {
@@ -905,6 +1008,34 @@ mod tests {
         };
         assert_eq!(parser.names.resolve(result.name.text()), "y");
         assert!(parser.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn end_marker_owner_does_not_reach_an_earlier_block_sibling() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "{ if a then x; y }",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Keyword(HardKeyword::If), 2, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Keyword(HardKeyword::Then), 7, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Punctuation(Punctuation::Semicolon), 13, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 17, 18),
+                token(TokenKind::Eof, 18, 18),
+            ],
+            &mut names,
+        );
+        let block = parser.expr();
+
+        assert!(matches!(parser.ast.get(block).kind, TreeKind::Block(_)));
+        assert!(
+            parser
+                .end_marker_owner(block, TokenKind::Keyword(HardKeyword::If), "if", 18, false,)
+                .is_none()
+        );
     }
 
     #[test]

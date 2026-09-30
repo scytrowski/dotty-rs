@@ -88,7 +88,6 @@ where
         body_indent: String,
     ) -> TemplateBodyResult {
         let mut members = Vec::new();
-        let mut end_marker_seen = false;
         self.consume_template_separators(closing);
         let self_val = self.parse_template_self();
         self.consume_template_separators(closing);
@@ -98,10 +97,9 @@ where
                 if !self.end_marker_matches_next(members.last().copied()) {
                     break;
                 }
-                if !self.consume_end_marker(members.last().copied(), end_marker_seen) {
+                if !self.consume_end_marker(members.last().copied()) {
                     break;
                 }
-                end_marker_seen = true;
                 self.consume_template_separators(closing);
                 continue;
             }
@@ -116,7 +114,6 @@ where
             }
 
             let checkpoint = self.cursor.checkpoint();
-            end_marker_seen = false;
             self.last_advance_was_outdent = false;
             let allow_secondary_constructor = self.context.secondary_constructor_allowed
                 && (self.current().kind == TokenKind::Keyword(HardKeyword::Def)
@@ -170,10 +167,9 @@ where
                 if !self.end_marker_matches_next(members.last().copied()) {
                     break;
                 }
-                if !self.consume_end_marker(members.last().copied(), end_marker_seen) {
+                if !self.consume_end_marker(members.last().copied()) {
                     return TemplateBodyResult { self_val, members };
                 }
-                end_marker_seen = true;
                 self.consume_template_separators(closing);
             }
         }
