@@ -114,6 +114,10 @@ braced scope; the scanner distinguishes their boundary from outdents requested
 while parsing an individual case body. Indented `match` case regions also
 retain their ownership when opened by eager layout, so a same-indentation
 `catch` closes the match cases before the enclosing `try` parses its handler.
+At a known case/body boundary, the parser can request closure of the named
+innermost layout region regardless of whether eager scanning or parser
+feedback opened it; ordinary outdent feedback remains restricted to
+parser-opened regions.
 The parser balances the match region before parsing the following sibling
 statement. If a matching parenthesis closes the case region first, the parser
 closes the feedback state without exposing an `Outdent` token inside the
@@ -141,13 +145,14 @@ owners; the parser does not infer indentation or enable general layout inside
 braced scopes.
 
 The scanner classifies line-final `end name` forms as `EndMarker` tokens. At
-statement-sequence boundaries the parser consumes the marker and its target
-only when the target matches the last parsed construct (`end if`, `end while`,
-or a named definition, for example), and extends that construct's source span
-through the marker. A marker for an enclosing construct is left for the outer
-sequence; a marker that reaches the outermost sequence without a matching
-construct produces a `misaligned end marker` diagnostic. The parser does not
-infer layout from source indentation; it uses the scanner's existing
+statement-sequence boundaries the parser matches a marker to the innermost
+not-yet-closed matching construct inside the last parsed statement (for
+example, consecutive nested `end if` markers close the inner and outer `if`
+nodes in order), then extends only that construct's source span through the
+marker. A marker for an enclosing construct is left for the outer sequence; a
+repeated marker for an already-closed construct is diagnosed as duplicate,
+and a marker without a matching owner is diagnosed as misaligned. The parser
+does not infer layout from source indentation; it uses the scanner's existing
 Outdent-feedback contract when an enclosing template ends at an `end` marker.
 Nested feedback regions are closed by their owning indentation boundary, even
 when a nested body's `Outdent` is already present before the marker; the
@@ -799,11 +804,14 @@ the next token starts a pattern. A trailing
 variable or wildcard followed by `*`
 inside extractor arguments is represented as `Typed(pattern, Ident(_*))`,
 matching Dotty's parser tree; sequence markers elsewhere remain invalid.
+Scala `given T` patterns are represented as a `Bind` with the parser-level
+`given` marker, containing a typed wildcard; the parser does not resolve a
+contextual value or type.
 Extractor-looking source patterns intentionally remain `Apply`/`TypeApply`;
 semantic `UnApply` lowering belongs to later phases. Quoted patterns preserve
 Dotty's parser-level `Quote` plus nested `SplicePattern` representation;
 `QuotePattern` construction and staging semantics remain later-phase work.
-`given` and XML patterns, remaining refined-type forms, remaining definition forms and full
+XML patterns, remaining refined-type forms, remaining definition forms and full
 template semantics, other legacy given migration syntax, remaining control flow (`do`/`while`),
 macros, and staging semantics remain follow-up increments.
 
@@ -813,6 +821,13 @@ patterns, optional guards (including line breaks between a pattern and its
 `Block` nodes, and extractor-looking source patterns remain
 `Apply`/`TypeApply` until later semantic lowering. Full case-clause features
 and pattern semantics remain future work.
+
+Nested match and case-body boundaries are closed by their active scanner
+`Indent` region, not by treating every encountered `case` as belonging to the
+innermost match. The parser requests closure at a less-indented case boundary;
+the scanner decides from source layout whether to materialize the `Outdent`.
+This applies both to eager layout tokens and to regions opened through parser
+feedback, including layout suppressed inside braces.
 
 The complete-expression boundary also recognizes the initial explicit function
 literal subset:

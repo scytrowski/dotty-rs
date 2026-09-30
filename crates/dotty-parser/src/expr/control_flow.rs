@@ -259,7 +259,7 @@ where
     /// multiline handler appears inside a braced scope. The ordinary scanner
     /// layout pass suppresses that region there, but Dotty still parses the
     /// handler as a case list rather than as one expression-only case.
-    fn accept_catch_keyword(&mut self) -> Option<bool> {
+    fn accept_catch_keyword(&mut self) -> Option<Option<(u32, bool)>> {
         let mut keyword_offset = 0;
         while matches!(
             self.cursor.lookahead(keyword_offset).kind,
@@ -282,10 +282,16 @@ where
             && first_body_token.kind != TokenKind::Indent
             && self
                 .has_physical_line_break(self.current().span.end(), first_body_token.span.start());
-        let feedback_opened = requests_feedback_region && self.observe_match_cases_indented();
+        let case_region = if requests_feedback_region {
+            self.observe_match_cases_indented()
+        } else if first_body_token.kind == TokenKind::Indent {
+            Some((first_body_token.span.start(), false))
+        } else {
+            None
+        };
 
         self.advance();
-        Some(feedback_opened)
+        Some(case_region)
     }
 
     fn catch_has_multiple_unindented_cases(&mut self) -> bool {
@@ -406,7 +412,7 @@ where
         false
     }
 
-    fn parse_catch_case_handler(&mut self, feedback_opened: bool) -> TreeId<Untyped> {
+    fn parse_catch_case_handler(&mut self, case_region: Option<(u32, bool)>) -> TreeId<Untyped> {
         let initial_mark = self.mark();
         self.consume_control_newlines();
         let braced = self.accept(TokenKind::Punctuation(Punctuation::LeftBrace));
@@ -418,8 +424,10 @@ where
         };
         let mark = if braced { initial_mark } else { self.mark() };
 
-        let cases = if braced || indented {
+        let cases = if braced {
             self.case_clauses()
+        } else if indented {
+            self.case_clauses_in_region(case_region.map(|(indent_offset, _)| indent_offset))
         } else {
             vec![self.case_clause(true)]
         };
@@ -438,10 +446,14 @@ where
                 );
             }
         } else if indented {
-            if feedback_opened && !self.cursor.at(TokenKind::Outdent) {
-                self.observe_match_cases_outdented();
-            }
             self.consume_control_newlines();
+            if !self.cursor.at(TokenKind::Outdent)
+                && let Some((indent_offset, _)) = case_region
+            {
+                self.observe_outdented_layout_region(indent_offset);
+            } else if !self.cursor.at(TokenKind::Outdent) {
+                self.observe_outdented();
+            }
             if !self.accept(TokenKind::Outdent) {
                 self.report(
                     crate::ParseDiagnosticKind::ExpectedToken,

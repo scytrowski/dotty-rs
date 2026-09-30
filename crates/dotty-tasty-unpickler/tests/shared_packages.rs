@@ -6,11 +6,12 @@ use dotty_core::names::{Name, Namespace};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::SymbolKind;
 use dotty_core::{Definitions, Packages};
-use dotty_tasty::tasty::TastyFile;
+use dotty_tasty::tasty::{DefinitionBody, StructuredNode, TYPEDEF_TAG, TastyFile};
 use dotty_tasty_unpickler::tasty_unpickler::{TastySemanticIndex, TastyUnpickler, UnpickleError};
 
 const FOO: &[u8] = include_bytes!("fixtures/semantic/Foo.tasty");
 const OVERLOADS: &[u8] = include_bytes!("fixtures/semantic/Overloads.tasty");
+const OUTER: &[u8] = include_bytes!("fixtures/semantic/Outer.tasty");
 
 /// Address of the single top-level `PACKAGE` node of each fixture.
 const PACKAGE_ADDRESS: u32 = 0;
@@ -102,6 +103,60 @@ fn units_entered_without_a_shared_registry_get_their_own_package() {
         foo.symbol_at(PACKAGE_ADDRESS),
         overloads.symbol_at(PACKAGE_ADDRESS)
     );
+}
+
+#[test]
+fn a_tasty_session_keeps_class_scopes_without_completing_the_class() {
+    use dotty_tasty_unpickler::tasty_unpickler::TastySession;
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let file = TastyFile::parse_scala_3_9(OUTER).unwrap();
+    let ast = file.ast_address_index().unwrap();
+    let outer_at = ast
+        .iter_nodes_with_tag(TYPEDEF_TAG)
+        .find_map(|node| {
+            let at = u32::try_from(node.offset).ok()?;
+            let raw = ast.get(at)?;
+            match raw.decode_structured().ok()? {
+                StructuredNode::TypeDef(DefinitionBody::TypeDef { name, .. })
+                    if file.names().get_utf8(name) == Some("Outer") =>
+                {
+                    Some(at)
+                }
+                _ => None,
+            }
+        })
+        .expect("Outer type definition");
+    let mut unpickler =
+        TastyUnpickler::with_session(&file, &mut store, definitions, TastySession::new());
+    unpickler.enter_symbols().unwrap();
+    let outer = unpickler.index().symbol_at(outer_at).unwrap();
+    let scope = unpickler.index().scope_of(outer).unwrap();
+    assert_eq!(
+        unpickler.symbol_state_at(outer_at).unwrap().1,
+        dotty_core::symbols::SymbolInfo::Missing
+    );
+    let (index, session) = unpickler.into_session_parts();
+    assert_eq!(index.scope_of(outer), Some(scope));
+    assert_eq!(session.scope_of(outer), Some(scope));
+}
+
+#[test]
+fn a_failed_enter_removes_new_owner_scopes_from_the_tasty_session() {
+    use dotty_tasty_unpickler::tasty_unpickler::TastySession;
+
+    let bytes = late_failing_foo();
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut unpickler =
+        TastyUnpickler::with_session(&file, &mut store, definitions, TastySession::new());
+    assert!(unpickler.enter_symbols().is_err());
+    let (_, session) = unpickler.into_session_parts();
+
+    assert_eq!(session.owner_scope_count(), 0);
+    assert!(session.packages().is_empty());
 }
 
 /// `Foo.tasty` with the byte at 124 zeroed fails late, after the shared
