@@ -968,7 +968,6 @@ fn complete_unit(
             }
             Err(UnpickleError::UnstableSelectQualifier { .. }) => "unstable select qualifier",
             Err(UnpickleError::InvalidSingletonTypeTree { .. }) => "invalid singleton",
-            Err(UnpickleError::OpaqueAliasDeferred { .. }) => "opaque alias",
             Err(UnpickleError::ConstructorOwnerNotClassLike { .. }) => {
                 "constructor owner not class-like"
             }

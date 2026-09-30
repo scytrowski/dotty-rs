@@ -12,10 +12,10 @@ use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolInfo, SymbolKind, SymbolOrigin};
 use dotty_core::types::{Type, TypeRefTarget};
 use dotty_tasty::tasty::{
-    APPLY_TAG, DEFDEF_TAG, Header, MUTABLE_TAG, NameTable, OPAQUE_TAG, PACKAGE_TAG, PARAM_TAG,
-    RawName, SHAREDTERM_TAG, SHAREDTYPE_TAG, Section, SectionTable, TEMPLATE_TAG,
-    TERMREFDIRECT_TAG, TERMREFPKG_TAG, TYPEBOUNDSTPT_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREF_TAG,
-    TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TastyFile, VALDEF_TAG,
+    APPLY_TAG, DEFDEF_TAG, Header, LAMBDATPT_TAG, MUTABLE_TAG, NameTable, OPAQUE_TAG, PACKAGE_TAG,
+    PARAM_TAG, RawName, SELFDEF_TAG, SHAREDTERM_TAG, SHAREDTYPE_TAG, Section, SectionTable,
+    TEMPLATE_TAG, TERMREFDIRECT_TAG, TERMREFPKG_TAG, TYPEBOUNDSTPT_TAG, TYPEDEF_TAG, TYPEPARAM_TAG,
+    TYPEREF_TAG, TYPEREFDIRECT_TAG, TYPEREFPKG_TAG, TastyFile, VALDEF_TAG,
 };
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
 
@@ -39,6 +39,15 @@ const N_Y: u32 = 16;
 const N_AND: u32 = 17;
 const N_OR: u32 = 18;
 const N_SCALA: u32 = 19;
+const N_GENERIC: u32 = 20;
+const N_B: u32 = 21;
+const N_BOUNDED: u32 = 22;
+const N_BOUNDS_ONLY: u32 = 23;
+const N_BAD_OP: u32 = 24;
+const N_LOOP_A: u32 = 25;
+const N_LOOP_B: u32 = 26;
+const N_LOOP_SELF: u32 = 27;
+const N_C: u32 = 28;
 
 const IDENTTPT: u8 = 111;
 const APPLIEDTPT: u8 = 162;
@@ -91,8 +100,35 @@ fn any_type() -> Vec<u8> {
 fn file_with(ast: &[u8]) -> Vec<u8> {
     let names = NameTable::from_entries(
         [
-            "ASTs", "p", "Box", "Out", "Holder", "A", "x", "v", "Alias", "Abs", "Same", "Op",
-            "Bad", "f", "a", "s", "y", "&", "|", "scala",
+            "ASTs",
+            "p",
+            "Box",
+            "Out",
+            "Holder",
+            "A",
+            "x",
+            "v",
+            "Alias",
+            "Abs",
+            "Same",
+            "Op",
+            "Bad",
+            "f",
+            "a",
+            "s",
+            "y",
+            "&",
+            "|",
+            "scala",
+            "Generic",
+            "B",
+            "Bounded",
+            "BoundsOnly",
+            "BadOp",
+            "LoopA",
+            "LoopB",
+            "LoopSelf",
+            "C",
         ]
         .into_iter()
         .map(|text| RawName::Utf8(text.to_owned()))
@@ -116,7 +152,7 @@ fn file_with(ast: &[u8]) -> Vec<u8> {
 }
 
 /// The definitions of the unit, in document order.
-const DEFINITIONS: [&str; 15] = [
+const DEFINITIONS: [&str; 24] = [
     "Box",
     "Box.Out",
     "Holder",
@@ -127,6 +163,15 @@ const DEFINITIONS: [&str; 15] = [
     "Holder.Abs",
     "Holder.Same",
     "Holder.Op",
+    "Holder.Generic",
+    "Holder.Generic.B",
+    "Holder.Generic.C",
+    "Holder.Bounded",
+    "Holder.BoundsOnly",
+    "Holder.BadOp",
+    "Holder.LoopA",
+    "Holder.LoopB",
+    "Holder.LoopSelf",
     "Holder.Bad",
     "Holder.f",
     "Holder.f.a",
@@ -204,18 +249,63 @@ fn assemble(at: &HashMap<&'static str, u32>) -> (Vec<u8>, HashMap<&'static str, 
         PARAM_TAG,
         &[nat(N_PARAM), wrap(BYNAMETPT, &ident_box())].concat(),
     );
+    let generic_parameter = node(
+        TYPEPARAM_TAG,
+        &[nat(N_B), bounds(&[any_type(), any_type()])].concat(),
+    );
+    let second_generic_parameter = node(
+        TYPEPARAM_TAG,
+        &[nat(N_C), bounds(&[any_type(), any_type()])].concat(),
+    );
+    let generic_rhs = node(
+        LAMBDATPT_TAG,
+        &[
+            generic_parameter,
+            second_generic_parameter,
+            ident(N_B, leaf(TYPEREFDIRECT_TAG, def("Holder.Generic.B"))),
+        ]
+        .concat(),
+    );
     let members = [
         node(
             TYPEPARAM_TAG,
             &[nat(N_A), bounds(&[any_type(), any_type()])].concat(),
         ),
         any_type(),
+        named(SELFDEF_TAG, N_HOLDER, &any_type()),
         val(N_X, ident_box(), &[]),
         val(N_V, ident_box(), &[MUTABLE_TAG]),
         alias(N_ALIAS, ident_any(), &[]),
         alias(N_ABS, bounds(&[any_type(), any_type()]), &[]),
         alias(N_SAME, bounds(&[any_type()]), &[]),
         alias(N_OP, ident_any(), &[OPAQUE_TAG]),
+        alias(N_GENERIC, generic_rhs, &[OPAQUE_TAG]),
+        alias(
+            N_BOUNDED,
+            bounds(&[any_type(), any_type(), ident_any()]),
+            &[OPAQUE_TAG],
+        ),
+        alias(
+            N_BOUNDS_ONLY,
+            bounds(&[any_type(), any_type()]),
+            &[OPAQUE_TAG],
+        ),
+        alias(N_BAD_OP, node(HOLE, &any_type()), &[OPAQUE_TAG]),
+        alias(
+            N_LOOP_A,
+            ident(N_LOOP_B, leaf(TYPEREFDIRECT_TAG, def("Holder.LoopB"))),
+            &[OPAQUE_TAG],
+        ),
+        alias(
+            N_LOOP_B,
+            ident(N_LOOP_A, leaf(TYPEREFDIRECT_TAG, def("Holder.LoopA"))),
+            &[OPAQUE_TAG],
+        ),
+        alias(
+            N_LOOP_SELF,
+            ident(N_LOOP_SELF, leaf(TYPEREFDIRECT_TAG, def("Holder.LoopSelf"))),
+            &[OPAQUE_TAG],
+        ),
         alias(N_BAD, node(HOLE, &any_type()), &[]),
         node(DEFDEF_TAG, &[nat(N_F), by_name_param, any_type()].concat()),
         val(
@@ -859,19 +949,14 @@ fn a_type_parameter_and_a_type_definition_get_bounds() {
 }
 
 #[test]
-fn an_opaque_alias_and_a_package_are_explicit_deferrals() {
+fn an_opaque_alias_has_external_bounds_and_keeps_its_owner_local_alias() {
     let unit = Unit::new();
     let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
     let mut session = Session::new();
     let mut unpickler = entered(&file, &mut session);
     let symbols = symbols_of(&unpickler, &unit);
 
-    assert_eq!(
-        unpickler.complete_symbol(unit.at("Holder.Op")),
-        Err(UnpickleError::OpaqueAliasDeferred {
-            address: unit.at("Holder.Op")
-        })
-    );
+    let opaque = unpickler.complete_symbol(unit.at("Holder.Op")).unwrap();
     assert_eq!(
         unpickler.complete_symbol(0),
         Err(UnpickleError::UnsupportedSymbolCompletion {
@@ -884,11 +969,283 @@ fn an_opaque_alias_and_a_package_are_explicit_deferrals() {
         Err(UnpickleError::MissingEnteredSymbol { address: 1 })
     );
     drop(unpickler);
-    // No placeholder info is written.
+
+    let Type::Bounds { low, high } = session.store.types.get(opaque) else {
+        panic!("the public opaque info is not bounds");
+    };
+    assert_eq!(*low, session.definitions.nothing_type);
+    assert_eq!(*high, session.definitions.any_type);
     assert_eq!(
         info(&session, symbols["Holder.Op"]),
-        SymbolInfo::Missing,
-        "Holder.Op"
+        SymbolInfo::Complete(opaque)
+    );
+
+    let owner_info = complete_info(&session, symbols["Holder"]);
+    let Type::ClassInfo(owner_info) = session.store.types.get(owner_info) else {
+        panic!("owner info is not ClassInfo");
+    };
+    let Some(self_type) = owner_info.self_type else {
+        panic!("opaque completion did not publish an owner self type");
+    };
+    let Type::Refined { parent, info, .. } = session.store.types.get(self_type) else {
+        panic!("owner self type has no opaque refinement");
+    };
+    assert!(matches!(
+        session.store.types.get(*parent),
+        Type::TypeRef { .. }
+    ));
+    assert!(matches!(
+        session.store.types.get(*info),
+        Type::AliasingBounds { .. }
+    ));
+}
+
+#[test]
+fn a_generic_opaque_alias_uses_a_canonical_public_binder_and_keeps_its_rhs() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+    let symbols = symbols_of(&unpickler, &unit);
+    let declarations = unpickler.index().scope_of(symbols["Holder"]).unwrap();
+
+    let public = unpickler
+        .complete_symbol(unit.at("Holder.Generic"))
+        .unwrap();
+    drop(unpickler);
+
+    let Type::TypeLambda(public_lambda) = session.store.types.get(public) else {
+        panic!(
+            "generic opaque public info is not a type lambda: {:?}",
+            session.store.types.get(public)
+        );
+    };
+    assert_eq!(public_lambda.params.len(), 2);
+    let Type::Bounds { low, high } = session.store.types.get(public_lambda.result) else {
+        panic!("generic opaque public lambda does not return bounds");
+    };
+    assert_eq!(*low, session.definitions.nothing_type);
+    assert_eq!(*high, session.definitions.any_type);
+
+    let owner = complete_info(&session, symbols["Holder"]);
+    let Type::ClassInfo(class_info) = session.store.types.get(owner) else {
+        panic!("owner info is not ClassInfo");
+    };
+    assert_eq!(class_info.declarations, declarations);
+    let Type::Refined { info, .. } = session.store.types.get(
+        class_info
+            .self_type
+            .expect("owner has no opaque refinement"),
+    ) else {
+        panic!("owner self type has no refinement");
+    };
+    let Type::AliasingBounds { alias } = session.store.types.get(*info) else {
+        panic!("owner refinement does not retain its alias");
+    };
+    let Type::TypeLambda(alias_lambda) = session.store.types.get(*alias) else {
+        panic!("owner implementation alias is not a type lambda");
+    };
+    assert_eq!(alias_lambda.params.len(), 2);
+    assert!(matches!(
+        session.store.types.get(alias_lambda.result),
+        Type::ParamRef { binder, index: 0 } if *binder == *alias
+    ));
+}
+
+#[test]
+fn a_bounded_opaque_alias_keeps_explicit_bounds_and_its_private_implementation() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+    let symbols = symbols_of(&unpickler, &unit);
+
+    let public = unpickler
+        .complete_symbol(unit.at("Holder.Bounded"))
+        .unwrap();
+    drop(unpickler);
+
+    let Type::Bounds { low, high } = session.store.types.get(public) else {
+        panic!("bounded opaque public info is not explicit bounds");
+    };
+    assert_ne!(low, high);
+    let owner = complete_info(&session, symbols["Holder"]);
+    let Type::ClassInfo(class_info) = session.store.types.get(owner) else {
+        panic!("owner info is not ClassInfo");
+    };
+    let Type::Refined { info, .. } = session.store.types.get(
+        class_info
+            .self_type
+            .expect("owner lost implementation alias"),
+    ) else {
+        panic!("owner self type has no implementation refinement");
+    };
+    assert!(matches!(
+        session.store.types.get(*info),
+        Type::AliasingBounds { .. }
+    ));
+}
+
+#[test]
+fn bounded_opaque_alias_without_an_implementation_does_not_invent_one() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+    let symbols = symbols_of(&unpickler, &unit);
+
+    let public = unpickler
+        .complete_symbol(unit.at("Holder.BoundsOnly"))
+        .unwrap();
+    drop(unpickler);
+
+    assert!(matches!(
+        session.store.types.get(public),
+        Type::Bounds { .. }
+    ));
+    let owner = complete_info(&session, symbols["Holder"]);
+    let Type::ClassInfo(class_info) = session.store.types.get(owner) else {
+        panic!("owner info is not ClassInfo");
+    };
+    let Some(self_type) = class_info.self_type else {
+        panic!("the pre-existing explicit self type was removed");
+    };
+    assert!(matches!(
+        session.store.types.get(self_type),
+        Type::TypeRef { .. }
+    ));
+}
+
+#[test]
+fn multiple_opaque_aliases_compose_deterministically_in_the_owner_self_type() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+    let symbols = symbols_of(&unpickler, &unit);
+
+    for address in [
+        unit.at("Holder.Op"),
+        unit.at("Holder.Bounded"),
+        unit.at("Holder.Generic"),
+    ] {
+        unpickler.complete_symbol(address).unwrap();
+    }
+    drop(unpickler);
+
+    let owner = complete_info(&session, symbols["Holder"]);
+    let Type::ClassInfo(class_info) = session.store.types.get(owner) else {
+        panic!("owner info is not ClassInfo");
+    };
+    let mut current = class_info
+        .self_type
+        .expect("opaque aliases were not retained");
+    let mut names = Vec::new();
+    while let Type::Refined { parent, name, .. } = session.store.types.get(current) {
+        names.push(session.store.names.resolve(name.text()).to_owned());
+        current = *parent;
+    }
+    assert_eq!(names, ["Bounded", "Generic", "Op"]);
+}
+
+#[test]
+fn a_failed_opaque_completion_rolls_back_owner_info_and_allocated_types() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut untouched = Session::new();
+    drop(entered(&file, &mut untouched));
+    let expected_next_type = next_type(&mut untouched);
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+    let symbols = symbols_of(&unpickler, &unit);
+    let initial_types = unpickler.index().type_count();
+    let initial_type_trees = unpickler.index().type_tree_count();
+
+    assert!(matches!(
+        unpickler.complete_symbol(unit.at("Holder.BadOp")),
+        Err(UnpickleError::UnsupportedTypeTree { tag: HOLE, .. })
+    ));
+    assert_eq!(unpickler.index().type_count(), initial_types);
+    assert_eq!(unpickler.index().type_tree_count(), initial_type_trees);
+    assert_eq!(
+        unpickler.symbol_state_at(unit.at("Holder")),
+        Some((SymbolKind::Class, SymbolInfo::Missing))
+    );
+    assert_eq!(
+        unpickler.symbol_state_at(unit.at("Holder.BadOp")),
+        Some((SymbolKind::TypeAlias, SymbolInfo::Missing))
+    );
+    drop(unpickler);
+    assert_eq!(info(&session, symbols["Holder"]), SymbolInfo::Missing);
+    assert_eq!(info(&session, symbols["Holder.BadOp"]), SymbolInfo::Missing);
+    assert_eq!(next_type(&mut session), expected_next_type);
+}
+
+#[test]
+fn a_failed_batch_rolls_back_successful_nested_opaque_completions() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut untouched = Session::new();
+    drop(entered(&file, &mut untouched));
+    let expected_next_type = next_type(&mut untouched);
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+    let symbols = symbols_of(&unpickler, &unit);
+    let initial_types = unpickler.index().type_count();
+
+    assert!(matches!(
+        unpickler.complete_symbols(&[unit.at("Holder.Op"), unit.at("Holder.BadOp"),]),
+        Err(UnpickleError::UnsupportedTypeTree { tag: HOLE, .. })
+    ));
+
+    assert_eq!(unpickler.index().type_count(), initial_types);
+    for label in ["Holder", "Holder.A", "Holder.Op", "Holder.BadOp"] {
+        assert_eq!(
+            unpickler
+                .symbol_state_at(unit.at(label))
+                .map(|(_, info)| info),
+            Some(SymbolInfo::Missing),
+            "{label} kept nested completion state after batch rollback"
+        );
+    }
+    drop(unpickler);
+    for label in ["Holder", "Holder.A", "Holder.Op", "Holder.BadOp"] {
+        assert_eq!(info(&session, symbols[label]), SymbolInfo::Missing);
+    }
+    assert_eq!(next_type(&mut session), expected_next_type);
+}
+
+#[test]
+fn direct_and_indirect_opaque_alias_cycles_fail_deterministically() {
+    let unit = Unit::new();
+    let file = TastyFile::parse_scala_3_9(&unit.bytes).unwrap();
+    let mut session = Session::new();
+    let mut unpickler = entered(&file, &mut session);
+
+    for label in [
+        "Holder.LoopSelf",
+        "Holder.LoopA",
+        "Holder.LoopSelf",
+        "Holder.LoopA",
+    ] {
+        assert_eq!(
+            unpickler.complete_symbol(unit.at(label)),
+            Err(UnpickleError::OpaqueAliasCycle {
+                address: unit.at(label)
+            })
+        );
+    }
+    assert_eq!(
+        unpickler.symbol_state_at(unit.at("Holder.LoopA")),
+        Some((SymbolKind::TypeAlias, SymbolInfo::Missing))
+    );
+    assert_eq!(
+        unpickler.symbol_state_at(unit.at("Holder.LoopB")),
+        Some((SymbolKind::TypeAlias, SymbolInfo::Missing))
+    );
+    assert_eq!(
+        unpickler.symbol_state_at(unit.at("Holder")),
+        Some((SymbolKind::Class, SymbolInfo::Missing))
     );
 }
 

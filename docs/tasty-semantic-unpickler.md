@@ -911,12 +911,39 @@ application with other than two arguments.
 | `TYPEPARAM` | its bounds tree; bounds are reused, another type is wrapped in a fresh `AliasingBounds` |
 | non-template, non-opaque `TYPEDEF` | `toBounds` of the right-hand side: `type A = Int` is `AliasingBounds(Int)` while its right-hand side still projects to `Int` |
 
-Opaque aliases are `OpaqueAliasDeferred`; methods, constructors, classes,
-traits, modules and packages are `UnsupportedSymbolCompletion { kind }`, with no
-info written and no empty `ClassInfo`. A body is never inspected, and a
-`ByName` or methodic right-hand side of a type definition is
-`InvalidCompletedBounds`. `suppressIntoIfParam` (upstream) is not applied; no
-real case was measured, so nothing was guessed.
+Opaque aliases follow the Scala 3.9 bounds/self-type contract below. Methods,
+constructors, classes, traits, modules and packages are still refused by this
+simple completion entry point, with no info written and no empty `ClassInfo`.
+A body is never inspected, and a `ByName` or methodic right-hand side of a
+type definition is `InvalidCompletedBounds`. `suppressIntoIfParam` (upstream)
+is not applied; no real case was measured, so nothing was guessed.
+
+### Opaque aliases (Scala 3.9 contract; implementation tracked by #529)
+
+The pinned Scala 3.9 `TreeUnpickler` first gives an alias provisional empty
+bounds while reading its right-hand side, then calls `toBounds` and
+`SymDenotation.opaqueToBounds`. For an opaque alias owned by a class-like
+symbol, `opaqueToBounds` replaces the public info with abstract bounds and
+stores the implementation alias in a same-named refinement of the owner's
+self type. The two views must remain distinct: external lookup sees the
+bounds, while the defining owner retains the alias.
+
+For an explicit `TypeBoundsTree`, the public bounds are its projected lower and
+upper types; an alias RHS without explicit bounds gets Scala's empty bounds.
+Generic aliases abstract those bounds over the RHS `LambdaTypeTree`'s type
+parameters using Scala's higher-kinded type-lambda machinery. The implementation
+alias kept on the owner uses the same canonical binders as the completed public
+info. The source uses provisional bounds during RHS completion to break
+self-reference; a completed same-named refinement is a true cyclic-reference
+error.
+
+The existing core model has the format-agnostic pieces for this contract:
+`Bounds` for external bounds, `AliasingBounds` for ordinary alias payloads,
+`TypeLambda`/`ParamRef` for generic binders, and `Refined` (or `Recursive`)
+for owner-local self-type refinements. Do not expose the implementation alias
+as the opaque symbol's public `AliasingBounds`. The unpickler must journal
+changes to an already-completed owner's `ClassInfo` and preserve any existing
+self type and refinements.
 
 Each public call is one atomic transaction (the store checkpoint, the type and
 tree caches, the `RecThis` journal and a **`SymbolInfo` journal**: arena
@@ -3081,7 +3108,41 @@ Roots (library, no builtins -> builtins; the compiler is unchanged):
 
 Both real `RECtype`/`RECthis` roots now decode. 0 unexpected errors in any run.
 
-## 9. Review of Milestone 1
+## 10. Opaque aliases (Milestone 5e3)
+
+Opaque alias completion follows the Scala 3.9 `opaqueToBounds` split. The
+alias symbol publishes only external `Bounds` (or a `TypeLambda` returning
+bounds). If the RHS can be resolved, its implementation is retained as a
+same-named `AliasingBounds` refinement in the defining class's self type.
+Generic public bounds and implementations use type lambdas whose parameter
+references point to their own canonical binders. Bounds are projected before
+the private implementation, so an unavailable implementation type does not
+hide public bounds. The owner is completed when possible; otherwise its
+implementation is held in the TASTy session and applied when the owner's full
+`ClassInfo` is later completed. A cycle or malformed tree remains an error and
+the completion transaction rolls back both public and owner state.
+
+The ignored corpus survey `opaque_corpus` uses the pinned Scala 3.9 library and
+compiler fixtures, with only `scala.Any`/`Nothing`/`Null`, `java.lang.Object`,
+and `scala.AnyRef` supplied as synthetic classpath stubs. It first enters every
+unit, then completes aliases using each unit's saved address index; this keeps
+all cross-unit declarations available before type projection. The audit asserts
+that the complete semantic result is identical in both path orders. All 4
+library aliases (3 generic) complete with public bounds and owner-local
+implementations. Of 24 compiler aliases (5 generic), 22 complete in both
+orders; one needs the unavailable `scala.reflect` package and one is malformed.
+Three compiler aliases had a resolvable implementation retained in an owner
+self type.
+
+The survey filters opaque-marked class definitions out of the alias count and
+reports unresolved external references separately from malformed,
+unsupported, cyclic and unexpected cases. Run it with:
+
+```text
+cargo test -p dotty-tasty-unpickler --release --test opaque_corpus -- --ignored --nocapture
+```
+
+## 11. Review of Milestone 1
 
 This is a record of the review made when Milestone 1 was delivered; §8 is the
 current state. Answers to the review questions asked before Milestone 2:

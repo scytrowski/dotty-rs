@@ -27,6 +27,7 @@ pub(crate) struct Transaction {
     rec_this: usize,
     infos: usize,
     annotations: usize,
+    pending_opaque_aliases: usize,
 }
 
 /// Interprets one TASTy file into a `SemanticStore`.
@@ -58,6 +59,8 @@ pub struct TastyUnpickler<'file, 'bytes, 'store> {
     pub(crate) shared_scopes: HashMap<SymbolId, ScopeId>,
     /// Owners whose scopes were added to `shared_scopes`, for enter rollback.
     pub(crate) shared_scope_order: Vec<SymbolId>,
+    /// Opaque aliases whose owners do not have a completed ClassInfo yet.
+    pub(crate) pending_opaque_aliases: Vec<(SymbolId, dotty_core::names::Name, TypeId)>,
     /// Asked for members the entered state does not hold. Owned, and given
     /// the store to read on each request; it never opens files here.
     pub(crate) resolver: Box<dyn SymbolResolver>,
@@ -130,6 +133,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             packages,
             shared_scopes: HashMap::new(),
             shared_scope_order: Vec::new(),
+            pending_opaque_aliases: Vec::new(),
             resolver: Box::new(NoResolver),
             scope_journal: Vec::new(),
             pending_binders: Vec::new(),
@@ -161,6 +165,26 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
         let mut unpickler = Self::with_packages(file, store, definitions, session.packages);
         unpickler.shared_scopes = session.owner_scopes;
         unpickler.shared_scope_order = session.scope_order;
+        unpickler.pending_opaque_aliases = session.pending_opaque_aliases;
+        unpickler
+    }
+
+    /// Resumes completion for a unit whose symbols were already entered with
+    /// [`with_session`](Self::with_session), preserving that unit's address
+    /// index while carrying the session updated by other entered units.
+    ///
+    /// This supports a whole-classpath entry pass followed by a completion
+    /// pass: every unit's definitions are visible before any signature is
+    /// projected, without re-entering definitions or losing their addresses.
+    pub fn with_session_and_index(
+        file: &'file TastyFile<'bytes>,
+        store: &'store mut SemanticStore,
+        definitions: Definitions,
+        session: TastySession,
+        index: TastySemanticIndex,
+    ) -> Self {
+        let mut unpickler = Self::with_session(file, store, definitions, session);
+        unpickler.index = index;
         unpickler
     }
 
@@ -203,6 +227,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
                 packages: self.packages,
                 owner_scopes: self.shared_scopes,
                 scope_order: self.shared_scope_order,
+                pending_opaque_aliases: self.pending_opaque_aliases,
             },
         )
     }
@@ -332,6 +357,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
             rec_this: self.rec_this_journal.len(),
             infos: self.info_journal.len(),
             annotations: self.annotations_journal.len(),
+            pending_opaque_aliases: self.pending_opaque_aliases.len(),
         }
     }
 
@@ -343,6 +369,8 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
         result: Result<T, UnpickleError>,
     ) -> Result<T, UnpickleError> {
         if result.is_err() {
+            self.pending_opaque_aliases
+                .truncate(transaction.pending_opaque_aliases);
             // Infos and annotations first: they name symbols that exist
             // before the call, and truncating the arenas does not touch them.
             while self.info_journal.len() > transaction.infos {

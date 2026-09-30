@@ -172,9 +172,17 @@ pub enum UnpickleError {
     /// `complete_symbols_annotations` are for `TYPEDEF`/`VALDEF`/`DEFDEF`/
     /// `TYPEPARAM`/`PARAM` addresses only.
     UnsupportedAnnotationCompletion { address: u32, kind: SymbolKind },
-    /// An opaque type alias, whose completion (`opaqueToBounds`) is not
-    /// approximated as an ordinary alias.
-    OpaqueAliasDeferred { address: u32 },
+    /// The defining owner of an opaque alias is not a class-like symbol.
+    OpaqueAliasOwnerNotClassLike {
+        address: u32,
+        owner: SymbolId,
+        kind: SymbolKind,
+    },
+    /// The opaque alias owner is missing from this unit and has no completed
+    /// class info in the shared semantic store.
+    OpaqueAliasOwnerNotEntered { address: u32, owner: SymbolId },
+    /// An opaque alias would add a second same-named refinement to its owner.
+    OpaqueAliasCycle { address: u32 },
     /// The symbol at `address` already holds `SymbolInfo::Deferred`, which
     /// this milestone has no way to force.
     SymbolCompletionDeferred { address: u32 },
@@ -477,9 +485,18 @@ impl fmt::Display for UnpickleError {
                 formatter,
                 "the {kind:?} at address {address} has no annotation tail to complete"
             ),
-            Self::OpaqueAliasDeferred { address } => write!(
+            Self::OpaqueAliasOwnerNotClassLike { address, kind, .. } => write!(
                 formatter,
-                "the opaque type alias at address {address} cannot be completed yet"
+                "the opaque type alias at address {address} is owned by a non-class-like {kind:?}"
+            ),
+            Self::OpaqueAliasOwnerNotEntered { address, owner } => write!(
+                formatter,
+                "the opaque type alias at address {address} has owner symbol {} without entered or completed class info",
+                owner.index()
+            ),
+            Self::OpaqueAliasCycle { address } => write!(
+                formatter,
+                "completing the opaque type alias at address {address} would create a cyclic owner refinement"
             ),
             Self::SymbolCompletionDeferred { address } => write!(
                 formatter,
@@ -690,7 +707,9 @@ impl std::error::Error for UnpickleError {
             | Self::MissingEnteredSymbol { .. }
             | Self::UnsupportedSymbolCompletion { .. }
             | Self::UnsupportedAnnotationCompletion { .. }
-            | Self::OpaqueAliasDeferred { .. }
+            | Self::OpaqueAliasOwnerNotClassLike { .. }
+            | Self::OpaqueAliasOwnerNotEntered { .. }
+            | Self::OpaqueAliasCycle { .. }
             | Self::SymbolCompletionDeferred { .. }
             | Self::SymbolInfoError { .. }
             | Self::InvalidCompletedBounds { .. }

@@ -15,8 +15,8 @@
 //! | `TYPEDEF` with a template (Milestone 5d1) | `ClassInfo` for a `Class`, `Trait` or `ModuleClass`: see the [`class`](crate::class) module |
 //! | `Constructor` `DEFDEF` (Milestone 5d2a) | `Poly`/`Method` whose final result constructs the owner class, from normalized clauses: see the [`constructor`](crate::constructor) module |
 //!
-//! Deferred, with its own typed error and no info written: opaque aliases
-//! (`OpaqueAliasDeferred`). No empty `ClassInfo` is made to mark a class
+//! Opaque aliases publish external bounds and an owner-local implementation
+//! refinement (Milestone 5e3). No empty `ClassInfo` is made to mark a class
 //! complete: it is published only with its parents and self type. A
 //! constructor does not need its owner's `ClassInfo` to complete (see the
 //! [`constructor`](crate::constructor) module).
@@ -115,7 +115,7 @@ impl TastyUnpickler<'_, '_, '_> {
                     return Err(unsupported);
                 }
                 if flags.contains(SymbolFlags::OPAQUE) {
-                    return Err(UnpickleError::OpaqueAliasDeferred { address: at });
+                    return self.complete_opaque_alias(ast, at, symbol, depth);
                 }
                 first_child(ast, at)?
             }
