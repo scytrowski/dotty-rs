@@ -8283,11 +8283,9 @@ impl<'a> SourceTyper<'a> {
                     source: self.source,
                     tree_index: definition.tpt.index(),
                 })?;
-        if matches!(result_node.kind, TreeKind::TypeTree(_)) {
-            return Err(TyperError::LocalMethodInferredResultDeferred {
-                symbol: method,
-                tree_index: method_tree_index,
-            });
+        let infer_result = matches!(result_node.kind, TreeKind::TypeTree(_));
+        if infer_result && !self.inferred_method_results_in_progress.insert(method) {
+            return Err(TyperError::RecursiveInferredMethodResult { symbol: method });
         }
 
         let declaration_context = self
@@ -8421,10 +8419,13 @@ impl<'a> SourceTyper<'a> {
             method,
             method_tree_index,
             definition,
-            false,
+            infer_result,
             info_journal,
         );
         self.active_local_type_scopes.pop();
+        if infer_result {
+            self.inferred_method_results_in_progress.remove(&method);
+        }
         signature
     }
 
@@ -20490,7 +20491,6 @@ mod tests {
     #[test]
     fn local_methods_defer_inferred_and_unsupported_signature_shapes() {
         let cases = [
-            ("def local(value: Int) = value", "result"),
             (
                 "def local(value: => Int): Int = value",
                 "by-name or repeated parameters",
@@ -20549,6 +20549,104 @@ mod tests {
                 (_, other) => panic!("unexpected local signature error: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn inferred_local_method_uses_typed_body_and_reifies_result_type() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def local(value: Int) = value; local(1) } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let method_tree = block.stats[0];
+        let result_tree = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => definition.tpt,
+            _ => panic!("local declaration should be a DefDef"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        let typed_block = typer.type_expression(block_tree, context).unwrap();
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        let SymbolInfo::Complete(signature) = *typer.store().symbols.info(method) else {
+            panic!("inferred local method should be completed");
+        };
+        let Type::Method(method_type) = typer.store().types.get(signature) else {
+            panic!("inferred local method should have a Method signature");
+        };
+        assert_eq!(method_type.params.len(), 1);
+        assert_eq!(method_type.result, definitions.int);
+
+        let typed_method = typer.source_typed_index().get(source, method_tree).unwrap();
+        let TreeKind::DefDef(typed_definition) = &typer.typed_ast().get(typed_method).kind else {
+            panic!("local declaration should produce a typed DefDef");
+        };
+        assert_eq!(
+            typed_definition.tpt,
+            typer.source_typed_index().get(source, result_tree).unwrap()
+        );
+        assert_eq!(
+            typer.typed_ast().get(typed_definition.tpt).ty,
+            definitions.int
+        );
+        let rhs = typed_definition.rhs.unwrap();
+        let parameter_tree = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+            _ => unreachable!(),
+        };
+        let parameter = typer
+            .local_method_parameter_symbol_at(source, parameter_tree)
+            .unwrap();
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(rhs).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == parameter
+        ));
+        assert_eq!(
+            typer.type_expression(block_tree, context).unwrap(),
+            typed_block
+        );
+    }
+
+    #[test]
+    fn recursive_inferred_local_method_fails_and_rolls_back() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def outer: Int = { def loop = loop; loop } }");
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let method_tree = block.stats[0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.complete_symbol(method),
+            Err(TyperError::RecursiveInferredMethodResult { symbol }) if symbol == method
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+        assert!(typer.inferred_method_results_in_progress.is_empty());
     }
 
     #[test]
