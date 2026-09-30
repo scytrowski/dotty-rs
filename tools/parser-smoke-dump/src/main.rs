@@ -1293,6 +1293,75 @@ mod tests {
     use dotty_core::ast::UntypedNode;
 
     #[test]
+    fn parses_a_multiline_lambda_body_inside_a_nested_call_argument() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/scala-parser-oracle/fixtures/expressions/lambda-multiline-argument.scala"
+        );
+        let source = fs::read_to_string(fixture).expect("fixture should be readable");
+        let scanner = ContextualScanner::new(&source).expect("fixture should scan cleanly");
+        let source_text = SourceText::new(&source).expect("fixture source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_expression_fragment(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::Apply(outer) = &result.ast.get(result.root).kind else {
+            panic!("expected the outer call");
+        };
+        assert_eq!(outer.args.len(), 2);
+        let TreeKind::Select(sequence) = &result.ast.get(outer.args[0]).kind else {
+            panic!("expected the chained `toSeq` selection");
+        };
+        assert_eq!(names.resolve(sequence.name.text()), "toSeq");
+        let TreeKind::Apply(mapping) = &result.ast.get(sequence.qualifier).kind else {
+            panic!("expected the `map` application");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) =
+            &result.ast.get(mapping.args[0]).kind
+        else {
+            panic!("expected the lambda argument");
+        };
+        let TreeKind::Block(body) = &result.ast.get(function.body).kind else {
+            panic!("expected a block for the multi-statement lambda body");
+        };
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            result.ast.get(body.stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert!(matches!(result.ast.get(body.expr).kind, TreeKind::Ident(_)));
+        let TreeKind::Ident(fallback) = &result.ast.get(outer.args[1]).kind else {
+            panic!("the following call argument must remain outside the lambda");
+        };
+        assert_eq!(names.resolve(fallback.name.text()), "fallback");
+    }
+
+    #[test]
+    fn missing_multiline_lambda_body_preserves_enclosing_argument_boundaries() {
+        let source = "consume(values.map(x =>\n), fallback)";
+        let scanner = ContextualScanner::new(source).expect("source should scan");
+        let source_text = SourceText::new(source).expect("source text should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_expression_fragment(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("expected an expression after lambda arrow")
+        }));
+        let TreeKind::Apply(outer) = &result.ast.get(result.root).kind else {
+            panic!("expected the outer call despite the missing lambda body");
+        };
+        assert_eq!(outer.args.len(), 2);
+        let TreeKind::Ident(fallback) = &result.ast.get(outer.args[1]).kind else {
+            panic!("the following argument must remain available after recovery");
+        };
+        assert_eq!(names.resolve(fallback.name.text()), "fallback");
+    }
+
+    #[test]
     fn parses_yield_tail_after_nested_anonymous_template() {
         let fixture = concat!(
             env!("CARGO_MANIFEST_DIR"),
