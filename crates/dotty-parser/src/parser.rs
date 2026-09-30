@@ -33,7 +33,7 @@ where
     pub(crate) known_names: KnownNames,
     pub(crate) next_wildcard_param: u32,
     pub(crate) next_wildcard_type_param: u32,
-    pub(crate) type_argument_depth: u32,
+    pub(crate) wildcard_type_depth: u32,
     pub(crate) placeholder_params: Vec<TreeId<Untyped>>,
     pub(crate) last_advance_was_outdent: bool,
     /// AST constructs already closed by an explicit Scala `end` marker.
@@ -82,7 +82,7 @@ where
             known_names,
             next_wildcard_param: 0,
             next_wildcard_type_param: 0,
-            type_argument_depth: 0,
+            wildcard_type_depth: 0,
             placeholder_params: Vec::new(),
             last_advance_was_outdent: false,
             end_marked_trees: HashSet::new(),
@@ -191,17 +191,29 @@ where
         parse: impl FnOnce(&mut Self) -> T,
     ) -> T {
         if wild_ok {
-            self.type_argument_depth += 1;
+            self.wildcard_type_depth += 1;
         }
         let result = parse(self);
         if wild_ok {
-            self.type_argument_depth -= 1;
+            self.wildcard_type_depth -= 1;
         }
         result
     }
 
+    /// Parses a type position in which a wildcard type is permitted by the
+    /// surrounding grammar, without treating it as a type argument.
+    pub(crate) fn with_wildcard_type_allowed<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.wildcard_type_depth += 1;
+        let result = parse(self);
+        self.wildcard_type_depth -= 1;
+        result
+    }
+
     pub(crate) const fn allows_wildcard_type(&self) -> bool {
-        self.type_argument_depth > 0
+        self.wildcard_type_depth > 0
     }
 
     /// Runs a nested parse with a temporary grammar category.

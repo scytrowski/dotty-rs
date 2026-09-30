@@ -149,12 +149,32 @@ where
         }
 
         let diagnostics_before = self.diagnostics.len();
-        let parameter = self.parse_infix_type();
+        let parameter = if self.current().kind == TokenKind::Operator
+            && self.current_text_is("?")
+            && self.lookahead_function_type_arrow(1).is_some()
+        {
+            self.with_wildcard_type_allowed(|parser| parser.parse_infix_type())
+        } else {
+            self.parse_infix_type()
+        };
         if self.diagnostics.len() != diagnostics_before {
             return parameter;
         }
 
         let Some(arrow) = self.current_function_type_arrow() else {
+            if !self.allows_wildcard_type() && self.is_wildcard_type(parameter) {
+                let position = self
+                    .ast
+                    .get(parameter)
+                    .position
+                    .unwrap_or_else(|| self.current_span());
+                self.report_at(
+                    ParseDiagnosticKind::ExpectedType,
+                    position,
+                    "a wildcard type is not valid in this type position",
+                );
+                return self.error_type(position);
+            }
             if self.current().kind == TokenKind::Keyword(HardKeyword::Match) {
                 return self.parse_match_type(mark, parameter);
             }
@@ -180,7 +200,7 @@ where
         } else {
             None
         };
-        let mut body = self.type_expr();
+        let mut body = self.with_wildcard_type_allowed(|parser| parser.type_expr());
         self.recover_missing_function_results();
         if let Some((capture_mark, captures)) = captures {
             let capture_start = captures
@@ -519,6 +539,16 @@ where
             | TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_)) => true,
             TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
                 self.is_function_type(parens.inner)
+            }
+            _ => false,
+        }
+    }
+
+    fn is_wildcard_type(&self, tree: TreeId<Untyped>) -> bool {
+        match &self.ast.get(tree).kind {
+            TreeKind::TypeBoundsTree(_) => true,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                self.is_wildcard_type(parens.inner)
             }
             _ => false,
         }
@@ -1871,7 +1901,7 @@ where
                 .unwrap_or_else(|| self.current_span());
             self.report(
                 ParseDiagnosticKind::ExpectedType,
-                "a wildcard type is only valid as a type argument",
+                "a wildcard type is not valid in this type position",
             );
             return self.error_type(position);
         }
@@ -1985,7 +2015,7 @@ where
             return self.parse_named_tuple_type(mark);
         }
 
-        let inner = self.type_expr();
+        let inner = self.with_wildcard_type_allowed(|parser| parser.type_expr());
         if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
             self.expect(TokenKind::Punctuation(Punctuation::RightParen));
             return self.alloc_from(
@@ -2011,7 +2041,7 @@ where
             if self.current().kind == TokenKind::Eof {
                 break;
             }
-            elements.push(self.type_expr());
+            elements.push(self.with_wildcard_type_allowed(|parser| parser.type_expr()));
             if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 break;
             }
@@ -3503,6 +3533,71 @@ mod tests {
     }
 
     #[test]
+    fn parses_wildcard_types_as_tuple_elements() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(?, V)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::Comma), 2, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) = &parser.ast().get(id).kind else {
+            panic!("expected a tuple type");
+        };
+        assert_eq!(tuple.elements.len(), 2);
+        let TreeKind::TypeBoundsTree(wildcard) = &parser.ast().get(tuple.elements[0]).kind else {
+            panic!("expected a wildcard type element");
+        };
+        assert!(wildcard.low.is_none() && wildcard.high.is_none() && wildcard.alias.is_none());
+        assert!(matches!(
+            parser.ast().get(tuple.elements[1]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_wildcard_types_as_function_parameter_and_result() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "? => ?",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::Operator, 2, 4),
+                token(TokenKind::Operator, 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(id).kind
+        else {
+            panic!("expected a function type");
+        };
+        assert_eq!(function.params.len(), 1);
+        assert!(matches!(
+            parser.ast().get(function.params[0]).kind,
+            TreeKind::TypeBoundsTree(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(function.body).kind,
+            TreeKind::TypeBoundsTree(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn preserves_a_backquoted_question_type_name_inside_type_arguments() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
@@ -3537,6 +3632,34 @@ mod tests {
             vec![
                 token(TokenKind::Operator, 0, 1),
                 token(TokenKind::Eof, 1, 1),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn rejects_a_parenthesized_wildcard_outside_a_tuple_or_function_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(?)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Operator, 1, 2),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 2, 3),
+                token(TokenKind::Eof, 3, 3),
             ],
             &mut names,
         );

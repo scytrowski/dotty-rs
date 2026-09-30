@@ -61,8 +61,10 @@ chains, and brace blocks.
 Numeric suffix fixtures also cover `Long`, `Float`, and `Double` literals.
 Applied-type fixtures also cover Scala wildcard arguments, including unbounded
 wildcards and `>: ... <: ...` bounds. The parser keeps those bounds in the
-existing `TypeBoundsTree` and accepts wildcard syntax only in nested type
-argument positions. Type-definition fixtures also cover path singleton types
+existing `TypeBoundsTree` and accepts wildcard syntax in type arguments,
+tuple-type elements, and function-type parameter/result positions. Standalone
+`?` and `(?)` remain invalid types. Type-definition fixtures also cover path
+singleton types
 such as `x.type` and `foo.bar.type`; their term-valued references are rendered
 as `SingletonTypeTree`, while ordinary qualified type references remain in the
 type namespace. They also cover literal singleton aliases for strings, characters,

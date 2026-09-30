@@ -538,12 +538,13 @@ with an upper bound. For a bounded alias, the upper bound is stored in the
 shared `MatchTypeTree.bound`; a lower bound combined with a match-type alias is
 diagnosed according to Scala's parser rule. Layout-only type case regions and
 the remaining full type grammar are still deferred.
-Wildcard syntax is enabled by the type-argument context (`List[?]` and
-`List[? >: String <: Number]`); a top-level `?` remains an invalid type and
-produces a parser diagnostic. `type_expr()` parses arrows outside the
-infix-type layer using the shared Scala precedence buckets; `&` still binds
-tighter than `|`, and operators ending in `:` associate to the right. All
-infix type operators produce source-level `InfixOp` trees with type-namespace
+Wildcard syntax is enabled in type arguments (`List[?]` and
+`List[? >: String <: Number]`), tuple-type elements (`(?, V)`), and function
+type parameter/result positions (`? => ?`). A standalone `?` or `(?)` remains
+an invalid type and produces a parser diagnostic. `type_expr()` parses arrows
+outside the infix-type layer using the shared Scala precedence buckets; `&`
+still binds tighter than `|`, and operators ending in `:` associate to the
+right. All infix type operators produce source-level `InfixOp` trees with type-namespace
 operator names; ordinary arrows produce `Function` trees and context arrows
 produce `FunctionWithMods`.
 Parenthesized
