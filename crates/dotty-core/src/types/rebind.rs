@@ -533,6 +533,38 @@ pub fn rebind_type_lambda(
     result
 }
 
+/// Builds a fresh `TypeLambda` from `source`, replacing only its result with
+/// `result` and rebinding every reference to `source` in the parameter bounds
+/// and replacement result to the new lambda.
+///
+/// This is useful when a format-independent operation changes a lambda's
+/// semantic result (for example, turning an alias RHS into bounds). The old
+/// binder and all types reachable from it remain unchanged. The operation is
+/// atomic on malformed graphs.
+pub fn type_lambda_with_result(
+    store: &mut SemanticStore,
+    source: TypeId,
+    result: TypeId,
+) -> Result<TypeId, TypeRebindError> {
+    if !store.types.is_filled(source) {
+        return Err(TypeRebindError::UnfilledType { id: source });
+    }
+    let Type::TypeLambda(lambda) = store.types.get(source) else {
+        return Err(TypeRebindError::NotATypeLambda { source });
+    };
+    if !store.types.is_filled(result) {
+        return Err(TypeRebindError::UnfilledType { id: result });
+    }
+    let lambda = lambda.clone();
+
+    let checkpoint = store.checkpoint();
+    let rebound = Rebinder::new(store).lambda_with_result(source, &lambda, result);
+    if rebound.is_err() {
+        store.rollback_to(checkpoint);
+    }
+    rebound
+}
+
 /// Closes `parent` over `class`: every reachable `ThisType { class }` becomes
 /// the one canonical `RecThis` of a fresh recursive binder (Dotty's
 /// `RecType.closeOver`, used to turn a refinement's own `ThisType` into a
@@ -1021,6 +1053,24 @@ impl<'a> Rebinder<'a> {
         Ok(new)
     }
 
+    fn lambda_with_result(
+        &mut self,
+        id: TypeId,
+        lambda: &TypeLambda,
+        result: TypeId,
+    ) -> Result<TypeId, TypeRebindError> {
+        let reserved = self.store.types.reserve();
+        let new = reserved.id();
+        self.memo.insert(id, new);
+        self.binders.insert(id, new);
+        let params = self.type_params(&lambda.params, None)?;
+        let result = self.ty(result)?;
+        self.store
+            .types
+            .fill(reserved, Type::TypeLambda(TypeLambda { params, result }));
+        Ok(new)
+    }
+
     fn type_params(
         &mut self,
         params: &[TypeParam],
@@ -1423,6 +1473,27 @@ mod tests {
         // The old graph is untouched, the new one names the new binder.
         assert_eq!(f.param_ref_of(f.get_lambda(old).result), (old, 0));
         assert_eq!(f.param_ref_of(f.get_lambda(new).result), (new, 0));
+    }
+
+    #[test]
+    fn replacing_a_lambda_result_rebinds_parameter_bounds_and_result() {
+        let mut f = Fixture::new();
+        let old = f.lambda(&["A"], |f, me| f.param_ref(me, 0));
+        let low = f.param_ref(old, 0);
+        let high = f.leaf;
+        let result = f.store.types.alloc(Type::Bounds { low, high });
+
+        let new = type_lambda_with_result(&mut f.store, old, result).unwrap();
+
+        assert_ne!(new, old);
+        let lambda = f.get_lambda(new);
+        assert_eq!(f.get_lambda(old).params[0].declared_variance, None);
+        let Type::Bounds { low, high } = f.store.types.get(lambda.result) else {
+            panic!("replacement result is not bounds");
+        };
+        assert_eq!(f.param_ref_of(*low), (new, 0));
+        assert_eq!(*high, f.leaf);
+        assert_eq!(f.param_ref_of(f.get_lambda(old).result), (old, 0));
     }
 
     #[test]
