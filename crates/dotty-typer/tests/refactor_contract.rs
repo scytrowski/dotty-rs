@@ -8,8 +8,8 @@ use std::collections::HashSet;
 use dotty_core::ast::{AstArena, TreeKind, Typed, Untyped};
 use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
-    Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SourceText, SymbolId,
-    SymbolInfo, SymbolKind, TreeId, TypeId,
+    Definitions, Name, Namespace, Packages, SemanticStore, SourceId, SourceSemanticIndex,
+    SourceText, SymbolId, SymbolInfo, SymbolKind, TreeId, TypeId,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
@@ -329,6 +329,258 @@ fn imported_source_name_is_used_after_local_scopes_miss() {
         _ => panic!("local method body should remain a block"),
     };
     assert_eq!(term_ref_symbol(&typer, local_expr), Some(local_symbol));
+}
+
+#[test]
+fn monomorphic_overload_selects_the_unique_most_specific_candidate() {
+    let mut fixture = Fixture::new(
+        "class Parent {}; class Child extends Parent {}; class C { def choose(x: Parent): Int = 1; def choose(x: Child): Int = 2; def use(x: Child): Int = choose(x) }",
+    );
+    let (_, use_method, rhs) = fixture.method("use");
+    let candidates = fixture.methods_named("choose");
+    assert_eq!(candidates.len(), 2);
+    let most_specific = candidates[1].1;
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(use_method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+
+    assert_eq!(call_target(&typer, typed), Some(most_specific));
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(typed).ty),
+        "TypeRef(Class:Int)"
+    );
+}
+
+#[test]
+fn equally_specific_generic_and_monomorphic_overloads_remain_ambiguous() {
+    let mut fixture = Fixture::new(
+        "class A {}; class C { def choose(x: A): Int = 1; def choose[T](x: T): Int = 2; def use(x: A): Int = choose(x) }",
+    );
+    let (_, use_method, rhs) = fixture.method("use");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(use_method).unwrap();
+    let error = typer.type_expression(rhs, context).unwrap_err();
+    let candidates = match &error {
+        TyperError::AmbiguousOverloadApplication { candidates, .. } => candidates
+            .iter()
+            .map(|symbol| symbol_label(&typer, *symbol))
+            .collect::<Vec<_>>(),
+        other => panic!("expected ambiguity, got {other:?}"),
+    };
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(
+        error_snapshot(&typer, &error),
+        "AmbiguousOverloadApplication"
+    );
+}
+
+#[test]
+fn generic_overload_wins_when_the_monomorphic_candidate_does_not_apply() {
+    let mut fixture = Fixture::new(
+        "class Parent {}; class Child extends Parent {}; class C { def choose[T <: Parent](x: T): T = x; def choose(x: Parent): Parent = x; def use(x: Child): Parent = choose(x) }",
+    );
+    let (_, use_method, rhs) = fixture.method("use");
+    let generic = fixture
+        .methods_named("choose")
+        .into_iter()
+        .find(|(tree, _, _)| matches!(&fixture.ast.get(*tree).kind, TreeKind::DefDef(def) if !def.type_params.is_empty()))
+        .unwrap()
+        .1;
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(use_method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+
+    assert_eq!(call_target(&typer, typed), Some(generic));
+}
+
+#[test]
+fn explicit_type_application_preserves_its_exact_function_reference() {
+    let mut fixture = Fixture::new(
+        "class C { def identity[A](value: A): A = value; def use: Int = identity[Int](1) }",
+    );
+    let (_, identity, _) = fixture.method("identity");
+    let (_, use_method, rhs) = fixture.method("use");
+    let source_type_apply = match &fixture.ast.get(rhs).kind {
+        TreeKind::Apply(application) => application.function,
+        _ => panic!("source expression should be an application"),
+    };
+    let source_type_arg = match &fixture.ast.get(source_type_apply).kind {
+        TreeKind::TypeApply(application) => application.args[0],
+        _ => panic!("source function should be explicitly type applied"),
+    };
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(use_method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+    let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+        panic!("source call should remain a typed application")
+    };
+    let TreeKind::TypeApply(type_apply) = &typer.typed_ast().get(application.function).kind else {
+        panic!("typed call should preserve its explicit type application")
+    };
+    let argument = type_apply.args[0];
+
+    assert_eq!(term_ref_symbol(&typer, type_apply.function), Some(identity));
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(argument).ty),
+        "TypeRef(Class:Int)"
+    );
+    assert_eq!(
+        typer.source_typed_index().get(SOURCE, source_type_arg),
+        Some(argument)
+    );
+}
+
+#[test]
+fn generic_inference_preserves_poly_binder_indices() {
+    let mut fixture = Fixture::new(
+        "class C { def choose[A, B](left: A, right: B): B = right; def use: Boolean = choose(1, true) }",
+    );
+    let (_, choose, _) = fixture.method("choose");
+    let (_, use_method, rhs) = fixture.method("use");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(use_method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+    let signature = typer.complete_symbol(choose).unwrap();
+    let Type::Poly(poly) = typer.store().types.get(signature) else {
+        panic!("generic method signature should retain its Poly binder")
+    };
+    let Type::Method(method) = typer.store().types.get(poly.result) else {
+        panic!("Poly result should be the method clause")
+    };
+
+    assert_eq!(poly.params.len(), 2);
+    assert!(
+        matches!(typer.store().types.get(method.params[0].ty), Type::ParamRef { binder, index: 0 } if *binder == signature)
+    );
+    assert!(
+        matches!(typer.store().types.get(method.params[1].ty), Type::ParamRef { binder, index: 1 } if *binder == signature)
+    );
+    assert!(
+        matches!(typer.store().types.get(method.result), Type::ParamRef { binder, index: 1 } if *binder == signature)
+    );
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(typed).ty),
+        "TypeRef(Class:Boolean)"
+    );
+}
+
+#[test]
+fn explicit_using_application_consumes_the_contextual_clause() {
+    let mut fixture = Fixture::new(
+        "class C { def provide(using value: Int): Int = value; def use: Int = provide(using 1) }",
+    );
+    let (_, use_method, rhs) = fixture.method("use");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(use_method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+    let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+        panic!("using call should produce an Apply")
+    };
+
+    assert_eq!(application.kind, dotty_core::ast::ApplyKind::Using);
+    assert_eq!(application.args.len(), 1);
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(typed).ty),
+        "TypeRef(Class:Int)"
+    );
+}
+
+#[test]
+fn primary_constructor_application_preserves_constructor_identity() {
+    let mut fixture = Fixture::new(
+        "class Point(x: Int, y: Int); class Use { def make: Point = new Point(1, 2) }",
+    );
+    let class = fixture.symbol_named("Point", SymbolKind::Class);
+    let constructors = constructors_of(&mut fixture, class);
+    assert_eq!(constructors.len(), 1);
+    let (_, method, rhs) = fixture.method("make");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+    let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+        panic!("constructor call should remain an Apply")
+    };
+
+    assert_eq!(application.args.len(), 2);
+    assert_eq!(
+        term_ref_symbol(&typer, application.function),
+        Some(constructors[0])
+    );
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(typed).ty),
+        "TypeRef(Class:Point)"
+    );
+}
+
+#[test]
+fn generic_constructor_inference_finalizes_the_new_instance_type() {
+    let mut fixture = Fixture::new("class Box[A](value: A); class Use { def make = new Box(1) }");
+    let box_class = fixture.symbol_named("Box", SymbolKind::Class);
+    let (_, method, rhs) = fixture.method("make");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+    let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+        panic!("generic constructor call should remain an Apply")
+    };
+    let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind else {
+        panic!("constructor callee should remain a Select")
+    };
+    let instance_type = typer.typed_ast().get(selection.qualifier).ty;
+    let expected = "TypeRef(Class:Box)[TypeRef(Class:Int)]";
+
+    assert_eq!(type_snapshot(&typer, instance_type), expected);
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(typed).ty),
+        expected
+    );
+    assert_eq!(
+        call_target(&typer, typed).map(|symbol| typer.store().symbols.get(symbol).owner),
+        Some(Some(box_class))
+    );
+}
+
+#[test]
+fn constructor_overload_selects_the_applicable_secondary_constructor() {
+    let mut fixture = Fixture::new(
+        "class C(value: Int) { def this(flag: Boolean) = this(1) }; class Use { def make: C = new C(true) }",
+    );
+    let class = fixture.symbol_named("C", SymbolKind::Class);
+    let constructors = constructors_of(&mut fixture, class);
+    assert_eq!(constructors.len(), 2);
+    let secondary = constructors[1];
+    let (_, method, rhs) = fixture.method("make");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+
+    assert_eq!(call_target(&typer, typed), Some(secondary));
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(typed).ty),
+        "TypeRef(Class:C)"
+    );
+}
+
+#[test]
+fn equally_applicable_constructor_candidates_remain_ambiguous() {
+    let mut fixture = Fixture::new(
+        "class C(value: Int) { def this(value: Int) = this(1) }; class Use { def make: C = new C(1) }",
+    );
+    let class = fixture.symbol_named("C", SymbolKind::Class);
+    assert_eq!(constructors_of(&mut fixture, class).len(), 2);
+    let (_, method, rhs) = fixture.method("make");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let checkpoint = typer.store().checkpoint();
+
+    let error = typer.type_expression(rhs, context).unwrap_err();
+
+    assert_eq!(
+        error_snapshot(&typer, &error),
+        "AmbiguousConstructorApplication(C, 2)"
+    );
+    assert_eq!(typer.store().checkpoint(), checkpoint);
+    assert!(typer.source_typed_index().get(SOURCE, rhs).is_none());
 }
 
 fn tree_snapshot(typer: &SourceTyper<'_>, tree: TreeId<Typed>) -> String {
@@ -679,13 +931,37 @@ fn error_snapshot(typer: &SourceTyper<'_>, error: &TyperError) -> String {
         TyperError::TermNameNotFound { name: missing, .. } => {
             format!("TermNameNotFound({})", name(typer, missing.text()))
         }
+        TyperError::AmbiguousConstructorApplication {
+            class, candidates, ..
+        } => format!(
+            "AmbiguousConstructorApplication({}, {})",
+            symbol_path(typer, *class, &mut HashSet::new()),
+            candidates.len()
+        ),
         _ => error_variant(error),
     }
+}
+
+fn constructors_of(fixture: &mut Fixture, class: SymbolId) -> Vec<SymbolId> {
+    let name = Name::new(fixture.store.names.intern("<init>"), Namespace::Term);
+    fixture
+        .index
+        .scope_of(class)
+        .map(|scope| fixture.store.scopes.get(scope).lookup_all(&name).to_vec())
+        .unwrap_or_default()
 }
 
 fn term_ref_symbol(typer: &SourceTyper<'_>, tree: TreeId<Typed>) -> Option<SymbolId> {
     match typer.store().types.get(typer.typed_ast().get(tree).ty) {
         Type::TermRef { target, .. } => target.symbol(),
         _ => None,
+    }
+}
+
+fn call_target(typer: &SourceTyper<'_>, tree: TreeId<Typed>) -> Option<SymbolId> {
+    match &typer.typed_ast().get(tree).kind {
+        TreeKind::Apply(application) => call_target(typer, application.function),
+        TreeKind::TypeApply(application) => call_target(typer, application.function),
+        _ => term_ref_symbol(typer, tree),
     }
 }
