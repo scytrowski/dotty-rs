@@ -675,6 +675,7 @@ impl TastyUnpickler<'_, '_, '_> {
         self.index.insert_symbol(tree, class)?;
         let scope = self.store.scopes.alloc(Scope::new(Some(class)));
         self.index.insert_scope(class, scope)?;
+        self.share_owner_scope(class, scope)?;
         let info = self.store.types.alloc(Type::ClassInfo(ClassInfo {
             prefix: self.definitions.no_prefix,
             class,
@@ -900,7 +901,8 @@ impl TastyUnpickler<'_, '_, '_> {
 
     fn enter_class_scope(&mut self, class: SymbolId) -> Result<(), UnpickleError> {
         let scope = self.store.scopes.alloc(Scope::new(Some(class)));
-        self.index.insert_scope(class, scope)
+        self.index.insert_scope(class, scope)?;
+        self.share_owner_scope(class, scope)
     }
 }
 

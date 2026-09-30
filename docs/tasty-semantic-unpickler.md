@@ -271,6 +271,31 @@ a shared package keeps the origin of the unit that first entered it.
 `TastyUnpickler::new` starts from an empty registry, so a lone unit behaves as
 before.
 
+### Companion links
+
+After pass 1 has entered every identity in a unit,
+`TastyUnpickler` links a `Class` or `Trait` to a same-named `Object` in the
+same owner's declaration scope, and publishes the reciprocal link. Both
+namespace and owner are checked, and each side must have exactly one matching
+candidate. A `ModuleClass` is never an endpoint. A missing or ambiguous side
+is left unlinked; symbol completion is not needed.
+
+When several units share one store, carry a `TastySession` using
+`with_session` / `into_session_parts`. It retains class declaration scopes as
+well as the package registry, so a later unit can complete a pair under an
+already-entered owner without forcing its `ClassInfo`. The package-only
+`with_packages` / `into_parts` API remains available for callers that do not
+need cross-unit class-scope lookup.
+
+All candidate pairs are checked before either endpoint is changed. Repeating
+the same discovery is idempotent; an endpoint already linked to a different
+symbol returns `UnpickleError::ConflictingCompanion`. Since link publication is
+the final step of pass 1, a failed entry leaves links from earlier units
+unchanged.
+
+The pinned library/compiler corpus counts and forward/reverse order survey are
+recorded in [`tasty-companion-audit-3.9.0.md`](tasty-companion-audit-3.9.0.md).
+
 The caller owns the session and passes the store's `Definitions` (bootstrapped
 once) to `new`/`with_packages`. The unpickler never bootstraps, and every
 reference without a prefix (`TYPEREFdirect`, `TERMREFdirect`, `TYPEREFpkg`,
@@ -323,8 +348,8 @@ not declared in any scope.
 A `TYPEPARAM`/`PARAM` node's name and modifiers are decoded from the node
 itself, at its own address.
 
-Not entered: definitions inside method bodies, parameters of type-lambda
-aliases, and companion links.
+Not entered: definitions inside method bodies and parameters of type-lambda
+aliases. Companion links are published after the complete identity walk.
 
 ### Types (pass 2a)
 
@@ -1144,8 +1169,9 @@ ClassInfo {
   `SHAREDterm` from a second class is refused for both. (`SharedLambdaOwnerConflict`
   is per address, as in 5c.)
 * **Deferred.** Constructors complete as of 5d2a (below), and `REFINEDtpt` as
-  of 5d2b (below); `MATCHtpt` stays an unsupported tree (Milestone 7), and
-  nothing sets symbol annotations or companion links (5e).
+  of 5d2b (below); `MATCHtpt` stays an unsupported tree (Milestone 7).
+  Symbol annotations are complete as of 5e1, and companion links as of 5e2;
+  opaque aliases and the remaining tails are tracked in 5e3.
 
 New errors: `MissingClassScope`, `UnsupportedParentTree`, `MalformedParentTree`,
 `InvalidSelfTypeTree`; everything else is the existing external, unsupported or
@@ -2180,7 +2206,9 @@ behaviour with tests (Milestone 6). The unpickler crate does not depend on
        `complete_symbol_annotations`/`complete_symbols_annotations`, the
        completion-outcome corpus survey and the `dotty-classloader`
        storage-convergence check all landed — complete;
-     - 5e2: companion links;
+     - 5e2: companion links — identity discovery, pair validation and
+       `SymbolLinks::companion` publication after the complete identity walk —
+       complete;
      - 5e3: opaque aliases and the remaining tails.
 6. Classloader integration and the `SymbolResolver` boundary.
 7. Typed AST.
@@ -2211,13 +2239,11 @@ Deliberately not supported yet:
   definition — `UnsupportedQualifier` (none occur in the corpora);
 - `PACKAGE` paths other than a direct `TERMREFpkg` or a `SHAREDtype` link to
   one — `UnsupportedPackagePath`;
-- the modifiers listed in §4 (no matching core flag, variance, accessor roles)
-  and annotations;
+- the modifiers listed in §4 (no matching core flag, variance, accessor roles);
 - an abstract type member is entered as `TypeAlias`; `SymbolKind` has no
   abstract-type kind;
 - definitions inside method bodies (locals) and the parameters of type-lambda
   aliases;
-- companion links (`SymbolLinks::companion`);
 - signed `TERMREFin`, and every other type form beyond §4 "Types" —
   `UnsupportedType`;
 - signed term references and inherited members (§4, "Name-based references");
