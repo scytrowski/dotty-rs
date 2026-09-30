@@ -621,6 +621,8 @@ fn inferred_local_value_widens_symbol_info_but_keeps_rhs_constant_type() {
         type_snapshot(&typer, typer.typed_ast().get(typed_rhs).ty),
         "Constant(Int(1))"
     );
+    let typed_block = typer.source_typed_index().get(SOURCE, rhs).unwrap();
+    assert!(tree_snapshot(&typer, typed_block).starts_with("Block([ValDef(value,"));
 }
 
 #[test]
@@ -668,6 +670,8 @@ fn inferred_local_method_keeps_a_poly_method_signature() {
     assert!(
         matches!(typer.store().types.get(method.result), Type::ParamRef { binder, index: 0 } if *binder == signature)
     );
+    let typed_block = typer.source_typed_index().get(SOURCE, rhs).unwrap();
+    assert!(tree_snapshot(&typer, typed_block).contains("DefDef(local,"));
 }
 
 #[test]
@@ -1078,6 +1082,60 @@ fn tree_snapshot(typer: &SourceTyper<'_>, tree: TreeId<Typed>) -> String {
             "While({},{},{ty})",
             tree_snapshot(typer, while_tree.cond),
             tree_snapshot(typer, while_tree.body)
+        ),
+        TreeKind::ValDef(definition) => format!(
+            "ValDef({},tpt={},rhs={})",
+            name(typer, definition.name.as_name().text()),
+            tree_snapshot(typer, definition.tpt),
+            definition
+                .rhs
+                .map(|rhs| tree_snapshot(typer, rhs))
+                .unwrap_or_else(|| "_".to_owned())
+        ),
+        TreeKind::DefDef(definition) => format!(
+            "DefDef({},type_params=[{}],clauses=[{}],result={},rhs={})",
+            name(typer, definition.name.as_name().text()),
+            definition
+                .type_params
+                .iter()
+                .map(|parameter| tree_snapshot(typer, *parameter))
+                .collect::<Vec<_>>()
+                .join(";"),
+            definition
+                .value_param_clauses
+                .iter()
+                .map(|clause| clause
+                    .iter()
+                    .map(|parameter| tree_snapshot(typer, *parameter))
+                    .collect::<Vec<_>>()
+                    .join(","))
+                .collect::<Vec<_>>()
+                .join(";"),
+            tree_snapshot(typer, definition.tpt),
+            definition
+                .rhs
+                .map(|rhs| tree_snapshot(typer, rhs))
+                .unwrap_or_else(|| "_".to_owned())
+        ),
+        TreeKind::TypeDef(definition) => format!(
+            "TypeDef({},rhs={})",
+            name(typer, definition.name.as_name().text()),
+            tree_snapshot(typer, definition.rhs)
+        ),
+        TreeKind::Template(template) => format!(
+            "Template(parents=[{}],body=[{}])",
+            template
+                .parents
+                .iter()
+                .map(|parent| tree_snapshot(typer, *parent))
+                .collect::<Vec<_>>()
+                .join(";"),
+            template
+                .body
+                .iter()
+                .map(|member| tree_snapshot(typer, *member))
+                .collect::<Vec<_>>()
+                .join(";")
         ),
         _ => format!("Other({ty})"),
     };
