@@ -120,6 +120,7 @@ object Main:
         fields += field("check_mode", quote(generator.checkMode.toString))
       case bind: dotty.tools.dotc.ast.Trees.Bind[?] =>
         fields += field("name", quote(bind.name.toString))
+        if bind.mods.is(Given) then fields += field("given", "true")
       case tdef: dotty.tools.dotc.ast.Trees.TypeDef[?] =>
         val name = tdef.name.toString
         fields += field("name", quote(if isWildcardTypeParamSource(slice(tdef, source)) then "$type_wildcard" else name))

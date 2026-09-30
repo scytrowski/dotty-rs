@@ -210,6 +210,9 @@ fn render_tree(
                 "\"name\":{}",
                 quote(names.resolve(bind.name.text()))
             ));
+            if bind.given {
+                fields.push("\"given\":true".to_owned());
+            }
         }
         TreeKind::TypeDef(definition) => {
             let name = names.resolve(definition.name.as_name().text());
