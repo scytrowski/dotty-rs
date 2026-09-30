@@ -5,6 +5,7 @@ use dotty_core::{
 
 use dotty_core::ScannerEvent;
 use dotty_core::ast::{ErrorNode, ErrorNodeKind, UntypedNode};
+use std::collections::HashSet;
 
 use crate::ParserFeatures;
 use crate::{
@@ -35,6 +36,8 @@ where
     pub(crate) type_argument_depth: u32,
     pub(crate) placeholder_params: Vec<TreeId<Untyped>>,
     pub(crate) last_advance_was_outdent: bool,
+    /// AST constructs already closed by an explicit Scala `end` marker.
+    pub(crate) end_marked_trees: HashSet<TreeId<Untyped>>,
     /// Active quoted expression bodies; `$` followed by `{` is a splice only
     /// while this depth is nonzero.
     pub(crate) expression_quote_depth: u32,
@@ -82,6 +85,7 @@ where
             type_argument_depth: 0,
             placeholder_params: Vec::new(),
             last_advance_was_outdent: false,
+            end_marked_trees: HashSet::new(),
             expression_quote_depth: 0,
             quote_pattern_depth: 0,
             type_quote_depth: 0,

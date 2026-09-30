@@ -212,7 +212,6 @@ where
         boundary: StatementSequenceBoundary,
     ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
         let mut statements = Vec::new();
-        let mut end_marker_seen = false;
         self.consume_sequence_separators(boundary);
 
         while !self.sequence_ended(boundary) {
@@ -231,14 +230,12 @@ where
                 {
                     return self.finish_statement_sequence(statements);
                 }
-                if !self.consume_end_marker(last, end_marker_seen) {
+                if !self.consume_end_marker(last) {
                     return self.finish_statement_sequence(statements);
                 }
-                end_marker_seen = true;
                 self.consume_sequence_separators(boundary);
                 continue;
             }
-            end_marker_seen = false;
             let checkpoint = self.cursor.checkpoint();
             let location = match boundary {
                 StatementSequenceBoundary::CompilationUnit => Location::Elsewhere,
@@ -311,10 +308,9 @@ where
                 {
                     return self.finish_statement_sequence(statements);
                 }
-                if !self.consume_end_marker(last, end_marker_seen) {
+                if !self.consume_end_marker(last) {
                     return self.finish_statement_sequence(statements);
                 }
-                end_marker_seen = true;
                 self.consume_sequence_separators(boundary);
             }
         }
@@ -341,20 +337,17 @@ where
         location: Location,
     ) -> Vec<TreeId<Untyped>> {
         let mut statements = Vec::new();
-        let mut end_marker_seen = false;
         self.consume_sequence_separators(boundary);
 
         while !self.sequence_ended(boundary) {
             if self.current().kind == TokenKind::EndMarker {
                 let last = statements.last().copied();
-                if !self.consume_end_marker(last, end_marker_seen) {
+                if !self.consume_end_marker(last) {
                     return statements;
                 }
-                end_marker_seen = true;
                 self.consume_sequence_separators(boundary);
                 continue;
             }
-            end_marker_seen = false;
             let checkpoint = self.cursor.checkpoint();
             match self.parse_top_level_statement(location) {
                 ParsedStatement::Definition(tree) | ParsedStatement::Expression(tree) => {
@@ -390,10 +383,9 @@ where
 
             while self.current().kind == TokenKind::EndMarker {
                 let last = statements.last().copied();
-                if !self.consume_end_marker(last, end_marker_seen) {
+                if !self.consume_end_marker(last) {
                     return statements;
                 }
-                end_marker_seen = true;
                 self.consume_sequence_separators(boundary);
             }
         }
@@ -509,11 +501,7 @@ where
     /// expression parsing or recovery. Only the marker and its target are
     /// consumed, so an unrelated next statement remains available to the
     /// enclosing sequence.
-    pub(crate) fn consume_end_marker(
-        &mut self,
-        last: Option<TreeId<Untyped>>,
-        duplicate: bool,
-    ) -> bool {
+    pub(crate) fn consume_end_marker(&mut self, last: Option<TreeId<Untyped>>) -> bool {
         let checkpoint = self.cursor.checkpoint();
         let marker = self.current().span;
         self.advance();
@@ -545,17 +533,21 @@ where
         }
 
         let target_text = self.marker_target_text(target_kind, self.current().span);
-        let matching_tree =
-            last.filter(|tree| self.end_marker_matches(*tree, target_kind, &target_text));
+        let matching_tree = last.and_then(|tree| {
+            self.end_marker_owner(tree, target_kind, &target_text, marker.start(), false)
+        });
         if let Some(tree) = matching_tree {
-            if duplicate {
-                self.report_at(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    SourceSpan::new(self.source_id, Span::without_point(marker)),
-                    "duplicate end marker",
-                );
-            }
+            self.end_marked_trees.insert(tree);
             self.extend_tree_end(tree, target_end);
+        } else if last.is_some_and(|tree| {
+            self.end_marker_owner(tree, target_kind, &target_text, marker.start(), true)
+                .is_some()
+        }) {
+            self.report_at(
+                ParseDiagnosticKind::UnexpectedToken,
+                SourceSpan::new(self.source_id, Span::without_point(marker)),
+                "duplicate end marker",
+            );
         } else {
             let range = TextRange::new(marker.start(), target_end).expect("marker span is ordered");
             self.report_at(
@@ -579,7 +571,43 @@ where
         let target_kind = target.kind;
         let target_span = target.span;
         let target_text = self.marker_target_text(target_kind, target_span);
-        self.end_marker_matches(tree, target_kind, &target_text)
+        self.end_marker_owner(
+            tree,
+            target_kind,
+            &target_text,
+            self.current().span.start(),
+            false,
+        )
+        .is_some()
+    }
+
+    /// Finds the innermost still-unmarked construct represented by `tree` that
+    /// matches an `end` target before the marker position. The parser's AST
+    /// spans encode the nested source ownership; selecting the latest-starting
+    /// eligible owner lets consecutive `end if` markers close nested controls
+    /// one at a time instead of repeatedly extending the outer statement.
+    fn end_marker_owner(
+        &self,
+        tree: TreeId<Untyped>,
+        target_kind: TokenKind,
+        target_text: &str,
+        marker_start: u32,
+        include_marked: bool,
+    ) -> Option<TreeId<Untyped>> {
+        let root_range = self.ast.get(tree).position?.span().range();
+        self.ast
+            .iter()
+            .filter_map(|(candidate, node)| {
+                let range = node.position?.span().range();
+                (range.start() >= root_range.start()
+                    && range.end() <= root_range.end()
+                    && range.end() <= marker_start
+                    && (include_marked || !self.end_marked_trees.contains(&candidate))
+                    && self.end_marker_matches(candidate, target_kind, target_text))
+                .then_some((range.start(), u32::MAX - range.end(), candidate))
+            })
+            .max_by_key(|(start, shorter_end, _)| (*start, *shorter_end))
+            .map(|(_, _, candidate)| candidate)
     }
 
     fn marker_target_text(&self, kind: TokenKind, span: TextRange) -> String {
