@@ -22,7 +22,7 @@ pub use method::{MethodKind, MethodParam, MethodType, PolyType, TypeLambda, Type
 pub use rebind::{
     InstantiatedPoly, MethodParamSpec, TypeParamSpec, TypeRebindError, close_over_this,
     instantiate_poly, method_type_from_symbols, poly_type_from_symbols, rebind_type_lambda,
-    substitute_type_symbols, type_lambda_from_symbols, type_lambda_with_result,
+    substitute_type_symbols, type_lambda_from_symbols,
 };
 pub use structural::{
     MAX_STRUCTURAL_DEPTH, StructuralLookupError, StructuralMemberLookup, lookup_structural_member,
