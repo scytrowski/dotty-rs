@@ -1,6 +1,6 @@
 use crate::annotation::{AnnotationValue, SemanticAnnotation};
 use crate::binary_name::BinaryName;
-use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry};
+use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError};
 use crate::error::ClassLoadError;
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
@@ -31,6 +31,21 @@ use dotty_core::{
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+#[derive(Debug)]
+enum TastyAliasResolutionError {
+    ClassPath(BinaryName, ClassPathError),
+    InvalidTasty(BinaryName, tasty_symbol::TastyDecodeError),
+}
+
+impl TastyAliasResolutionError {
+    fn into_class_load_error(self) -> ClassLoadError {
+        match self {
+            Self::ClassPath(name, error) => ClassLoadError::Io(name, Rc::new(error)),
+            Self::InvalidTasty(name, error) => ClassLoadError::InvalidTastyFile(name, error),
+        }
+    }
+}
+
 /// Resolves an alias in a package object's TASTy and accepts its target only
 /// when exactly one plausible binary name is present on the configured
 /// classpath. Bare names in alias RHS trees can be relative to the defining
@@ -40,7 +55,7 @@ fn resolve_tasty_alias<E: ClassPathEntry>(
     class_path: &E,
     owner: &BinaryName,
     alias: &str,
-) -> Result<Option<BinaryName>, crate::class_path::ClassPathError> {
+) -> Result<Option<BinaryName>, TastyAliasResolutionError> {
     let Some((target_owner, candidate)) =
         follow_tasty_alias_chain(owner.clone(), alias.to_owned(), |owner, alias| {
             resolve_tasty_alias_target(class_path, owner, alias)
@@ -86,7 +101,7 @@ fn resolve_tasty_alias_target<E: ClassPathEntry>(
     class_path: &E,
     owner: &BinaryName,
     alias: &str,
-) -> Result<Option<tasty_symbol::TypeAliasTarget>, crate::class_path::ClassPathError> {
+) -> Result<Option<tasty_symbol::TypeAliasTarget>, TastyAliasResolutionError> {
     if !matches!(owner.simple_name(), "package" | "package$") {
         return Ok(None);
     }
@@ -94,26 +109,30 @@ fn resolve_tasty_alias_target<E: ClassPathEntry>(
         .as_internal()
         .strip_suffix('$')
         .unwrap_or(owner.as_internal());
-    let package_tasty = class_path.find_class(&BinaryName::from_internal(package_object))?;
+    let package_name = BinaryName::from_internal(package_object);
+    let package_tasty = class_path
+        .find_class(&package_name)
+        .map_err(|error| TastyAliasResolutionError::ClassPath(package_name.clone(), error))?;
     let Some(resource) = package_tasty.filter(|resource| resource.format() == ClassFormat::Tasty)
     else {
         return Ok(None);
     };
-    let Ok(file) = dotty_tasty::tasty::TastyFile::parse_scala_3_9(resource.bytes()) else {
-        return Ok(None);
-    };
-    Ok(tasty_symbol::resolve_type_alias_target(
-        &file,
-        alias,
-        owner.package_path(),
-    ))
+    let file =
+        dotty_tasty::tasty::TastyFile::parse_scala_3_9(resource.bytes()).map_err(|error| {
+            TastyAliasResolutionError::InvalidTasty(
+                package_name.clone(),
+                tasty_symbol::TastyDecodeError::Parse(error),
+            )
+        })?;
+    tasty_symbol::resolve_type_alias_target(&file, alias, owner.package_path())
+        .map_err(|error| TastyAliasResolutionError::InvalidTasty(package_name, error))
 }
 
 fn validate_alias_candidate<E: ClassPathEntry>(
     class_path: &E,
     package: &str,
     candidate: BinaryName,
-) -> Result<Option<BinaryName>, crate::class_path::ClassPathError> {
+) -> Result<Option<BinaryName>, TastyAliasResolutionError> {
     let raw = candidate.clone();
     let relative = if package.is_empty() || raw.as_internal().starts_with(&format!("{package}/")) {
         None
@@ -125,7 +144,11 @@ fn validate_alias_candidate<E: ClassPathEntry>(
     };
     let mut resolved = None;
     for candidate in std::iter::once(raw).chain(relative) {
-        if class_path.find_class(&candidate)?.is_some() {
+        if class_path
+            .find_class(&candidate)
+            .map_err(|error| TastyAliasResolutionError::ClassPath(candidate.clone(), error))?
+            .is_some()
+        {
             if resolved.is_some() {
                 return Ok(None);
             }
@@ -949,7 +972,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             }
         });
         if let Some(error) = alias_error {
-            return Err(ClassLoadError::Io(name.clone(), Rc::new(error)));
+            return Err(error.into_class_load_error());
         }
         let decoded =
             decoded.map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
@@ -4754,6 +4777,34 @@ mod tests {
                 .repository
                 .get(&BinaryName::from_internal("scala/collection/Iterator")),
             Some(ClassEntry::Loaded(iterator)) if *iterator != source
+        ));
+    }
+
+    #[test]
+    fn loading_source_reports_a_malformed_package_alias_tasty_file() {
+        let mut tasty = HashMap::new();
+        tasty.insert(
+            BinaryName::from_internal("Source"),
+            dotty_tasty_fixture_bytes("scala3-library/scala/io/Source.tasty"),
+        );
+        tasty.insert(
+            BinaryName::from_internal("scala/package"),
+            b"malformed package object TASTy".to_vec(),
+        );
+        let class_path = InMemoryTastyClassPath(tasty);
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        let error = loader
+            .load_class(&BinaryName::from_internal("Source"))
+            .expect_err("malformed package alias TASTy should be reported");
+
+        assert!(matches!(
+            error,
+            ClassLoadError::InvalidTastyFile(
+                ref name,
+                tasty_symbol::TastyDecodeError::Parse(_)
+            ) if name.as_internal() == "scala/package"
         ));
     }
 

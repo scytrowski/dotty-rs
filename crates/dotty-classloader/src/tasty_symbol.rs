@@ -1038,16 +1038,17 @@ pub(crate) fn resolve_type_alias_target(
     file: &TastyFile<'_>,
     alias_name: &str,
     current_package: &str,
-) -> Option<TypeAliasTarget> {
-    for node in file.ast_address_index().ok()?.iter() {
+) -> Result<Option<TypeAliasTarget>, TastyDecodeError> {
+    let index = file.ast_address_index()?;
+    for node in index.iter() {
         if node.tag != TYPEDEF_TAG {
             continue;
         }
-        let Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef {
+        let StructuredNode::TypeDef(DefinitionBody::TypeDef {
             name,
             type_or_template,
             ..
-        })) = node.decode_structured()
+        }) = node.decode_structured()?
         else {
             continue;
         };
@@ -1056,7 +1057,7 @@ pub(crate) fn resolve_type_alias_target(
         }
         let rhs = match type_or_template {
             RawTree::LengthNode(lambda) if lambda.tag == dotty_tasty::tasty::LAMBDATPT_TAG => {
-                lambda.decode_lambda_tpt().ok()?.body
+                lambda.decode_lambda_tpt()?.body
             }
             RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG => continue,
             rhs => rhs,
@@ -1064,12 +1065,17 @@ pub(crate) fn resolve_type_alias_target(
         if let Some((owner, name)) = unresolved_alias_reference(file, &rhs)
             && matches!(owner.simple_name(), "package" | "package$")
         {
-            return Some(TypeAliasTarget::Alias { owner, name });
+            return Ok(Some(TypeAliasTarget::Alias { owner, name }));
         }
-        return resolve_parent_name_in_package(file, &rhs, current_package, Some(current_package))
-            .map(TypeAliasTarget::Candidate);
+        return Ok(resolve_parent_name_in_package(
+            file,
+            &rhs,
+            current_package,
+            Some(current_package),
+        )
+        .map(TypeAliasTarget::Candidate));
     }
-    None
+    Ok(None)
 }
 
 /// Compatibility helper for unit coverage that only needs a direct target.
@@ -1079,7 +1085,7 @@ fn resolve_type_alias_candidate(
     alias_name: &str,
     current_package: &str,
 ) -> Option<BinaryName> {
-    match resolve_type_alias_target(file, alias_name, current_package)? {
+    match resolve_type_alias_target(file, alias_name, current_package).ok()?? {
         TypeAliasTarget::Candidate(candidate) => Some(candidate),
         TypeAliasTarget::Alias { .. } => None,
     }
