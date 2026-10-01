@@ -297,3 +297,17 @@ Recreate it with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-562-scala3-3.9.0.json
 ```
+
+`parser-post-issue-576-scala3-3.9.0.json` reruns the same measurement after
+PR #576 at merge revision `0a6a55aecbdb766d2cdc4a814aff8b30a1fd37f8`. The
+pinned Scala revision and 1,236-file corpus are unchanged. It records 1,165
+clean parses (94.26%), 71 recoverable files, and zero hard parser failures,
+process failures, panics, or hangs. The Scala oracle emitted all 1,236 files
+with zero failures. The comparison and its limitations are in
+[`parser-v0.1-compatibility.md`](../../docs/parser-v0.1-compatibility.md).
+Recreate it with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-576-scala3-3.9.0.json
+```

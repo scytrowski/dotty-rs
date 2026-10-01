@@ -764,3 +764,59 @@ Recreate the report from the pinned checkout with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-562-scala3-3.9.0.json
 ```
+
+## Corpus rerun after PR #576
+
+Issue #582 reran the same corpus at parser merge revision
+`0a6a55aecbdb766d2cdc4a814aff8b30a1fd37f8` (PR #576), using the unchanged
+Scala 3.9.0 source revision and sorted 1,236-file inventory. The immutable
+report is
+[`parser-post-issue-576-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-576-scala3-3.9.0.json).
+
+| Measure | After #561 / issue #562 | After #576 | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parses | 1,142 (92.39%) | 1,165 (94.26%) | +23 (+1.86 pp) |
+| Recoverable files | 94 (7.61%) | 71 (5.74%) | -23 |
+| Hard parser failures / process failures / panics / hangs | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | unchanged |
+| Scanner diagnostics | 13 | 13 | 0 |
+| Scala oracle files / failures | 1,236 / 0 | 1,236 / 0 | unchanged |
+
+The 23 additional clean files are all in the capture-checking-disabled cohort
+(905/994 → 928/994); the enabled cohort is unchanged at 237/242 clean. Total
+diagnostic occurrences fell from 1,402 to 757 (-645, or 46.0%):
+
+| Diagnostic occurrences | After #561 | After #576 | Change |
+| --- | ---: | ---: | ---: |
+| `ExpectedExpression` | 641 | 351 | -290 |
+| `ExpectedPattern` | 5 | 5 | 0 |
+| `ExpectedToken` | 174 | 115 | -59 |
+| `ExpectedType` | 1 | 1 | 0 |
+| `UnexpectedToken` | 332 | 190 | -142 |
+| `UnsupportedSyntax` | 249 | 95 | -154 |
+| **Total** | **1,402** | **757** | **-645 (-46.0%)** |
+
+First-failure counts moved from 38 to 24 for `ExpectedExpression`, 22 to 23
+for `ExpectedToken`, and 29 to 18 for `UnexpectedToken`; `ExpectedPattern`
+stayed at 2. One `ScannerDiagnostics` first-failure bucket is now visible
+(for `compiler/src/dotty/tools/dotc/reporting/WConf.scala`), while the three
+named `UnsupportedSyntax` cases remain unchanged. These are first-failure
+classifications, not counts of every syntax occurrence. The four motivating
+files from #570 (`BTypeLoader.scala`, `AliasingAnalyzer.scala`, `BoxUnbox.scala`,
+and `CaptureAnnotation.scala`) now parse without diagnostics in focused
+full-source runs.
+
+This is an aggregate comparison across the parser changes between issues #562
+and #582; it does not isolate PR #576 as the cause of all 23 clean parses or
+645 fewer diagnostics. PR #576's four targeted boundary fixes address the
+named #570 reproducers. The small increase in `ExpectedToken` first failures
+and the newly visible scanner bucket should be triaged independently rather
+than hidden by the improved aggregate. There were no hard failures, process
+failures, panics, hangs, or Scala-oracle failures.
+
+Recreate the report from the pinned checkout with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-576-scala3-3.9.0.json
+```
