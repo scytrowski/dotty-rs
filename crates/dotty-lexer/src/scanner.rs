@@ -209,13 +209,13 @@ impl ContextualScanner {
         next_kind == Some(TokenKind::Keyword(HardKeyword::Case))
     }
 
-    /// Restores statement separators inside an arrow body when the ordinary
-    /// layout pass suppressed them because the body is nested in parentheses
-    /// or brackets. Only peer statements at the body indentation are split;
-    /// nested layout and the body-closing outdent remain parser feedback.
-    fn insert_arrow_body_separators(&mut self) {
-        let arrow_index = self.current_index();
-        let body_index = arrow_index.saturating_add(2);
+    /// Restores statement separators inside a feedback-opened body when the
+    /// ordinary layout pass suppressed them because it is nested in
+    /// parentheses or brackets. Only peer statements at the body indentation
+    /// are split; nested layout and the body-closing outdent remain feedback.
+    fn insert_indented_body_separators(&mut self) {
+        let introducer_index = self.current_index();
+        let body_index = introducer_index.saturating_add(2);
         let Some(first_body_token) = self.tokens.get(body_index) else {
             return;
         };
@@ -475,6 +475,7 @@ impl TokenSource for ContextualScanner {
                         indent_offset: self.feedback_indent_offset_after_current(),
                         case_offset: None,
                     });
+                    self.insert_indented_body_separators();
                 }
             }
             ScannerEvent::IndentedFrom { reference_offset } => {
@@ -484,6 +485,7 @@ impl TokenSource for ContextualScanner {
                         indent_offset: self.feedback_indent_offset_after_current(),
                         case_offset: None,
                     });
+                    self.insert_indented_body_separators();
                 }
             }
             ScannerEvent::Outdented => match self.feedback_regions.last().map(|region| region.kind)
@@ -553,7 +555,7 @@ impl TokenSource for ContextualScanner {
                         indent_offset: self.feedback_indent_offset_after_current(),
                         case_offset: Some(case_start),
                     });
-                    self.insert_arrow_body_separators();
+                    self.insert_indented_body_separators();
                 }
             }
             ScannerEvent::OutdentedByDelimiter => {
@@ -570,7 +572,7 @@ impl TokenSource for ContextualScanner {
                         indent_offset: self.feedback_indent_offset_after_current(),
                         case_offset: None,
                     });
-                    self.insert_arrow_body_separators();
+                    self.insert_indented_body_separators();
                 }
             }
             ScannerEvent::SelfArrow => {
@@ -641,6 +643,12 @@ fn build_tokens(
                     previous_end,
                     &indentation_stack,
                 );
+                let starts_prefix_expression = raw.kind == RawTokenKind::Operator
+                    && is_prefix_operator(source, raw.span)
+                    && next_raw_token(items, item_index).is_some_and(|next| {
+                        can_start_simple_expr_raw(next.kind)
+                            && !has_source_line_break(source, raw.span.end(), next.span.start())
+                    });
                 let case_guard_candidate = raw.kind == RawTokenKind::Keyword(HardKeyword::If)
                     && indentation_stack
                         .last()
@@ -698,6 +706,7 @@ fn build_tokens(
                         && !leading_infix
                         && !suppresses_statement_separator(raw.kind)
                         && (can_start_statement_or_annotation(source, raw)
+                            || starts_prefix_expression
                             || blank_line_before_operator)
                     {
                         let separator = if blank_line {
@@ -1314,6 +1323,18 @@ fn is_leading_infix(
 
     let previous_indent = line_indentation(source, previous_end.saturating_sub(1));
     let operator_indent = line_indentation(source, current.span.start());
+    // At the previous statement's indentation, a prefix-capable operator
+    // starts a new expression rather than continuing the preceding braced
+    // expression as an infix operator. More-indented leading operators remain
+    // eligible for Scala's multiline infix layout.
+    if previous_kind == Some(TokenKind::Punctuation(Punctuation::RightBrace))
+        && is_prefix_operator(source, current.span)
+        && current.span.end() == next.span.start()
+        && can_start_simple_expr_raw(next.kind)
+        && previous_indent == operator_indent
+    {
+        return false;
+    }
     let current_region = layout_stack
         .last()
         .filter(|region| region.owner != LayoutRegionOwner::MatchCases);
@@ -3460,6 +3481,38 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn separates_a_same_indent_prefix_operator_after_a_braced_match() {
+        let source = "object T:\n  def check =\n    val result = value match { case A => true }\n    !result\n";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+        let bang = source.find("!result").expect("prefix expression exists") as u32;
+        let bang_index = scanner
+            .tokens()
+            .iter()
+            .position(|token| token.span.start() == bang)
+            .expect("prefix operator token exists");
+        let separator = &scanner.tokens()[bang_index - 1];
+
+        assert_eq!(separator.kind, TokenKind::Newline);
+        assert_eq!(separator.span.end(), bang);
+    }
+
+    #[test]
+    fn keeps_a_spaced_leading_infix_after_a_braced_match() {
+        let source =
+            "object T:\n  def check =\n    value match { case 0 => 1; case _ => 2 }\n    - 1\n";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+        let minus = source.find("- 1").expect("leading minus exists") as u32;
+        let minus_index = scanner
+            .tokens()
+            .iter()
+            .position(|token| token.span.start() == minus)
+            .expect("minus operator token exists");
+
+        assert_ne!(scanner.tokens()[minus_index - 1].kind, TokenKind::Newline);
+        assert_ne!(scanner.tokens()[minus_index - 1].kind, TokenKind::Newlines);
     }
 
     #[test]
