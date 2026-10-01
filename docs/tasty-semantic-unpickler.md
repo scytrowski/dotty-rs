@@ -2176,14 +2176,19 @@ store path covers the metadata the loader consumes and has equivalent focused
 regression coverage; then migrate consumers and remove the legacy reader in a
 separate change.
 
-The resolver API is read-only and consumes already available semantic state.
-`MemberRequest` carries a prefix `TypeId`, namespaced `Name`, `Unique` selector
-and a declaration space. `MemberSpace::Explicit(owner_type)` means search that
-declaring owner and forbids fallback to the prefix. `Ok(Some(id))` is an exact
-answer, `Ok(None)` means this resolver cannot answer (not proof of absence),
-and `Err(ResolutionError)` preserves ambiguity or malformed resolver state.
-`NoResolver` always answers `None`. Resolver results are validated for the
-requested namespace/owner; invalid answers and resolver errors are reported as
+The resolver API consumes the shared semantic store and may materialize
+canonical state into it. Each call is atomic: an unresolved or failed call
+leaves no partial store or resolver-cache state. `MemberRequest` carries a
+prefix `TypeId`, namespaced `Name`, `Unique` selector and a declaration space.
+`MemberSpace::Explicit(owner_type)` means search that declaring owner and
+forbids fallback to the prefix. `Ok(Some(id))` is an exact answer,
+`Ok(None)` means this resolver cannot answer (not proof of absence), and
+`Err(ResolutionError)` preserves ambiguity or malformed resolver state.
+`NoResolver` always answers `None`. Public unpickler transactions pair the
+store checkpoint with a resolver checkpoint; on failure they restore the
+resolver before rolling back the store, so resolver caches cannot retain
+rolled-back IDs. Resolver results are validated for the requested
+namespace/owner; invalid answers and resolver errors are reported as
 `ResolverFailure`, not silently accepted.
 
 For classpath-wide operation, bootstrap `Definitions` once and reuse one

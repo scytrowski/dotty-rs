@@ -1554,10 +1554,16 @@ the classloader.
 
 `Ok(None)` means "this resolver cannot resolve it" and never "does not exist";
 `Err(ResolutionError)` (ambiguous, malformed state) is never lowered to `None`.
-Resolvers take `&SemanticStore`: until the port has a transactional contract
-they do not allocate, so a failed decode leaves nothing to undo. Overload
-selection by signature is a `#[non_exhaustive]` extension of `MemberSelector`;
-today only `Unique` exists. `NoResolver` answers `None` to everything.
+Resolvers receive `&mut SemanticStore` and may materialize canonical state.
+Each resolver call is atomic: `None` and errors leave no partial store or
+resolver-cache state. Larger caller transactions pair a store checkpoint with
+`SymbolResolver::checkpoint`; on rollback the caller first invokes
+`rollback_to` on the resolver, which removes its newer cache entries and
+undeclares changes to older scopes, then rolls back the store. This keeps
+resolver caches from retaining IDs freed by typer or unpickler rollback.
+Overload selection by signature is a `#[non_exhaustive]` extension of
+`MemberSelector`; today only `Unique` exists. `NoResolver` answers `None` to
+everything and never mutates the store.
 
 `MemberSpace` says where the declaration is looked for. `Prefix` (ordinary
 references) searches the members of `prefix`. `Explicit(TypeId)` (Scala's
