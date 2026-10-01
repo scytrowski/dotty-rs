@@ -357,17 +357,24 @@ fn equally_specific_generic_and_monomorphic_overloads_remain_ambiguous() {
         "class A {}; class C { def choose(x: A): Int = 1; def choose[T](x: T): Int = 2; def use(x: A): Int = choose(x) }",
     );
     let (_, use_method, rhs) = fixture.method("use");
+    let declared_candidates = fixture
+        .methods_named("choose")
+        .into_iter()
+        .map(|(_, symbol, _)| symbol)
+        .collect::<HashSet<_>>();
+    assert_eq!(declared_candidates.len(), 2);
     let mut typer = fixture.typer();
     let context = typer.expression_context_for(use_method).unwrap();
     let error = typer.type_expression(rhs, context).unwrap_err();
     let candidates = match &error {
-        TyperError::AmbiguousOverloadApplication { candidates, .. } => candidates
-            .iter()
-            .map(|symbol| symbol_label(&typer, *symbol))
-            .collect::<Vec<_>>(),
+        TyperError::AmbiguousOverloadApplication { candidates, .. } => candidates,
         other => panic!("expected ambiguity, got {other:?}"),
     };
     assert_eq!(candidates.len(), 2);
+    assert_eq!(
+        candidates.iter().copied().collect::<HashSet<_>>(),
+        declared_candidates
+    );
     assert_eq!(
         error_snapshot(&typer, &error),
         "AmbiguousOverloadApplication(Method:C.choose=Missing|Method:C.choose=Missing)"
