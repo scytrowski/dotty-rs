@@ -209,13 +209,13 @@ impl ContextualScanner {
         next_kind == Some(TokenKind::Keyword(HardKeyword::Case))
     }
 
-    /// Restores statement separators inside an arrow body when the ordinary
-    /// layout pass suppressed them because the body is nested in parentheses
-    /// or brackets. Only peer statements at the body indentation are split;
-    /// nested layout and the body-closing outdent remain parser feedback.
-    fn insert_arrow_body_separators(&mut self) {
-        let arrow_index = self.current_index();
-        let body_index = arrow_index.saturating_add(2);
+    /// Restores statement separators inside a feedback-opened body when the
+    /// ordinary layout pass suppressed them because it is nested in
+    /// parentheses or brackets. Only peer statements at the body indentation
+    /// are split; nested layout and the body-closing outdent remain feedback.
+    fn insert_indented_body_separators(&mut self) {
+        let introducer_index = self.current_index();
+        let body_index = introducer_index.saturating_add(2);
         let Some(first_body_token) = self.tokens.get(body_index) else {
             return;
         };
@@ -475,6 +475,7 @@ impl TokenSource for ContextualScanner {
                         indent_offset: self.feedback_indent_offset_after_current(),
                         case_offset: None,
                     });
+                    self.insert_indented_body_separators();
                 }
             }
             ScannerEvent::IndentedFrom { reference_offset } => {
@@ -484,6 +485,7 @@ impl TokenSource for ContextualScanner {
                         indent_offset: self.feedback_indent_offset_after_current(),
                         case_offset: None,
                     });
+                    self.insert_indented_body_separators();
                 }
             }
             ScannerEvent::Outdented => match self.feedback_regions.last().map(|region| region.kind)
@@ -553,7 +555,7 @@ impl TokenSource for ContextualScanner {
                         indent_offset: self.feedback_indent_offset_after_current(),
                         case_offset: Some(case_start),
                     });
-                    self.insert_arrow_body_separators();
+                    self.insert_indented_body_separators();
                 }
             }
             ScannerEvent::OutdentedByDelimiter => {
@@ -570,7 +572,7 @@ impl TokenSource for ContextualScanner {
                         indent_offset: self.feedback_indent_offset_after_current(),
                         case_offset: None,
                     });
-                    self.insert_arrow_body_separators();
+                    self.insert_indented_body_separators();
                 }
             }
             ScannerEvent::SelfArrow => {
