@@ -641,6 +641,12 @@ fn build_tokens(
                     previous_end,
                     &indentation_stack,
                 );
+                let starts_prefix_expression = raw.kind == RawTokenKind::Operator
+                    && is_prefix_operator(source, raw.span)
+                    && next_raw_token(items, item_index).is_some_and(|next| {
+                        can_start_simple_expr_raw(next.kind)
+                            && !has_source_line_break(source, raw.span.end(), next.span.start())
+                    });
                 let case_guard_candidate = raw.kind == RawTokenKind::Keyword(HardKeyword::If)
                     && indentation_stack
                         .last()
@@ -698,6 +704,7 @@ fn build_tokens(
                         && !leading_infix
                         && !suppresses_statement_separator(raw.kind)
                         && (can_start_statement_or_annotation(source, raw)
+                            || starts_prefix_expression
                             || blank_line_before_operator)
                     {
                         let separator = if blank_line {
@@ -1314,6 +1321,16 @@ fn is_leading_infix(
 
     let previous_indent = line_indentation(source, previous_end.saturating_sub(1));
     let operator_indent = line_indentation(source, current.span.start());
+    // At the previous statement's indentation, a prefix-capable operator
+    // starts a new expression rather than continuing the preceding braced
+    // expression as an infix operator. More-indented leading operators remain
+    // eligible for Scala's multiline infix layout.
+    if previous_kind == Some(TokenKind::Punctuation(Punctuation::RightBrace))
+        && is_prefix_operator(source, current.span)
+        && previous_indent == operator_indent
+    {
+        return false;
+    }
     let current_region = layout_stack
         .last()
         .filter(|region| region.owner != LayoutRegionOwner::MatchCases);
@@ -3460,6 +3477,22 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn separates_a_same_indent_prefix_operator_after_a_braced_match() {
+        let source = "object T:\n  def check =\n    val result = value match { case A => true }\n    !result\n";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+        let bang = source.find("!result").expect("prefix expression exists") as u32;
+        let bang_index = scanner
+            .tokens()
+            .iter()
+            .position(|token| token.span.start() == bang)
+            .expect("prefix operator token exists");
+        let separator = &scanner.tokens()[bang_index - 1];
+
+        assert_eq!(separator.kind, TokenKind::Newline);
+        assert_eq!(separator.span.end(), bang);
     }
 
     #[test]
