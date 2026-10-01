@@ -574,7 +574,8 @@ fn equally_applicable_constructor_candidates_remain_ambiguous() {
         "class C(value: Int) { def this(value: Int) = this(1) }; class Use { def make: C = new C(1) }",
     );
     let class = fixture.symbol_named("C", SymbolKind::Class);
-    assert_eq!(constructors_of(&mut fixture, class).len(), 2);
+    let declared_constructors = constructors_of(&mut fixture, class);
+    assert_eq!(declared_constructors.len(), 2);
     let (_, method, rhs) = fixture.method("make");
     let mut typer = fixture.typer();
     let context = typer.expression_context_for(method).unwrap();
@@ -582,6 +583,15 @@ fn equally_applicable_constructor_candidates_remain_ambiguous() {
 
     let error = typer.type_expression(rhs, context).unwrap_err();
 
+    let candidates = match &error {
+        TyperError::AmbiguousConstructorApplication { candidates, .. } => candidates,
+        other => panic!("expected constructor ambiguity, got {other:?}"),
+    };
+    assert_eq!(candidates.len(), declared_constructors.len());
+    assert_eq!(
+        candidates.iter().copied().collect::<HashSet<_>>(),
+        declared_constructors.into_iter().collect::<HashSet<_>>()
+    );
     assert_eq!(
         error_snapshot(&typer, &error),
         "AmbiguousConstructorApplication(C;Constructor:C.<init>=Missing|Constructor:C.<init>=Missing)"
