@@ -51,24 +51,6 @@ pub(super) struct ExpressionScopeFrame {
 }
 
 impl SourceTyper<'_> {
-    pub(super) fn source_tree_for_symbol(
-        &self,
-        symbol: SymbolId,
-    ) -> Option<(SourceId, TreeId<Untyped>)> {
-        self.local_methods
-            .definition(symbol)
-            .or_else(|| self.local_methods.parameter_definition(symbol))
-            .or_else(|| self.local_methods.type_parameter_definition(symbol))
-            .or_else(|| {
-                self.index
-                    .definition_of(symbol)
-                    .map(|definition| match definition {
-                        SourceDefinition::Canonical { source, tree }
-                        | SourceDefinition::Derived { source, tree } => (source, tree),
-                    })
-            })
-    }
-
     pub(super) fn method_declaration_context(&self, method: SymbolId) -> Option<ExpressionContext> {
         self.local_methods.declaration_context(method).or_else(|| {
             self.index
