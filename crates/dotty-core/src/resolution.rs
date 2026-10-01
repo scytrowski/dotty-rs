@@ -204,10 +204,10 @@ mod tests {
 
     impl MemberResolver {
         fn materialize(&mut self, store: &mut SemanticStore, name: Name) -> SymbolId {
-            if let Some(symbol) = self.members.get(&name).copied() {
-                if store.symbols.contains(symbol) {
-                    return symbol;
-                }
+            if let Some(symbol) = self.members.get(&name).copied()
+                && store.symbols.contains(symbol)
+            {
+                return symbol;
             }
             let symbol = store.symbols.alloc(Symbol {
                 name,
