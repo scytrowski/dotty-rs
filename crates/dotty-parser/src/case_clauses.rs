@@ -38,6 +38,9 @@ where
         }
 
         let body = if expr_only {
+            // Braced templates suppress eager layout tokens, but an
+            // expression-only case can still have an indented statement body.
+            let body_indent_offset = self.observe_case_body_indented(mark.start);
             self.advance();
             self.consume_case_newlines();
             self.with_case_body(|parser| {
@@ -46,9 +49,7 @@ where
                     // indented expression as a BlockExpr. Keep the indentation
                     // token visible so the shared case-body parser consumes
                     // the complete statement sequence and its matching outdent.
-                    let body_indent = (parser.current().kind == TokenKind::Indent)
-                        .then(|| parser.current().span.start());
-                    let body = parser.parse_case_body(body_mark, body_indent);
+                    let body = parser.parse_case_body(body_mark, body_indent_offset);
                     if let TreeKind::Block(Block { stats, expr }) = &parser.ast.get(body).kind
                         && stats.is_empty()
                     {
