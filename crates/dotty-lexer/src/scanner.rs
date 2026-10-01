@@ -313,10 +313,10 @@ impl ContextualScanner {
                     TokenKind::Outdent => {
                         closed_regions = closed_regions.saturating_add(1);
                     }
-                    TokenKind::Indent if closed_regions > 0 => closed_regions -= 1,
                     TokenKind::Indent
-                        if !self.delimiter_closed_indents.contains(&token.span.start()) =>
-                    {
+                        if self.delimiter_closed_indents.contains(&token.span.start()) => {}
+                    TokenKind::Indent if closed_regions > 0 => closed_regions -= 1,
+                    TokenKind::Indent => {
                         indent_index = Some(token_index);
                         break;
                     }
@@ -376,10 +376,10 @@ impl ContextualScanner {
         for token in self.tokens[..before].iter().rev() {
             match token.kind {
                 TokenKind::Outdent => closed_regions = closed_regions.saturating_add(1),
-                TokenKind::Indent if closed_regions > 0 => closed_regions -= 1,
                 TokenKind::Indent
-                    if !self.delimiter_closed_indents.contains(&token.span.start()) =>
-                {
+                    if self.delimiter_closed_indents.contains(&token.span.start()) => {}
+                TokenKind::Indent if closed_regions > 0 => closed_regions -= 1,
+                TokenKind::Indent => {
                     return Some(token.span.start());
                 }
                 _ => {}
@@ -1683,6 +1683,29 @@ mod tests {
         let deep = IndentWidth::from_prefix("\t\t ");
 
         assert_eq!(shallow.ordering(&deep), IndentOrdering::Less);
+    }
+
+    #[test]
+    fn delimiter_closed_indent_does_not_absorb_a_later_outdent() {
+        let mut scanner = ContextualScanner::new("          ").expect("source should scan");
+        scanner.tokens = [
+            (TokenKind::Indent, 0),
+            (TokenKind::Indent, 2),
+            (TokenKind::Indent, 4),
+            (TokenKind::Outdent, 6),
+            (TokenKind::Identifier, 8),
+        ]
+        .into_iter()
+        .map(|(kind, offset)| {
+            Token::new(
+                kind,
+                TextRange::new(offset, offset).expect("synthetic range is valid"),
+            )
+        })
+        .collect();
+        scanner.delimiter_closed_indents.push(4);
+
+        assert_eq!(scanner.innermost_open_indent_offset(4), Some(0));
     }
 
     fn next_event_value(seed: &mut u64) -> u64 {
