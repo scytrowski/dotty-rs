@@ -3,6 +3,7 @@
 use super::*;
 
 pub(super) mod constructors;
+pub use constructors::ConstructorCandidate;
 mod inference;
 pub(in crate::typer) mod overload;
 pub(in crate::typer) use inference::InferenceLocation;

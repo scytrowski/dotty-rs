@@ -20,6 +20,7 @@ use dotty_core::{
 use crate::{SourceTypeIndex, SourceTypedIndex};
 
 mod application;
+pub use application::ConstructorCandidate;
 mod completion;
 mod context;
 mod error;
@@ -110,17 +111,6 @@ pub struct SourceTyper<'a> {
 struct SourceTreeLocation {
     tree_index: u32,
     position: Option<SourceSpan>,
-}
-
-/// One constructor declared directly by an instantiated class.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ConstructorCandidate {
-    /// Exact semantic identity of this constructor overload.
-    pub symbol: SymbolId,
-    /// Completed callable constructor signature.
-    pub callable: TypeId,
-    /// Class that directly declares the constructor.
-    pub owner: SymbolId,
 }
 
 #[derive(Clone, Default)]

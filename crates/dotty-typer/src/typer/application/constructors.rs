@@ -2,6 +2,17 @@
 
 use super::super::*;
 
+/// One constructor declared directly by an instantiated class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConstructorCandidate {
+    /// Exact semantic identity of this constructor overload.
+    pub symbol: SymbolId,
+    /// Completed callable constructor signature.
+    pub callable: TypeId,
+    /// Class that directly declares the constructor.
+    pub owner: SymbolId,
+}
+
 #[derive(Default)]
 struct ConstructorApplicationCandidates {
     applicable_signatures: Vec<ConstructorCandidate>,
