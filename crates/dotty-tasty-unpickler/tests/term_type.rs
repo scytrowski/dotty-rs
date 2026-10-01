@@ -1053,9 +1053,20 @@ struct Fixed {
 }
 
 impl SymbolResolver for Fixed {
+    fn checkpoint(&self) -> dotty_core::ResolverCheckpoint {
+        dotty_core::ResolverCheckpoint::new(0)
+    }
+
+    fn rollback_to(
+        &mut self,
+        _store: &mut SemanticStore,
+        _checkpoint: dotty_core::ResolverCheckpoint,
+    ) {
+    }
+
     fn resolve_member(
         &mut self,
-        _store: &SemanticStore,
+        _store: &mut SemanticStore,
         request: &MemberRequest,
     ) -> Result<Option<SymbolId>, ResolutionError> {
         self.log.borrow_mut().push(request.clone());
@@ -1064,7 +1075,7 @@ impl SymbolResolver for Fixed {
 
     fn resolve_package(
         &mut self,
-        _store: &SemanticStore,
+        _store: &mut SemanticStore,
         _path: &[&str],
     ) -> Result<Option<SymbolId>, ResolutionError> {
         Ok(None)

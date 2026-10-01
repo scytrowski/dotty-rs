@@ -325,9 +325,20 @@ struct Script {
 struct Scripted(Rc<RefCell<Script>>);
 
 impl SymbolResolver for Scripted {
+    fn checkpoint(&self) -> dotty_core::ResolverCheckpoint {
+        dotty_core::ResolverCheckpoint::new(0)
+    }
+
+    fn rollback_to(
+        &mut self,
+        _store: &mut SemanticStore,
+        _checkpoint: dotty_core::ResolverCheckpoint,
+    ) {
+    }
+
     fn resolve_member(
         &mut self,
-        _store: &SemanticStore,
+        _store: &mut SemanticStore,
         request: &MemberRequest,
     ) -> Result<Option<SymbolId>, ResolutionError> {
         let mut script = self.0.borrow_mut();
@@ -337,7 +348,7 @@ impl SymbolResolver for Scripted {
 
     fn resolve_package(
         &mut self,
-        _store: &SemanticStore,
+        _store: &mut SemanticStore,
         _path: &[&str],
     ) -> Result<Option<SymbolId>, ResolutionError> {
         Ok(None)

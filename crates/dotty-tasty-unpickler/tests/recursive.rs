@@ -16,6 +16,8 @@ use dotty_core::types::{
 };
 use dotty_tasty::tasty::TastyFile;
 use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 const AND: u8 = 165;
 const FLEXIBLE: u8 = 193;
@@ -1365,9 +1367,20 @@ fn a_prefix_that_is_not_structural_stays_an_unresolved_member() {
 struct Answering(Option<dotty_core::SymbolId>);
 
 impl dotty_core::SymbolResolver for Answering {
+    fn checkpoint(&self) -> dotty_core::ResolverCheckpoint {
+        dotty_core::ResolverCheckpoint::new(0)
+    }
+
+    fn rollback_to(
+        &mut self,
+        _store: &mut SemanticStore,
+        _checkpoint: dotty_core::ResolverCheckpoint,
+    ) {
+    }
+
     fn resolve_member(
         &mut self,
-        _store: &SemanticStore,
+        _store: &mut SemanticStore,
         _request: &dotty_core::MemberRequest,
     ) -> Result<Option<dotty_core::SymbolId>, dotty_core::ResolutionError> {
         Ok(self.0)
@@ -1375,7 +1388,7 @@ impl dotty_core::SymbolResolver for Answering {
 
     fn resolve_package(
         &mut self,
-        _store: &SemanticStore,
+        _store: &mut SemanticStore,
         _path: &[&str],
     ) -> Result<Option<dotty_core::SymbolId>, dotty_core::ResolutionError> {
         Ok(None)
@@ -1447,4 +1460,90 @@ fn a_failure_after_a_name_designated_reference_was_built_leaves_nothing_behind()
         panic!("a type ref expected");
     };
     assert_eq!(rec_this_binder(store, prefix), recursive);
+}
+
+#[derive(Default)]
+struct MaterializedState {
+    member: Option<dotty_core::SymbolId>,
+    journal: Vec<Option<dotty_core::SymbolId>>,
+}
+
+struct Materializing(Rc<RefCell<MaterializedState>>);
+
+impl dotty_core::SymbolResolver for Materializing {
+    fn checkpoint(&self) -> dotty_core::ResolverCheckpoint {
+        dotty_core::ResolverCheckpoint::new(self.0.borrow().journal.len() as u64)
+    }
+
+    fn rollback_to(
+        &mut self,
+        _store: &mut SemanticStore,
+        checkpoint: dotty_core::ResolverCheckpoint,
+    ) {
+        let mut state = self.0.borrow_mut();
+        while state.journal.len() > checkpoint.token() as usize {
+            state.member = state.journal.pop().unwrap_or(None);
+        }
+    }
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &dotty_core::MemberRequest,
+    ) -> Result<Option<dotty_core::SymbolId>, dotty_core::ResolutionError> {
+        if let Some(member) = self
+            .0
+            .borrow()
+            .member
+            .filter(|member| store.symbols.contains(*member))
+        {
+            return Ok(Some(member));
+        }
+        let member = store.symbols.alloc(dotty_core::Symbol {
+            name: request.name,
+            owner: None,
+            kind: dotty_core::SymbolKind::Class,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: dotty_core::SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        let mut state = self.0.borrow_mut();
+        let previous = state.member.replace(member);
+        state.journal.push(previous);
+        Ok(Some(member))
+    }
+
+    fn resolve_package(
+        &mut self,
+        _store: &mut SemanticStore,
+        _path: &[&str],
+    ) -> Result<Option<dotty_core::SymbolId>, dotty_core::ResolutionError> {
+        Ok(None)
+    }
+}
+
+#[test]
+fn a_later_tasty_failure_rolls_back_materialized_resolver_state() {
+    let first = named(TYPEREF, NAME_M, &package_ref());
+    let bytes = file_with_two(&first, &[UNSUPPORTED, nat(1)]);
+    let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+    let mut session = Session::new();
+    let mut packages = Packages::new();
+    packages.enter(&mut session.store, SymbolOrigin::Synthetic, &["p"]);
+    let before = session.store.checkpoint();
+    let state = Rc::new(RefCell::new(MaterializedState::default()));
+    let mut unpickler =
+        TastyUnpickler::with_packages(&file, &mut session.store, session.definitions, packages)
+            .with_resolver(Box::new(Materializing(state.clone())));
+
+    assert!(unpickler.unpickle_type(0).is_err());
+
+    assert_eq!(state.borrow().member, None);
+    assert!(state.borrow().journal.is_empty());
+    drop(unpickler);
+    assert_eq!(session.store.checkpoint(), before);
 }

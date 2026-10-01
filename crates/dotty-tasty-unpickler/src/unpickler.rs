@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use dotty_core::ids::{AnnotationId, ScopeId, SymbolId, TypeId};
-use dotty_core::resolution::{NoResolver, SymbolResolver};
+use dotty_core::resolution::{NoResolver, ResolverCheckpoint, SymbolResolver};
 use dotty_core::store::SemanticStore;
 use dotty_core::store::StoreCheckpoint;
 use dotty_core::symbols::{SymbolInfo, SymbolKind, SymbolOrigin};
@@ -21,6 +21,7 @@ use crate::session::TastySession;
 /// The marks of one public call, to roll it back.
 pub(crate) struct Transaction {
     checkpoint: StoreCheckpoint,
+    resolver: ResolverCheckpoint,
     types: usize,
     type_trees: usize,
     term_trees: usize,
@@ -351,6 +352,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
     pub(crate) fn begin_transaction(&self) -> Transaction {
         Transaction {
             checkpoint: self.store.checkpoint(),
+            resolver: self.resolver.checkpoint(),
             types: self.index.mark_types(),
             type_trees: self.index.mark_type_trees(),
             term_trees: self.index.mark_term_trees(),
@@ -388,6 +390,7 @@ impl<'file, 'bytes, 'store> TastyUnpickler<'file, 'bytes, 'store> {
                     }
                 }
             }
+            self.resolver.rollback_to(self.store, transaction.resolver);
             self.store.rollback_to(transaction.checkpoint);
             self.index.roll_back_types(transaction.types);
             self.index.roll_back_type_trees(transaction.type_trees);

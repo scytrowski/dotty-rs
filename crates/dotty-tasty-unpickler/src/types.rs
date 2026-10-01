@@ -765,7 +765,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let failure = |error| UnpickleError::ResolverFailure { address: at, error };
         match self
             .resolver
-            .resolve_member(&*self.store, &request)
+            .resolve_member(self.store, &request)
             .map_err(failure)?
         {
             Some(symbol) if self.store.symbols.get(symbol).name.namespace() != namespace => {
@@ -866,7 +866,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let failure = |error| UnpickleError::ResolverFailure { address: at, error };
         match self
             .resolver
-            .resolve_package(&*self.store, &segments)
+            .resolve_package(self.store, &segments)
             .map_err(failure)?
         {
             Some(symbol) if self.store.symbols.get(symbol).kind == SymbolKind::Package => {

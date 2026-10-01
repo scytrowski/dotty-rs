@@ -66,7 +66,8 @@ pub use ids::{
 pub use names::{Name, NameInterner, Namespace, TermName, TypeName};
 pub use packages::{EnteredPackage, Packages};
 pub use resolution::{
-    MemberRequest, MemberSelector, MemberSpace, NoResolver, ResolutionError, SymbolResolver,
+    MemberRequest, MemberSelector, MemberSpace, NoResolver, ResolutionError, ResolverCheckpoint,
+    SymbolResolver,
 };
 pub use source::{
     LineIndex, SourceSpan, SourceText, SourceTextError, Span, SpanError, TextRange, TextRangeError,
