@@ -37,6 +37,23 @@ A mismatch reports the normalized semantic path and the first differing
 normalized component from each frontend. Builtin package-prefix normalization
 is deliberately limited to named Scala and `java.lang` builtin targets.
 
+## Expression typing layout
+
+`SourceTyper::type_expression_inner` is the expression dispatcher. It handles
+typed-tree cache lookups, raw generic-constructor preparation, dispatch, and
+source-to-typed index updates. Expression-specific behavior lives under
+`crates/dotty-typer/src/typer/expression/`: references and selections,
+control flow, assignments, construction, and blocks/local definitions each
+have dedicated modules. Block-local symbol and source-tree metadata is owned
+by the block module.
+
+Handlers share the same `SourceTyper` state and pass the existing info journal
+and pending source-tree mappings through recursive typing. The enclosing
+typing transaction remains responsible for publishing those mappings on
+success and rolling back semantic mutations and typed-tree cache entries on
+failure. Keep cache insertion and rollback behavior in that orchestration
+layer when adding expression handlers.
+
 ## Supported source contract
 
 For the tested subset, source Typer completion currently supports:
