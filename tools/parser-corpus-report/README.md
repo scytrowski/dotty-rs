@@ -283,3 +283,17 @@ Recreate it with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-541-scala3-3.9.0.json
 ```
+
+`parser-post-issue-562-scala3-3.9.0.json` measures current `main` after PR #561
+at parser revision `49da0fa117ad406e4a97c785e73e2fb9349107b4`, with the same
+pinned Scala revision and 1,236-file manifest. It records 1,142 clean parses
+(92.39%), 94 recoverable files, and zero hard failures, process failures,
+panics, or hangs. The Scala oracle emitted all 1,236 files with zero failures.
+The comparison with the previous report is in
+[`parser-v0.1-compatibility.md`](../../docs/parser-v0.1-compatibility.md).
+Recreate it with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-562-scala3-3.9.0.json
+```
