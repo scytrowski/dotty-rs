@@ -914,3 +914,13 @@ impl SourceTyper<'_> {
         }
     }
 }
+
+fn overload_arity_rejection(method: &MethodType, actual: usize) -> Option<usize> {
+    match method.params.iter().position(|parameter| parameter.varargs) {
+        Some(varargs_index) if varargs_index + 1 == method.params.len() => {
+            (actual < varargs_index).then_some(varargs_index)
+        }
+        Some(_) => None,
+        None => (actual != method.params.len()).then_some(method.params.len()),
+    }
+}

@@ -2,8 +2,9 @@
 
 use super::*;
 
+pub(super) mod constructors;
 mod inference;
-mod overload;
+pub(in crate::typer) mod overload;
 pub(in crate::typer) use inference::InferenceLocation;
 
 #[derive(Clone, Copy)]
@@ -34,17 +35,4 @@ pub(in crate::typer) struct TypedArgument {
     pub(in crate::typer) typed: TreeId<Typed>,
     pub(in crate::typer) own_type: TypeId,
     pub(in crate::typer) widened_type: TypeId,
-}
-
-pub(in crate::typer) fn overload_arity_rejection(
-    method: &MethodType,
-    actual: usize,
-) -> Option<usize> {
-    match method.params.iter().position(|parameter| parameter.varargs) {
-        Some(varargs_index) if varargs_index + 1 == method.params.len() => {
-            (actual < varargs_index).then_some(varargs_index)
-        }
-        Some(_) => None,
-        None => (actual != method.params.len()).then_some(method.params.len()),
-    }
 }
