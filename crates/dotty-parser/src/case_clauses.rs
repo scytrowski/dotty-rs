@@ -38,6 +38,9 @@ where
         }
 
         let body = if expr_only {
+            // Braced templates suppress eager layout tokens, but an
+            // expression-only case can still have an indented statement body.
+            let body_indent_offset = self.observe_case_body_indented(mark.start);
             self.advance();
             self.consume_case_newlines();
             self.with_case_body(|parser| {
@@ -46,9 +49,7 @@ where
                     // indented expression as a BlockExpr. Keep the indentation
                     // token visible so the shared case-body parser consumes
                     // the complete statement sequence and its matching outdent.
-                    let body_indent = (parser.current().kind == TokenKind::Indent)
-                        .then(|| parser.current().span.start());
-                    let body = parser.parse_case_body(body_mark, body_indent);
+                    let body = parser.parse_case_body(body_mark, body_indent_offset);
                     if let TreeKind::Block(Block { stats, expr }) = &parser.ast.get(body).kind
                         && stats.is_empty()
                     {
@@ -322,11 +323,45 @@ mod tests {
     }
 
     #[test]
-    fn parses_a_multiline_expression_only_case_without_opening_a_layout_body() {
+    fn expression_only_case_unwraps_a_single_indented_expression_before_next_case() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case x =>\n  body\ncase y => next",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Newline, 9, 10),
+                token(TokenKind::Indent, 12, 12),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Outdent, 16, 16),
+                token(TokenKind::Keyword(HardKeyword::Case), 17, 21),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::Operator, 24, 26),
+                token(TokenKind::Identifier, 27, 31),
+                token(TokenKind::Eof, 31, 31),
+            ],
+            &mut names,
+        );
+
+        let case = parser.case_clause(true);
+        let TreeKind::CaseDef(case) = &parser.ast().get(case).kind else {
+            panic!("expected a case clause");
+        };
+        assert!(matches!(
+            parser.ast().get(case.body).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Keyword(HardKeyword::Case));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn expression_only_case_requests_layout_for_an_indented_definition_body() {
         let mut names = NameInterner::new();
         let observed = Rc::new(RefCell::new(Vec::new()));
         let mut parser = Parser::new(
-            SourceText::new("case x =>\n  body").expect("valid source"),
+            SourceText::new("case x =>\n  val local = 1\n  local").expect("valid source"),
             SourceId::from_index(1),
             RecordingTokenSource {
                 tokens: vec![
@@ -335,9 +370,14 @@ mod tests {
                     token(TokenKind::Operator, 7, 9),
                     token(TokenKind::Newline, 9, 10),
                     token(TokenKind::Indent, 12, 12),
-                    token(TokenKind::Identifier, 12, 16),
-                    token(TokenKind::Outdent, 16, 16),
-                    token(TokenKind::Eof, 16, 16),
+                    token(TokenKind::Keyword(HardKeyword::Val), 12, 15),
+                    token(TokenKind::Identifier, 16, 21),
+                    token(TokenKind::Operator, 22, 23),
+                    token(TokenKind::IntegerLiteral, 24, 25),
+                    token(TokenKind::Newline, 25, 26),
+                    token(TokenKind::Identifier, 28, 33),
+                    token(TokenKind::Outdent, 33, 33),
+                    token(TokenKind::Eof, 33, 33),
                 ],
                 index: 0,
                 observed: Rc::clone(&observed),
@@ -350,9 +390,26 @@ mod tests {
             panic!("expected case definition");
         };
 
-        assert!(matches!(parser.ast().get(body).kind, TreeKind::Ident(_)));
+        let TreeKind::Block(block) = &parser.ast().get(body).kind else {
+            panic!("expected an indented case-body block");
+        };
+        assert_eq!(block.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(block.stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(block.expr).kind,
+            TreeKind::Ident(_)
+        ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(observed.borrow().is_empty());
+        assert_eq!(
+            observed.borrow().as_slice(),
+            &[
+                ScannerEvent::CaseBodyIndented { case_start: 0 },
+                ScannerEvent::Outdented,
+            ]
+        );
         assert!(parser.diagnostics().is_empty());
     }
 

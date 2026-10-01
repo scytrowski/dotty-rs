@@ -452,7 +452,7 @@ mod tests {
 
         fn observe(&mut self, event: ScannerEvent) {
             match event {
-                ScannerEvent::Indented
+                ScannerEvent::Indented | ScannerEvent::IndentedFrom { .. }
                     if self.current().kind != TokenKind::Indent
                         && self.lookahead(1).kind != TokenKind::Indent =>
                 {
