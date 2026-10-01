@@ -1329,6 +1329,8 @@ fn is_leading_infix(
     // eligible for Scala's multiline infix layout.
     if previous_kind == Some(TokenKind::Punctuation(Punctuation::RightBrace))
         && is_prefix_operator(source, current.span)
+        && current.span.end() == next.span.start()
+        && can_start_simple_expr_raw(next.kind)
         && previous_indent == operator_indent
     {
         return false;
@@ -3495,6 +3497,22 @@ mod tests {
 
         assert_eq!(separator.kind, TokenKind::Newline);
         assert_eq!(separator.span.end(), bang);
+    }
+
+    #[test]
+    fn keeps_a_spaced_leading_infix_after_a_braced_match() {
+        let source =
+            "object T:\n  def check =\n    value match { case 0 => 1; case _ => 2 }\n    - 1\n";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+        let minus = source.find("- 1").expect("leading minus exists") as u32;
+        let minus_index = scanner
+            .tokens()
+            .iter()
+            .position(|token| token.span.start() == minus)
+            .expect("minus operator token exists");
+
+        assert_ne!(scanner.tokens()[minus_index - 1].kind, TokenKind::Newline);
+        assert_ne!(scanner.tokens()[minus_index - 1].kind, TokenKind::Newlines);
     }
 
     #[test]
