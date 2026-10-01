@@ -778,7 +778,11 @@ where
         matches!(
             self.current().kind,
             TokenKind::Keyword(
-                HardKeyword::Case | HardKeyword::Else | HardKeyword::Catch | HardKeyword::Finally
+                HardKeyword::Case
+                    | HardKeyword::Else
+                    | HardKeyword::Catch
+                    | HardKeyword::Finally
+                    | HardKeyword::Then
             ) | TokenKind::Punctuation(Punctuation::RightBrace | Punctuation::RightParen)
                 | TokenKind::Outdent
         )
@@ -952,6 +956,29 @@ mod tests {
             parser.current().kind,
             TokenKind::Keyword(HardKeyword::Finally)
         );
+        assert!(parser.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn case_body_sequence_leaves_then_for_an_enclosing_if_condition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "true then result",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::True), 0, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Identifier, 10, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let (_, expr) = parser.with_case_body(|parser| {
+            parser.parse_statement_sequence(StatementSequenceBoundary::Block(TokenKind::Outdent))
+        });
+
+        assert!(matches!(parser.ast.get(expr).kind, TreeKind::Literal(_)));
+        assert_eq!(parser.current().kind, TokenKind::Keyword(HardKeyword::Then));
         assert!(parser.diagnostics.is_empty());
     }
 
