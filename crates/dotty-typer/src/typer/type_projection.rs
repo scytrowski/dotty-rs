@@ -345,4 +345,43 @@ impl SourceTyper<'_> {
             position,
         })
     }
+
+    pub(in crate::typer) fn type_prefix_for_qualifier(&mut self, symbol: SymbolId) -> TypeId {
+        match self.store.symbols.get(symbol).kind {
+            SymbolKind::Package => self.package_type_prefix(symbol),
+            SymbolKind::Object => {
+                let owner = self.store.symbols.get(symbol).owner;
+                let module_class = owner
+                    .and_then(|owner| self.index.definition_of(symbol).map(|_| owner))
+                    .and_then(|owner| {
+                        self.index
+                            .definition_of(symbol)
+                            .and_then(|definition| match definition {
+                                SourceDefinition::Canonical { source, tree }
+                                | SourceDefinition::Derived { source, tree }
+                                    if source == self.source =>
+                                {
+                                    self.index.derived_symbol_at(owner, source, tree)
+                                }
+                                _ => None,
+                            })
+                    });
+                if let Some(module_class) = module_class {
+                    self.store.types.alloc(Type::ThisType {
+                        class: module_class,
+                    })
+                } else {
+                    self.definitions.no_prefix
+                }
+            }
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass => {
+                let prefix = self.type_symbol_prefix(symbol);
+                self.store.types.alloc(Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(symbol),
+                })
+            }
+            _ => self.definitions.no_prefix,
+        }
+    }
 }
