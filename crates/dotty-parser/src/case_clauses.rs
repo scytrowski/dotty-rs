@@ -323,11 +323,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_a_multiline_expression_only_case_without_opening_a_layout_body() {
+    fn expression_only_case_requests_layout_for_an_indented_definition_body() {
         let mut names = NameInterner::new();
         let observed = Rc::new(RefCell::new(Vec::new()));
         let mut parser = Parser::new(
-            SourceText::new("case x =>\n  body").expect("valid source"),
+            SourceText::new("case x =>\n  val local = 1\n  local").expect("valid source"),
             SourceId::from_index(1),
             RecordingTokenSource {
                 tokens: vec![
@@ -336,9 +336,14 @@ mod tests {
                     token(TokenKind::Operator, 7, 9),
                     token(TokenKind::Newline, 9, 10),
                     token(TokenKind::Indent, 12, 12),
-                    token(TokenKind::Identifier, 12, 16),
-                    token(TokenKind::Outdent, 16, 16),
-                    token(TokenKind::Eof, 16, 16),
+                    token(TokenKind::Keyword(HardKeyword::Val), 12, 15),
+                    token(TokenKind::Identifier, 16, 21),
+                    token(TokenKind::Operator, 22, 23),
+                    token(TokenKind::IntegerLiteral, 24, 25),
+                    token(TokenKind::Newline, 25, 26),
+                    token(TokenKind::Identifier, 28, 33),
+                    token(TokenKind::Outdent, 33, 33),
+                    token(TokenKind::Eof, 33, 33),
                 ],
                 index: 0,
                 observed: Rc::clone(&observed),
@@ -351,9 +356,26 @@ mod tests {
             panic!("expected case definition");
         };
 
-        assert!(matches!(parser.ast().get(body).kind, TreeKind::Ident(_)));
+        let TreeKind::Block(block) = &parser.ast().get(body).kind else {
+            panic!("expected an indented case-body block");
+        };
+        assert_eq!(block.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(block.stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(block.expr).kind,
+            TreeKind::Ident(_)
+        ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(observed.borrow().is_empty());
+        assert_eq!(
+            observed.borrow().as_slice(),
+            &[
+                ScannerEvent::CaseBodyIndented { case_start: 0 },
+                ScannerEvent::Outdented,
+            ]
+        );
         assert!(parser.diagnostics().is_empty());
     }
 
