@@ -323,6 +323,40 @@ mod tests {
     }
 
     #[test]
+    fn expression_only_case_unwraps_a_single_indented_expression_before_next_case() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case x =>\n  body\ncase y => next",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Newline, 9, 10),
+                token(TokenKind::Indent, 12, 12),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Outdent, 16, 16),
+                token(TokenKind::Keyword(HardKeyword::Case), 17, 21),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::Operator, 24, 26),
+                token(TokenKind::Identifier, 27, 31),
+                token(TokenKind::Eof, 31, 31),
+            ],
+            &mut names,
+        );
+
+        let case = parser.case_clause(true);
+        let TreeKind::CaseDef(case) = &parser.ast().get(case).kind else {
+            panic!("expected a case clause");
+        };
+        assert!(matches!(
+            parser.ast().get(case.body).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Keyword(HardKeyword::Case));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn expression_only_case_requests_layout_for_an_indented_definition_body() {
         let mut names = NameInterner::new();
         let observed = Rc::new(RefCell::new(Vec::new()));
