@@ -31,11 +31,11 @@ fn next_expression_scope_owner() -> u64 {
         .expect("expression scope owner identity space exhausted")
 }
 
-#[path = "lookup/mod.rs"]
+#[path = "../lookup/mod.rs"]
 mod lookup;
-#[path = "substitution.rs"]
+#[path = "../substitution.rs"]
 mod substitution;
-#[path = "types/subtype.rs"]
+#[path = "../types/subtype.rs"]
 mod subtype;
 
 pub use lookup::{MAX_MEMBER_LOOKUP_DEPTH, MemberCandidate, MemberLookupError};
@@ -20691,7 +20691,7 @@ mod tests {
     fn explicit_result_breaks_a_local_inference_cycle() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name(include_str!(
-                "../tests/fixtures/local-method-results/explicit-breaks-inference-cycle.scala"
+                "../../tests/fixtures/local-method-results/explicit-breaks-inference-cycle.scala"
             ));
         let (outer, block_tree) =
             method_definition_and_rhs(&parsed, &store, &index, source, "outer");
@@ -21755,13 +21755,13 @@ mod tests {
     #[test]
     fn inferred_val_literal_matches_scala_39_typed_tree_oracle() {
         let source_text =
-            include_str!("../tests/fixtures/local-value-inference/LocalValueInference.scala");
+            include_str!("../../tests/fixtures/local-value-inference/LocalValueInference.scala");
         let oracle = include_str!(
-            "../tests/fixtures/local-value-inference/LocalValueInference.typed-tree.txt"
+            "../../tests/fixtures/local-value-inference/LocalValueInference.typed-tree.txt"
         );
         assert!(oracle.contains("val n: Int = 1"));
         dotty_tasty::tasty::TastyFile::parse_scala_3_9(include_bytes!(
-            "../tests/fixtures/local-value-inference/LocalValueInference.tasty"
+            "../../tests/fixtures/local-value-inference/LocalValueInference.tasty"
         ))
         .expect("Scala 3.9.0 oracle TASTy should be structurally readable");
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
