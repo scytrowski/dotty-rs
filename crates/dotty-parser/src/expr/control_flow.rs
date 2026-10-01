@@ -2,7 +2,7 @@ use dotty_core::ast::{Block, If, Match, ParsedTry, Return, Throw, UntypedNode, W
 use dotty_core::{Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use super::{can_start_expr, is_else_separator};
-use crate::Parser;
+use crate::{Location, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -524,7 +524,10 @@ where
             && matches!(
                 self.current().kind,
                 TokenKind::Punctuation(Punctuation::RightParen | Punctuation::RightBrace)
-            );
+            )
+            || (feedback_indent.is_some()
+                && self.context.location == Location::InArgs
+                && self.current().kind == TokenKind::Punctuation(Punctuation::Comma));
         if closed_by_delimiter {
             self.observe_outdented_by_delimiter();
         } else if let Some(indent_offset) = feedback_indent {

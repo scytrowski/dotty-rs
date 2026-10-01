@@ -458,6 +458,9 @@ where
                         self.current().kind,
                         TokenKind::Punctuation(Punctuation::RightParen | Punctuation::RightBrace)
                     )
+                    || (self.context.location == Location::InArgs
+                        && self.current().kind
+                            == TokenKind::Punctuation(Punctuation::Comma))
                     || (self.context.case_body && self.is_case_body_terminator())
             }
         }
