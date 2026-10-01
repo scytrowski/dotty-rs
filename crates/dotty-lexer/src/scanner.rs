@@ -264,6 +264,7 @@ impl ContextualScanner {
                     &self.tokens,
                     previous_index,
                     current_index,
+                    &body_indent,
                 )
             {
                 let line_breaks = count_line_breaks(
@@ -1145,6 +1146,7 @@ fn is_leading_infix_tokens(
     tokens: &[Token],
     previous_index: usize,
     current_index: usize,
+    body_indent: &IndentWidth,
 ) -> bool {
     let previous = &tokens[previous_index];
     let current = &tokens[current_index];
@@ -1179,7 +1181,13 @@ fn is_leading_infix_tokens(
     }
     let previous_indent = line_indentation(source, previous.span.end().saturating_sub(1));
     let operator_indent = line_indentation(source, current.span.start());
-    previous_indent.is_prefix_of(&operator_indent)
+    let next_indent = line_indentation(source, next.span.start());
+    if has_source_line_break(source, current.span.end(), next.span.start())
+        && !operator_indent.is_prefix_of(&next_indent)
+    {
+        return false;
+    }
+    previous_indent.is_prefix_of(&operator_indent) || operator_indent == *body_indent
 }
 
 fn is_unspaced_prefix_expr(source: &str, tokens: &[Token], operator_index: usize) -> bool {
@@ -1306,7 +1314,24 @@ fn is_leading_infix(
 
     let previous_indent = line_indentation(source, previous_end.saturating_sub(1));
     let operator_indent = line_indentation(source, current.span.start());
+    let current_region = layout_stack
+        .last()
+        .filter(|region| region.owner != LayoutRegionOwner::MatchCases);
+    let enclosing_region = layout_stack.iter().rev().nth(1);
+    let next_indent = line_indentation(source, next.span.start());
+    if has_source_line_break(source, current.span.end(), next.span.start())
+        && !operator_indent.is_prefix_of(&next_indent)
+    {
+        return false;
+    }
+    // A leading operator can dedent from a multiline operand back to the
+    // enclosing definition's indentation while remaining inside its body.
     previous_indent.is_prefix_of(&operator_indent)
+        || current_region.is_some_and(|region| region.indentation.is_prefix_of(&operator_indent))
+        || enclosing_region.is_some_and(|region| {
+            region.indentation.is_prefix_of(&operator_indent)
+                && region.indentation != operator_indent
+        })
         || layout_stack
             .iter()
             .rev()
@@ -3172,6 +3197,39 @@ mod tests {
     }
 
     #[test]
+    fn arrow_indented_feedback_keeps_a_dedented_infix_operator_in_the_body() {
+        let source = "(case A =>\n  first\n    && nested\n        .exists(ready)\n    // comment one\n    // comment two\n  || fallback)";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while !(scanner.current().kind == TokenKind::Operator
+            && &source
+                [scanner.current().span.start() as usize..scanner.current().span.end() as usize]
+                == "=>")
+        {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::ArrowIndented);
+
+        let operator_start = source.find("|| fallback").unwrap() as u32;
+        let operator = scanner
+            .tokens()
+            .iter()
+            .position(|token| token.span.start() == operator_start)
+            .expect("leading operator exists");
+        let previous = scanner.tokens()[..operator]
+            .iter()
+            .rposition(|token| !is_layout_token(token.kind))
+            .expect("operator has a previous token");
+        assert!(
+            !scanner.tokens()[previous + 1..operator]
+                .iter()
+                .any(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines)),
+            "tokens: {:#?}",
+            scanner.tokens()
+        );
+    }
+
+    #[test]
     fn arrow_indented_feedback_splits_a_leading_prefix_operator_without_spacing() {
         let source = "(case A =>\n  first\n  !second\n  finish)";
         let mut scanner = ContextualScanner::new(source).expect("source scans");
@@ -3382,6 +3440,89 @@ mod tests {
     }
 
     #[test]
+    fn keeps_a_leading_infix_operator_aligned_with_the_enclosing_expression() {
+        let source = "object T:\n  def f(using Context): Boolean =\n    first\n    || second\n    || nested\n        && third\n            .exists(check)\n      // explanation one\n      // explanation two\n      // explanation three\n    || fallback\n";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+        let operator = scanner
+            .tokens()
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Operator
+                    && &source[token.span.start() as usize..token.span.end() as usize] == "||"
+                    && token.span.start() == source.find("|| fallback").unwrap() as u32
+            })
+            .expect("final leading operator exists");
+
+        let previous = scanner.tokens()[..operator]
+            .iter()
+            .rposition(|token| !is_layout_token(token.kind))
+            .expect("the operator has a previous token");
+        assert_eq!(
+            scanner.tokens()[previous].kind,
+            TokenKind::Punctuation(Punctuation::RightParen)
+        );
+        assert!(
+            !scanner.tokens()[previous + 1..operator]
+                .iter()
+                .any(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines)),
+            "tokens: {:#?}",
+            scanner.tokens()
+        );
+    }
+
+    #[test]
+    fn allows_a_leading_infix_operator_to_dedent_within_its_enclosing_definition() {
+        let source = "object T:\n  def compare =\n       first\n    && second\n";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+        let operator = scanner
+            .tokens()
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Operator
+                    && &source[token.span.start() as usize..token.span.end() as usize] == "&&"
+            })
+            .expect("leading operator exists");
+        let previous = scanner.tokens()[..operator]
+            .iter()
+            .rposition(|token| !is_layout_token(token.kind))
+            .expect("operator has a previous token");
+
+        assert!(
+            !scanner.tokens()[previous + 1..operator]
+                .iter()
+                .any(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines)),
+            "tokens: {:#?}",
+            scanner.tokens()
+        );
+    }
+
+    #[test]
+    fn separates_a_leading_infix_operator_when_its_rhs_dedents() {
+        let source = "object T:\n  def compare =\n       first\n    &&\n  second\n";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+        let operator = scanner
+            .tokens()
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Operator
+                    && &source[token.span.start() as usize..token.span.end() as usize] == "&&"
+            })
+            .expect("leading operator exists");
+        let previous = scanner.tokens()[..operator]
+            .iter()
+            .rposition(|token| !is_layout_token(token.kind))
+            .expect("the operator has a previous token");
+
+        assert!(
+            scanner.tokens()[previous + 1..operator]
+                .iter()
+                .any(|token| token.kind == TokenKind::Outdent),
+            "tokens: {:#?}",
+            scanner.tokens()
+        );
+    }
+
+    #[test]
     fn keeps_a_leading_infix_operator_after_comment_lines() {
         assert_eq!(
             kinds("value // explanation\n  // continued below\n  && other"),
@@ -3443,7 +3584,8 @@ mod tests {
             source,
             scanner.tokens(),
             0,
-            operator_index
+            operator_index,
+            &line_indentation(source, scanner.tokens()[operator_index].span.start())
         ));
     }
 
