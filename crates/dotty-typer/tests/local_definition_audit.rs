@@ -39,7 +39,7 @@ struct FailureClassification {
     family: FailureFamily,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Audit {
     local_definitions: usize,
     buckets: BTreeMap<String, usize>,
@@ -48,6 +48,20 @@ struct Audit {
     failures: BTreeMap<String, FailureBucket>,
     expression_forms: BTreeMap<String, usize>,
     parser_diagnostics: BTreeMap<String, usize>,
+}
+
+impl Default for Audit {
+    fn default() -> Self {
+        Self {
+            local_definitions: 0,
+            buckets: BTreeMap::new(),
+            local_defdefs: 0,
+            typed_local_defdefs: 0,
+            failures: BTreeMap::new(),
+            expression_forms: empty_expression_histogram(),
+            parser_diagnostics: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -296,6 +310,14 @@ fn local_expression_histogram_excludes_parameters_and_type_trees() {
             .count()
             > 0
     );
+}
+
+#[test]
+fn local_expression_audit_schema_keeps_zero_count_forms_without_an_ast() {
+    let audit = Audit::default();
+
+    assert_eq!(audit.expression_forms.len(), EXPRESSION_FORMS.len());
+    assert!(audit.expression_forms.values().all(|count| *count == 0));
 }
 
 #[test]
@@ -1162,11 +1184,15 @@ const EXPRESSION_FORMS: &[&str] = &[
     "InterpolatedString",
 ];
 
-fn collect_expression_histogram(arena: &dotty_core::AstArena<Untyped>) -> BTreeMap<String, usize> {
-    let mut histogram = EXPRESSION_FORMS
+fn empty_expression_histogram() -> BTreeMap<String, usize> {
+    EXPRESSION_FORMS
         .iter()
         .map(|form| ((*form).to_owned(), 0))
-        .collect::<BTreeMap<_, _>>();
+        .collect()
+}
+
+fn collect_expression_histogram(arena: &dotty_core::AstArena<Untyped>) -> BTreeMap<String, usize> {
+    let mut histogram = empty_expression_histogram();
     let nodes = arena
         .iter()
         .map(|(tree, node)| (tree.index(), node))
