@@ -3520,6 +3520,19 @@ mod tests {
             "tokens: {:#?}",
             scanner.tokens()
         );
+        let rhs_start = source.find("second").expect("RHS exists") as u32;
+        let rhs = scanner
+            .tokens()
+            .iter()
+            .position(|token| token.span.start() == rhs_start)
+            .expect("RHS token exists");
+        assert!(
+            scanner.tokens()[operator + 1..rhs]
+                .iter()
+                .any(|token| token.kind == TokenKind::Newline),
+            "expected a statement boundary between the leading operator and its dedented RHS; tokens: {:#?}",
+            scanner.tokens()
+        );
     }
 
     #[test]
