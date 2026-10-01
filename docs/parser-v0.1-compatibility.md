@@ -724,3 +724,43 @@ Recreate the report from the pinned checkout with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-541-scala3-3.9.0.json
 ```
+
+## Corpus rerun after PR #561
+
+Issue #562 reran the same corpus at parser revision
+`49da0fa117ad406e4a97c785e73e2fb9349107b4` (main after PR #561). The immutable
+report is [`parser-post-issue-562-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-562-scala3-3.9.0.json).
+The pinned Scala 3.9.0 source revision and sorted 1,236-file inventory are
+unchanged.
+
+| Measure | After #538 / #541 | After #561 | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parses | 1,135 (91.83%) | 1,142 (92.39%) | +7 (+0.57 pp) |
+| Recoverable files | 101 (8.17%) | 94 (7.61%) | -7 |
+| Hard failures / process failures / panics / hangs | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | unchanged |
+| Scanner diagnostics | 13 | 13 | 0 |
+| Scala oracle files / failures | 1,236 / 0 | 1,236 / 0 | unchanged |
+
+Diagnostic occurrences fell from 1,427 to 1,402 (-25, or 1.75%). By kind,
+`ExpectedExpression` changed 646 → 641 (-5), `ExpectedPattern` stayed at 5,
+`ExpectedToken` changed 179 → 174 (-5), `ExpectedType` changed 7 → 1 (-6),
+`UnexpectedToken` changed 339 → 332 (-7), and `UnsupportedSyntax` changed 251
+→ 249 (-2). First-failure counts decreased for `ExpectedToken` (24 → 22) and
+`ExpectedType` (5 → 0); the other first-failure buckets were unchanged. The
+largest remaining first-failure groups are `ExpectedExpression` (38),
+`UnexpectedToken` (29), and `ExpectedToken` (22).
+
+The capture-checking-disabled cohort gained two clean files (903/994 →
+905/994); the enabled cohort gained five (232/242 → 237/242). These are
+aggregate changes across the parser merges since the prior measurement, not
+isolated effects attributable to PR #561. The result is a modest coverage
+gain with unchanged scanner diagnostics and no reliability failures; it does
+not establish that every newly clean parse matches Dotty semantically.
+
+Recreate the report from the pinned checkout with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-562-scala3-3.9.0.json
+```
