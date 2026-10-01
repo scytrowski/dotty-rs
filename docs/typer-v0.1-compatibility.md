@@ -54,6 +54,40 @@ success and rolling back semantic mutations and typed-tree cache entries on
 failure. Keep cache insertion and rollback behavior in that orchestration
 layer when adding expression handlers.
 
+## Real-source local-definition audit
+
+Run the pinned Scala 3.9.0 source audit with:
+
+```text
+SCALA39_ROOT=/path/to/pinned/scala3 \
+  cargo test -p dotty-typer --test local_definition_audit \
+  pinned_scala39_local_definition_audit -- --ignored --nocapture
+```
+
+The report retains local declaration counters and adds a deterministic
+`expression_forms` histogram for the required term-expression shapes in named
+method bodies. The histogram follows AST term children before naming or typing
+and excludes parameter and type trees, so an early import/classpath failure
+cannot hide later expression forms. It prints every supported histogram key,
+including zero counts.
+
+`parser_diagnostics` counts parser diagnostic kinds separately. Failed local
+methods are attributed to the nearest enclosing root-method failure and
+reported as stable buckets with a top-level family: resolution/classpath
+environment, parser/namer, unsupported expression syntax/semantics, local
+declaration deferral, type relation/inference/completion, or other. For
+example, unsupported forms use `UnsupportedExpression::InfixOp` and deferred
+block declarations retain their subkind, such as
+`LocalBlockDeclarationDeferred::import`. Each failure bucket includes up to
+five lexicographically ordered representative source paths. Bucket and
+histogram rows sort by count descending, then name.
+
+Resolution/classpath failures remain visible in the report and are grouped
+separately from unsupported expression forms. A high resolution-failure count
+is evidence about the audit environment or missing semantic inputs; it should
+not be read as a count of typer features that need implementation. No corpus
+counts are recorded here unless the pinned full audit is run for that change.
+
 ## Supported source contract
 
 For the tested subset, source Typer completion currently supports:
