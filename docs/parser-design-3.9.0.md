@@ -136,7 +136,10 @@ with `OutdentedByDelimiter` and leaves the delimiter for its enclosing grammar.
 
 For supported method/value-definition RHSs and `if`/`while` bodies, the parser
 likewise asks the scanner for an indentation region at `=`, `then`, `else`, or
-`do` when the source continues on a more-indented line inside braces. Indented
+`do` when the source continues on a more-indented line inside braces. For a
+method RHS, indentation is compared with the declaration start, so a
+multiline parameter clause does not hide a body indented relative to the
+method's line. Indented
 lambda bodies also open a region when they start with a local definition, not
 only when their first token can begin an expression. These regions use the
 shared expression-block statement sequence, so local definitions remain in
