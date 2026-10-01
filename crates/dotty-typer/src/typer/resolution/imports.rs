@@ -360,6 +360,10 @@ impl SourceTyper<'_> {
         Ok(None)
     }
 
+    /// Looks up all imports at the same lexical depth together. Imports in one
+    /// scope have equal precedence, so distinct matching symbols are
+    /// ambiguous regardless of their source order.
+
     pub(in crate::typer) fn lookup_imports(
         &mut self,
         contexts: &[SourceContextId],
@@ -428,6 +432,10 @@ impl SourceTyper<'_> {
         }
         Ok(Vec::new())
     }
+
+    /// Returns the underlying symbol for a fully known chain of type aliases.
+    /// Unknown or structurally described aliases remain distinct so lookup
+    /// never guesses that two incomplete types are equivalent.
 
     pub(in crate::typer) fn imported_type_target(&self, symbol: SymbolId) -> Option<SymbolId> {
         let mut current = symbol;

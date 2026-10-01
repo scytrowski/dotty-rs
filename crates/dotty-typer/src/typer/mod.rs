@@ -5719,14 +5719,6 @@ impl<'a> SourceTyper<'a> {
         &self.type_index
     }
 
-    /// Looks up all imports at the same lexical depth together. Imports in one
-    /// scope have equal precedence, so distinct matching symbols are
-    /// ambiguous regardless of their source order.
-
-    /// Returns the underlying symbol for a fully known chain of type aliases.
-    /// Unknown or structurally described aliases remain distinct so lookup
-    /// never guesses that two incomplete types are equivalent.
-
     /// Exposes the shared semantic store after the driver is no longer needed.
     pub fn store(&self) -> &SemanticStore {
         self.store
