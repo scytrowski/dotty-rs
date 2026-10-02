@@ -584,11 +584,10 @@ where
         .is_some()
     }
 
-    /// Finds the innermost still-unmarked construct represented by `tree` that
-    /// matches an `end` target before the marker position. The parser's AST
-    /// spans encode the nested source ownership; selecting the latest-starting
-    /// eligible owner lets consecutive `end if` markers close nested controls
-    /// one at a time instead of repeatedly extending the outer statement.
+    /// Checks whether the statement itself owns an `end` marker. Dotty checks
+    /// only the last direct statement in the active statement sequence; nested
+    /// constructs have their own sequence and must not steal an enclosing
+    /// statement's marker just because their source span starts later.
     fn end_marker_owner(
         &self,
         tree: TreeId<Untyped>,
@@ -597,79 +596,8 @@ where
         marker_start: u32,
         include_marked: bool,
     ) -> Option<TreeId<Untyped>> {
-        let node = self.ast.get(tree);
-        let children: Vec<TreeId<Untyped>> = match &node.kind {
-            TreeKind::Block(block) => vec![block.expr],
-            TreeKind::If(conditional) => {
-                // An end marker after a nested branch closes that branch's
-                // construct first; the next marker can then close this `if`.
-                return [conditional.then_branch, conditional.else_branch]
-                    .into_iter()
-                    .filter_map(|child| {
-                        self.end_marker_owner(
-                            child,
-                            target_kind,
-                            target_text,
-                            marker_start,
-                            include_marked,
-                        )
-                    })
-                    .max_by_key(|child| {
-                        self.ast
-                            .get(*child)
-                            .position
-                            .map(|position| position.span().range().start())
-                    })
-                    .or_else(|| {
-                        self.end_marker_is_eligible(
-                            tree,
-                            target_kind,
-                            target_text,
-                            marker_start,
-                            include_marked,
-                        )
-                        .then_some(tree)
-                    });
-            }
-            TreeKind::Match(matching) => matching.cases.last().copied().into_iter().collect(),
-            TreeKind::CaseDef(case) => vec![case.body],
-            TreeKind::Try(try_expr) => vec![
-                try_expr
-                    .finalizer
-                    .or_else(|| try_expr.cases.last().copied())
-                    .unwrap_or(try_expr.expr),
-            ],
-            TreeKind::While(loop_expr) => vec![loop_expr.body],
-            _ => Vec::new(),
-        };
-
-        children
-            .into_iter()
-            .filter_map(|child| {
-                self.end_marker_owner(
-                    child,
-                    target_kind,
-                    target_text,
-                    marker_start,
-                    include_marked,
-                )
-            })
-            .max_by_key(|child| {
-                self.ast
-                    .get(*child)
-                    .position
-                    .map(|position| position.span().range().start())
-            })
-            .or_else(|| {
-                self.end_marker_is_eligible(
-                    tree,
-                    target_kind,
-                    target_text,
-                    marker_start,
-                    include_marked,
-                )
-                .then_some(tree)
-            })
+        self.end_marker_is_eligible(tree, target_kind, target_text, marker_start, include_marked)
+            .then_some(tree)
     }
 
     fn end_marker_is_eligible(
@@ -1065,6 +993,39 @@ mod tests {
             parser
                 .end_marker_owner(block, TokenKind::Keyword(HardKeyword::If), "if", 18, false,)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn end_marker_owner_does_not_select_a_nested_construct_over_its_statement() {
+        let source = "if outer then if inner then 1";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 8),
+                token(TokenKind::Keyword(HardKeyword::Then), 9, 13),
+                token(TokenKind::Keyword(HardKeyword::If), 14, 16),
+                token(TokenKind::Identifier, 17, 22),
+                token(TokenKind::Keyword(HardKeyword::Then), 23, 27),
+                token(TokenKind::IntegerLiteral, 28, 29),
+                token(TokenKind::Eof, 29, 29),
+            ],
+            &mut names,
+        );
+
+        let outer = parser.expr();
+
+        assert_eq!(
+            parser.end_marker_owner(
+                outer,
+                TokenKind::Keyword(HardKeyword::If),
+                "if",
+                source.len() as u32,
+                false,
+            ),
+            Some(outer)
         );
     }
 
