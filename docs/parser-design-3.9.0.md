@@ -278,7 +278,7 @@ new with simple or qualified type names, constructor applications, ordered
 `with`-separated parent/mixin chains, and braced or indented anonymous
 template bodies after `new`
 simple type applications such as foo[A] and foo[A, B]
-match types with braced type cases, including wildcard cases
+match types with braced or indented type-case regions, including wildcard cases
 opaque type aliases, including parameterized and bounded aliases
 brace blocks with separator-delimited expressions
 repeated `.`, `[...]`, and `(...)` suffix chaining
@@ -552,8 +552,10 @@ spans independently. Match-type patterns use
 tuple case patterns, infix case patterns, wildcard cases, and bounded aliases
 with an upper bound. For a bounded alias, the upper bound is stored in the
 shared `MatchTypeTree.bound`; a lower bound combined with a match-type alias is
-diagnosed according to Scala's parser rule. Layout-only type case regions and
-the remaining full type grammar are still deferred.
+diagnosed according to Scala's parser rule. Indented case regions use the
+same parser-to-scanner match-layout feedback as term matches; the scanner
+remains responsible for emitting indentation and outdent tokens. The remaining
+full type grammar is still deferred.
 Wildcard syntax is enabled in type arguments (`List[?]` and
 `List[? >: String <: Number]`), tuple-type elements (`(?, V)`), and function
 type parameter/result positions (`? => ?`). A standalone `?` or `(?)` remains

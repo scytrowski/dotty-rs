@@ -146,7 +146,9 @@ impl ContextualScanner {
 
     fn insert_match_case_indent_after_current(&mut self) -> bool {
         let index = self.current_index();
-        if self.next_line_starts_same_indent_cases(index) {
+        if self.next_line_starts_same_indent_cases(index)
+            || self.next_line_starts_cases_in_enclosing_region(index)
+        {
             let next = next_real_token(&self.tokens, index).expect("same-indent case exists");
             let offset = next.span.start();
             self.tokens.insert(
@@ -192,6 +194,57 @@ impl ContextualScanner {
             );
             true
         }
+    }
+
+    fn next_line_starts_cases_in_enclosing_region(&self, current_index: usize) -> bool {
+        let Some(current) = self.tokens.get(current_index) else {
+            return false;
+        };
+        let Some(next) = next_real_token(&self.tokens, current_index) else {
+            return false;
+        };
+        if next.kind != TokenKind::Keyword(HardKeyword::Case)
+            || !has_source_line_break(&self.source, current.span.end(), next.span.start())
+        {
+            return false;
+        }
+
+        let next_indent = line_indentation(&self.source, next.span.start());
+        self.active_layout_indent_before(current_index)
+            .or_else(|| self.enclosing_brace_indent_before(current_index))
+            .is_some_and(|outer_indent| outer_indent.ordering(&next_indent) == IndentOrdering::Less)
+    }
+
+    fn active_layout_indent_before(&self, index: usize) -> Option<IndentWidth> {
+        let mut indentations = Vec::new();
+        for token in &self.tokens[..index] {
+            match token.kind {
+                TokenKind::Indent => {
+                    indentations.push(line_indentation(&self.source, token.span.start()));
+                }
+                TokenKind::Outdent => {
+                    indentations.pop();
+                }
+                _ => {}
+            }
+        }
+        indentations.pop()
+    }
+
+    fn enclosing_brace_indent_before(&self, index: usize) -> Option<IndentWidth> {
+        let mut indentations = Vec::new();
+        for token in &self.tokens[..index] {
+            match token.kind {
+                TokenKind::Punctuation(Punctuation::LeftBrace) => {
+                    indentations.push(line_indentation(&self.source, token.span.start()));
+                }
+                TokenKind::Punctuation(Punctuation::RightBrace) => {
+                    indentations.pop();
+                }
+                _ => {}
+            }
+        }
+        indentations.pop()
     }
 
     fn feedback_case_indent_offset_after_current(&self) -> u32 {
@@ -2826,6 +2879,20 @@ mod tests {
     #[test]
     fn match_feedback_opens_a_deeper_indented_fallback_region() {
         let source = "{ value match\n    unsupported\n}";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Match) {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::MatchCasesIndented);
+
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
+        assert_eq!(scanner.feedback_regions.len(), 1);
+    }
+
+    #[test]
+    fn match_feedback_opens_cases_aligned_with_an_enclosing_block_after_a_multiline_header() {
+        let source = "trait T {\n  def f(tp: Int,\n      args: List[Int]): Int = args match\n    case head :: tail => head\n    case Nil => 0\n}\n";
         let mut scanner = ContextualScanner::new(source).expect("source scans");
         while scanner.current().kind != TokenKind::Keyword(HardKeyword::Match) {
             scanner.advance();
