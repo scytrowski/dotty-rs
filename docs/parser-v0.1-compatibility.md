@@ -880,10 +880,12 @@ tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
 
 ## Corpus rerun after PR #618
 
-Issue #619 reran the same sorted 1,236-file corpus at parser merge revision
-`8217760dcfb87c6fbc06557e30ca9a2d4dbf8770` (PR #618), using the unchanged
-Scala 3.9.0 source revision. Two full runs produced byte-identical normalized
-reports. The machine-readable report is
+Issue #619 reran the same sorted 1,236-file corpus at measurement revision
+`030f9765ce84d82b43ad6bfbfd4420fa9d6ea752`, based on latest `origin/main`
+`79a41183daffbe037fda7cc0734c42ca83a8c288` (which includes parser PR #618).
+The intervening corpus-runner-only fix ensures its temporary files are cleaned
+up. The Scala 3.9.0 source revision is unchanged. Two full runs produced
+byte-identical normalized reports. The machine-readable report is
 [`parser-post-issue-619-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-619-scala3-3.9.0.json).
 
 | Measure | After #597 | After #618 | Change |
