@@ -235,7 +235,12 @@ impl ClassPathEntry for DirectoryClassPath {
         };
         for entry in entries {
             let entry = entry?;
-            if !entry.file_type()?.is_file() {
+            let metadata = match std::fs::metadata(entry.path()) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if !metadata.is_file() {
                 continue;
             }
             if entry
