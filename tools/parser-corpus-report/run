@@ -64,7 +64,7 @@ if [[ "$skip_oracle" == 0 ]]; then
 else
   echo "Scala oracle skipped; pinned Scala source revision is still verified"
 fi
-exec cargo run --quiet --locked -p dotty-parser-corpus-report -- \
+cargo run --quiet --locked -p dotty-parser-corpus-report -- \
   "${roots[@]}" --source-version 3.9.0 --source-revision "$actual_revision" \
   --parser-revision "$parser_revision" \
   "${oracle_args[@]}" "${forwarded_args[@]}"
