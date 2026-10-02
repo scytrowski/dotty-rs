@@ -1,0 +1,5 @@
+{
+  def value
+    : Int = 1
+  value
+}

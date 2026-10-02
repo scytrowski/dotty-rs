@@ -81,7 +81,8 @@ where
             self.recover_until(RecoverySet::Statement);
         }
         let return_type_start = self.last_real_token_end;
-        let has_explicit_return_type = !has_interleaved_type_params && is_definition_colon(self);
+        let has_explicit_return_type = !has_interleaved_type_params
+            && (is_definition_colon(self) || self.consume_newlines_before_method_return_type());
         let tpt = if has_explicit_return_type {
             self.advance();
             self.with_parse_kind(crate::ParseKind::Type, |parser| parser.type_expr())
@@ -125,6 +126,27 @@ where
         feedback_indent: Option<u32>,
     ) -> TreeId<Untyped> {
         self.parse_definition_rhs(location, feedback_indent)
+    }
+
+    /// Consumes statement separators only when the method's result-type colon
+    /// follows them. Otherwise the separators belong to the enclosing
+    /// statement sequence and must remain visible there.
+    fn consume_newlines_before_method_return_type(&mut self) -> bool {
+        let mut newline_count = 0;
+        while matches!(
+            self.cursor.lookahead(newline_count).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            newline_count += 1;
+        }
+        if newline_count == 0 || !is_definition_colon_at(self, newline_count) {
+            return false;
+        }
+
+        for _ in 0..newline_count {
+            self.advance();
+        }
+        true
     }
 
     fn parse_definition_rhs(
@@ -905,6 +927,73 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::Number(_))
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_method_result_type_colon_on_the_following_line() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "def f\n  : Int = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Newline, 5, 8),
+                token(TokenKind::ColonFollow, 8, 9),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::Operator, 14, 15),
+                token(TokenKind::IntegerLiteral, 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_method_definition(Location::Elsewhere)
+        else {
+            panic!("expected a method definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected DefDef");
+        };
+        assert!(matches!(
+            parser.ast().get(definition.tpt).kind,
+            TreeKind::Ident(ident) if ident.name.is_type()
+        ));
+        assert!(matches!(
+            parser
+                .ast()
+                .get(definition.rhs.expect("method body exists"))
+                .kind,
+            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn keeps_a_newline_after_a_method_signature_when_no_return_colon_follows() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "def f\nval x = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Newline, 5, 6),
+                token(TokenKind::Keyword(HardKeyword::Val), 6, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Operator, 12, 13),
+                token(TokenKind::IntegerLiteral, 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(_) = parser.parse_method_definition(Location::Elsewhere)
+        else {
+            panic!("expected a method definition recovery tree");
+        };
+
+        assert_eq!(parser.current().kind, TokenKind::Newline);
+        assert_eq!(parser.current_text().unwrap(), "\n");
+        assert_eq!(parser.diagnostics().len(), 1);
     }
 
     #[test]
