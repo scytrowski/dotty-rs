@@ -169,7 +169,17 @@ impl ContextualScanner {
             let Some(next) = self.tokens.get(insert_index) else {
                 return false;
             };
-            if next.kind == TokenKind::Indent {
+            let current = &self.tokens[index];
+            let has_line_break =
+                has_source_line_break(&self.source, current.span.end(), next.span.start());
+            let current_indent = line_indentation(&self.source, current.span.start());
+            let next_indent = line_indentation(&self.source, next.span.start());
+            if next.kind == TokenKind::Indent
+                || next.kind == TokenKind::Eof
+                || !has_line_break
+                || !current_indent.is_prefix_of(&next_indent)
+                || current_indent == next_indent
+            {
                 return false;
             }
             let offset = next.span.start();
@@ -2788,6 +2798,43 @@ mod tests {
             TokenKind::Keyword(HardKeyword::Case)
         );
         assert!(scanner.feedback_regions.is_empty());
+    }
+
+    #[test]
+    fn malformed_same_line_match_body_does_not_get_a_feedback_indent() {
+        let source = "{ value match foo }";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Match) {
+            scanner.advance();
+        }
+
+        // The parser requests match-case layout feedback for `foo`, but a
+        // same-line token is not an indented case region.
+        scanner.observe(ScannerEvent::MatchCasesIndented);
+
+        let foo_offset = source.find("foo").expect("foo is present") as u32;
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Identifier);
+        assert_eq!(scanner.lookahead(1).span.start(), foo_offset);
+        assert!(scanner.feedback_regions.is_empty());
+        assert!(
+            !scanner.tokens.iter().any(|token| {
+                token.kind == TokenKind::Indent && token.span.start() == foo_offset
+            })
+        );
+    }
+
+    #[test]
+    fn match_feedback_opens_a_deeper_indented_fallback_region() {
+        let source = "{ value match\n    unsupported\n}";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Match) {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::MatchCasesIndented);
+
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Indent);
+        assert_eq!(scanner.feedback_regions.len(), 1);
     }
 
     #[test]
