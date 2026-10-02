@@ -178,7 +178,23 @@ where
             .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
         if body_indent_offset.is_none()
             && body_starts_after_newline
-            && !crate::expr::can_start_prefix_expr(self.current().kind)
+            && matches!(
+                self.current().kind,
+                TokenKind::Keyword(
+                    HardKeyword::Class
+                        | HardKeyword::Enum
+                        | HardKeyword::Export
+                        | HardKeyword::Given
+                        | HardKeyword::Import
+                        | HardKeyword::Object
+                        | HardKeyword::Package
+                        | HardKeyword::Trait
+                        | HardKeyword::Type
+                        | HardKeyword::Val
+                        | HardKeyword::Var
+                        | HardKeyword::Def
+                )
+            )
         {
             // A case whose body starts on the next line may have no eager or
             // parser-requested body Indent. Give the scanner a chance to close
