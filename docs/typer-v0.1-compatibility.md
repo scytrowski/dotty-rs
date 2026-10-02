@@ -425,16 +425,46 @@ Classpath-resolution buckets are also reported separately and excluded from
 the Typer-semantic ranking so missing external symbols cannot masquerade as
 Typer features.
 
-The real classpath resolves packages but current class materialization still
-has measured limitations: in this run 1,965 package resolutions came from the
-classpath and 5,025 reused source packages; there were no external class or
-member successes, 3,884 unresolved member requests, and 91 resolver errors.
-The errors include recursive `java/lang/Object` / `java/lang/Class` loading and
-unresolved supertype names in published TASTy. Therefore the ranked list is a
-deterministic inventory of Typer-owned first errors observed after the
-available resolver calls, not a claim that all dependencies were resolved or
-that later failures in those bodies are known. Resolution failures remain
-visible as their own buckets rather than being attributed to Typer semantics.
+The #581 baseline resolved 1,965 packages from the classpath, reused 5,025
+source packages, and materialized no external classes or members (3,884
+unresolved member requests and 91 resolver errors). The #610 rerun resolves
+2,530 external packages and reuses 6,406 source packages. It materializes one
+external class, but no non-class members: the resolver records one successful
+member request because that result is the class symbol itself. It records
+5,070 unresolved member requests, 116 errors, 25 distinct packages, one class,
+and zero members. This does not meet #610's real external class/member
+materialization gate.
+
+The previous `java/lang/Object` / `java/lang/Class` circular-load failures are
+gone. Remaining resolver errors are dominated by JDK classfile signatures
+whose generic references cannot be resolved (`K` in
+`java/lang/invoke/ClassSpecializer$SpeciesData`), which cascade through
+`Object` and reflection types (80 errors), plus 34 published Scala TASTy files
+whose supertype references cannot be resolved to names. Thus the measured
+classloader limitation is now unresolved JDK generic-signature variables and
+Scala library TASTy supertypes. The updated audit records this as a blocker;
+it does not claim that the #605/#606 resolver integration gate passed.
+
+For the #610 feature comparison against #581, first-blocker counts moved from
+146 to 0 for `UnsupportedExpression::Parens`, 146 to 0 for
+`UnsupportedExpression::InfixOp`, and 139 to 0 for
+`LocalBlockDeclarationDeferred::import`. The complete rankings and the next
+first errors are recorded in the linked report. These are reachability and
+first-error movements, not by themselves proof of semantic completion. Two
+`RightAssociativeInfixDeferred` sites remain; ordinary left-associative infix
+blockers are gone. The
+report also records Match readiness: 191 Match first-blocker local methods in
+70 files (199 in 71 files in #581), and 7,353 structural Match nodes overall.
+Across the 1,666 named method bodies whose first failure is Match, there are
+2,151 structural Match nodes and 6,615 cases (639 guarded). The cases are
+dominated by identifier/bind (2,327), typed (1,829), and extractor-looking
+Apply/TypeApply (1,324) patterns. Pattern-shape examples and the refreshed
+top-ten ranking are in the report.
+
+The ranked list remains a deterministic inventory of Typer-owned first errors
+observed after the resolver calls that succeeded; unresolved external symbols
+remain separate from Typer semantic gaps, and later failures in those bodies
+are not known.
 
 Application sites can resolve lexical, imported, and selected overload buckets
 for supported monomorphic methods and `Poly -> Method` candidates. Generic
