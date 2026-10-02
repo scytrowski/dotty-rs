@@ -3,8 +3,8 @@ trait T {
     foo match
         case A => a
         )
-  val second =
-      bar match
+  def second(prefix: Int,
+      values: List[Int]): Int = values match
     case B => b
   def after = 1
 }
