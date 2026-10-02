@@ -1,0 +1,3 @@
+// Scala 3.9.0 `-Vprint:typer` output; ordinary infix calls lower to Select + Apply.
+def infix(left: Box, right: Box): Box = left.combine(right)
+def direct(left: Box, right: Box): Box = left.combine(right)

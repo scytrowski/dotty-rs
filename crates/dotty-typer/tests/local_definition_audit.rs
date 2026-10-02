@@ -744,26 +744,14 @@ fn local_definition_audit_counts_pattern_bindings_in_local_definitions() {
 }
 
 #[test]
-fn local_expression_audit_reports_exact_infix_failure_and_counts_it_structurally() {
-    let source = "object Audit { def outer: Int = { def local: Int = 1 + 2; local } }";
+fn local_expression_audit_types_infix_calls_and_counts_them_structurally() {
+    let source = "class Box { def combine(other: Box): Box = this }; object Audit { def outer(left: Box, right: Box): Box = { def local: Box = left `combine` right; local } }";
     let audit = audit_source(source, "Infix.scala");
 
     assert_eq!(audit.expression_forms.get("InfixOp"), Some(&1));
-    assert_eq!(
-        audit
-            .failures
-            .get("UnsupportedExpression::InfixOp")
-            .map(|bucket| bucket.count),
-        Some(1),
-        "{audit:?}"
-    );
-    assert_eq!(
-        audit
-            .failures
-            .get("UnsupportedExpression::InfixOp")
-            .map(|bucket| bucket.family),
-        Some(FailureFamily::UnsupportedExpressionSyntaxSemantics)
-    );
+    assert_eq!(audit.local_defdefs, 1);
+    assert_eq!(audit.typed_local_defdefs, 1, "{audit:?}");
+    assert!(audit.failures.is_empty(), "{audit:?}");
 }
 
 #[test]
@@ -1428,6 +1416,8 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         }
         TyperError::InvalidInferredMethodResult { .. } => "InvalidInferredMethodResult",
         TyperError::RightAssociativeExtensionDeferred { .. } => "RightAssociativeExtensionDeferred",
+        TyperError::RightAssociativeInfixDeferred { .. } => "RightAssociativeInfixDeferred",
+        TyperError::InfixOperatorMustBeTerm { .. } => "InfixOperatorMustBeTerm",
         TyperError::MethodParameterSymbolMissing { .. } => "MethodParameterSymbolMissing",
         TyperError::LocalMethodSignatureDeferred { .. } => "LocalMethodSignatureDeferred",
         TyperError::LocalMethodInferredResultDeferred { .. } => "LocalMethodInferredResultDeferred",
