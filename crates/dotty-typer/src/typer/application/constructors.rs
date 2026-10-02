@@ -612,6 +612,7 @@ impl SourceTyper<'_> {
             )?;
         }
         let candidate_checkpoint = self.store.checkpoint();
+        let resolver_checkpoint = self.resolver.checkpoint();
         let type_index_checkpoint = self.type_index.checkpoint();
         let journal_checkpoint = info_journal.len();
         let mut application_candidates = Vec::with_capacity(candidates.len());
@@ -712,6 +713,7 @@ impl SourceTyper<'_> {
             }
         }
         info_journal.truncate(journal_checkpoint);
+        self.resolver.rollback_to(self.store, resolver_checkpoint);
         self.store.rollback_to(candidate_checkpoint);
         self.type_index.restore(type_index_checkpoint);
         completed_types.clear();

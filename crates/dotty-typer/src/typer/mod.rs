@@ -156,8 +156,9 @@ impl<'a> SourceTyper<'a> {
 
     /// Uses an external semantic resolver after source and session lookup.
     ///
-    /// The resolver supplies symbols already present in the semantic store;
-    /// it does not perform classpath IO through the typer.
+    /// The resolver may materialize canonical symbols in the shared store;
+    /// classpath IO remains the resolver adapter's responsibility, outside the
+    /// typer. Failed typer transactions restore both store and resolver state.
     pub fn with_resolver(mut self, resolver: Box<dyn SymbolResolver + 'a>) -> Self {
         self.resolver = resolver;
         self
@@ -207,6 +208,7 @@ impl<'a> SourceTyper<'a> {
     /// types; failures roll those changes back.
     pub fn widen_expression_type(&mut self, ty: TypeId) -> Result<TypeId, TyperError> {
         let store_checkpoint = self.store.checkpoint();
+        let resolver_checkpoint = self.resolver.checkpoint();
         let type_index_checkpoint = self.type_index.checkpoint();
         let mut info_journal = Vec::new();
         let result = self.widen_expression_type_journaled(ty, &mut info_journal, 0);
@@ -216,6 +218,7 @@ impl<'a> SourceTyper<'a> {
                     self.store.symbols.set_info(symbol, previous);
                 }
             }
+            self.resolver.rollback_to(self.store, resolver_checkpoint);
             self.store.rollback_to(store_checkpoint);
             self.type_index.restore(type_index_checkpoint);
         }
@@ -512,10 +515,75 @@ mod tests {
         package_requests: Rc<RefCell<Vec<Vec<String>>>>,
     }
 
-    impl SymbolResolver for ScriptedResolver {
+    #[derive(Default)]
+    struct JournalingResolver {
+        member: Option<SymbolId>,
+        journal: Vec<Option<SymbolId>>,
+    }
+
+    impl SymbolResolver for JournalingResolver {
+        fn checkpoint(&self) -> dotty_core::ResolverCheckpoint {
+            dotty_core::ResolverCheckpoint::new(self.journal.len() as u64)
+        }
+
+        fn rollback_to(
+            &mut self,
+            _store: &mut SemanticStore,
+            checkpoint: dotty_core::ResolverCheckpoint,
+        ) {
+            while self.journal.len() > checkpoint.token() as usize {
+                self.member = self.journal.pop().unwrap_or(None);
+            }
+        }
+
         fn resolve_member(
             &mut self,
-            _store: &SemanticStore,
+            store: &mut SemanticStore,
+            request: &MemberRequest,
+        ) -> Result<Option<SymbolId>, ResolutionError> {
+            if let Some(member) = self.member.filter(|member| store.symbols.contains(*member)) {
+                return Ok(Some(member));
+            }
+            let member = store.symbols.alloc(dotty_core::Symbol {
+                name: request.name,
+                owner: None,
+                kind: SymbolKind::Field,
+                flags: SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Missing,
+                origin: SymbolOrigin::Synthetic,
+                annotations: Vec::new(),
+                position: None,
+                links: dotty_core::SymbolLinks::default(),
+            });
+            self.journal.push(self.member.replace(member));
+            Ok(Some(member))
+        }
+
+        fn resolve_package(
+            &mut self,
+            _store: &mut SemanticStore,
+            _path: &[&str],
+        ) -> Result<Option<SymbolId>, ResolutionError> {
+            Ok(None)
+        }
+    }
+
+    impl SymbolResolver for ScriptedResolver {
+        fn checkpoint(&self) -> dotty_core::ResolverCheckpoint {
+            dotty_core::ResolverCheckpoint::new(0)
+        }
+
+        fn rollback_to(
+            &mut self,
+            _store: &mut SemanticStore,
+            _checkpoint: dotty_core::ResolverCheckpoint,
+        ) {
+        }
+
+        fn resolve_member(
+            &mut self,
+            _store: &mut SemanticStore,
             request: &MemberRequest,
         ) -> Result<Option<SymbolId>, ResolutionError> {
             self.member_requests.borrow_mut().push(request.name);
@@ -524,7 +592,7 @@ mod tests {
 
         fn resolve_package(
             &mut self,
-            _store: &SemanticStore,
+            _store: &mut SemanticStore,
             path: &[&str],
         ) -> Result<Option<SymbolId>, ResolutionError> {
             self.package_requests
@@ -6980,6 +7048,63 @@ mod tests {
         assert_eq!(typer.source_type_index().type_at(source, tree_id), None);
         drop(typer);
         assert_eq!(store.types.alloc(Type::NoType), attempted_type);
+    }
+
+    #[test]
+    fn failed_expression_transaction_restores_resolver_state_with_the_store() {
+        let arena = AstArena::new();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let packages = Packages::new();
+        let source = SourceId::from_index(8);
+        let index = SourceSemanticIndex::new();
+        let member_name = Name::new(store.names.intern("external"), Namespace::Term);
+        let request = MemberRequest {
+            prefix: definitions.no_prefix,
+            name: member_name,
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages)
+                .with_resolver(Box::new(JournalingResolver::default()));
+        let before = typer.store().checkpoint();
+
+        let result: Result<(), TyperError> = typer.run_expression_transaction(|typer, _, _| {
+            typer
+                .resolver
+                .resolve_member(typer.store, &request)
+                .unwrap();
+            Err(TyperError::TreeOutsideArena {
+                source,
+                tree_index: 0,
+            })
+        });
+
+        assert!(matches!(result, Err(TyperError::TreeOutsideArena { .. })));
+        assert_eq!(typer.store().checkpoint(), before);
+
+        // Reuse the freed slot for an unrelated symbol. A stale resolver cache
+        // would now appear live and return this wrong identity.
+        let other_name = Name::new(typer.store.names.intern("other"), Namespace::Term);
+        typer.store.symbols.alloc(dotty_core::Symbol {
+            name: other_name,
+            owner: None,
+            kind: SymbolKind::Field,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        let resolved = typer
+            .resolver
+            .resolve_member(typer.store, &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(typer.store.symbols.get(resolved).name, member_name);
     }
 
     #[test]

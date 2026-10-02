@@ -245,6 +245,7 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<ApplicationCandidate, TyperError> {
         let store_checkpoint = self.store.checkpoint();
+        let resolver_checkpoint = self.resolver.checkpoint();
         let type_index_checkpoint = self.type_index.checkpoint();
         let journal_checkpoint = info_journal.len();
         let original_candidates = candidates.to_vec();
@@ -267,6 +268,7 @@ impl SourceTyper<'_> {
             }
         }
         info_journal.truncate(journal_checkpoint);
+        self.resolver.rollback_to(self.store, resolver_checkpoint);
         self.store.rollback_to(store_checkpoint);
         self.type_index.restore(type_index_checkpoint);
         candidates.copy_from_slice(&original_candidates);
@@ -297,6 +299,7 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<ApplicationCandidate, TyperError> {
         let store_checkpoint = self.store.checkpoint();
+        let resolver_checkpoint = self.resolver.checkpoint();
         let type_index_checkpoint = self.type_index.checkpoint();
         let journal_checkpoint = info_journal.len();
         let original_candidates = candidates.to_vec();
@@ -325,6 +328,7 @@ impl SourceTyper<'_> {
             }
         }
         info_journal.truncate(journal_checkpoint);
+        self.resolver.rollback_to(self.store, resolver_checkpoint);
         self.store.rollback_to(store_checkpoint);
         self.type_index.restore(type_index_checkpoint);
         candidates.copy_from_slice(&original_candidates);

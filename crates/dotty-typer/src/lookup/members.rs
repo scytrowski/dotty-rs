@@ -100,6 +100,7 @@ impl SourceTyper<'_> {
         name: Name,
     ) -> Result<Vec<MemberCandidate>, MemberLookupError> {
         let store_checkpoint = self.store.checkpoint();
+        let resolver_checkpoint = self.resolver.checkpoint();
         let checkpoint = self.type_index.checkpoint();
         let mut journal = Vec::new();
         let result = self.lookup_members_inner(receiver, name, &mut journal, false);
@@ -109,6 +110,7 @@ impl SourceTyper<'_> {
                     self.store.symbols.set_info(symbol, previous);
                 }
             }
+            self.resolver.rollback_to(self.store, resolver_checkpoint);
             self.store.rollback_to(store_checkpoint);
             self.type_index.restore(checkpoint);
         }

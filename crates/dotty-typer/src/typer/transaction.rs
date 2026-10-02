@@ -8,6 +8,7 @@ impl SourceTyper<'_> {
         operation: impl FnOnce(&mut Self, &mut Vec<(SymbolId, SymbolInfo)>) -> Result<T, TyperError>,
     ) -> Result<T, TyperError> {
         let checkpoint = self.store.checkpoint();
+        let resolver_checkpoint = self.resolver.checkpoint();
         let cache_checkpoint = self.type_index.checkpoint();
         let typed_ast_checkpoint = self.typed_arena.checkpoint();
         let typed_index_checkpoint = self.typed_index.clone();
@@ -24,6 +25,7 @@ impl SourceTyper<'_> {
                     self.store.symbols.set_info(changed, previous);
                 }
             }
+            self.resolver.rollback_to(self.store, resolver_checkpoint);
             self.store.rollback_to(checkpoint);
             self.type_index.restore(cache_checkpoint);
             self.typed_arena.rollback_to(typed_ast_checkpoint);
@@ -47,6 +49,7 @@ impl SourceTyper<'_> {
     ) -> Result<T, TyperError> {
         let ast_checkpoint = self.typed_arena.checkpoint();
         let store_checkpoint = self.store.checkpoint();
+        let resolver_checkpoint = self.resolver.checkpoint();
         let type_index_checkpoint = self.type_index.checkpoint();
         let local_symbols_checkpoint = self.local_symbols.clone();
         let local_methods_checkpoint = self.local_methods.clone();
@@ -64,6 +67,7 @@ impl SourceTyper<'_> {
                     }
                 }
                 self.typed_arena.rollback_to(ast_checkpoint);
+                self.resolver.rollback_to(self.store, resolver_checkpoint);
                 self.store.rollback_to(store_checkpoint);
                 self.type_index.restore(type_index_checkpoint);
                 self.local_symbols = local_symbols_checkpoint;
