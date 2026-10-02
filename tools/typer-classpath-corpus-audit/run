@@ -8,6 +8,17 @@ java_home="${JAVA_HOME:?set JAVA_HOME to the JDK used for this audit}"
 jdk_release="${SCALA39_JDK_RELEASE:?set SCALA39_JDK_RELEASE to the JDK feature version}"
 coursier_maven_root="${COURSIER_MAVEN_ROOT:-${HOME}/.cache/coursier/v1/https/repo1.maven.org/maven2}"
 
+if [[ ! -d "$java_home/jmods" || ! -f "$java_home/release" ]]; then
+    printf 'JAVA_HOME must contain a release file and a jmods directory: %s\n' "$java_home" >&2
+    exit 1
+fi
+jdk_version="$(sed -n 's/^JAVA_VERSION="\([^"]*\)".*/\1/p' "$java_home/release")"
+jdk_feature="${jdk_version%%.*}"
+if [[ "$jdk_feature" != "$jdk_release" ]]; then
+    printf 'JAVA_HOME is Java %s; SCALA39_JDK_RELEASE is %s\n' "$jdk_feature" "$jdk_release" >&2
+    exit 1
+fi
+
 revision="777528f19a58e794c9954a42f433373472ec57f8"
 actual_revision="$(git -C "$scala_root" rev-parse HEAD)"
 if [[ "$actual_revision" != "$revision" ]]; then
