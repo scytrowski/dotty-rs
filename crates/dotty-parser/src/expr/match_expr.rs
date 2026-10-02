@@ -100,15 +100,13 @@ where
                 } else if closed_by_delimiter && !self.cursor.at(TokenKind::Outdent) {
                     self.observe_outdented();
                 } else if !self.cursor.at(TokenKind::Outdent)
-                    && let Some((indent_offset, opened_by_feedback)) = case_region
+                    && let Some((indent_offset, _)) = case_region
                 {
-                    if opened_by_feedback {
-                        self.observe_match_cases_closed(indent_offset);
-                    } else {
-                        self.observe_outdented_layout_region(indent_offset);
-                    }
+                    self.observe_match_cases_closed(indent_offset);
                 } else if !self.cursor.at(TokenKind::Outdent) {
                     self.observe_outdented();
+                } else if let Some((indent_offset, _)) = case_region {
+                    self.observe_match_cases_closed(indent_offset);
                 }
                 if !self.accept(TokenKind::Outdent) && !closed_by_delimiter {
                     self.report(
@@ -317,17 +315,18 @@ mod tests {
                     );
                     self.feedback_regions.pop();
                 }
-                (ScannerEvent::MatchCasesClosed { .. }, _)
-                    if self
-                        .feedback_regions
-                        .last()
-                        .is_some_and(|(_, kind)| *kind == FeedbackRegionKind::MatchCases) =>
+                (ScannerEvent::MatchCasesClosed { indent_offset }, current_kind)
+                    if self.feedback_regions.last().is_some_and(|(offset, kind)| {
+                        *offset == indent_offset && *kind == FeedbackRegionKind::MatchCases
+                    }) =>
                 {
-                    let offset = self.current().span.start();
-                    self.tokens.insert(
-                        self.index,
-                        Token::new(TokenKind::Outdent, TextRange::new(offset, offset).unwrap()),
-                    );
+                    if current_kind != TokenKind::Outdent {
+                        let offset = self.current().span.start();
+                        self.tokens.insert(
+                            self.index,
+                            Token::new(TokenKind::Outdent, TextRange::new(offset, offset).unwrap()),
+                        );
+                    }
                     self.feedback_regions.pop();
                 }
                 _ => {}

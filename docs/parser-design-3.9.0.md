@@ -119,6 +119,10 @@ region boundaries from outdents requested while parsing an individual case
 body. Indented `match` case regions also retain their ownership when opened by
 eager layout, so a same-indentation `catch` closes the match cases before the
 enclosing `try` parses its handler.
+When a nested match closes immediately before a dedented infix continuation
+in its enclosing case body, the scanner keeps the nested case-region outdent
+but moves any enclosing outdent past the operator; this lets the operator's
+right operand remain part of the outer expression.
 At a known case/body boundary, the parser can request closure of the named
 innermost layout region regardless of whether eager scanning or parser
 feedback opened it; ordinary outdent feedback remains restricted to
