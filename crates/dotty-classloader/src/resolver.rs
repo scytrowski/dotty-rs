@@ -146,26 +146,38 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 }
                 (package, scope)
             }
-            PrefixTarget::Class(binary_name) => {
-                let class = match self.load_class(store, &binary_name) {
-                    Ok(class) => class,
-                    Err(ClassLoadError::NotFound(_)) => return Ok(None),
-                    Err(error) => {
-                        return Err(ResolutionError::Malformed {
-                            reason: error.to_string(),
-                        });
+            PrefixTarget::Class(class) => {
+                let mut scope = self.declaration_scope(store, class);
+                if scope.is_none() && class == self.definitions.object_class {
+                    match self.load_class(store, &BinaryName::from_internal("java/lang/Object")) {
+                        Ok(loaded) if loaded == class => {
+                            scope = self.declaration_scope(store, class);
+                        }
+                        Ok(_) => {
+                            return Err(ResolutionError::Malformed {
+                                reason:
+                                    "loading java/lang/Object changed its canonical symbol identity"
+                                        .to_owned(),
+                            });
+                        }
+                        Err(ClassLoadError::NotFound(_)) => return Ok(None),
+                        Err(error) => {
+                            return Err(ResolutionError::Malformed {
+                                reason: error.to_string(),
+                            });
+                        }
                     }
-                };
-                let Some(scope) = self.declaration_scope(store, class) else {
-                    return Err(ResolutionError::Malformed {
-                        reason: format!("loaded class {binary_name} has no declaration scope"),
-                    });
+                }
+                let Some(scope) = scope else {
+                    // A symbol already present in the caller's store is its
+                    // canonical identity. If it is incomplete, this adapter
+                    // cannot complete it by loading a second symbol with the
+                    // same binary name.
+                    return Ok(None);
                 };
                 if !store.scopes.contains(scope) {
                     return Err(ResolutionError::Malformed {
-                        reason: format!(
-                            "loaded class {binary_name} has an invalid declaration scope"
-                        ),
+                        reason: format!("class {class:?} has an invalid declaration scope"),
                     });
                 }
                 (class, scope)
@@ -225,15 +237,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         ) {
             return Ok(None);
         }
-        if symbol == self.definitions.object_class {
-            return Ok(Some(PrefixTarget::Class(BinaryName::from_internal(
-                "java/lang/Object",
-            ))));
-        }
-        let Some(name) = binary_name_of_symbol(store, symbol) else {
-            return Ok(None);
-        };
-        Ok(Some(PrefixTarget::Class(name)))
+        Ok(Some(PrefixTarget::Class(symbol)))
     }
 
     fn resolve_member_inner(
@@ -359,57 +363,7 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
 
 enum PrefixTarget {
     Package(SymbolId),
-    Class(BinaryName),
-}
-
-fn binary_name_of_symbol(store: &SemanticStore, symbol: SymbolId) -> Option<BinaryName> {
-    let mut current = symbol;
-    let mut class_names = Vec::new();
-    let mut package_names = Vec::new();
-    let mut visited = std::collections::HashSet::new();
-    loop {
-        if !visited.insert(current) {
-            return None;
-        }
-        let item = store.symbols.get(current);
-        let text = store.names.resolve(item.name.text());
-        match item.kind {
-            SymbolKind::Package => {
-                if !text.is_empty() {
-                    package_names.push(text.to_owned());
-                }
-            }
-            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass => {
-                class_names.push(text.to_owned());
-            }
-            _ => return None,
-        }
-        let Some(owner) = item.owner else {
-            break;
-        };
-        current = owner;
-    }
-    if class_names.is_empty() {
-        return None;
-    }
-    class_names.reverse();
-    package_names.reverse();
-    let mut simple_name = class_names[0].clone();
-    for nested in class_names.iter().skip(1) {
-        if nested.starts_with(&format!("{simple_name}$")) {
-            simple_name.clone_from(nested);
-        } else {
-            simple_name.push('$');
-            simple_name.push_str(nested);
-        }
-    }
-    let path = if package_names.is_empty() {
-        simple_name
-    } else {
-        format!("{}/{}", package_names.join("/"), simple_name)
-    };
-    let name = BinaryName::from_internal(path);
-    name.is_path_safe().then_some(name)
+    Class(SymbolId),
 }
 
 fn package_path_of_symbol(store: &SemanticStore, package: SymbolId) -> Option<Vec<String>> {
@@ -444,7 +398,7 @@ mod tests {
         ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource,
     };
     use crate::jdk_class_path::JdkClassPath;
-    use dotty_core::{MemberSelector, Name, Namespace};
+    use dotty_core::{ClassInfo, MemberSelector, Name, Namespace, Scope};
     use std::path::PathBuf;
 
     fn fixture_path(relative: &str) -> PathBuf {
@@ -1033,5 +987,73 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(reloaded, class);
+    }
+
+    #[test]
+    fn class_prefix_reuses_completed_symbol_already_in_the_shared_store() {
+        let (mut store, definitions, mut resolver) = setup();
+        let package = resolver
+            .resolve_package(&mut store, &["pool"])
+            .unwrap()
+            .unwrap();
+        let class_name = Name::new(store.names.intern("AlreadyThere"), Namespace::Type);
+        let class = store.symbols.alloc(Symbol {
+            name: class_name,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: dotty_core::SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        let declarations = store.scopes.alloc(Scope::new(Some(class)));
+        let member_name = Name::new(store.names.intern("fromTasty"), Namespace::Term);
+        let member = store.symbols.alloc(Symbol {
+            name: member_name,
+            owner: Some(class),
+            kind: SymbolKind::Method,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: dotty_core::SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store
+            .scopes
+            .get_mut(declarations)
+            .enter(member_name, member);
+        let class_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: definitions.no_prefix,
+            class,
+            parents: Vec::new(),
+            declarations,
+            self_type: None,
+        }));
+        store.symbols.get_mut(class).info = SymbolInfo::Complete(class_info);
+        let prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, class));
+        let checkpoint = store.checkpoint();
+
+        let resolved = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix,
+                    name: member_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(resolved, Some(member));
+        assert_eq!(store.checkpoint(), checkpoint);
+        assert_eq!(store.symbols.get(member).owner, Some(class));
     }
 }
