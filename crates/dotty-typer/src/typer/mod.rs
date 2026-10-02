@@ -10067,6 +10067,62 @@ mod tests {
     }
 
     #[test]
+    fn block_local_imports_type_following_terms_and_type_trees() {
+        let source_text = include_str!("../../tests/fixtures/local-imports/LocalImports.scala");
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (term_method, term_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "term");
+        let (type_method, type_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "localType");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let term_context = typer.expression_context_for(term_method).unwrap();
+        let typed_term = typer.type_expression(term_rhs, term_context).unwrap();
+        let TreeKind::Block(term_block) = &typer.typed_ast().get(typed_term).kind else {
+            panic!("local term import should remain in its typed block")
+        };
+        let TreeKind::Import(typed_import) = &typer.typed_ast().get(term_block.stats[0]).kind
+        else {
+            panic!("the first block statement should be a typed import")
+        };
+        assert_eq!(typed_import.selectors.len(), 1);
+        assert!(matches!(
+            typer.typed_ast().get(term_block.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(typer.typed_ast().get(typed_term).ty, definitions.int);
+
+        let type_context = typer.expression_context_for(type_method).unwrap();
+        let typed_type = typer.type_expression(type_rhs, type_context).unwrap();
+        let TreeKind::Block(type_block) = &typer.typed_ast().get(typed_type).kind else {
+            panic!("local type import should remain in its typed block")
+        };
+        assert!(matches!(
+            typer.typed_ast().get(type_block.stats[0]).kind,
+            TreeKind::Import(_)
+        ));
+        let TreeKind::ValDef(local_value) = &typer.typed_ast().get(type_block.stats[1]).kind else {
+            panic!("local value should remain in the typed block")
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(local_value.tpt).ty),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }
+                if *symbol == class_symbol(&parsed, typer.store(), &index, source, "Box")
+        ));
+
+        let oracle = include_str!("../../tests/fixtures/local-imports/LocalImports.typed-tree.txt");
+        assert!(oracle.contains("import lib.Owner.member"));
+        assert!(oracle.contains("val box: lib.Owner.Box = value"));
+    }
+
+    #[test]
     fn explicitly_typed_local_value_is_entered_after_its_initializer() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def use: Int = { val local: Int = 1; local } }");
