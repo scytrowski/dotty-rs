@@ -31,6 +31,8 @@ use dotty_core::{
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+const MAX_INHERITANCE_DEPTH: usize = 256;
+
 #[derive(Debug)]
 enum TastyAliasResolutionError {
     ClassPath(BinaryName, ClassPathError),
@@ -333,6 +335,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
     /// Loads (or returns the cached result for) the class named `name`.
     pub fn load_class(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadError> {
+        self.load_class_with_inheritance_ancestry(name, &mut Vec::new())
+    }
+
+    fn load_class_with_inheritance_ancestry(
+        &mut self,
+        name: &BinaryName,
+        inheritance_ancestry: &mut Vec<BinaryName>,
+    ) -> Result<SymbolId, ClassLoadError> {
         // Checked first, and separately from `self.repository` below: a
         // name found here was resolved successfully by *some* loader
         // sharing this `session` (this one or an earlier one), and that
@@ -350,6 +360,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             Some(ClassEntry::Loaded(symbol)) => return Ok(symbol),
             Some(ClassEntry::Failed(_, error)) => return Err(error),
             Some(ClassEntry::Loading(symbol)) => {
+                if !inheritance_ancestry.contains(name) {
+                    // A superclass may point back to a class which is
+                    // loading through an ordinary member-type dependency
+                    // (for example Object -> member Class -> superclass
+                    // Object). Reuse its stable, incomplete identity; only
+                    // a name already on this explicit supertype path is a
+                    // genuine inheritance cycle.
+                    return Ok(symbol);
+                }
                 let error = ClassLoadError::CircularInheritance(name.clone());
                 // Same reasoning as the `DependencyFailure` branch below:
                 // this class's `Symbol` was already allocated by
@@ -365,7 +384,16 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             None => {}
         }
 
-        match self.load_uncached(name) {
+        if inheritance_ancestry.len() >= MAX_INHERITANCE_DEPTH {
+            return Err(ClassLoadError::InheritanceDepthExceeded(name.clone()));
+        }
+
+        inheritance_ancestry.push(name.clone());
+        let load_result = self.load_uncached(name, inheritance_ancestry);
+        let popped = inheritance_ancestry.pop();
+        debug_assert_eq!(popped.as_ref(), Some(name));
+
+        match load_result {
             Ok(symbol) => {
                 self.repository.mark_loaded(name.clone(), symbol);
                 self.session.cache_resolved(name.clone(), symbol);
@@ -404,7 +432,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
     }
 
-    fn load_uncached(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadError> {
+    fn load_uncached(
+        &mut self,
+        name: &BinaryName,
+        inheritance_ancestry: &mut Vec<BinaryName>,
+    ) -> Result<SymbolId, ClassLoadError> {
         let resource = self
             .class_path
             .find_class(name)
@@ -412,12 +444,18 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
 
         match resource.format() {
-            ClassFormat::Class => {
-                self.load_uncached_class(name, resource.bytes(), resource.origin().clone())
-            }
-            ClassFormat::Tasty => {
-                self.load_uncached_tasty(name, resource.bytes(), resource.origin().clone())
-            }
+            ClassFormat::Class => self.load_uncached_class(
+                name,
+                resource.bytes(),
+                resource.origin().clone(),
+                inheritance_ancestry,
+            ),
+            ClassFormat::Tasty => self.load_uncached_tasty(
+                name,
+                resource.bytes(),
+                resource.origin().clone(),
+                inheritance_ancestry,
+            ),
         }
     }
 
@@ -965,6 +1003,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         name: &BinaryName,
         bytes: &[u8],
         resource_origin: ClassOrigin,
+        inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
         let mut alias_error = None;
         let class_path = &self.class_path;
@@ -1002,10 +1041,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             self.store.symbols.get_mut(class_symbol).visibility = visibility;
         }
 
-        let super_class = self.load_dependency(name, decoded.super_class)?;
+        let super_class = self.load_dependency(name, decoded.super_class, inheritance_ancestry)?;
         let mut interfaces = Vec::with_capacity(decoded.interfaces.len());
         for dependency in decoded.interfaces {
-            interfaces.push(self.load_dependency(name, dependency)?);
+            interfaces.push(self.load_dependency(name, dependency, inheritance_ancestry)?);
         }
 
         // `.tasty` annotation decoding is not built yet (unlike `.class`'s
@@ -1133,6 +1172,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         name: &BinaryName,
         bytes: &[u8],
         resource_origin: ClassOrigin,
+        inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
         let mut reader = Reader::new(bytes);
         let class_file = ClassFile::decode(&mut reader)
@@ -1194,12 +1234,17 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let super_class = class_file
             .super_class
-            .map(|index| self.resolve_dependency(name, &class_file, index))
+            .map(|index| self.resolve_dependency(name, &class_file, index, inheritance_ancestry))
             .transpose()?;
 
         let mut interfaces = Vec::with_capacity(class_file.interfaces.len());
         for index in &class_file.interfaces {
-            interfaces.push(self.resolve_dependency(name, &class_file, *index)?);
+            interfaces.push(self.resolve_dependency(
+                name,
+                &class_file,
+                *index,
+                inheritance_ancestry,
+            )?);
         }
 
         let mut fields = Vec::with_capacity(class_file.fields.len());
@@ -1646,9 +1691,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         owner: &BinaryName,
         class_file: &ClassFile<'_>,
         index: ConstantPoolIndex,
+        inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
         let dependency = self.resolve_name(owner, class_file, index)?;
-        self.load_dependency(owner, dependency)
+        self.load_dependency(owner, dependency, inheritance_ancestry)
     }
 
     /// Loads `dependency` (a superclass or interface, already resolved
@@ -1661,8 +1707,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         &mut self,
         owner: &BinaryName,
         dependency: BinaryName,
+        inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
-        self.load_class(&dependency)
+        self.load_class_with_inheritance_ancestry(&dependency, inheritance_ancestry)
             .map_err(|source| ClassLoadError::DependencyFailure {
                 owner: owner.clone(),
                 dependency,
@@ -4939,6 +4986,37 @@ mod tests {
         }
 
         assert!(contains_circular_inheritance(&error));
+    }
+
+    #[test]
+    fn inheritance_ancestry_has_a_bounded_depth() {
+        let mut classes = HashMap::new();
+        for index in 0..=MAX_INHERITANCE_DEPTH {
+            let this_name = format!("Deep{index}");
+            let super_name = (index < MAX_INHERITANCE_DEPTH).then(|| format!("Deep{}", index + 1));
+            classes.insert(
+                BinaryName::from_internal(&this_name),
+                synthetic_class(&this_name, super_name.as_deref()),
+            );
+        }
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        let error = loader
+            .load_class(&BinaryName::from_internal("Deep0"))
+            .expect_err("a malformed, excessively deep hierarchy is bounded");
+
+        fn contains_depth_error(error: &ClassLoadError) -> bool {
+            match error {
+                ClassLoadError::InheritanceDepthExceeded(name) => {
+                    name.as_internal() == format!("Deep{MAX_INHERITANCE_DEPTH}")
+                }
+                ClassLoadError::DependencyFailure { source, .. } => contains_depth_error(source),
+                _ => false,
+            }
+        }
+
+        assert!(contains_depth_error(&error), "unexpected error: {error:?}");
     }
 
     /// The circular-inheritance branch and the `DependencyFailure` branch

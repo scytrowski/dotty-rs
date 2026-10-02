@@ -62,6 +62,8 @@ pub enum ClassLoadError {
     /// A class is (in)directly its own superclass or interface — a hard
     /// JVMS §5.3.5 error, not a legitimate mutual reference.
     CircularInheritance(BinaryName),
+    /// The superclass/interface chain exceeded the loader's recursion bound.
+    InheritanceDepthExceeded(BinaryName),
     /// Loading `owner` failed because resolving `dependency` (its
     /// superclass, an interface, or — since `docs/classloader.md` §9's
     /// Milestone 6 — a member's declared type) failed.
@@ -124,6 +126,10 @@ impl fmt::Display for ClassLoadError {
             Self::CircularInheritance(name) => {
                 write!(formatter, "circular inheritance involving {name}")
             }
+            Self::InheritanceDepthExceeded(name) => write!(
+                formatter,
+                "inheritance chain exceeds the supported depth while loading {name}"
+            ),
             Self::DependencyFailure {
                 owner,
                 dependency,
@@ -146,6 +152,7 @@ impl std::error::Error for ClassLoadError {
             Self::NotFound(_)
             | Self::NameMismatch { .. }
             | Self::CircularInheritance(_)
+            | Self::InheritanceDepthExceeded(_)
             | Self::UnresolvedTypeVariable(_, _)
             | Self::UnsupportedClassVersion(_, _) => None,
             Self::Io(_, source) => Some(source.as_ref()),
