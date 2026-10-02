@@ -1855,12 +1855,11 @@ occurs in either corpus.
 share the "attach `AnnotationId`s to `Symbol.annotations`, `tree` always
 `None`, annotation type always class-like" contract (issue #129 §33) —
 `ClassLoader::enter_annotations` (JVM classfile `RuntimeVisibleAnnotations`)
-on one side, `complete_symbol_annotations` on the other. Classloader/`SymbolResolver` integration has not landed, so the two
-adapters cannot yet run against one shared `SemanticStore` — `ClassLoader::new`
-bootstraps its own `Definitions` internally, and `Definitions::bootstrap` is
-documented as exactly-once per store — so the test runs each adapter over its
-own store and compares the contract their results satisfy, not one shared
-arena. One divergence is documented and asserted rather than hidden:
+on one side, `complete_symbol_annotations` on the other. The test uses
+separate stores because it compares annotation storage contracts, not shared
+resolver/session integration; `ClasspathSymbolResolver` now provides that
+shared-store path. One divergence is documented and asserted rather than
+hidden:
 `dotty-classloader` does not (yet) map a classfile's decoded element values
 into `AnnotationArguments::Known` (they stay exclusively in its own
 JVM-facing `SemanticAnnotation` sidecar), so every classfile annotation is

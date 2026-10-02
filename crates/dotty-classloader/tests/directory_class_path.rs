@@ -97,6 +97,30 @@ fn returns_none_for_a_missing_class_without_erroring() {
     assert!(resource.is_none());
 }
 
+#[cfg(unix)]
+#[test]
+fn counts_a_symlinked_class_file_as_package_evidence() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = TemporaryDirectory::new("directory-class-path-symlink-workspace");
+    let root = workspace.path().join("root");
+    let package = root.join("pool");
+    fs::create_dir_all(&package).unwrap();
+    let target = workspace.path().join("PoolSample.class");
+    fs::write(&target, pool_sample_bytes()).unwrap();
+    symlink(target, package.join("PoolSample.class")).unwrap();
+
+    let class_path = DirectoryClassPath::new(root);
+
+    assert!(class_path.contains_package(&["pool"]).unwrap());
+    assert!(
+        class_path
+            .find_class(&BinaryName::from_internal("pool/PoolSample"))
+            .unwrap()
+            .is_some()
+    );
+}
+
 #[test]
 fn rejects_a_path_traversal_name_instead_of_escaping_the_root() {
     let workspace = TemporaryDirectory::new("directory-class-path-traversal-workspace");

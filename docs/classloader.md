@@ -117,6 +117,13 @@ resolution.
 - `.tasty`-backed loading converging on the same `Symbol`/`Type::ClassInfo`
   shape as `.class` loading (§4.4), including case-class constructor
   accessor fields.
+- A shared-store `ClasspathSymbolResolver` implementing core's
+  `SymbolResolver` port. It reuses canonical `Definitions`, package
+  identities, and `LoadingSession`; package lookups require existing
+  package state or classpath evidence, and class prefixes support
+  `TypeRef`, `Applied`, and `ThisType` shapes. Resolver calls and caller
+  transaction rollbacks undo package-scope links and session cache entries
+  together with store allocations.
 
 ### Explicitly out of scope
 - `module-info.class`, `ACC_MODULE`, and the `Module*` attributes.
@@ -250,6 +257,31 @@ and is never repointed at the enclosing class — a package-private
 nested class is visible package-wide, not only from within its
 enclosing class. `.tasty` files carry neither attribute, so a
 `.tasty`-backed nested class's owner is still just its package (§4.4).
+
+### 4.5 Shared-store symbol resolver
+
+`ClasspathSymbolResolver<E>` is the classloader implementation of
+`dotty_core::SymbolResolver`. The frontend bootstraps `Definitions` once,
+then passes the same `SemanticStore`, `Definitions`, and `LoadingSession`
+through resolver instances. A resolver can hand its session to the next
+instance with `into_session`; the returned `SymbolId`s and package registry
+therefore remain canonical across classpath roots and frontend phases.
+
+Package paths are reused when already present in the shared `Packages`
+registry. A new path is entered only when its classpath reports a direct
+`.class` or `.tasty` resource in that package. Member lookup understands
+package and class `TypeRef`s, `Applied` class types, and class/package
+`ThisType`s. `MemberSpace::Explicit` chooses its declaring type as the
+lookup scope; names retain their type or term namespace, and a `Unique`
+request with multiple declarations returns `ResolutionError::Ambiguous`.
+The resolver returns declaration symbols only; inherited lookup, receiver
+adaptation, and overload ranking stay with the caller. Unsupported prefix
+forms return `None`.
+
+Every resolver call is atomic. A miss or loading error removes newly loaded
+classes, session cache entries, package entries, and package-scope links.
+Successful materializations are journaled so the frontend can call
+`rollback_to` before its paired `SemanticStore::rollback_to`.
 
 ### 4.4 `.tasty` convergence
 
