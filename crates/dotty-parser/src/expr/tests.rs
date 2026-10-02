@@ -3,7 +3,7 @@ use crate::ParseDiagnosticKind;
 use crate::compilation_unit::tests::{parser_for, token};
 use dotty_core::ast::{
     Annotated, Apply, ApplyKind, Block, CaseDef, Literal, Match, New, NumberKind, Parens, Select,
-    Super, This, Tuple, TypedExpr, UntypedNode,
+    Super, This, Tuple, UntypedNode,
 };
 use dotty_core::{
     Constant, HardKeyword, NameInterner, ScannerEvent, SourceId, SourceText, TextRange, Token,
@@ -2273,7 +2273,7 @@ fn parses_a_simple_type_ascription() {
 
 #[test]
 fn parses_an_unchecked_type_ascription_as_a_match_selector() {
-    let source = "(value: T @unchecked) match { case _ => value }";
+    let source = "(value: @unchecked) match { case _ => value }";
     let mut names = NameInterner::new();
     let mut parser = parser_for(
         source,
@@ -2281,18 +2281,17 @@ fn parses_an_unchecked_type_ascription_as_a_match_selector() {
             token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
             token(TokenKind::Identifier, 1, 6),
             token(TokenKind::ColonFollow, 6, 7),
-            token(TokenKind::Identifier, 8, 9),
-            token(TokenKind::Operator, 10, 11),
-            token(TokenKind::Identifier, 11, 20),
-            token(TokenKind::Punctuation(Punctuation::RightParen), 20, 21),
-            token(TokenKind::Keyword(HardKeyword::Match), 22, 27),
-            token(TokenKind::Punctuation(Punctuation::LeftBrace), 28, 29),
-            token(TokenKind::Keyword(HardKeyword::Case), 30, 34),
-            token(TokenKind::Identifier, 35, 36),
-            token(TokenKind::Operator, 37, 39),
-            token(TokenKind::Identifier, 40, 45),
-            token(TokenKind::Punctuation(Punctuation::RightBrace), 46, 47),
-            token(TokenKind::Eof, 47, 47),
+            token(TokenKind::Operator, 8, 9),
+            token(TokenKind::Identifier, 9, 18),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 18, 19),
+            token(TokenKind::Keyword(HardKeyword::Match), 20, 25),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 26, 27),
+            token(TokenKind::Keyword(HardKeyword::Case), 28, 32),
+            token(TokenKind::Identifier, 33, 34),
+            token(TokenKind::Operator, 35, 37),
+            token(TokenKind::Identifier, 38, 43),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 44, 45),
+            token(TokenKind::Eof, 45, 45),
         ],
         &mut names,
     );
@@ -2306,30 +2305,36 @@ fn parses_an_unchecked_type_ascription_as_a_match_selector() {
     else {
         panic!("expected the ascribed selector to retain its parentheses");
     };
-    let TreeKind::Typed(TypedExpr { expr, tpt }) = &parser.ast().get(*inner).kind else {
-        panic!("expected the selector's type ascription");
+    let TreeKind::Annotated(Annotated { expr, annotation }) = &parser.ast().get(*inner).kind else {
+        panic!("expected the selector's unchecked annotation ascription");
     };
     assert!(matches!(parser.ast().get(*expr).kind, TreeKind::Ident(_)));
     assert!(matches!(
-        parser.ast().get(*tpt).kind,
-        TreeKind::Annotated(Annotated { .. })
+        parser.ast().get(*annotation).kind,
+        TreeKind::Apply(_)
     ));
     assert_eq!(
         parser.ast().get(*inner).position.unwrap().span().range(),
-        TextRange::new(1, 20).unwrap()
+        TextRange::new(1, 18).unwrap()
     );
     assert_eq!(
-        parser.ast().get(*tpt).position.unwrap().span().range(),
-        TextRange::new(8, 20).unwrap()
+        parser
+            .ast()
+            .get(*annotation)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(8, 18).unwrap()
     );
     assert_eq!(cases.len(), 1);
     assert_eq!(
         parser.ast().get(tree).position.unwrap().span().range(),
-        TextRange::new(0, 47).unwrap()
+        TextRange::new(0, 45).unwrap()
     );
     assert_eq!(
         parser.ast().get(*selector).position.unwrap().span().range(),
-        TextRange::new(0, 21).unwrap()
+        TextRange::new(0, 19).unwrap()
     );
     assert!(parser.diagnostics().is_empty());
     assert_eq!(parser.current().kind, TokenKind::Eof);
