@@ -321,8 +321,10 @@ simple `val`/`var` definitions with inferred or explicit types, declarations
 without an RHS, and full-expression RHS values
 pattern definitions with tuple, extractor, binder, and infix-pattern LHSs
 method definitions with a leading type-parameter clause, ordered term
-parameter clauses, supported type-expression return types, declarations, and
-expression RHSs
+parameter clauses, supported type-expression return types (including a colon
+on the following line when it directly introduces the result type),
+declarations, and expression RHSs. A line separator is consumed only when a
+result-type colon follows it, so unrelated statement boundaries stay intact.
 parameter nodes are represented as `ValDef`; ordinary and named `using`
 clauses, inline parameters, default parameter expressions, and indented method
 bodies are supported. The soft name `inline` remains a parameter name when
