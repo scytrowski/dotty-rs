@@ -757,7 +757,7 @@ impl SourceTyper<'_> {
                     .get_mut(scope_stack.index())
                     .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack: scope_stack })?
                     .imports
-                    .push((stat, block_context.lexical));
+                    .push((stat, block_context));
                 continue;
             }
             if let Some(kind) = local_block_declaration_kind(&source_stat.kind) {

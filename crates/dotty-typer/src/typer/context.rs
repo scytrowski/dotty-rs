@@ -48,7 +48,7 @@ pub(super) struct ExpressionScopeFrame {
     pub(super) scope: dotty_core::ScopeId,
     pub(super) parent: Option<ExpressionScopeId>,
     pub(super) is_block_scope: bool,
-    pub(super) imports: Vec<(TreeId<Untyped>, SourceContextId)>,
+    pub(super) imports: Vec<(TreeId<Untyped>, ExpressionContext)>,
 }
 
 impl SourceTyper<'_> {

@@ -10355,6 +10355,29 @@ mod tests {
     }
 
     #[test]
+    fn local_import_qualifiers_resolve_prior_locals_and_import_aliases() {
+        let source_text = "package lib { object Owner { val member: Int = 1 } }; package app { import lib.Owner; object Use { def viaLocalValue: Int = { val local = Owner; import local.member; member }; def viaImportedAlias: Int = { import lib.{Owner as O}; import O.member; member } } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for name in ["viaLocalValue", "viaImportedAlias"] {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+            let context = typer.expression_context_for(method).unwrap();
+            typer.type_expression(rhs, context).unwrap_or_else(|error| {
+                panic!("local import qualifier in `{name}` should resolve: {error:?}")
+            });
+        }
+    }
+
+    #[test]
     fn explicitly_typed_local_value_is_entered_after_its_initializer() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def use: Int = { val local: Int = 1; local } }");

@@ -8,11 +8,14 @@ pub(in crate::typer) enum ImportSelection {
     Wildcard,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(in crate::typer) struct SourceImport {
     tree: TreeId<Untyped>,
     context: SourceContextId,
     parent: Option<SourceContextId>,
+    expression_context: Option<ExpressionContext>,
+    local_import_scope: Option<ExpressionScopeId>,
+    preceding_local_imports: Option<Vec<(TreeId<Untyped>, ExpressionContext)>>,
 }
 
 impl SourceTyper<'_> {
@@ -20,6 +23,19 @@ impl SourceTyper<'_> {
         &mut self,
         tree: TreeId<Untyped>,
         context: SourceContextId,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        self.resolve_qualifier_symbol_with_expression_context(
+            tree, context, None, tree_index, position,
+        )
+    }
+
+    fn resolve_qualifier_symbol_with_expression_context(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: SourceContextId,
+        expression_context: Option<ExpressionContext>,
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
@@ -31,6 +47,25 @@ impl SourceTyper<'_> {
         };
         match &node.kind {
             TreeKind::Ident(ident) => {
+                if let Some(expression_context) = expression_context {
+                    match self.expression_term_candidates(
+                        ident.name,
+                        expression_context,
+                        tree_index,
+                        position,
+                    ) {
+                        Ok(candidates) => {
+                            return self.unique_symbol_candidate(
+                                &candidates,
+                                ident.name,
+                                tree_index,
+                                position,
+                            );
+                        }
+                        Err(TyperError::TermNameNotFound { .. }) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
                 if let Some(symbol) =
                     self.lookup_context_symbol(ident.name, context, tree_index, position)?
                 {
@@ -40,8 +75,13 @@ impl SourceTyper<'_> {
                 self.resolve_external_package(&[segment], tree_index)
             }
             TreeKind::Select(select) => {
-                let Some(qualifier) =
-                    self.resolve_qualifier_symbol(select.qualifier, context, tree_index, position)?
+                let Some(qualifier) = self.resolve_qualifier_symbol_with_expression_context(
+                    select.qualifier,
+                    context,
+                    expression_context,
+                    tree_index,
+                    position,
+                )?
                 else {
                     return Ok(None);
                 };
@@ -244,13 +284,44 @@ impl SourceTyper<'_> {
         }
 
         let qualifier_context = source_import.parent.unwrap_or(source_import.context);
-        let Some(qualifier) = self.import_qualifier_symbol(
-            import.expr,
-            qualifier_context,
-            source_import.tree.index(),
-            location.position,
-        )?
-        else {
+        let qualifier_result = if let Some(expression_context) = source_import.expression_context {
+            let saved_imports = source_import
+                .local_import_scope
+                .zip(source_import.preceding_local_imports.clone())
+                .map(|(scope, preceding)| {
+                    let frame = self
+                        .expression_scopes
+                        .get_mut(scope.index())
+                        .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack: scope })?;
+                    Ok::<_, TyperError>(std::mem::replace(&mut frame.imports, preceding))
+                })
+                .transpose()?;
+            let result = self.resolve_qualifier_symbol_with_expression_context(
+                import.expr,
+                qualifier_context,
+                Some(expression_context),
+                source_import.tree.index(),
+                location.position,
+            );
+            if let (Some(scope), Some(saved_imports)) =
+                (source_import.local_import_scope, saved_imports)
+            {
+                let frame = self
+                    .expression_scopes
+                    .get_mut(scope.index())
+                    .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack: scope })?;
+                frame.imports = saved_imports;
+            }
+            result?
+        } else {
+            self.import_qualifier_symbol(
+                import.expr,
+                qualifier_context,
+                source_import.tree.index(),
+                location.position,
+            )?
+        };
+        let Some(qualifier) = qualifier_result else {
             return Err(TyperError::ImportQualifierNotFound {
                 source: self.source,
                 import_tree_index: source_import.tree.index(),
@@ -405,9 +476,10 @@ impl SourceTyper<'_> {
                     tree_index: tree.index(),
                 })?;
         let symbol = self
-            .resolve_qualifier_symbol(
+            .resolve_qualifier_symbol_with_expression_context(
                 tree,
                 context.lexical,
+                Some(context),
                 import_tree_index,
                 source_node.position,
             )?
@@ -645,6 +717,9 @@ impl SourceTyper<'_> {
                 tree: import_tree,
                 context: *context_id,
                 parent: source_context.parent,
+                expression_context: None,
+                local_import_scope: None,
+                preceding_local_imports: None,
             };
             if let Some(scope_index) = scopes
                 .iter()
@@ -681,26 +756,32 @@ impl SourceTyper<'_> {
     /// imports at this lexical depth contribute to the same candidate bucket.
     pub(in crate::typer) fn lookup_local_import_candidates(
         &mut self,
-        imports: &[(TreeId<Untyped>, SourceContextId)],
+        imports: &[(TreeId<Untyped>, ExpressionContext)],
+        import_scope: ExpressionScopeId,
         name: dotty_core::Name,
         type_only: bool,
         selection: ImportSelection,
         location: SourceTreeLocation,
     ) -> Result<Vec<SymbolId>, TyperError> {
         let mut candidates = Vec::new();
-        for (tree, context) in imports {
-            let source_context = self.index.try_source_context(*context).ok_or(
-                TyperError::SourceContextMissing {
-                    source: self.source,
-                    tree_index: location.tree_index,
-                    context_index: context.index(),
-                },
-            )?;
+        for (import_index, (tree, expression_context)) in imports.iter().enumerate() {
+            let context = expression_context.lexical;
+            let source_context =
+                self.index
+                    .try_source_context(context)
+                    .ok_or(TyperError::SourceContextMissing {
+                        source: self.source,
+                        tree_index: location.tree_index,
+                        context_index: context.index(),
+                    })?;
             candidates.extend(self.lookup_imported_symbols(
                 SourceImport {
                     tree: *tree,
-                    context: *context,
+                    context,
                     parent: source_context.parent,
+                    expression_context: Some(*expression_context),
+                    local_import_scope: Some(import_scope),
+                    preceding_local_imports: Some(imports[..import_index].to_vec()),
                 },
                 name,
                 type_only,
@@ -818,6 +899,18 @@ impl SourceTyper<'_> {
     }
 
     pub(in crate::typer) fn scopes_of(&self, symbol: SymbolId) -> Vec<dotty_core::ScopeId> {
+        self.scopes_of_with_seen(symbol, &mut Vec::new())
+    }
+
+    fn scopes_of_with_seen(
+        &self,
+        symbol: SymbolId,
+        seen: &mut Vec<SymbolId>,
+    ) -> Vec<dotty_core::ScopeId> {
+        if seen.contains(&symbol) {
+            return Vec::new();
+        }
+        seen.push(symbol);
         let mut scopes = Vec::new();
         if let Some(scope) = self
             .packages
@@ -852,10 +945,23 @@ impl SourceTyper<'_> {
                 }
             }
         }
-        if let SymbolInfo::Complete(ty) = self.store.symbols.get(symbol).info
-            && let Type::ClassInfo(info) = self.store.types.get(ty)
-        {
-            insert_scope(&mut scopes, info.declarations);
+        if let SymbolInfo::Complete(ty) = self.store.symbols.get(symbol).info {
+            match self.store.types.get(ty) {
+                Type::ClassInfo(info) => insert_scope(&mut scopes, info.declarations),
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(target),
+                    ..
+                }
+                | Type::TypeRef {
+                    target: TypeRefTarget::Symbol(target),
+                    ..
+                } => {
+                    for scope in self.scopes_of_with_seen(*target, seen) {
+                        insert_scope(&mut scopes, scope);
+                    }
+                }
+                _ => {}
+            }
         }
         let semantic = self.store.symbols.get(symbol);
         if semantic.kind != SymbolKind::Object {

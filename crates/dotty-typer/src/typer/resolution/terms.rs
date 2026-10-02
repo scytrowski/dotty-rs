@@ -47,6 +47,7 @@ impl SourceTyper<'_> {
                 for selection in [ImportSelection::Explicit, ImportSelection::Wildcard] {
                     let imported = self.lookup_local_import_candidates(
                         &frame.imports,
+                        stack,
                         name,
                         false,
                         selection,
