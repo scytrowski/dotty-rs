@@ -31,7 +31,7 @@ impl SourceTyper<'_> {
             let frame = self
                 .expression_scopes
                 .get(stack.index())
-                .copied()
+                .cloned()
                 .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack })?;
             let candidates = self
                 .store
@@ -41,6 +41,59 @@ impl SourceTyper<'_> {
                 .to_vec();
             if !candidates.is_empty() {
                 return Ok(candidates);
+            }
+
+            if frame.is_block_scope && !frame.imports.is_empty() {
+                for selection in [ImportSelection::Explicit, ImportSelection::Wildcard] {
+                    let imported = self.lookup_local_import_candidates(
+                        &frame.imports,
+                        stack,
+                        name,
+                        false,
+                        selection,
+                        SourceTreeLocation {
+                            tree_index,
+                            position,
+                        },
+                    )?;
+                    if imported.is_empty() {
+                        continue;
+                    }
+
+                    // Scala 3 treats an import in a nested block as ambiguous
+                    // with a matching declaration from the enclosing method or
+                    // block. A direct declaration in this same block was
+                    // already preferred above.
+                    let mut combined = imported;
+                    let mut outer = frame.parent;
+                    while let Some(parent) = outer {
+                        let parent_frame = self.expression_scopes.get(parent.index()).ok_or(
+                            TyperError::ExpressionLocalScopeStackMissing { stack: parent },
+                        )?;
+                        let outer_candidates = self
+                            .store
+                            .scopes
+                            .get(parent_frame.scope)
+                            .lookup_all(&name)
+                            .to_vec();
+                        if !outer_candidates.is_empty() {
+                            combined.extend(outer_candidates);
+                            break;
+                        }
+                        outer = parent_frame.parent;
+                    }
+                    if let Some(outer_candidates) = self.lexical_term_candidates(
+                        context.lexical,
+                        context.owner,
+                        name,
+                        tree_index,
+                    )? {
+                        combined.extend(outer_candidates);
+                    }
+                    combined.sort_by_key(|symbol| symbol.index());
+                    combined.dedup();
+                    return Ok(combined);
+                }
             }
             local_scope = frame.parent;
         }
@@ -111,6 +164,56 @@ impl SourceTyper<'_> {
             name,
             position,
         })
+    }
+
+    fn lexical_term_candidates(
+        &self,
+        context: SourceContextId,
+        owner: SymbolId,
+        name: dotty_core::Name,
+        tree_index: u32,
+    ) -> Result<Option<Vec<SymbolId>>, TyperError> {
+        let contexts = self.source_context_chain(context, tree_index)?;
+        let fallback_scope = self
+            .store
+            .symbols
+            .contains(owner)
+            .then(|| self.store.symbols.get(owner).owner)
+            .flatten()
+            .filter(|owner| {
+                self.store.symbols.contains(*owner)
+                    && matches!(
+                        self.store.symbols.get(*owner).kind,
+                        SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                    )
+            })
+            .and_then(|owner| self.index.scope_of(owner))
+            .filter(|scope| {
+                contexts.iter().all(|context_id| {
+                    self.index.source_context(*context_id).lexical_scope != *scope
+                })
+            });
+        for (context_position, context_id) in contexts.iter().enumerate() {
+            let source_context = self.index.source_context(*context_id);
+            let candidates = self
+                .store
+                .scopes
+                .get(source_context.lexical_scope)
+                .lookup_all(&name)
+                .to_vec();
+            if !candidates.is_empty() {
+                return Ok(Some(candidates));
+            }
+            if context_position == 0
+                && let Some(scope) = fallback_scope
+            {
+                let candidates = self.store.scopes.get(scope).lookup_all(&name).to_vec();
+                if !candidates.is_empty() {
+                    return Ok(Some(candidates));
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub(in crate::typer) fn unique_expression_term(

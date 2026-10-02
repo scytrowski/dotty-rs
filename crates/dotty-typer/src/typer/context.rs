@@ -43,11 +43,12 @@ impl ExpressionScopeId {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct ExpressionScopeFrame {
     pub(super) scope: dotty_core::ScopeId,
     pub(super) parent: Option<ExpressionScopeId>,
     pub(super) is_block_scope: bool,
+    pub(super) imports: Vec<(TreeId<Untyped>, ExpressionContext)>,
 }
 
 impl SourceTyper<'_> {
@@ -199,6 +200,7 @@ impl SourceTyper<'_> {
             scope,
             parent: context.local_scopes,
             is_block_scope: false,
+            imports: Vec::new(),
         });
         Ok(ExpressionContext {
             local_scopes: Some(stack),

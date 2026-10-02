@@ -16,7 +16,7 @@ impl SourceTyper<'_> {
         let local_methods_checkpoint = self.local_methods.clone();
         let initializing_local_symbols_checkpoint = self.initializing_local_symbols.clone();
         let inferred_method_results_checkpoint = self.inferred_method_results_in_progress.clone();
-        let expression_scope_checkpoint = self.expression_scopes.len();
+        let expression_scope_checkpoint = self.expression_scopes.clone();
         let mut info_journal = Vec::new();
         let result = operation(self, &mut info_journal);
         if result.is_err() {
@@ -34,7 +34,7 @@ impl SourceTyper<'_> {
             self.local_methods = local_methods_checkpoint;
             self.initializing_local_symbols = initializing_local_symbols_checkpoint;
             self.inferred_method_results_in_progress = inferred_method_results_checkpoint;
-            self.expression_scopes.truncate(expression_scope_checkpoint);
+            self.expression_scopes = expression_scope_checkpoint;
         }
         result
     }
@@ -54,7 +54,7 @@ impl SourceTyper<'_> {
         let local_symbols_checkpoint = self.local_symbols.clone();
         let local_methods_checkpoint = self.local_methods.clone();
         let initializing_local_symbols_checkpoint = self.initializing_local_symbols.clone();
-        let expression_scope_checkpoint = self.expression_scopes.len();
+        let expression_scope_checkpoint = self.expression_scopes.clone();
         let mut info_journal = Vec::new();
         let mut new_mappings = Vec::new();
         let result = operation(self, &mut info_journal, &mut new_mappings);
@@ -73,7 +73,7 @@ impl SourceTyper<'_> {
                 self.local_symbols = local_symbols_checkpoint;
                 self.local_methods = local_methods_checkpoint;
                 self.initializing_local_symbols = initializing_local_symbols_checkpoint;
-                self.expression_scopes.truncate(expression_scope_checkpoint);
+                self.expression_scopes = expression_scope_checkpoint;
                 for (source, source_tree) in new_mappings.into_iter().rev() {
                     self.typed_index.remove(source, source_tree);
                 }

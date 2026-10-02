@@ -441,6 +441,63 @@ fn source_typer_resolves_external_imports_and_types_member_applications() {
 }
 
 #[test]
+fn local_import_qualifiers_resolve_through_the_classpath() {
+    let stubs = TemporaryDirectory::new("local-import-jdk-stubs");
+    write_required_jdk_stubs(stubs.path());
+
+    let source = SourceId::from_index(0);
+    let text = "def localImport(p: external.Ping): external.Ping = { import external.Ping; def local(value: Ping): Ping = value; local(p) }";
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(text, source, &mut store, &mut packages);
+    let root = packages.symbol::<&str>(&[]).unwrap();
+    let resolver = ClasspathSymbolResolver::new(
+        class_path(&stubs),
+        definitions,
+        LoadingSession::with_packages(packages),
+    );
+    let log = Rc::new(RefCell::new(ResolutionLog::default()));
+    let resolver = RecordingResolver::new(resolver, Rc::clone(&log));
+    let (method, rhs) = method_rhs(&unit, &store, "localImport");
+
+    let typed_type = {
+        let typer_packages = Packages::new();
+        let mut typer = SourceTyper::new(
+            &unit.parsed.ast,
+            source,
+            &unit.index,
+            &mut store,
+            definitions,
+            &typer_packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer.type_expression(rhs, context).unwrap();
+        typer.typed_ast().get(typed).ty
+    };
+
+    let external_ping = log
+        .borrow()
+        .members
+        .iter()
+        .find_map(|(name, symbol)| (name == "Ping").then_some(*symbol))
+        .expect("local import should resolve external.Ping through the classpath");
+    let external_package = store.symbols.get(external_ping).owner.unwrap();
+    assert_eq!(store.symbols.get(external_package).owner, Some(root));
+    assert_eq!(
+        store
+            .names
+            .resolve(store.symbols.get(external_package).name.text()),
+        "external"
+    );
+    assert!(matches!(
+        store.types.get(typed_type),
+        Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == external_ping
+    ));
+}
+
+#[test]
 fn generic_external_receiver_reports_the_current_signature_limitation() {
     let stubs = TemporaryDirectory::new("generic-jdk-stubs");
     write_required_jdk_stubs(stubs.path());
