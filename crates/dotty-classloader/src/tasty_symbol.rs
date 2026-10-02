@@ -4,14 +4,14 @@ use dotty_classfile::access_flags::{
     ACC_SYNTHETIC, ClassAccessFlags, FieldAccessFlags, MethodAccessFlags,
 };
 use dotty_tasty::tasty::{
-    ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, AstError,
-    CASEACCESSOR_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionTail, FIELDACCESSOR_TAG,
-    FINAL_TAG, IdentNode, LOCAL_TAG, MUTABLE_TAG, PRIVATE_TAG, PRIVATEQUALIFIED_TAG, PROTECTED_TAG,
-    PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree, Reader, ReferenceNode, SHAREDTERM_TAG,
-    SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode,
-    StructuredTree, TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG,
-    TYPEDEF_TAG, TYPEREF_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError,
-    TermValue, VALDEF_TAG,
+    ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, ApplyNode,
+    AstError, CASEACCESSOR_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionTail,
+    FIELDACCESSOR_TAG, FINAL_TAG, IdentNode, LOCAL_TAG, MUTABLE_TAG, PRIVATE_TAG,
+    PRIVATEQUALIFIED_TAG, PROTECTED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree,
+    Reader, ReferenceNode, SHAREDTERM_TAG, SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG, SelectNode,
+    StandardSection, StructuredNode, StructuredTree, TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG,
+    TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG, TYPEREF_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG,
+    TastyFile, TastyFileError, TermValue, VALDEF_TAG,
 };
 use std::collections::HashSet;
 use std::fmt;
@@ -23,7 +23,7 @@ use std::fmt;
 ///
 /// `fields`/`methods` cover ordinary `ValDef`/`DefDef` template members;
 /// each member's own declared type resolves to a name the same
-/// best-effort way a supertype does (see `resolve_parent_name`) — a
+/// best-effort way a supertype does (see `resolve_parent_name_with_bare`) — a
 /// type shape this decoder does not recognize (anything past a plain or
 /// generic class reference: tuples, function types, refinements,
 /// dependent/path types, ...) is simply `None`, not a decode failure, so
@@ -94,7 +94,7 @@ pub(crate) enum DeclaredQualifier {
 pub(crate) struct DecodedTastyField {
     pub name: String,
     pub flags: FieldAccessFlags,
-    /// `None` when [`resolve_parent_name`] can't reduce the field's
+    /// `None` when [`resolve_parent_name_with_bare`] can't reduce the field's
     /// declared type tree to a name — see [`DecodedTastyClass`]'s doc
     /// comment.
     pub declared_type: Option<BinaryName>,
@@ -153,10 +153,9 @@ pub enum TastyDecodeError {
     /// from (there is always one for a class/trait/object; seeing this
     /// means the file's shape isn't one this decoder recognizes).
     NoTemplateBody,
-    /// A supertype after the first `Template` parent (i.e. a mixin
-    /// interface, not the implicit superclass slot) has no name this
-    /// decoder can resolve — see `resolve_parent_name`'s doc comment
-    /// for exactly which shapes are and are not resolved.
+    /// A declared `Template` parent (superclass or mixin interface) has no
+    /// name this decoder can resolve — see `resolve_parent_name_with_bare`'s
+    /// doc comment for exactly which shapes are and are not resolved.
     UnresolvedSupertype,
 }
 
@@ -209,23 +208,40 @@ impl From<AstError> for TastyDecodeError {
 /// `requested`'s own package (everything before that last `/`, `""` for
 /// the root package) doubles as the package every bare, unqualified
 /// parent/member-type name reference is resolved relative to — see
-/// [`resolve_parent_name`]'s doc comment for why that's the right
+/// [`resolve_parent_name_with_bare`]'s doc comment for why that's the right
 /// context to use.
 #[cfg(test)]
 pub(crate) fn decode(
     bytes: &[u8],
     requested: &BinaryName,
 ) -> Result<DecodedTastyClass, TastyDecodeError> {
-    decode_with_alias_resolver(bytes, requested, |_, _| None)
+    decode_impl(bytes, requested, |_, _| None, |_, _| None, false)
 }
 
-/// Decodes a class while allowing the classpath owner to resolve a named
-/// alias when an otherwise real TASTy reference has a class prefix this
-/// structural decoder cannot follow (for example `scala.package$.Iterator`).
-pub(crate) fn decode_with_alias_resolver(
+/// Decodes a class with classpath-backed resolution for aliases and bare
+/// references. The latter callback is consulted only for an unqualified name
+/// that structural TASTy resolution could not identify.
+pub(crate) fn decode_with_resolvers(
     bytes: &[u8],
     requested: &BinaryName,
     mut resolve_alias: impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
+    mut resolve_bare: impl FnMut(&str, &str) -> Option<BinaryName>,
+) -> Result<DecodedTastyClass, TastyDecodeError> {
+    decode_impl(
+        bytes,
+        requested,
+        &mut resolve_alias,
+        &mut resolve_bare,
+        true,
+    )
+}
+
+fn decode_impl(
+    bytes: &[u8],
+    requested: &BinaryName,
+    mut resolve_alias: impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
+    mut resolve_bare: impl FnMut(&str, &str) -> Option<BinaryName>,
+    strict_superclass: bool,
 ) -> Result<DecodedTastyClass, TastyDecodeError> {
     let file = TastyFile::parse_scala_3_9(bytes)?;
     let index = file.ast_address_index()?;
@@ -276,19 +292,39 @@ pub(crate) fn decode_with_alias_resolver(
 
     let mut parents = template.parents.iter();
     let super_class = match parents.next() {
-        Some(parent) => resolve_parent_name_with_alias(&file, parent, package, &mut resolve_alias)
-            .unwrap_or_else(|| BinaryName::from_internal("java/lang/Object")),
-        None => BinaryName::from_internal("java/lang/Object"),
+        Some(parent) => {
+            let resolved = resolve_parent_name_with_alias(
+                &file,
+                parent,
+                package,
+                &mut resolve_alias,
+                &mut resolve_bare,
+            );
+            resolve_super_class(true, resolved, strict_superclass)?
+        }
+        None => resolve_super_class(false, None, strict_superclass)?,
     };
 
     let mut interfaces = Vec::new();
     for parent in parents {
-        let resolution = resolve_parent_name_with_alias(&file, parent, package, &mut resolve_alias);
+        let resolution = resolve_parent_name_with_alias(
+            &file,
+            parent,
+            package,
+            &mut resolve_alias,
+            &mut resolve_bare,
+        );
         interfaces.push(resolution.ok_or(TastyDecodeError::UnresolvedSupertype)?);
     }
 
-    let mut fields = decode_constructor_accessor_fields(&file, &template.term_params, package)?;
-    let (stats_fields, methods) = decode_members(&file, &template.stats, package)?;
+    let mut fields = decode_constructor_accessor_fields(
+        &file,
+        &template.term_params,
+        package,
+        &mut resolve_bare,
+    )?;
+    let (stats_fields, methods) =
+        decode_members(&file, &template.stats, package, &mut resolve_bare)?;
     fields.extend(stats_fields);
 
     Ok(DecodedTastyClass {
@@ -299,6 +335,19 @@ pub(crate) fn decode_with_alias_resolver(
         fields,
         methods,
     })
+}
+
+fn resolve_super_class(
+    explicit_parent: bool,
+    resolved: Option<BinaryName>,
+    strict: bool,
+) -> Result<BinaryName, TastyDecodeError> {
+    match (explicit_parent, resolved, strict) {
+        (false, _, _) => Ok(BinaryName::from_internal("java/lang/Object")),
+        (true, Some(parent), _) => Ok(parent),
+        (true, None, false) => Ok(BinaryName::from_internal("java/lang/Object")),
+        (true, None, true) => Err(TastyDecodeError::UnresolvedSupertype),
+    }
 }
 
 /// Reconstructs a field for every primary-constructor term parameter that is
@@ -331,6 +380,7 @@ fn decode_constructor_accessor_fields(
     file: &TastyFile<'_>,
     term_params: &[ParameterNode<'_>],
     package: &str,
+    resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
 ) -> Result<Vec<DecodedTastyField>, TastyDecodeError> {
     let mut fields = Vec::new();
 
@@ -348,7 +398,12 @@ fn decode_constructor_accessor_fields(
         fields.push(DecodedTastyField {
             name: field_name,
             flags: decode_field_flags(&body.tail),
-            declared_type: resolve_parent_name(file, &body.type_tree, package),
+            declared_type: resolve_parent_name_with_bare(
+                file,
+                &body.type_tree,
+                package,
+                resolve_bare,
+            ),
         });
     }
 
@@ -384,6 +439,7 @@ fn decode_members(
     file: &TastyFile<'_>,
     stats: &[RawTree<'_>],
     package: &str,
+    resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
 ) -> Result<(Vec<DecodedTastyField>, Vec<DecodedTastyMethod>), TastyDecodeError> {
     let mut fields = Vec::new();
     let mut methods = Vec::new();
@@ -410,7 +466,12 @@ fn decode_members(
                 fields.push(DecodedTastyField {
                     name: field_name,
                     flags: decode_field_flags(&tail),
-                    declared_type: resolve_parent_name(file, &type_tree, package),
+                    declared_type: resolve_parent_name_with_bare(
+                        file,
+                        &type_tree,
+                        package,
+                        resolve_bare,
+                    ),
                 });
             }
             DEFDEF_TAG => {
@@ -440,10 +501,9 @@ fn decode_members(
                     let Some(parameter_name) = wire_name(file, *parameter_name) else {
                         continue;
                     };
-                    let declared_type = parameter
-                        .decode_body()
-                        .ok()
-                        .and_then(|body| resolve_parent_name(file, &body.type_tree, package));
+                    let declared_type = parameter.decode_body().ok().and_then(|body| {
+                        resolve_parent_name_with_bare(file, &body.type_tree, package, resolve_bare)
+                    });
                     decoded_parameters.push(DecodedTastyParameter {
                         name: parameter_name,
                         declared_type,
@@ -459,7 +519,7 @@ fn decode_members(
                 let return_type = if method_name == "<init>" {
                     None
                 } else {
-                    resolve_parent_name(file, &return_type, package)
+                    resolve_parent_name_with_bare(file, &return_type, package, resolve_bare)
                 };
 
                 methods.push(DecodedTastyMethod {
@@ -593,13 +653,28 @@ fn decode_qualifier(file: &TastyFile<'_>, tree: &RawTree<'_>) -> DeclaredQualifi
 /// `Qualified { prefix: "java", selector: "io" }`, not one flat `UTF8`
 /// entry — `docs/tasty-format-3.9.0.md` §4.2).
 fn resolve_qualified_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
+    resolve_qualified_name_at_depth(file, reference, 0)
+}
+
+fn resolve_qualified_name_at_depth(
+    file: &TastyFile<'_>,
+    reference: u32,
+    depth: usize,
+) -> Option<String> {
+    const MAX_NAME_DEPTH: usize = 256;
+    if depth >= MAX_NAME_DEPTH {
+        return None;
+    }
     match file.names().entries().get(reference as usize)? {
         RawName::Utf8(text) => Some(text.clone()),
         RawName::Qualified { prefix, selector } => {
-            let prefix = resolve_qualified_name(file, *prefix)?;
-            let selector = resolve_qualified_name(file, *selector)?;
+            let prefix = resolve_qualified_name_at_depth(file, *prefix, depth + 1)?;
+            let selector = resolve_qualified_name_at_depth(file, *selector, depth + 1)?;
             Some(format!("{prefix}/{selector}"))
         }
+        RawName::Signed {
+            result_signature, ..
+        } => resolve_qualified_name_at_depth(file, *result_signature, depth + 1),
         _ => None,
     }
 }
@@ -750,7 +825,7 @@ fn qualify_symbol_address(name: String, current_package: Option<&str>) -> String
 /// A plain `Option<BinaryName>` cannot distinguish "this isn't a reference
 /// shape I understand at all, try your own heuristic" from "this
 /// unambiguously *is* a real, post-typecheck reference, but I can't name
-/// its prefix" — and [`resolve_parent_name`] must treat those two cases
+/// its prefix" — and [`resolve_parent_name_with_bare`] must treat those two cases
 /// completely differently: the first still falls back to its
 /// flatten-and-guess heuristic (the only thing that has ever handled
 /// pre-typecheck `IDENT`/`SELECT` chains), but the second must not — a
@@ -779,7 +854,7 @@ enum ReferenceResolution {
 /// nested inside the elaborated `IDENTTPT` pretty-print form a `.tasty`
 /// `extends` clause's own reference tree wraps it in — into a fully
 /// qualified [`BinaryName`], using [`resolve_reference_prefix`]'s
-/// prefix/name-table semantics instead of [`resolve_parent_name`]'s
+/// prefix/name-table semantics instead of [`resolve_parent_name_with_bare`]'s
 /// flatten-and-guess fallback.
 ///
 /// Returns [`ReferenceResolution::Unresolved`] — never a bare,
@@ -853,6 +928,33 @@ fn resolve_reference_name_at_depth(
                     ))
                 })
                 .unwrap_or(ReferenceResolution::Unresolved)
+        }
+        StructuredTree::Length(StructuredNode::SelectIn(selection)) => {
+            let Some(name) = render_tree_name(file, selection.name) else {
+                return ReferenceResolution::Unresolved;
+            };
+            resolve_reference_prefix_at_depth(
+                file,
+                &selection.qualifier,
+                current_package,
+                depth + 1,
+            )
+            .and_then(|prefix| {
+                let prefix = prefix.trim_matches('/');
+                if matches!(prefix, "scala/package" | "scala/package$") {
+                    return None;
+                }
+                if prefix.is_empty() || prefix == "_root_" {
+                    Some(ReferenceResolution::Resolved(BinaryName::from_internal(
+                        name,
+                    )))
+                } else {
+                    Some(ReferenceResolution::Resolved(BinaryName::from_internal(
+                        format!("{prefix}/{name}"),
+                    )))
+                }
+            })
+            .unwrap_or(ReferenceResolution::Unresolved)
         }
         StructuredTree::Ident(IdentNode { type_tree, .. }) => {
             resolve_reference_name_at_depth(file, &type_tree, current_package, depth + 1)
@@ -991,12 +1093,13 @@ fn resolve_symbol_address(file: &TastyFile<'_>, address: u32) -> Option<String> 
 /// case, exactly as bare (unqualified) resolution was wrong for it
 /// before this fix. Only real symbol resolution can disambiguate the
 /// two.
-fn resolve_parent_name(
+fn resolve_parent_name_with_bare(
     file: &TastyFile<'_>,
     parent: &RawTree<'_>,
     package: &str,
+    resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
 ) -> Option<BinaryName> {
-    resolve_parent_name_in_package(file, parent, package, Some(package))
+    resolve_parent_name_in_package_with_bare(file, parent, package, Some(package), resolve_bare)
 }
 
 fn resolve_parent_name_in_package(
@@ -1005,18 +1108,82 @@ fn resolve_parent_name_in_package(
     package: &str,
     package_scope: Option<&str>,
 ) -> Option<BinaryName> {
+    resolve_parent_name_in_package_with_bare(file, parent, package, package_scope, &mut |_, _| None)
+}
+
+fn resolve_parent_name_in_package_with_bare(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+    package_scope: Option<&str>,
+    resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
+) -> Option<BinaryName> {
+    resolve_parent_name_in_package_with_bare_at_depth(
+        file,
+        parent,
+        package,
+        package_scope,
+        resolve_bare,
+        0,
+    )
+}
+
+fn resolve_parent_name_in_package_with_bare_at_depth(
+    file: &TastyFile<'_>,
+    parent: &RawTree<'_>,
+    package: &str,
+    package_scope: Option<&str>,
+    resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
+    depth: usize,
+) -> Option<BinaryName> {
+    const MAX_PARENT_TREE_DEPTH: usize = 256;
+    if depth >= MAX_PARENT_TREE_DEPTH {
+        return None;
+    }
+    if let Ok(StructuredTree::Length(StructuredNode::Apply(ApplyNode { function, .. }))) =
+        parent.decode_structured()
+    {
+        return resolve_parent_name_in_package_with_bare_at_depth(
+            file,
+            &function,
+            package,
+            package_scope,
+            resolve_bare,
+            depth + 1,
+        );
+    }
     let reference = match package_scope {
         Some(_) => resolve_reference_name_in_package(file, parent, package_scope),
         None => resolve_reference_name(file, parent),
     };
     match reference {
-        ReferenceResolution::Resolved(resolved) => return Some(resolved),
+        ReferenceResolution::Resolved(resolved) => {
+            if matches!(
+                resolved.as_internal(),
+                "scala/Any" | "scala/AnyRef" | "scala/Object"
+            ) {
+                return Some(BinaryName::from_internal("java/lang/Object"));
+            }
+            return Some(resolved);
+        }
         // A real reference this decoder cannot fully qualify (an
         // implicit-import reference such as `scala.package$.Iterator`,
         // see `ReferenceResolution`'s own doc comment) must not fall
         // through to the heuristic below and come back out as a
         // misleading same-package guess.
-        ReferenceResolution::Unresolved => return None,
+        ReferenceResolution::Unresolved => {
+            let simple_name = unresolved_semantic_reference_name(file, parent)?;
+            // Scala 3.9 represents AnyRef as the JVM Object superclass in
+            // emitted class hierarchies. This is a compiler-known identity,
+            // not a fallback for arbitrary unreadable symbol addresses.
+            if matches!(
+                simple_name.as_str(),
+                "Any" | "AnyRef" | "Object" | "java/lang/Object"
+            ) {
+                return Some(BinaryName::from_internal("java/lang/Object"));
+            }
+            return resolve_bare(package, &simple_name);
+        }
         ReferenceResolution::NotAReference => {}
     }
 
@@ -1028,7 +1195,27 @@ fn resolve_parent_name_in_package(
 
     if names.is_empty() {
         return match package_scope {
-            Some(_) => resolve_applied_type_name_in_package(file, parent, package, package_scope),
+            Some(_) => {
+                let RawTree::LengthNode(node) = parent else {
+                    return None;
+                };
+                if !matches!(node.tag, APPLIEDTPT_TAG | APPLIEDTYPE_TAG) {
+                    return None;
+                }
+                let StructuredNode::AppliedType(AppliedTypeNode { tycon, .. }) =
+                    node.decode_structured().ok()?
+                else {
+                    return None;
+                };
+                resolve_parent_name_in_package_with_bare_at_depth(
+                    file,
+                    &tycon,
+                    package,
+                    package_scope,
+                    resolve_bare,
+                    depth + 1,
+                )
+            }
             None => resolve_applied_type_name(file, parent, package),
         };
     }
@@ -1042,6 +1229,10 @@ fn resolve_parent_name_in_package(
         return None;
     }
 
+    if !already_qualified && let Some(resolved) = resolve_bare(package, &names[0]) {
+        return Some(resolved);
+    }
+
     let joined = names.join("/");
     let qualified = if already_qualified || package.is_empty() {
         joined
@@ -1051,18 +1242,65 @@ fn resolve_parent_name_in_package(
     Some(BinaryName::from_internal(qualified))
 }
 
+/// Returns the simple name only for an unresolved named TYPEREF/TERMREF,
+/// following wrappers used by extends and applied types. Direct symbol refs
+/// intentionally return `None`: if their AST address or owner chain is bad,
+/// textual name guessing would hide malformed semantic identity.
+fn unresolved_semantic_reference_name(file: &TastyFile<'_>, tree: &RawTree<'_>) -> Option<String> {
+    unresolved_semantic_reference_name_at_depth(file, tree, 0)
+}
+
+fn unresolved_semantic_reference_name_at_depth(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    depth: usize,
+) -> Option<String> {
+    const MAX_DEPTH: usize = 128;
+    if depth >= MAX_DEPTH {
+        return None;
+    }
+    if let RawTree::LengthNode(node) = tree
+        && matches!(node.tag, APPLIEDTPT_TAG | APPLIEDTYPE_TAG)
+    {
+        let StructuredNode::AppliedType(AppliedTypeNode { tycon, .. }) =
+            node.decode_structured().ok()?
+        else {
+            return None;
+        };
+        return unresolved_semantic_reference_name_at_depth(file, &tycon, depth + 1);
+    }
+    match tree.decode_structured().ok()? {
+        StructuredTree::Ident(IdentNode { type_tree, .. }) => {
+            unresolved_semantic_reference_name_at_depth(file, &type_tree, depth + 1)
+        }
+        StructuredTree::Length(StructuredNode::SelectIn(selection)) => {
+            render_tree_name(file, selection.name)
+        }
+        StructuredTree::Length(StructuredNode::Apply(ApplyNode { function, .. })) => {
+            unresolved_semantic_reference_name_at_depth(file, &function, depth + 1)
+        }
+        StructuredTree::Reference(ReferenceNode {
+            tag: TERMREF_TAG | TYPEREF_TAG,
+            reference,
+            ..
+        }) => resolve_qualified_name(file, reference),
+        _ => None,
+    }
+}
+
 fn resolve_parent_name_with_alias(
     file: &TastyFile<'_>,
     parent: &RawTree<'_>,
     package: &str,
     resolve_alias: &mut impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
+    resolve_bare: &mut impl FnMut(&str, &str) -> Option<BinaryName>,
 ) -> Option<BinaryName> {
     if let Some((owner, alias)) = unresolved_alias_reference(file, parent)
         && matches!(owner.simple_name(), "package" | "package$")
     {
         return resolve_alias(&owner, &alias);
     }
-    resolve_parent_name(file, parent, package)
+    resolve_parent_name_with_bare(file, parent, package, resolve_bare)
 }
 
 /// Extracts the owner and simple name of a reference that could not be
@@ -1106,6 +1344,9 @@ fn unresolved_alias_reference_at_depth(
     match structured {
         StructuredTree::Ident(IdentNode { type_tree, .. }) => {
             unresolved_alias_reference_at_depth(file, &type_tree, depth + 1)
+        }
+        StructuredTree::Length(StructuredNode::Apply(ApplyNode { function, .. })) => {
+            unresolved_alias_reference_at_depth(file, &function, depth + 1)
         }
         StructuredTree::Reference(ReferenceNode {
             tag: TERMREF_TAG | TYPEREF_TAG,
@@ -1313,6 +1554,10 @@ fn wire_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
     file.names().get_utf8(reference).map(str::to_owned)
 }
 
+fn render_tree_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
+    resolve_qualified_name(file, reference)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1442,7 +1687,7 @@ mod tests {
     /// `TERMREFpkg`-qualified reference is authoritative and never
     /// deferred to the requested class's own package the way a
     /// genuinely bare (unresolvable) reference is (see
-    /// [`resolve_parent_name`]'s flatten-based fallback, still covered
+    /// [`resolve_parent_name_with_bare`]'s flatten-based fallback, still covered
     /// by `does_not_requalify_an_already_cross_package_mixin` below).
     #[test]
     fn a_real_qualified_mixin_resolves_to_its_own_package_not_the_requested_ones() {
@@ -1516,13 +1761,29 @@ mod tests {
     /// validates its target.
     #[test]
     fn decoding_fails_when_a_generic_mixins_tycon_is_an_unresolvable_implicit_import_reference() {
-        let error = decode(
+        let error = decode_with_resolvers(
             &fixture_bytes("scala3-library/scala/io/Source.tasty"),
             &BinaryName::from_internal("Source"),
+            |_, _| None,
+            |_, _| None,
         )
         .unwrap_err();
 
         assert!(matches!(error, TastyDecodeError::UnresolvedSupertype));
+    }
+
+    #[test]
+    fn an_unresolved_explicit_first_parent_is_not_replaced_with_object() {
+        assert!(matches!(
+            resolve_super_class(true, None, true),
+            Err(TastyDecodeError::UnresolvedSupertype)
+        ));
+        assert_eq!(
+            resolve_super_class(false, None, true)
+                .unwrap()
+                .as_internal(),
+            "java/lang/Object"
+        );
     }
 
     /// `scala3-library/scala/math/BigInt.tasty`'s real `BigInt` mixes in
