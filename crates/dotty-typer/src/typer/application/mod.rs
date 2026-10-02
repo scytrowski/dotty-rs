@@ -63,29 +63,58 @@ impl SourceTyper<'_> {
         } else {
             self.resolve_overloaded_application_function(request, info_journal, new_mappings)?
         };
-        let (function, mut callable, mut typed_arguments) =
-            if let Some((function, callable, arguments)) = constructor_function {
-                (function, callable, arguments)
-            } else if let Some(resolved) = resolved_function {
-                (resolved.typed, resolved.callable, Some(resolved.arguments))
-            } else {
-                let function = self.type_expression_inner(
-                    application.function,
-                    context,
-                    info_journal,
-                    new_mappings,
-                )?;
-                let function_type = self.typed_arena.get(function).ty;
-                let callable =
-                    self.widen_expression_type_journaled(function_type, info_journal, 0)?;
-                (function, callable, None)
-            };
+        let (function, callable, typed_arguments) = if let Some((function, callable, arguments)) =
+            constructor_function
+        {
+            (function, callable, arguments)
+        } else if let Some(resolved) = resolved_function {
+            (resolved.typed, resolved.callable, Some(resolved.arguments))
+        } else {
+            let function = self.type_expression_inner(
+                application.function,
+                context,
+                info_journal,
+                new_mappings,
+            )?;
+            let function_type = self.typed_arena.get(function).ty;
+            let callable = self.widen_expression_type_journaled(function_type, info_journal, 0)?;
+            (function, callable, None)
+        };
+        self.type_resolved_application(
+            tree.index(),
+            application.kind,
+            &application.args,
+            position,
+            context,
+            function,
+            callable,
+            typed_arguments,
+            is_constructor_application,
+            info_journal,
+            new_mappings,
+        )
+    }
+
+    pub(in crate::typer) fn type_resolved_application(
+        &mut self,
+        tree_index: u32,
+        application_kind: ApplyKind,
+        argument_trees: &[TreeId<Untyped>],
+        position: Option<SourceSpan>,
+        context: ExpressionContext,
+        function: TreeId<Typed>,
+        mut callable: TypeId,
+        mut typed_arguments: Option<Vec<TypedArgument>>,
+        is_constructor_application: bool,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
             let arguments = if let Some(arguments) = typed_arguments.take() {
                 arguments
             } else {
-                let mut arguments = Vec::with_capacity(application.args.len());
-                for argument_tree in &application.args {
+                let mut arguments = Vec::with_capacity(argument_trees.len());
+                for argument_tree in argument_trees {
                     let typed = self.type_expression_inner(
                         *argument_tree,
                         context,
@@ -107,8 +136,8 @@ impl SourceTyper<'_> {
                 callable,
                 &poly,
                 &arguments,
-                application.kind,
-                tree.index(),
+                application_kind,
+                tree_index,
                 info_journal,
             )?;
             let instantiated =
@@ -124,7 +153,7 @@ impl SourceTyper<'_> {
                     argument,
                     bounds,
                     parameter_index,
-                    tree.index(),
+                    tree_index,
                     info_journal,
                 )
                 .map_err(|error| match error {
@@ -136,7 +165,7 @@ impl SourceTyper<'_> {
                         ..
                     } => TyperError::InferredTypeArgumentBoundViolation {
                         source: self.source,
-                        tree_index: tree.index(),
+                        tree_index: tree_index,
                         parameter_index,
                         argument,
                         bound,
@@ -148,7 +177,7 @@ impl SourceTyper<'_> {
                         ..
                     } => TyperError::UnsupportedInferredTypeArgumentBounds {
                         source: self.source,
-                        tree_index: tree.index(),
+                        tree_index: tree_index,
                         parameter_index,
                         argument,
                         bounds,
@@ -161,7 +190,7 @@ impl SourceTyper<'_> {
                         ..
                     } => TyperError::InferredTypeArgumentBoundCheckUnsupported {
                         source: self.source,
-                        tree_index: tree.index(),
+                        tree_index: tree_index,
                         parameter_index,
                         argument,
                         bound,
@@ -178,39 +207,39 @@ impl SourceTyper<'_> {
             _ => {
                 return Err(TyperError::ApplicationCalleeNotMethod {
                     source: self.source,
-                    tree_index: tree.index(),
+                    tree_index: tree_index,
                     ty: callable,
                 });
             }
         };
-        if !application_kind_accepts(application.kind, method.kind) {
+        if !application_kind_accepts(application_kind, method.kind) {
             return Err(TyperError::ApplicationMethodKindMismatch {
                 source: self.source,
-                tree_index: tree.index(),
-                application_kind: application.kind,
+                tree_index: tree_index,
+                application_kind: application_kind,
                 method_kind: method.kind,
             });
         }
-        if application.args.len() != method.params.len() {
+        if argument_trees.len() != method.params.len() {
             return Err(TyperError::ApplicationArityMismatch {
                 source: self.source,
-                tree_index: tree.index(),
+                tree_index: tree_index,
                 expected: method.params.len(),
-                actual: application.args.len(),
+                actual: argument_trees.len(),
             });
         }
         for (parameter_index, parameter) in method.params.iter().enumerate() {
             if parameter.erased {
                 return Err(TyperError::ErasedApplicationParameterDeferred {
                     source: self.source,
-                    tree_index: tree.index(),
+                    tree_index: tree_index,
                     parameter_index,
                 });
             }
             if parameter.varargs {
                 return Err(TyperError::VarargsApplicationParameterDeferred {
                     source: self.source,
-                    tree_index: tree.index(),
+                    tree_index: tree_index,
                     parameter_index,
                 });
             }
@@ -220,7 +249,7 @@ impl SourceTyper<'_> {
             ) {
                 return Err(TyperError::ByNameApplicationParameterDeferred {
                     source: self.source,
-                    tree_index: tree.index(),
+                    tree_index: tree_index,
                     parameter_index,
                 });
             }
@@ -228,14 +257,14 @@ impl SourceTyper<'_> {
         if self.type_contains_param_ref(method.result, callable)? {
             return Err(TyperError::DependentMethodApplicationDeferred {
                 source: self.source,
-                tree_index: tree.index(),
+                tree_index: tree_index,
                 binder: callable,
                 result: method.result,
             });
         }
-        let mut arguments = Vec::with_capacity(application.args.len());
+        let mut arguments = Vec::with_capacity(argument_trees.len());
         for (argument_index, (argument_tree, parameter)) in
-            application.args.iter().zip(&method.params).enumerate()
+            argument_trees.iter().zip(&method.params).enumerate()
         {
             let (argument, actual) = if let Some(typed_arguments) = &typed_arguments {
                 let typed_argument = typed_arguments[argument_index];
@@ -269,7 +298,7 @@ impl SourceTyper<'_> {
                 Ok(false) => {
                     return Err(TyperError::ApplicationArgumentTypeMismatch {
                         source: self.source,
-                        tree_index: tree.index(),
+                        tree_index: tree_index,
                         argument_index,
                         actual,
                         expected: parameter.ty,
@@ -278,7 +307,7 @@ impl SourceTyper<'_> {
                 Err(error) => {
                     return Err(TyperError::ApplicationArgumentConformanceUnsupported {
                         source: self.source,
-                        tree_index: tree.index(),
+                        tree_index: tree_index,
                         argument_index,
                         actual,
                         expected: parameter.ty,
@@ -291,7 +320,7 @@ impl SourceTyper<'_> {
         Ok(TypedAstBuilder::new(&mut self.typed_arena).apply_with_kind(
             function,
             arguments,
-            application.kind,
+            application_kind,
             method.result,
             position,
         ))

@@ -344,6 +344,18 @@ pub enum TyperError {
         symbol: SymbolId,
         tree_index: u32,
     },
+    /// Right-associative infix lowering requires Scala's right-operand rewrite.
+    RightAssociativeInfixDeferred {
+        source: SourceId,
+        tree_index: u32,
+        operator: dotty_core::Name,
+    },
+    /// An infix operator was not represented in the term namespace.
+    InfixOperatorMustBeTerm {
+        source: SourceId,
+        tree_index: u32,
+        operator: dotty_core::Name,
+    },
     /// A source method parameter tree has no symbol for this method owner.
     MethodParameterSymbolMissing {
         method: SymbolId,
