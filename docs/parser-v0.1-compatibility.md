@@ -820,3 +820,60 @@ Recreate the report from the pinned checkout with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-576-scala3-3.9.0.json
 ```
+
+## Corpus rerun after PR #597
+
+Issue #599 reran the corpus at parser merge revision
+`002d7c56724ba4a3798f421b0ac24e2efb2d48a3` (PR #597), with the same pinned
+Scala 3.9.0 revision and sorted 1,236-file inventory. The immutable report is
+[`parser-post-issue-599-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-599-scala3-3.9.0.json).
+
+| Measure | After #576 | After #597 | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parses | 1,165 (94.26%) | 1,163 (94.09%) | -2 (-0.16 pp) |
+| Recoverable files | 71 (5.74%) | 73 (5.91%) | +2 |
+| Hard parser failures / process failures / panics / hangs | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | unchanged |
+| Scanner diagnostics | 13 | 13 | 0 |
+| Scala oracle files / failures | 1,236 / 0 | 1,236 / 0 | unchanged |
+
+The capture-checking-disabled cohort changed from 928/994 to 926/994 clean;
+the enabled cohort remained 237/242. Diagnostic occurrences fell from 757 to
+642 (-115, or 15.2%), but this did not translate to more clean files:
+
+| Diagnostic occurrences | After #576 | After #597 | Change |
+| --- | ---: | ---: | ---: |
+| `ExpectedExpression` | 351 | 308 | -43 |
+| `ExpectedPattern` | 5 | 0 | -5 |
+| `ExpectedToken` | 115 | 102 | -13 |
+| `ExpectedType` | 1 | 1 | 0 |
+| `UnboundPlaceholderParameter` | 0 | 2 | +2 |
+| `UnexpectedToken` | 190 | 162 | -28 |
+| `UnsupportedSyntax` | 95 | 67 | -28 |
+| **Total** | **757** | **642** | **-115 (-15.2%)** |
+
+The new placeholder diagnostics are both in
+`compiler/src/dotty/tools/debug/ResolveReflectEval.scala`, at the `${_}`
+interpolations in `scala.runtime.${_}Ref` (lines 77 and 164 in the pinned
+Scala checkout). This is a concrete follow-up candidate: the parser currently
+reports the interpolation wildcard as unbound. The first-failure histogram
+also shifted: `ExpectedExpression` rose 24 → 27, `ExpectedToken` fell 23 → 21,
+`UnexpectedToken` rose 18 → 19, and the `ExpectedPattern` bucket (2) vanished;
+the single scanner bucket and remaining named unsupported-syntax buckets
+persist. First-failure counts describe only the earliest diagnostic per file,
+not all diagnostic occurrences.
+
+This aggregate compares parser revisions across all changes between PR #576
+and PR #597; it does not attribute the two lost clean parses, reduced
+diagnostic total, or the new placeholder cases to PR #597 alone. Fewer
+diagnostic occurrences are not by themselves a correctness improvement. The
+measurement took 21.1 seconds on the runner used for this report. There were
+no hard parser failures, process failures, panics, hangs, or Scala-oracle
+failures.
+
+Recreate the report from the pinned checkout with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-599-scala3-3.9.0.json
+```

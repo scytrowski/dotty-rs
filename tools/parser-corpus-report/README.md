@@ -311,3 +311,18 @@ Recreate it with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-576-scala3-3.9.0.json
 ```
+
+`parser-post-issue-599-scala3-3.9.0.json` reruns the same corpus at parser
+revision `002d7c56724ba4a3798f421b0ac24e2efb2d48a3` (main after PR #597), using
+the same pinned Scala revision and sorted 1,236-file inventory. It records
+1,163 clean parses, 73 recoverable files, and zero hard failures, process
+failures, panics, or hangs; the Scala oracle emitted all 1,236 results without
+failures. The comparison, including the two newly reported unbound placeholders
+in interpolated patterns, is documented in
+[`parser-v0.1-compatibility.md`](../../docs/parser-v0.1-compatibility.md).
+Recreate it with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-599-scala3-3.9.0.json
+```
