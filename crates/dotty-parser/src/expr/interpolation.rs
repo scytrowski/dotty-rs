@@ -1,13 +1,28 @@
-use dotty_core::ast::{InterpolatedString, Literal, This, UntypedNode};
+use dotty_core::ast::{Block, InterpolatedString, Literal, This, UntypedNode};
 use dotty_core::{Constant, Punctuation, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
 
-use crate::Parser;
+use crate::{Location, ParseKind, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
     pub(crate) fn parse_interpolated_string(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.parse_interpolated_string_with_mode(mark, false)
+    }
+
+    pub(crate) fn parse_interpolated_string_pattern(
+        &mut self,
+        mark: crate::Mark,
+    ) -> TreeId<Untyped> {
+        self.parse_interpolated_string_with_mode(mark, true)
+    }
+
+    fn parse_interpolated_string_with_mode(
+        &mut self,
+        mark: crate::Mark,
+        in_pattern: bool,
+    ) -> TreeId<Untyped> {
         let prefix = match self.intern_current_term_name() {
             Ok(prefix) => *prefix.as_name(),
             Err(_) => return self.unexpected_expression(),
@@ -42,12 +57,37 @@ where
                         let position = self.current_span();
                         self.advance();
                         parts.push(self.alloc(TreeKind::This(This { qual: None }), Some(position)));
+                    } else if in_pattern {
+                        parts.push(self.with_parse_kind(ParseKind::Pattern, |parser| {
+                            parser.with_location(Location::InPattern, |parser| parser.pattern())
+                        }));
                     } else {
                         parts.push(self.simple_expr());
                     }
                 }
                 TokenKind::Punctuation(Punctuation::LeftBrace) => {
-                    parts.push(self.expr());
+                    if in_pattern {
+                        let block_mark = self.mark();
+                        self.advance();
+                        let pattern = self.with_parse_kind(ParseKind::Pattern, |parser| {
+                            parser.with_location(Location::InPattern, |parser| parser.pattern())
+                        });
+                        if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+                            self.report(
+                                crate::ParseDiagnosticKind::ExpectedToken,
+                                "expected `}` to close interpolated pattern splice",
+                            );
+                        }
+                        parts.push(self.alloc_from(
+                            block_mark,
+                            TreeKind::Block(Block {
+                                stats: Vec::new(),
+                                expr: pattern,
+                            }),
+                        ));
+                    } else {
+                        parts.push(self.expr());
+                    }
                 }
                 TokenKind::StringPart => continue,
                 _ => break,
@@ -242,6 +282,33 @@ mod tests {
             TextRange::new(8, 8).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn expression_interpolation_keeps_underscore_as_a_placeholder() {
+        let source = "s\"${_}\"";
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::StringPart, 1, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 5, 6),
+                token(TokenKind::StringPart, 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let result = parser.compilation_unit();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            crate::ParseDiagnosticKind::UnboundPlaceholderParameter
+        );
     }
 
     #[test]

@@ -803,7 +803,9 @@ and the existing `InterpolatedString` node. Parts remain source-level literal,
 identifier, and braced `Block` trees in source order; semantic expansion to
 `StringContext` and interpolator-specific behavior are outside the parser.
 Literal-fragment spans follow Scala 3.9's decoded-length rule, including
-escaped dollars.
+escaped dollars. In pattern context, a braced splice parses its contents with
+the pattern grammar; a wildcard such as `${_}` therefore does not enter
+expression placeholder tracking.
 
 The current source-level pattern grammar is layered as:
 
@@ -835,7 +837,9 @@ Dotty's parser-level `Quote` plus nested `SplicePattern` representation;
 `QuotePattern` construction and staging semantics remain later-phase work.
 Interpolated strings are also accepted as patterns and reuse the source-level
 `InterpolatedString` node, preserving literal parts and simple/braced splices;
-interpolator expansion and pattern semantics remain outside the parser.
+braced splice contents use `Pattern`, not `Expr`, so `_` remains a wildcard
+pattern rather than an escaping expression placeholder. Interpolator expansion
+and pattern semantics remain outside the parser.
 XML patterns, remaining refined-type forms, remaining definition forms and full
 template semantics, other legacy given migration syntax, remaining control flow (`do`/`while`),
 macros, and staging semantics remain follow-up increments.
