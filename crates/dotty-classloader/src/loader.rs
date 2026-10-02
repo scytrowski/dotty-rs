@@ -28,6 +28,7 @@ use dotty_core::{
     SymbolId, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, TermName, Type, TypeId, TypeName,
     TypeParam, Visibility,
 };
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -66,6 +67,43 @@ fn resolve_tasty_alias<E: ClassPathEntry>(
         return Ok(None);
     };
     validate_alias_candidate(class_path, target_owner.package_path(), candidate)
+}
+
+/// Resolves an unqualified reference against the package and Scala/Java
+/// implicit-import namespaces, but only when exactly one candidate is
+/// present on the classpath.
+fn resolve_tasty_bare_reference<E: ClassPathEntry>(
+    class_path: &E,
+    package: &str,
+    simple_name: &str,
+) -> Result<Option<BinaryName>, TastyAliasResolutionError> {
+    let mut candidates = Vec::with_capacity(3);
+    for candidate_package in [package, "scala", "java/lang"] {
+        let internal = if candidate_package.is_empty() {
+            simple_name.to_owned()
+        } else {
+            format!("{candidate_package}/{simple_name}")
+        };
+        let candidate = BinaryName::from_internal(internal);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+
+    let mut matches = Vec::new();
+    for candidate in candidates {
+        if class_path
+            .find_class(&candidate)
+            .map_err(|error| TastyAliasResolutionError::ClassPath(candidate.clone(), error))?
+            .is_some()
+        {
+            matches.push(candidate);
+            if matches.len() > 1 {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(matches.pop())
 }
 
 fn follow_tasty_alias_chain<E>(
@@ -1018,18 +1056,31 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         resource_origin: ClassOrigin,
         inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
-        let mut alias_error = None;
+        let alias_error = RefCell::new(None);
         let class_path = &self.class_path;
-        let decoded = tasty_symbol::decode_with_alias_resolver(bytes, name, |owner, alias| {
-            match resolve_tasty_alias(class_path, owner, alias) {
+        let decoded = tasty_symbol::decode_with_resolvers(
+            bytes,
+            name,
+            |owner, alias| match resolve_tasty_alias(class_path, owner, alias) {
                 Ok(target) => target,
                 Err(error) => {
-                    alias_error = Some(error);
+                    alias_error.borrow_mut().get_or_insert(error);
                     None
                 }
-            }
-        });
-        if let Some(error) = alias_error {
+            },
+            |package, simple_name| match resolve_tasty_bare_reference(
+                class_path,
+                package,
+                simple_name,
+            ) {
+                Ok(target) => target,
+                Err(error) => {
+                    alias_error.borrow_mut().get_or_insert(error);
+                    None
+                }
+            },
+        );
+        if let Some(error) = alias_error.into_inner() {
             return Err(error.into_class_load_error());
         }
         let decoded =
@@ -2453,6 +2504,32 @@ mod tests {
                 )
             }))
         }
+    }
+
+    #[test]
+    fn bare_tasty_reference_uses_the_unique_classpath_candidate() {
+        let class_path = InMemoryClassPath(HashMap::from([(
+            BinaryName::from_internal("java/lang/Closeable"),
+            Vec::new(),
+        )]));
+
+        assert_eq!(
+            resolve_tasty_bare_reference(&class_path, "example", "Closeable").unwrap(),
+            Some(BinaryName::from_internal("java/lang/Closeable"))
+        );
+    }
+
+    #[test]
+    fn bare_tasty_reference_stays_unresolved_when_candidates_are_ambiguous() {
+        let class_path = InMemoryClassPath(HashMap::from([
+            (BinaryName::from_internal("example/Closeable"), Vec::new()),
+            (BinaryName::from_internal("java/lang/Closeable"), Vec::new()),
+        ]));
+
+        assert_eq!(
+            resolve_tasty_bare_reference(&class_path, "example", "Closeable").unwrap(),
+            None
+        );
     }
 
     /// Like [`InMemoryClassPath`], but tags every entry
@@ -4613,7 +4690,6 @@ mod tests {
         let error = loader
             .load_class(&BinaryName::from_internal("Dog"))
             .unwrap_err();
-
         assert!(matches!(
             error,
             ClassLoadError::DependencyFailure { owner, dependency, source }
@@ -4884,14 +4960,24 @@ mod tests {
             BinaryName::from_internal("scala/package"),
             b"malformed package object TASTy".to_vec(),
         );
-        let class_path = InMemoryTastyClassPath(tasty);
+        let mut classes = HashMap::new();
+        for stub in [
+            "java/lang/Object",
+            "scala/collection/Iterator",
+            "java/io/Closeable",
+        ] {
+            classes.insert(BinaryName::from_internal(stub), synthetic_class(stub, None));
+        }
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(tasty)),
+            Box::new(InMemoryClassPath(classes)),
+        ]);
 
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(class_path, &mut store);
         let error = loader
             .load_class(&BinaryName::from_internal("Source"))
             .expect_err("malformed package alias TASTy should be reported");
-
         assert!(matches!(
             error,
             ClassLoadError::InvalidTastyFile(

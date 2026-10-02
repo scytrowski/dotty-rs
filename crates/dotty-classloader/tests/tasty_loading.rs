@@ -46,6 +46,10 @@ fn tasty_sample_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasty_sample")
 }
 
+fn published_scala39_library_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dotty-tasty/tests/fixtures/scala3-library")
+}
+
 /// A minimal, hand-built, clearly-synthetic `java/lang/Object` class
 /// file: none of this crate's real fixtures define `Object` itself, and
 /// a real one isn't needed here — only its existence as a loadable,
@@ -54,30 +58,58 @@ fn tasty_sample_dir() -> PathBuf {
 /// temporary classpath root, kept separate from `tasty_sample/`'s real
 /// `scalac` output.
 fn write_synthetic_object_class(root: &Path) {
-    let name = b"java/lang/Object";
+    write_synthetic_class(root, "java/lang/Object", 0x0021, None);
+}
+
+fn write_synthetic_interface(root: &Path, internal_name: &str) {
+    write_synthetic_class(root, internal_name, 0x0601, Some("java/lang/Object"));
+}
+
+fn write_synthetic_class(
+    root: &Path,
+    internal_name: &str,
+    access_flags: u16,
+    super_name: Option<&str>,
+) {
+    let name = internal_name.as_bytes();
     let mut pool = Vec::new();
     pool.push(1); // CONSTANT_Utf8 #1
     pool.extend_from_slice(&(name.len() as u16).to_be_bytes());
     pool.extend_from_slice(name);
     pool.push(7); // CONSTANT_Class #2 -> #1
     pool.extend_from_slice(&1u16.to_be_bytes());
+    if let Some(super_name) = super_name {
+        pool.push(1); // CONSTANT_Utf8 #3
+        pool.extend_from_slice(&(super_name.len() as u16).to_be_bytes());
+        pool.extend_from_slice(super_name.as_bytes());
+        pool.push(7); // CONSTANT_Class #4 -> #3
+        pool.extend_from_slice(&3u16.to_be_bytes());
+    }
 
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]);
     bytes.extend_from_slice(&[0x00, 0x00]); // minor
     bytes.extend_from_slice(&[0x00, 0x45]); // class-file major = 69
-    bytes.extend_from_slice(&[0x00, 0x03]); // constant_pool_count
+    bytes.extend_from_slice(
+        &(if super_name.is_some() {
+            0x0005u16
+        } else {
+            0x0003u16
+        })
+        .to_be_bytes(),
+    ); // constant_pool_count
     bytes.extend_from_slice(&pool);
-    bytes.extend_from_slice(&[0x00, 0x21]); // access_flags
+    bytes.extend_from_slice(&access_flags.to_be_bytes());
     bytes.extend_from_slice(&2u16.to_be_bytes()); // this_class -> #2
-    bytes.extend_from_slice(&0u16.to_be_bytes()); // super_class (none)
+    bytes.extend_from_slice(&if super_name.is_some() { 4u16 } else { 0u16 }.to_be_bytes());
     bytes.extend_from_slice(&[0x00, 0x00]); // interfaces_count
     bytes.extend_from_slice(&[0x00, 0x00]); // fields_count
     bytes.extend_from_slice(&[0x00, 0x00]); // methods_count
     bytes.extend_from_slice(&[0x00, 0x00]); // attributes_count
 
-    fs::create_dir_all(root.join("java/lang")).unwrap();
-    fs::write(root.join("java/lang/Object.class"), bytes).unwrap();
+    let path = root.join(internal_name).with_extension("class");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, bytes).unwrap();
 }
 
 fn class_loader_over_tasty_sample<'store>(
@@ -187,6 +219,38 @@ fn loads_animal_directly_as_an_interface_with_no_declared_interfaces() {
             .resolve(store.symbols.get(super_symbol).name.text()),
         "Object"
     );
+}
+
+#[test]
+fn loads_published_scala39_with_filter_and_its_map_member() {
+    let mut store = SemanticStore::new();
+    let synthetic_jdk = TemporaryDirectory::new("published-scala39-with-filter");
+    write_synthetic_object_class(synthetic_jdk.path());
+    write_synthetic_interface(synthetic_jdk.path(), "java/io/Serializable");
+    let class_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(published_scala39_library_dir())),
+        Box::new(DirectoryClassPath::new(synthetic_jdk.path().clone())),
+    ]);
+    let mut loader = ClassLoader::new(class_path, &mut store);
+
+    let with_filter = loader
+        .load_class(&BinaryName::from_internal("scala/collection/WithFilter"))
+        .expect("published Scala 3.9 WithFilter should load through its real TASTy");
+    drop(loader);
+
+    assert_eq!(store.symbols.get(with_filter).kind, SymbolKind::Class);
+    let declarations = class_info(&store, with_filter).declarations;
+    let map_name = Name::new(store.names.intern("map"), Namespace::Term);
+    let map = store
+        .scopes
+        .get(declarations)
+        .lookup(&map_name)
+        .expect("WithFilter.map should be materialized into its declarations");
+    assert_eq!(store.symbols.get(map).kind, SymbolKind::Method);
+    assert!(matches!(
+        store.symbols.get(map).info,
+        SymbolInfo::Complete(_)
+    ));
 }
 
 #[test]
