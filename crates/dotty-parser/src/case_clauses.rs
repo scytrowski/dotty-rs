@@ -18,6 +18,7 @@ where
             parser.with_location(Location::InPattern, |parser| parser.pattern())
         });
         let guard = self.parse_case_guard();
+        self.consume_newlines_before_case_arrow();
         let body_mark = self.mark();
 
         if !self.current_is_arrow() {
@@ -143,6 +144,25 @@ where
         }
 
         self.parse_guard()
+    }
+
+    /// Dotty's `InCase` separator region permits line breaks before the case
+    /// arrow. Consume them only when they lead directly to `=>`, so a newline
+    /// before the next case remains available to the case-list parser.
+    fn consume_newlines_before_case_arrow(&mut self) {
+        let mut offset = 0;
+        while matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            offset += 1;
+        }
+
+        if offset > 0 && self.lookahead_is_arrow(offset) {
+            for _ in 0..offset {
+                self.advance();
+            }
+        }
     }
 
     fn parse_case_body(
@@ -319,6 +339,79 @@ mod tests {
             parser.ast().get(body).position.unwrap().span().range(),
             TextRange::new(7, 14).unwrap()
         );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn accepts_a_line_break_between_case_pattern_and_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case x\n  => body",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Newline, 6, 9),
+                token(TokenKind::Operator, 9, 11),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let case = parser.case_clause(false);
+
+        assert!(matches!(parser.ast().get(case).kind, TreeKind::CaseDef(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn accepts_a_line_break_between_case_guard_and_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case x if ready\n  => body",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Keyword(HardKeyword::If), 7, 9),
+                token(TokenKind::Identifier, 10, 15),
+                token(TokenKind::Newline, 15, 18),
+                token(TokenKind::Operator, 18, 20),
+                token(TokenKind::Identifier, 21, 25),
+                token(TokenKind::Eof, 25, 25),
+            ],
+            &mut names,
+        );
+
+        let case = parser.case_clause(false);
+        let TreeKind::CaseDef(case) = &parser.ast().get(case).kind else {
+            panic!("expected a case definition");
+        };
+
+        assert!(case.guard.is_some());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn accepts_blank_lines_before_a_case_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case x\n\n  => body",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Newlines, 6, 10),
+                token(TokenKind::Operator, 10, 12),
+                token(TokenKind::Identifier, 13, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.case_clause(false);
+
+        assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
     }
 
