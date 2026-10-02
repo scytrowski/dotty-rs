@@ -338,11 +338,24 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.load_class_with_inheritance_ancestry(name, &mut Vec::new())
     }
 
+    fn compiler_builtin_class(&self, name: &BinaryName) -> Option<SymbolId> {
+        match name.as_internal() {
+            "scala/Any" => Some(self.definitions.any_class),
+            "scala/AnyRef" => Some(self.definitions.object_class),
+            "scala/Nothing" => Some(self.definitions.nothing_class),
+            _ => None,
+        }
+    }
+
     fn load_class_with_inheritance_ancestry(
         &mut self,
         name: &BinaryName,
         inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
+        if let Some(symbol) = self.compiler_builtin_class(name) {
+            return Ok(symbol);
+        }
+
         // Checked first, and separately from `self.repository` below: a
         // name found here was resolved successfully by *some* loader
         // sharing this `session` (this one or an earlier one), and that
@@ -1199,10 +1212,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         // Entered before any recursive resolution below, so a legitimate
         // mutual member-type reference back to `name` (see
-        // `resolve_member_class`) can reuse this same `SymbolId` instead of
-        // erroring, and a genuine supertype cycle back to `name` (via
-        // `resolve_dependency` -> `load_class`) still hits `Loading` and is
-        // rejected as `CircularInheritance`, exactly as before.
+        // `resolve_member_class`) can reuse this same `SymbolId`. A genuine
+        // supertype cycle is rejected when this name appears on the explicit
+        // ancestry threaded through `resolve_dependency`; a dependency cycle
+        // that reaches this shell outside that ancestry may reuse it.
         let origin = SymbolOrigin::Classfile(self.store.origins.register_classfile());
         let (class_symbol, declarations) = self.enter_class(name, class_file.access_flags, origin);
         self.session.record_origin(class_symbol, resource_origin);
@@ -1681,11 +1694,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// interface) and loads it, wrapping any failure as a
     /// [`ClassLoadError::DependencyFailure`] against `owner`.
     ///
-    /// Unlike [`Self::resolve_member_class`], hitting an already-`Loading`
-    /// entry here is *not* tolerated: a class being its own (in)direct
-    /// supertype is a hard JVMS §5.3.5 error, not a legitimate mutual
-    /// reference (`docs/classloader.md` §5) — `self.load_class(&dependency)`
-    /// reports that as `CircularInheritance`, unchanged.
+    /// Carries the explicit supertype ancestry used to distinguish a true
+    /// cycle from a superclass dependency that reaches a class still loading
+    /// through a member type (`docs/classloader.md` §5). A `Loading` entry
+    /// already on this ancestry is a hard JVMS §5.3.5 error; one outside the
+    /// ancestry can reuse its stable, incomplete `SymbolId`.
     fn resolve_dependency(
         &mut self,
         owner: &BinaryName,
@@ -1698,7 +1711,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     }
 
     /// Loads `dependency` (a superclass or interface, already resolved
-    /// to a name) and wraps a failure as [`ClassLoadError::DependencyFailure`]
+    /// to a name) under the current inheritance ancestry and wraps a failure
+    /// as [`ClassLoadError::DependencyFailure`]
     /// — the format-agnostic half of dependency resolution shared by
     /// both the `.class` path (via [`Self::resolve_dependency`], which
     /// resolves a constant-pool index to a name first) and the `.tasty`
@@ -3071,6 +3085,32 @@ mod tests {
         assert_eq!(symbol_name(&store, loaded_object), "Object");
         let info = class_info(&store, loaded_object);
         assert!(info.parents.is_empty());
+    }
+
+    #[test]
+    fn scala_compiler_builtin_class_names_reuse_definitions_without_classpath_entries() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let definitions = loader.definitions();
+
+        assert_eq!(
+            loader
+                .load_class(&BinaryName::from_internal("scala/AnyRef"))
+                .unwrap(),
+            definitions.object_class
+        );
+        assert_eq!(
+            loader
+                .load_class(&BinaryName::from_internal("scala/Any"))
+                .unwrap(),
+            definitions.any_class
+        );
+        assert_eq!(
+            loader
+                .load_class(&BinaryName::from_internal("scala/Nothing"))
+                .unwrap(),
+            definitions.nothing_class
+        );
     }
 
     /// `load_uncached_class`/`load_uncached_tasty` used to receive only

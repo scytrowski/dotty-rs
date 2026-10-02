@@ -112,8 +112,14 @@ resolution.
 - A structured error model (`ClassLoadError`) distinguishing not-found,
   I/O failure, malformed class file / reference / descriptor /
   signature, invalid `.tasty` file, name mismatch, circular inheritance,
-  an unresolved generic type variable, and a dependency's failure
-  propagating to its dependent.
+  excessive inheritance depth, an unresolved generic type variable, and a
+  dependency's failure propagating to its dependent.
+- Explicit classpath aliases for the compiler-only `scala.Any`,
+  `scala.AnyRef`, and `scala.Nothing` type names. `Any` and `Nothing` reuse
+  their `Definitions` identities; `AnyRef` reuses `Definitions::object_class`.
+  These aliases are limited to the `scala` package's type namespace and do
+  not probe the classpath. Primitive and `Unit` names keep their real
+  classpath classes.
 - `.tasty`-backed loading converging on the same `Symbol`/`Type::ClassInfo`
   shape as `.class` loading (§4.4), including case-class constructor
   accessor fields.
@@ -316,16 +322,18 @@ known, then `SymbolInfo::Complete(TypeId)` pointing at its
 
 `ClassLoader::load_class(name)` follows that shape:
 
-1. Check the repository: `Loaded` -> return the cached symbol; `Failed`
-   -> return the cached error; `Loading` -> a class being its own
-   (in)direct supertype is a hard JVMS §5.3.5 error, not a legitimate
-   reuse case — reported as `CircularInheritance`, not a silent shell
-   reuse. (Reusing an in-progress shell for a *legitimate* mutual
-   reference — two classes each having a field/method typed as the
-   other, or a nest host and member referencing each other — is a real
-   technique this loader does use, via `resolve_member_class`/
-   `resolve_semantic_owner`; it's just not what `Loading` on a
-   *supertype* edge means.)
+1. Resolve `scala.Any`, `scala.AnyRef`, and `scala.Nothing` to their
+   canonical `Definitions` identities before classpath lookup. Otherwise,
+   check the repository: `Loaded` -> return the cached symbol; `Failed`
+   -> return the cached error. On `Loading`, consult the explicit current
+   superclass/interface ancestry: a name already on that ancestry is a
+   genuine cycle and reports `CircularInheritance`; an in-progress symbol
+   outside it may be reused as a dependency reached through a member type
+   (for example Object -> member Class -> superclass Object). Mutual
+   member references still reuse their in-progress shell through
+   `resolve_member_class`/`resolve_semantic_owner`.
+   The inheritance ancestry is capped at 256 classes; exceeding it reports
+   `InheritanceDepthExceeded` rather than recursing without bound.
 2. Ask the classpath for the bytes; not found -> `NotFound` (cached).
    The classpath also decides `.class` vs `.tasty` (`ClassFormat`) —
    preferring `.tasty` when both exist.
@@ -403,7 +411,8 @@ known, then `SymbolInfo::Complete(TypeId)` pointing at its
 - `ClassLoadError` — `NotFound`, `Io`, `InvalidClassFile`,
   `MalformedReference`, `MalformedDescriptor`, `MalformedSignature`,
   `NameMismatch`, `InvalidTastyFile`, `CircularInheritance`,
-  `DependencyFailure`, `UnresolvedTypeVariable`; `Clone` (so `Failed`
+  `InheritanceDepthExceeded`, `DependencyFailure`,
+  `UnresolvedTypeVariable`; `Clone` (so `Failed`
   entries can be returned repeatedly from the cache; non-`Clone`
   payloads are `Rc`-wrapped to keep the whole enum cheaply cloneable).
 
@@ -451,6 +460,13 @@ exact error variants asserted rather than `is_err()`.
   dependencies needs `CompositeClassPath` over two single-format
   in-memory classpaths. Such fixtures must be clearly marked as
   synthetic, not real compiler output.
+- The ignored resolver regression
+  `real_jdk_object_and_get_class_materialize_through_the_resolver` uses the
+  real `$JAVA_HOME/jmods/java.base.jmod` `java/lang/Object.class` and small
+  stubs only for its descriptor dependencies. Run it with
+  `JAVA_HOME=/path/to/jdk cargo test -p dotty-classloader real_jdk_object_and_get_class_materialize_through_the_resolver -- --ignored`.
+  This pins real JDK symbol/member loading while avoiding unrelated eager
+  closure over all of `java.base`.
 - Differential testing against `javap -p -v` on real fixtures is used
   throughout to confirm exact attribute/descriptor/signature shapes
   before writing an assertion against them (e.g. confirming

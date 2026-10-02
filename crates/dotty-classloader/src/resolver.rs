@@ -240,6 +240,28 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         Ok(Some(PrefixTarget::Class(symbol)))
     }
 
+    fn compiler_builtin_class_alias(
+        &self,
+        store: &SemanticStore,
+        package: SymbolId,
+        member: dotty_core::Name,
+    ) -> Option<SymbolId> {
+        if !member.is_type() {
+            return None;
+        }
+        let package_path = package_path_of_symbol(store, package)?;
+        if package_path.as_slice() != ["scala"] {
+            return None;
+        }
+
+        match store.names.resolve(member.text()) {
+            "Any" => Some(self.definitions.any_class),
+            "AnyRef" => Some(self.definitions.object_class),
+            "Nothing" => Some(self.definitions.nothing_class),
+            _ => None,
+        }
+    }
+
     fn resolve_member_inner(
         &mut self,
         store: &mut SemanticStore,
@@ -264,6 +286,11 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             [] if store.symbols.get(resolved_owner).kind == SymbolKind::Package
                 && request.name.is_type() =>
             {
+                if let Some(alias) =
+                    self.compiler_builtin_class_alias(store, resolved_owner, request.name)
+                {
+                    return Ok(Some(alias));
+                }
                 let package_path =
                     package_path_of_symbol(store, resolved_owner).ok_or_else(|| {
                         ResolutionError::Malformed {
@@ -398,8 +425,11 @@ mod tests {
         ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource,
     };
     use crate::jdk_class_path::JdkClassPath;
+    use crate::jmod_class_path::JmodClassPath;
     use dotty_core::{ClassInfo, MemberSelector, Name, Namespace, Scope};
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn fixture_path(relative: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -434,6 +464,47 @@ mod tests {
         }
     }
 
+    struct EmptyCountingClassPath(Arc<AtomicUsize>);
+
+    impl ClassPathEntry for EmptyCountingClassPath {
+        fn find_class(&self, _name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(None)
+        }
+
+        fn contains_package(&self, _package: &[&str]) -> Result<bool, ClassPathError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(false)
+        }
+    }
+
+    struct RealObjectBootstrapClassPath(JmodClassPath);
+
+    impl ClassPathEntry for RealObjectBootstrapClassPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            match name.as_internal() {
+                "java/lang/Object" => self.0.find_class(name),
+                "java/lang/Class" => Ok(Some(ClassResource::new(
+                    test_class_stub_with_super("java/lang/Class", "java/lang/Object"),
+                    ClassFormat::Class,
+                    ClassOrigin::Directory(PathBuf::from("<bootstrap-stub>")),
+                ))),
+                "java/lang/String"
+                | "java/lang/CloneNotSupportedException"
+                | "java/lang/InterruptedException" => Ok(Some(ClassResource::new(
+                    test_class_stub(name.as_internal(), 0x0021),
+                    ClassFormat::Class,
+                    ClassOrigin::Directory(PathBuf::from("<descriptor-stub>")),
+                ))),
+                _ => Ok(None),
+            }
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(package == ["java", "lang"])
+        }
+    }
+
     fn test_class_stub(binary_name: &str, access_flags: u16) -> Vec<u8> {
         let name = binary_name.as_bytes();
         let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 61, 0, 3, 1];
@@ -442,6 +513,21 @@ mod tests {
         bytes.extend_from_slice(&[7, 0, 1]);
         bytes.extend_from_slice(&access_flags.to_be_bytes());
         bytes.extend_from_slice(&[0, 2, 0, 0]);
+        bytes.extend_from_slice(&[0; 8]);
+        bytes
+    }
+
+    fn test_class_stub_with_super(binary_name: &str, super_name: &str) -> Vec<u8> {
+        let this_name = binary_name.as_bytes();
+        let super_name = super_name.as_bytes();
+        let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 61, 0, 5, 1];
+        bytes.extend_from_slice(&(this_name.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(this_name);
+        bytes.extend_from_slice(&[7, 0, 1, 1]);
+        bytes.extend_from_slice(&(super_name.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(super_name);
+        bytes.extend_from_slice(&[7, 0, 3]);
+        bytes.extend_from_slice(&[0, 0x21, 0, 2, 0, 4]);
         bytes.extend_from_slice(&[0; 8]);
         bytes
     }
@@ -496,6 +582,170 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn compiler_builtin_aliases_are_scala_type_members_without_classpath_probes() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let probes = Arc::new(AtomicUsize::new(0));
+        let class_path = EmptyCountingClassPath(Arc::clone(&probes));
+        let mut resolver =
+            ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+        let scala = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "scala");
+        let scala_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, scala));
+
+        for (name, expected) in [
+            ("Any", definitions.any_class),
+            ("AnyRef", definitions.object_class),
+            ("Nothing", definitions.nothing_class),
+        ] {
+            let name = Name::new(store.names.intern(name), Namespace::Type);
+            let resolved = resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix: scala_prefix,
+                        name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .unwrap();
+            assert_eq!(resolved, Some(expected));
+        }
+
+        assert_eq!(
+            probes.load(Ordering::Relaxed),
+            0,
+            "compiler-only aliases never reach classpath I/O"
+        );
+
+        let scala_int = Name::new(store.names.intern("Int"), Namespace::Type);
+        assert!(
+            resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix: scala_prefix,
+                        name: scala_int,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            probes.load(Ordering::Relaxed),
+            1,
+            "loadable Scala classes are not builtin aliases"
+        );
+
+        let other = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "example");
+        let other_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, other));
+        let any_ref = Name::new(store.names.intern("AnyRef"), Namespace::Type);
+        assert!(
+            resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix: other_prefix,
+                        name: any_ref,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            probes.load(Ordering::Relaxed),
+            2,
+            "alias ownership is exactly scala.AnyRef"
+        );
+
+        let any_ref_term = Name::new(store.names.intern("AnyRef"), Namespace::Term);
+        assert!(
+            resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix: scala_prefix,
+                        name: any_ref_term,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            probes.load(Ordering::Relaxed),
+            2,
+            "aliases occupy only the type namespace"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires JAVA_HOME pointing to a JDK with jmods/java.base.jmod"]
+    fn real_jdk_object_and_get_class_materialize_through_the_resolver() {
+        let java_home = std::env::var_os("JAVA_HOME")
+            .expect("set JAVA_HOME to run this real-JDK classpath regression");
+        let java_base = PathBuf::from(java_home).join("jmods/java.base.jmod");
+        let class_path = RealObjectBootstrapClassPath(
+            crate::jmod_class_path::JmodClassPath::new(java_base)
+                .expect("JAVA_HOME should contain a readable java.base.jmod"),
+        );
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let object_class = definitions.object_class;
+        let mut resolver =
+            ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+        let get_class = Name::new(store.names.intern("getClass"), Namespace::Term);
+
+        let method = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: definitions.object_type,
+                    name: get_class,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .expect("loading java/lang/Object through the JDK classpath should succeed")
+            .expect("java.lang.Object should declare getClass");
+
+        assert_eq!(store.symbols.get(method).owner, Some(object_class));
+        assert!(matches!(
+            store.symbols.get(method).origin,
+            dotty_core::SymbolOrigin::Classfile(_)
+        ));
+        let class_symbol = *resolver
+            .session
+            .resolved
+            .get(&BinaryName::from_internal("java/lang/Class"))
+            .expect("getClass's descriptor should materialize java/lang/Class");
+        assert_ne!(class_symbol, object_class);
+        assert!(matches!(
+            store.symbols.get(class_symbol).info,
+            SymbolInfo::Complete(info)
+                if matches!(store.types.get(info), Type::ClassInfo(class_info)
+                    if class_info.parents.iter().any(|parent| {
+                        store.types.get(*parent).reference_symbol() == Some(object_class)
+                    }))
+        ));
     }
 
     #[test]
