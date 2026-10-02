@@ -505,6 +505,38 @@ mod tests {
         }
     }
 
+    struct Issue605ClassPath;
+
+    impl ClassPathEntry for Issue605ClassPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            let bytes = match name.as_internal() {
+                "java/lang/Object" => test_class_with_object_fields(
+                    "java/lang/Object",
+                    None,
+                    &[
+                        ("class", "java/lang/Class"),
+                        ("broken", "missing/NoSuchClass"),
+                    ],
+                ),
+                "java/lang/Class" => {
+                    test_class_stub_with_super("java/lang/Class", "java/lang/Object")
+                }
+                "cycle/A" => test_class_stub_with_super("cycle/A", "cycle/B"),
+                "cycle/B" => test_class_stub_with_super("cycle/B", "cycle/A"),
+                _ => return Ok(None),
+            };
+            Ok(Some(ClassResource::new(
+                bytes,
+                ClassFormat::Class,
+                ClassOrigin::Directory(PathBuf::from("<issue-605-fixture>")),
+            )))
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(package == ["java", "lang"] || package == ["cycle"])
+        }
+    }
+
     fn test_class_stub(binary_name: &str, access_flags: u16) -> Vec<u8> {
         let name = binary_name.as_bytes();
         let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 61, 0, 3, 1];
@@ -529,6 +561,59 @@ mod tests {
         bytes.extend_from_slice(&[7, 0, 3]);
         bytes.extend_from_slice(&[0, 0x21, 0, 2, 0, 4]);
         bytes.extend_from_slice(&[0; 8]);
+        bytes
+    }
+
+    fn test_class_with_object_fields(
+        binary_name: &str,
+        super_name: Option<&str>,
+        fields: &[(&str, &str)],
+    ) -> Vec<u8> {
+        fn push_utf8(pool: &mut Vec<u8>, next_index: &mut u16, text: &str) -> u16 {
+            let index = *next_index;
+            pool.push(1);
+            pool.extend_from_slice(&(text.len() as u16).to_be_bytes());
+            pool.extend_from_slice(text.as_bytes());
+            *next_index += 1;
+            index
+        }
+
+        fn push_class(pool: &mut Vec<u8>, next_index: &mut u16, name_index: u16) -> u16 {
+            let index = *next_index;
+            pool.extend_from_slice(&[7]);
+            pool.extend_from_slice(&name_index.to_be_bytes());
+            *next_index += 1;
+            index
+        }
+
+        let mut pool = Vec::new();
+        let mut next_index = 1;
+        let this_name = push_utf8(&mut pool, &mut next_index, binary_name);
+        let this_class = push_class(&mut pool, &mut next_index, this_name);
+        let super_class = super_name.map(|super_name| {
+            let super_name = push_utf8(&mut pool, &mut next_index, super_name);
+            push_class(&mut pool, &mut next_index, super_name)
+        });
+        let mut field_entries = Vec::new();
+        for (field_name, field_type) in fields {
+            let field_name = push_utf8(&mut pool, &mut next_index, field_name);
+            let descriptor = push_utf8(&mut pool, &mut next_index, &format!("L{field_type};"));
+            field_entries.extend_from_slice(&[0, 1]);
+            field_entries.extend_from_slice(&field_name.to_be_bytes());
+            field_entries.extend_from_slice(&descriptor.to_be_bytes());
+            field_entries.extend_from_slice(&[0, 0]);
+        }
+
+        let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 61];
+        bytes.extend_from_slice(&next_index.to_be_bytes());
+        bytes.extend_from_slice(&pool);
+        bytes.extend_from_slice(&[0, 0x21]);
+        bytes.extend_from_slice(&this_class.to_be_bytes());
+        bytes.extend_from_slice(&super_class.unwrap_or(0).to_be_bytes());
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&(fields.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(&field_entries);
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
         bytes
     }
 
@@ -746,6 +831,112 @@ mod tests {
                         store.types.get(*parent).reference_symbol() == Some(object_class)
                     }))
         ));
+    }
+
+    #[test]
+    fn resolver_rollback_removes_a_successful_dependency_of_a_failed_object_load() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let canonical_object = store.symbols.get(definitions.object_class).clone();
+        let mut resolver =
+            ClasspathSymbolResolver::new(Issue605ClassPath, definitions, LoadingSession::new());
+        let java_lang = resolver
+            .resolve_package(&mut store, &["java", "lang"])
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, java_lang));
+        let package_scope = resolver.session.packages.scope_of(java_lang).unwrap();
+
+        for _ in 0..2 {
+            let object_name = Name::new(store.names.intern("Object"), Namespace::Type);
+            let error = resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix: package_prefix,
+                        name: object_name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .expect_err("Object's second field deliberately has no classpath class");
+            assert!(matches!(
+                error,
+                ResolutionError::Malformed { reason }
+                    if reason.contains("missing/NoSuchClass")
+            ));
+
+            assert_eq!(
+                store.symbols.get(definitions.object_class),
+                &canonical_object
+            );
+            for binary_name in ["java/lang/Object", "java/lang/Class"] {
+                assert!(
+                    !resolver
+                        .session
+                        .resolved
+                        .contains_key(&BinaryName::from_internal(binary_name)),
+                    "failed transaction left {binary_name} in the positive cache"
+                );
+            }
+            assert!(resolver.session.metadata.is_empty());
+            for class_name in ["Object", "Class"] {
+                let name = Name::new(store.names.intern(class_name), Namespace::Type);
+                assert!(store.scopes.get(package_scope).lookup_all(&name).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn resolver_rollback_does_not_cache_a_genuine_inheritance_cycle() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let object_before = store.symbols.get(definitions.object_class).clone();
+        let mut resolver =
+            ClasspathSymbolResolver::new(Issue605ClassPath, definitions, LoadingSession::new());
+        let cycle_package = resolver
+            .resolve_package(&mut store, &["cycle"])
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, cycle_package));
+
+        let class_a_name = Name::new(store.names.intern("A"), Namespace::Type);
+        let error = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: class_a_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .expect_err("A extends B, B extends A must remain an error");
+
+        assert!(matches!(
+            error,
+            ResolutionError::Malformed { reason }
+                if reason.contains("circular inheritance involving cycle/A")
+        ));
+        assert_eq!(store.symbols.get(definitions.object_class), &object_before);
+        for binary_name in ["cycle/A", "cycle/B"] {
+            assert!(
+                !resolver
+                    .session
+                    .resolved
+                    .contains_key(&BinaryName::from_internal(binary_name)),
+                "failed cycle left {binary_name} in the positive cache"
+            );
+        }
+        let package_scope = resolver.session.packages.scope_of(cycle_package).unwrap();
+        for class_name in ["A", "B"] {
+            let name = Name::new(store.names.intern(class_name), Namespace::Type);
+            assert!(store.scopes.get(package_scope).lookup_all(&name).is_empty());
+        }
     }
 
     #[test]
