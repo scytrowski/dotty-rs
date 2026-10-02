@@ -365,7 +365,7 @@ fn source_typer_resolves_external_imports_and_types_member_applications() {
     let log = Rc::new(RefCell::new(ResolutionLog::default()));
     let resolver = RecordingResolver::new(resolver, Rc::clone(&log));
 
-    let typed_ids = {
+    let exchange_type = {
         let typer_packages = Packages::new();
         let mut typer = SourceTyper::new(
             &unit.parsed.ast,
@@ -376,27 +376,18 @@ fn source_typer_resolves_external_imports_and_types_member_applications() {
             &typer_packages,
         )
         .with_resolver(Box::new(resolver));
-        let mut typed = Vec::new();
-        for name in ["exchange"] {
-            let (method, rhs) = method_rhs(&unit, typer.store(), name);
-            let context = typer.expression_context_for(method).unwrap();
-            let typed_tree = typer.type_expression(rhs, context).unwrap_or_else(|error| {
-                let resolutions = log.borrow().members.clone();
-                panic!("typing {name} failed: {error:?}; resolutions: {resolutions:?}")
-            });
-            let result_type = typer.typed_ast().get(typed_tree).ty;
-            typed.push((name, result_type));
-        }
-        typed
+        let name = "exchange";
+        let (method, rhs) = method_rhs(&unit, typer.store(), name);
+        let context = typer.expression_context_for(method).unwrap();
+        let typed_tree = typer.type_expression(rhs, context).unwrap_or_else(|error| {
+            let resolutions = log.borrow().members.clone();
+            panic!("typing {name} failed: {error:?}; resolutions: {resolutions:?}")
+        });
+        typer.typed_ast().get(typed_tree).ty
     };
 
     let mut log = log.borrow_mut();
     let ping = class_id(&log, "Ping");
-    let exchange_type = typed_ids
-        .iter()
-        .find(|(name, _)| *name == "exchange")
-        .unwrap()
-        .1;
     let Type::TypeRef {
         target: TypeRefTarget::Symbol(pong),
         ..
@@ -426,11 +417,7 @@ fn source_typer_resolves_external_imports_and_types_member_applications() {
     assert!(!package_resolutions.is_empty());
     assert!(package_resolutions.iter().all(|symbol| *symbol == package));
 
-    let exchange = typed_ids
-        .iter()
-        .find(|(name, _)| *name == "exchange")
-        .unwrap()
-        .1;
+    let exchange = exchange_type;
     assert!(
         matches!(store.types.get(exchange), Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == pong)
     );
