@@ -21,12 +21,12 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ResolverMetrics {
-    package_requests: usize,
+    resolver_package_requests: usize,
     package_successes: usize,
     package_unresolved: usize,
     package_errors: usize,
     package_source_reuse: usize,
-    member_requests: usize,
+    resolver_member_requests: usize,
     member_successes: usize,
     member_source_reuse: usize,
     member_unresolved: usize,
@@ -36,6 +36,18 @@ struct ResolverMetrics {
     members: BTreeSet<String>,
     unresolved_member_names: BTreeMap<String, usize>,
     member_error_kinds: BTreeMap<String, usize>,
+}
+
+impl ResolverMetrics {
+    fn external_package_requests(&self) -> usize {
+        debug_assert!(self.resolver_package_requests >= self.package_source_reuse);
+        self.resolver_package_requests - self.package_source_reuse
+    }
+
+    fn external_member_requests(&self) -> usize {
+        debug_assert!(self.resolver_member_requests >= self.member_source_reuse);
+        self.resolver_member_requests - self.member_source_reuse
+    }
 }
 
 struct AuditResolver<E: ClassPathEntry> {
@@ -81,7 +93,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
     ) -> Result<Option<SymbolId>, ResolutionError> {
         let result = self.inner.resolve_member(store, request);
         let mut metrics = self.metrics.borrow_mut();
-        metrics.member_requests += 1;
+        metrics.resolver_member_requests += 1;
         match &result {
             Ok(Some(symbol)) => {
                 let path = audit_symbol_path(store, *symbol);
@@ -128,7 +140,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
     ) -> Result<Option<SymbolId>, ResolutionError> {
         let result = self.inner.resolve_package(store, path);
         let mut metrics = self.metrics.borrow_mut();
-        metrics.package_requests += 1;
+        metrics.resolver_package_requests += 1;
         match &result {
             Ok(Some(symbol)) => {
                 if matches!(
@@ -674,6 +686,42 @@ fn local_definition_audit_is_deterministic() {
 }
 
 #[test]
+fn resolver_request_metrics_exclude_source_reuse_from_external_attempts() {
+    let metrics = ResolverMetrics {
+        resolver_package_requests: 12,
+        package_successes: 3,
+        package_unresolved: 4,
+        package_errors: 0,
+        package_source_reuse: 5,
+        resolver_member_requests: 8,
+        member_successes: 2,
+        member_source_reuse: 1,
+        member_unresolved: 4,
+        member_errors: 1,
+        ..ResolverMetrics::default()
+    };
+
+    assert_eq!(metrics.external_package_requests(), 7);
+    assert_eq!(
+        metrics.external_package_requests(),
+        metrics.package_successes + metrics.package_unresolved + metrics.package_errors
+    );
+    assert_eq!(
+        metrics.resolver_package_requests,
+        metrics.external_package_requests() + metrics.package_source_reuse
+    );
+    assert_eq!(metrics.external_member_requests(), 7);
+    assert_eq!(
+        metrics.external_member_requests(),
+        metrics.member_successes + metrics.member_unresolved + metrics.member_errors
+    );
+    assert_eq!(
+        metrics.resolver_member_requests,
+        metrics.external_member_requests() + metrics.member_source_reuse
+    );
+}
+
+#[test]
 fn local_definition_audit_excludes_local_class_members() {
     let source = "object Audit { def outer: Int = { class Local { def member = 1 }; def local = 2; local } }";
     let audit = audit_source(source, "Audit.scala");
@@ -1022,7 +1070,14 @@ fn audit_classpath_from_environment() -> SharedClassPath {
 
 fn print_resolver_metrics(metrics: &ResolverMetrics) {
     println!("resolver_metrics:");
-    println!("  external_package_requests={}", metrics.package_requests);
+    println!(
+        "  resolver_package_requests={}",
+        metrics.resolver_package_requests
+    );
+    println!(
+        "  external_package_requests={}",
+        metrics.external_package_requests()
+    );
     println!("  external_package_successes={}", metrics.package_successes);
     println!(
         "  external_package_unresolved={}",
@@ -1030,7 +1085,14 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     );
     println!("  external_package_errors={}", metrics.package_errors);
     println!("  source_package_reuse={}", metrics.package_source_reuse);
-    println!("  external_member_requests={}", metrics.member_requests);
+    println!(
+        "  resolver_member_requests={}",
+        metrics.resolver_member_requests
+    );
+    println!(
+        "  external_member_requests={}",
+        metrics.external_member_requests()
+    );
     println!("  external_member_successes={}", metrics.member_successes);
     println!("  source_member_reuse={}", metrics.member_source_reuse);
     println!("  external_member_unresolved={}", metrics.member_unresolved);

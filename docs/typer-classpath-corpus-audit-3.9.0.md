@@ -4,6 +4,8 @@ This normalized result was produced by two identical runs. It measures local-met
 
 Run `tools/typer-classpath-corpus-audit/run` with the environment documented in `docs/typer-v0.1-compatibility.md` to regenerate this report.
 
+Resolver request totals include every resolver call. External request counts exclude calls satisfied by source symbols; therefore each external request count reconciles with its success, unresolved, and error counts, while source reuse is reported separately.
+
 ```text
 scala_revision=777528f19a58e794c9954a42f433373472ec57f8
 files=1236
@@ -127,11 +129,13 @@ top_gap_implementation_scope_notes:
   LocalBlockDeclarationDeferred::import (139 occurrences, 29 files): first_slice=resolve one local import qualifier and install its selector in the active block scope; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=the classpath resolver and transactional scope updates; non_goals=local type/class/object declarations and wildcard semantics beyond existing imports
   UnsupportedTypeTree (81 occurrences, 25 files): first_slice=lower the encountered type-tree shape into the existing core type model; owner=dotty-typer/src/typer/type_projection.rs; prerequisites=the source type AST node and its named symbol/type metadata; non_goals=new parser syntax or broad type-model changes
 resolver_metrics:
-  external_package_requests=12806
+  resolver_package_requests=12806
+  external_package_requests=7781
   external_package_successes=1965
   external_package_unresolved=5816
   external_package_errors=0
   source_package_reuse=5025
+  resolver_member_requests=3975
   external_member_requests=3975
   external_member_successes=0
   source_member_reuse=0
