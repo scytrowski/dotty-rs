@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+repo_root="$(CDPATH= cd -- "$script_dir/../.." && pwd)"
+scala_root="${SCALA39_ROOT:?set SCALA39_ROOT to the pinned Scala 3.9.0 checkout}"
+java_home="${JAVA_HOME:?set JAVA_HOME to the JDK used for this audit}"
+jdk_release="${SCALA39_JDK_RELEASE:?set SCALA39_JDK_RELEASE to the JDK feature version}"
+coursier_maven_root="${COURSIER_MAVEN_ROOT:-${HOME}/.cache/coursier/v1/https/repo1.maven.org/maven2}"
+
+revision="777528f19a58e794c9954a42f433373472ec57f8"
+actual_revision="$(git -C "$scala_root" rev-parse HEAD)"
+if [[ "$actual_revision" != "$revision" ]]; then
+    printf 'SCALA39_ROOT revision is %s; expected %s\n' "$actual_revision" "$revision" >&2
+    exit 1
+fi
+
+scala_jars=(
+    "$coursier_maven_root/org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar"
+    "$coursier_maven_root/org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar"
+    "$coursier_maven_root/org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar"
+    "$coursier_maven_root/org/scala-lang/tasty-core_3/3.9.0/tasty-core_3-3.9.0.jar"
+    "$coursier_maven_root/org/scala-lang/scala3-interfaces/3.9.0/scala3-interfaces-3.9.0.jar"
+    "$coursier_maven_root/org/scala-lang/modules/scala-asm/9.9.0-scala-1/scala-asm-9.9.0-scala-1.jar"
+    "$coursier_maven_root/org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar"
+    "$coursier_maven_root/org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar"
+)
+for jar in "${scala_jars[@]}"; do
+    if [[ ! -f "$jar" ]]; then
+        printf 'missing Scala runtime artifact: %s\n' "$jar" >&2
+        exit 1
+    fi
+done
+export SCALA39_ROOT="$scala_root"
+export JAVA_HOME="$java_home"
+export SCALA39_JDK_RELEASE="$jdk_release"
+export SCALA39_CLASSPATH="$(IFS=:; printf '%s' "${scala_jars[*]}")"
+
+output_path="${1:-$repo_root/docs/typer-classpath-corpus-audit-3.9.0.md}"
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT
+
+for run in first second; do
+    (
+        cd "$repo_root"
+        cargo test -p dotty-typer --test local_definition_audit --locked \
+            pinned_scala39_local_definition_audit -- --ignored --nocapture
+    ) >"$tmp_dir/$run.log" 2>&1
+    sed -n '/^AUDIT_REPORT_BEGIN$/,/^AUDIT_REPORT_END$/p' "$tmp_dir/$run.log" \
+        | sed '1d;$d' >"$tmp_dir/$run.report"
+    if [[ ! -s "$tmp_dir/$run.report" ]]; then
+        cat "$tmp_dir/$run.log" >&2
+        printf 'audit report markers were missing\n' >&2
+        exit 1
+    fi
+done
+
+if ! cmp -s "$tmp_dir/first.report" "$tmp_dir/second.report"; then
+    diff -u "$tmp_dir/first.report" "$tmp_dir/second.report" >&2 || true
+    printf 'normalized audit output was not deterministic\n' >&2
+    exit 1
+fi
+
+mkdir -p "$(dirname -- "$output_path")"
+{
+    printf '# Typer classpath corpus audit: Scala 3.9.0\n\n'
+    printf 'This normalized result was produced by two identical runs. It measures local-method typing reachability; `NoSuccessfulEnclosingMethodTyping` is a downstream count and is excluded from the ranked semantic gaps. Parser recovery, parser/namer failures, classpath misses, and unsupported Typer semantics remain separate buckets. The deltas are historical measurements, not a claim that moving a failure to a later bucket is a semantic improvement.\n\n'
+    printf 'Run `tools/typer-classpath-corpus-audit/run` with the environment documented in `docs/typer-v0.1-compatibility.md` to regenerate this report.\n\n'
+    printf '```text\n'
+    cat "$tmp_dir/first.report"
+    printf '```\n'
+} >"$output_path"
+
+printf 'Wrote deterministic audit report to %s\n' "$output_path"
