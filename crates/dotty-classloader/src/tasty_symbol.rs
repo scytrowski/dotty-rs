@@ -283,10 +283,8 @@ pub(crate) fn decode_with_alias_resolver(
 
     let mut interfaces = Vec::new();
     for parent in parents {
-        interfaces.push(
-            resolve_parent_name_with_alias(&file, parent, package, &mut resolve_alias)
-                .ok_or(TastyDecodeError::UnresolvedSupertype)?,
-        );
+        let resolution = resolve_parent_name_with_alias(&file, parent, package, &mut resolve_alias);
+        interfaces.push(resolution.ok_or(TastyDecodeError::UnresolvedSupertype)?);
     }
 
     let mut fields = decode_constructor_accessor_fields(&file, &template.term_params, package)?;
@@ -665,21 +663,85 @@ fn resolve_reference_prefix_at_depth(
         RawTree::Leaf(term) if term.tag == TERMREFPKG_TAG => {
             let reference = term.name_ref()?;
             let package = resolve_qualified_name(file, reference)?;
-            match current_package {
-                Some(current)
-                    if !current.is_empty() && !package.contains('/') && package != "_root_" =>
-                {
-                    Some(format!("{current}/{package}"))
-                }
-                _ => Some(package),
-            }
+            Some(if package == "_root_" {
+                String::new()
+            } else {
+                package
+            })
         }
         RawTree::Leaf(term) if matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG) => {
             let reference = term.ast_ref()?;
+            if let Some(name) = resolve_symbol_address(file, reference.address) {
+                return Some(qualify_symbol_address(name, current_package));
+            }
             let shared = decode_shared_tree(file, reference.address)?;
             resolve_reference_prefix_at_depth(file, &shared, current_package, depth + 1)
         }
-        _ => None,
+        RawTree::Leaf(term) if term.ast_ref().is_some() => {
+            let reference = term.ast_ref()?;
+            if let Some(name) = resolve_symbol_address(file, reference.address) {
+                return Some(qualify_symbol_address(name, current_package));
+            }
+            let target = decode_shared_tree(file, reference.address)?;
+            resolve_reference_prefix_at_depth(file, &target, current_package, depth + 1)
+        }
+        _ => match prefix.decode_structured().ok()? {
+            StructuredTree::Reference(ReferenceNode {
+                tag: TERMREFPKG_TAG,
+                reference,
+                qualifier,
+            }) => {
+                let segment = resolve_qualified_name(file, reference)?;
+                let owner =
+                    resolve_reference_prefix_at_depth(file, &qualifier, current_package, depth + 1);
+                match owner.as_deref() {
+                    Some("") | Some("/") | Some("_root_") | None => Some(segment),
+                    Some(owner) => {
+                        let owner = owner.trim_matches('/');
+                        if owner.is_empty() {
+                            Some(segment)
+                        } else {
+                            Some(format!("{owner}/{segment}"))
+                        }
+                    }
+                }
+            }
+            StructuredTree::Reference(ReferenceNode {
+                tag:
+                    TERMREF_TAG
+                    | TYPEREF_TAG
+                    | dotty_tasty::tasty::TERMREFDIRECT_TAG
+                    | dotty_tasty::tasty::TYPEREFDIRECT_TAG
+                    | dotty_tasty::tasty::TERMREFIN_TAG
+                    | dotty_tasty::tasty::TYPEREFIN_TAG,
+                reference,
+                qualifier,
+            }) => {
+                let name = resolve_qualified_name(file, reference)?;
+                let prefix = resolve_reference_prefix_at_depth(
+                    file,
+                    &qualifier,
+                    current_package,
+                    depth + 1,
+                )?;
+                let prefix = prefix.trim_matches('/');
+                if prefix.is_empty() || prefix == "_root_" {
+                    Some(name)
+                } else {
+                    Some(format!("{prefix}/{name}"))
+                }
+            }
+            _ => None,
+        },
+    }
+}
+
+fn qualify_symbol_address(name: String, current_package: Option<&str>) -> String {
+    match current_package {
+        Some(package) if !package.is_empty() && !name.contains('/') => {
+            format!("{package}/{name}")
+        }
+        _ => name,
     }
 }
 
@@ -786,13 +848,9 @@ fn resolve_reference_name_at_depth(
             let resolved = resolve_symbol_address(file, reference);
             resolved
                 .map(|name| {
-                    let name = match current_package {
-                        Some(package) if !package.is_empty() && !name.contains('/') => {
-                            format!("{package}/{name}")
-                        }
-                        _ => name,
-                    };
-                    ReferenceResolution::Resolved(BinaryName::from_internal(name))
+                    ReferenceResolution::Resolved(BinaryName::from_internal(
+                        qualify_symbol_address(name, current_package),
+                    ))
                 })
                 .unwrap_or(ReferenceResolution::Unresolved)
         }
@@ -938,7 +996,7 @@ fn resolve_parent_name(
     parent: &RawTree<'_>,
     package: &str,
 ) -> Option<BinaryName> {
-    resolve_parent_name_in_package(file, parent, package, None)
+    resolve_parent_name_in_package(file, parent, package, Some(package))
 }
 
 fn resolve_parent_name_in_package(
@@ -999,9 +1057,12 @@ fn resolve_parent_name_with_alias(
     package: &str,
     resolve_alias: &mut impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
 ) -> Option<BinaryName> {
-    let package_alias = unresolved_alias_reference(file, parent)
-        .and_then(|(owner, alias)| resolve_alias(&owner, &alias));
-    package_alias.or_else(|| resolve_parent_name(file, parent, package))
+    if let Some((owner, alias)) = unresolved_alias_reference(file, parent)
+        && matches!(owner.simple_name(), "package" | "package$")
+    {
+        return resolve_alias(&owner, &alias);
+    }
+    resolve_parent_name(file, parent, package)
 }
 
 /// Extracts the owner and simple name of a reference that could not be
@@ -1086,6 +1147,15 @@ fn resolve_selection_path_at_depth(
         let reference = term.ast_ref()?;
         let shared = decode_shared_tree(file, reference.address)?;
         return resolve_selection_path_at_depth(file, &shared, depth + 1);
+    }
+    if let RawTree::Leaf(term) = tree
+        && let Some(reference) = term.ast_ref()
+    {
+        if let Some(name) = resolve_symbol_address(file, reference.address) {
+            return Some(BinaryName::from_internal(name));
+        }
+        let target = decode_shared_tree(file, reference.address)?;
+        return resolve_selection_path_at_depth(file, &target, depth + 1);
     }
     if let Some(package) = resolve_reference_prefix(file, tree) {
         return Some(BinaryName::from_internal(package));
@@ -1185,11 +1255,39 @@ pub(crate) fn resolve_type_alias_target(
         {
             return Ok(Some(TypeAliasTarget::Alias { owner, name }));
         }
+        if let Some((owner, name)) = unresolved_alias_reference(file, &rhs) {
+            let package_path = owner.package_path();
+            let owner_path = if !current_package.is_empty()
+                && package_path.starts_with(&format!("{current_package}/"))
+            {
+                owner
+                    .as_internal()
+                    .strip_prefix(&format!("{current_package}/"))
+                    .unwrap_or(owner.as_internal())
+                    .to_owned()
+            } else {
+                owner.as_internal().to_owned()
+            };
+            let candidate = BinaryName::from_internal(format!("{owner_path}/{name}"));
+            return Ok(Some(TypeAliasTarget::Candidate(
+                package_relative_candidate(candidate, current_package),
+            )));
+        }
         let candidate =
-            resolve_parent_name_in_package(file, &rhs, current_package, Some(current_package));
+            resolve_parent_name_in_package(file, &rhs, current_package, Some(current_package))
+                .map(|candidate| package_relative_candidate(candidate, current_package));
         return Ok(candidate.map(TypeAliasTarget::Candidate));
     }
     Ok(None)
+}
+
+fn package_relative_candidate(candidate: BinaryName, current_package: &str) -> BinaryName {
+    let prefix = format!("{current_package}/");
+    candidate
+        .as_internal()
+        .strip_prefix(&prefix)
+        .filter(|_| !current_package.is_empty())
+        .map_or(candidate.clone(), BinaryName::from_internal)
 }
 
 /// Compatibility helper for unit coverage that only needs a direct target.
@@ -1261,10 +1359,45 @@ mod tests {
                     .flatten()
             })
             .expect("Reverse's type definition should have an AST address");
+        let reference = RawTree::NatAst {
+            tag: TYPEREFSYMBOL_TAG,
+            offset: 0,
+            value: address,
+            child: Box::new(RawTree::Leaf(SimpleTerm {
+                tag: dotty_tasty::tasty::THIS_TAG,
+                offset: 0,
+                value: TermValue::Tag,
+            })),
+        };
+        assert!(matches!(
+            resolve_reference_name_in_package(&file, &reference, Some("scala/math")),
+            ReferenceResolution::Resolved(name)
+                if name.as_internal() == "scala/math/Ordering$Reverse"
+        ));
+        let shared = RawTree::Leaf(SimpleTerm {
+            tag: SHAREDTYPE_TAG,
+            offset: 0,
+            value: TermValue::AstRef(address),
+        });
         assert_eq!(
-            resolve_symbol_address(&file, address).as_deref(),
-            Some("Ordering$Reverse")
+            resolve_reference_prefix_in_package(&file, &shared, Some("scala/math")).as_deref(),
+            Some("scala/math/Ordering$Reverse")
         );
+
+        let malformed = RawTree::NatAst {
+            tag: TYPEREFSYMBOL_TAG,
+            offset: 0,
+            value: u32::MAX,
+            child: Box::new(RawTree::Leaf(SimpleTerm {
+                tag: dotty_tasty::tasty::THIS_TAG,
+                offset: 0,
+                value: TermValue::Tag,
+            })),
+        };
+        assert!(matches!(
+            resolve_reference_name_in_package(&file, &malformed, Some("scala/math")),
+            ReferenceResolution::Unresolved
+        ));
     }
 
     #[test]
