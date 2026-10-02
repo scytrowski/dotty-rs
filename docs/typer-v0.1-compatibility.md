@@ -160,6 +160,12 @@ Expression typing currently includes typed identifiers, stable term selections,
 literal expressions, plain method applications, `New` nodes, and blocks with
 expressions, local `val`/`var` definitions with or without explicit types, and
 local methods with explicit result types.
+Ordinary left-associative term infix calls lower through selected-member
+application, including overload selection and generic argument inference. Their
+typed shape is a `Select` followed by an `Apply`; the Scala 3.9.0 oracle fixture
+is `crates/dotty-typer/tests/fixtures/infix-expressions/InfixExpressions.scala`.
+Right-associative infix calls (operators ending in `:`) remain explicitly
+deferred because they require Scala's operand rewrite.
 It also supports expected-type conformance checks, source type ascriptions, direct
 assignments to mutable locals and fields, ordinary `if` expressions over the
 supported expression subset, condition-bearing `while` expressions, and local

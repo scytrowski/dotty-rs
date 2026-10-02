@@ -1,5 +1,6 @@
 //! Expression typing orchestration and shared expression helpers.
 
+use super::application::{InfixApplicationRequest, ResolvedApplication};
 use super::{ExpressionContext, SourceTyper, TyperError, tree_kind_name};
 use dotty_core::ast::*;
 use dotty_core::types::*;
@@ -13,6 +14,56 @@ mod references;
 pub(super) use blocks::LocalMethodIndex;
 
 impl SourceTyper<'_> {
+    pub(super) fn type_infix_expression(
+        &mut self,
+        tree: TreeId<Untyped>,
+        infix: dotty_core::ast::InfixOp,
+        position: Option<SourceSpan>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let operator_text = self.store.names.resolve(infix.op.text());
+        if operator_text.ends_with(':') {
+            return Err(TyperError::RightAssociativeInfixDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                operator: infix.op,
+            });
+        }
+
+        let left = self.type_expression_inner(infix.left, context, info_journal, new_mappings)?;
+        let receiver_type = self.typed_arena.get(left).ty;
+        let resolved = self.resolve_infix_application_function(
+            InfixApplicationRequest {
+                operator: infix.op,
+                qualifier: left,
+                receiver_type,
+                argument_tree: infix.right,
+                context,
+                tree_index: tree.index(),
+                position,
+            },
+            info_journal,
+            new_mappings,
+        )?;
+        self.type_resolved_application(
+            ResolvedApplication {
+                tree_index: tree.index(),
+                application_kind: ApplyKind::Regular,
+                argument_trees: vec![infix.right],
+                position,
+                context,
+                function: resolved.typed,
+                callable: resolved.callable,
+                typed_arguments: Some(resolved.arguments),
+                is_constructor_application: false,
+            },
+            info_journal,
+            new_mappings,
+        )
+    }
+
     pub(super) fn type_parenthesized_expression(
         &mut self,
         inner: TreeId<Untyped>,

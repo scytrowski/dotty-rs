@@ -22,6 +22,137 @@ fn supported_override_signature(method: &MethodType, store: &SemanticStore) -> b
 }
 
 impl SourceTyper<'_> {
+    pub(in crate::typer) fn resolve_infix_application_function(
+        &mut self,
+        request: InfixApplicationRequest,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<ResolvedApplicationFunction, TyperError> {
+        let InfixApplicationRequest {
+            operator,
+            qualifier,
+            receiver_type,
+            argument_tree,
+            context,
+            tree_index,
+            position,
+        } = request;
+        if !operator.is_term() {
+            return Err(TyperError::InfixOperatorMustBeTerm {
+                source: self.source,
+                tree_index,
+                operator,
+            });
+        }
+        let receiver = self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
+        if let Err(error) = self.require_stable_selection_prefix(receiver_type, tree_index) {
+            // A left-associated infix chain selects on the result of the
+            // preceding application. Its widened nominal type is enough to
+            // resolve a member without retaining a dependent term prefix.
+            if !matches!(
+                self.store.types.try_get(receiver),
+                Some(Type::TypeRef { .. } | Type::Applied { .. })
+            ) {
+                return Err(error);
+            }
+        }
+        let receiver = self.this_type_receiver_view(receiver)?;
+        let members = self
+            .lookup_overload_members_journaled(receiver, operator, info_journal)
+            .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+        if members.is_empty() {
+            return Err(TyperError::MemberNotFound {
+                source: self.source,
+                tree_index,
+                receiver,
+                name: operator,
+            });
+        }
+        if members
+            .iter()
+            .any(|member| self.store.symbols.get(member.symbol).kind != SymbolKind::Method)
+        {
+            return Err(TyperError::MixedApplicationCandidateKinds {
+                source: self.source,
+                tree_index,
+                candidates: members.iter().map(|member| member.symbol).collect(),
+            });
+        }
+        let mut candidates = members
+            .into_iter()
+            .map(|member| {
+                let callable = self.member_type_on_journaled(&member, info_journal)?;
+                self.validate_overload_callable(member.symbol, callable)?;
+                Ok(ApplicationCandidate {
+                    symbol: member.symbol,
+                    callable,
+                    member: Some(member),
+                    rejection: None,
+                })
+            })
+            .collect::<Result<Vec<_>, TyperError>>()?;
+
+        let typed =
+            self.type_expression_inner(argument_tree, context, info_journal, new_mappings)?;
+        let own_type = self.typed_arena.get(typed).ty;
+        let widened_type = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+        let arguments = [TypedArgument {
+            typed,
+            own_type,
+            widened_type,
+        }];
+
+        let mut completed_relation_types = std::collections::HashSet::new();
+        self.complete_relation_type(widened_type, info_journal, &mut completed_relation_types, 0)?;
+        for candidate in &candidates {
+            if let Some(Type::Method(method)) = self.store.types.try_get(candidate.callable) {
+                let parameter_types: Vec<_> = method.params.iter().map(|param| param.ty).collect();
+                for parameter_type in parameter_types {
+                    self.complete_relation_type(
+                        parameter_type,
+                        info_journal,
+                        &mut completed_relation_types,
+                        0,
+                    )?;
+                }
+            }
+        }
+
+        self.remove_overridden_overload_candidates(&mut candidates, tree_index)?;
+        let winner = self.choose_method_overload_candidate(
+            &mut candidates,
+            &arguments,
+            tree_index,
+            ApplyKind::Regular,
+            info_journal,
+        )?;
+        if winner
+            .member
+            .is_some_and(|member| member.symbol != winner.symbol)
+        {
+            return Err(TyperError::MalformedOverloadCandidate {
+                symbol: winner.symbol,
+                callable: winner.callable,
+            });
+        }
+        let function_type = self.store.types.alloc(Type::TermRef {
+            prefix: receiver_type,
+            target: TermRefTarget::Symbol(winner.symbol),
+        });
+        let function = TypedAstBuilder::new(&mut self.typed_arena).select(
+            qualifier,
+            operator,
+            false,
+            function_type,
+            position,
+        );
+        Ok(ResolvedApplicationFunction {
+            typed: function,
+            callable: winner.callable,
+            arguments: arguments.into(),
+        })
+    }
+
     pub(in crate::typer) fn resolve_overloaded_application_function(
         &mut self,
         request: ApplicationRequest<'_>,

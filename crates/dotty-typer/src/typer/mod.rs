@@ -12,7 +12,7 @@ use dotty_core::types::{
     TypeParamSpec, TypeRefTarget, method_type_from_symbols, poly_type_from_symbols,
 };
 use dotty_core::{
-    AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
+    AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, Name, NoResolver, Packages,
     ResolutionError, ScopeId, SemanticStore, SourceContextId, SourceDefinition, SourceId,
     SourceSemanticIndex, SourceSpan, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin,
     SymbolResolver, TreeId, TypeId, Typed, Untyped,
@@ -33,8 +33,8 @@ mod transaction;
 mod type_projection;
 
 use application::{
-    ApplicationCandidate, ApplicationRequest, InferenceLocation, ResolvedApplicationFunction,
-    TypedArgument,
+    ApplicationCandidate, ApplicationRequest, InferenceLocation, InfixApplicationRequest,
+    ResolvedApplicationFunction, TypedArgument,
 };
 pub use context::{ExpressionContext, ExpressionScopeId};
 use context::{ExpressionScopeFrame, next_expression_scope_owner};
@@ -247,6 +247,14 @@ impl<'a> SourceTyper<'a> {
         let typed = match source_tree.kind {
             TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => self
                 .type_parenthesized_expression(parens.inner, context, info_journal, new_mappings),
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => self.type_infix_expression(
+                tree,
+                infix,
+                source_tree.position,
+                context,
+                info_journal,
+                new_mappings,
+            ),
             TreeKind::New(new) => self.type_new_expression(
                 tree,
                 new,
@@ -16376,6 +16384,226 @@ mod tests {
             typer.store().types.get(typer.typed_ast().get(typed).ty),
             &Type::Constant(dotty_core::Constant::Int(1))
         );
+    }
+
+    #[test]
+    fn ordinary_infix_call_matches_selected_member_application() {
+        let source_text =
+            include_str!("../../tests/fixtures/infix-expressions/InfixExpressions.scala");
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (infix_method, infix_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "infix");
+        let (direct_method, direct_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "direct");
+        let combine = method_symbol(&parsed, &store, &index, source, "combine");
+        assert!(matches!(
+            parsed.ast.get(infix_tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let infix_context = typer.expression_context_for(infix_method).unwrap();
+
+        let infix = typer.type_expression(infix_tree, infix_context).unwrap();
+
+        assert!(matches!(
+            typer.typed_ast().get(infix).kind,
+            TreeKind::Apply(_)
+        ));
+        assert_eq!(
+            type_symbol(typer.store(), typer.typed_ast().get(infix).ty),
+            class_symbol(&parsed, typer.store(), &index, source, "Box")
+        );
+        assert_eq!(
+            typer.source_typed_index().get(source, infix_tree),
+            Some(infix)
+        );
+
+        let direct_context = typer.expression_context_for(direct_method).unwrap();
+        let direct = typer.type_expression(direct_tree, direct_context).unwrap();
+        let TreeKind::Apply(direct_application) = &typer.typed_ast().get(direct).kind else {
+            panic!("dot-call should produce a typed application");
+        };
+        let TreeKind::Apply(infix_application) = &typer.typed_ast().get(infix).kind else {
+            unreachable!();
+        };
+        for function in [direct_application.function, infix_application.function] {
+            assert!(matches!(
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(function).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                    if *symbol == combine
+            ));
+        }
+        assert_eq!(
+            typer.typed_ast().get(infix).ty,
+            typer.typed_ast().get(direct).ty
+        );
+        let oracle =
+            include_str!("../../tests/fixtures/infix-expressions/InfixExpressions.typed-tree.txt");
+        assert!(oracle.contains("def infix(left: Box, right: Box): Box = left.combine(right)"));
+    }
+
+    #[test]
+    fn infix_overload_and_generic_method_use_selected_member_resolution() {
+        let source_text = "class Box { def combine(value: Int): Int = value; def combine(value: Box): Box = value; def echo[A](value: A): A = value }; class Use { def overloaded(left: Box, right: Box): Box = left `combine` right; def generic(left: Box, right: Box): Box = left `echo` right }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (overloaded_method, overloaded_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "overloaded");
+        let (generic_method, generic_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "generic");
+        let echo = method_symbol(&parsed, &store, &index, source, "echo");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let overloaded_context = typer.expression_context_for(overloaded_method).unwrap();
+        let overloaded = typer
+            .type_expression(overloaded_tree, overloaded_context)
+            .unwrap();
+        let TreeKind::Apply(overloaded_application) = &typer.typed_ast().get(overloaded).kind
+        else {
+            panic!("expected overload infix lowering to produce an Apply")
+        };
+        let selected_function = overloaded_application.function;
+        let selected = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(selected_function).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected selected overload, found {other:?}"),
+        };
+        let selected_info = typer.complete_symbol(selected).unwrap();
+        assert!(matches!(
+            typer.store().types.get(selected_info),
+            Type::Method(method)
+                if matches!(typer.store().types.get(method.params[0].ty),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }
+                        if *class == class_symbol(&parsed, typer.store(), &index, source, "Box"))
+        ));
+        let generic_context = typer.expression_context_for(generic_method).unwrap();
+        let generic = typer
+            .type_expression(generic_tree, generic_context)
+            .unwrap();
+        let TreeKind::Apply(generic_application) = &typer.typed_ast().get(generic).kind else {
+            panic!("expected generic infix lowering to produce an Apply")
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(generic_infix)) =
+            &parsed.ast.get(generic_tree).kind
+        else {
+            panic!("generic source should be an infix expression")
+        };
+        assert_eq!(
+            typer.source_typed_index().get(source, generic_infix.right),
+            Some(generic_application.args[0])
+        );
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(generic_application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == echo
+        ));
+        assert_eq!(
+            type_symbol(typer.store(), typer.typed_ast().get(generic).ty),
+            class_symbol(&parsed, typer.store(), &index, source, "Box")
+        );
+    }
+
+    #[test]
+    fn nested_infix_calls_preserve_left_associative_application_shape() {
+        let source_text = "class Box { def combine(other: Box): Box = this }; class Use { def nested(left: Box, middle: Box, right: Box): Box = left `combine` middle `combine` right }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "nested");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let TreeKind::Apply(outer) = &typer.typed_ast().get(typed).kind else {
+            panic!("outer infix operator should produce an Apply")
+        };
+        let TreeKind::Select(selection) = &typer.typed_ast().get(outer.function).kind else {
+            panic!("outer infix application should select its method")
+        };
+        assert!(matches!(
+            typer.typed_ast().get(selection.qualifier).kind,
+            TreeKind::Apply(_)
+        ));
+    }
+
+    #[test]
+    fn right_associative_infix_is_reported_as_deferred() {
+        let source_text = "class Box { def +:(other: Box): Box = this }; class Use { def right(left: Box, right: Box): Box = left +: right }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "right");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let context = typer.expression_context_for(method).unwrap();
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::RightAssociativeInfixDeferred {
+                source: error_source,
+                tree_index,
+                ..
+            }) if error_source == source && tree_index == rhs.index()
+        ));
+    }
+
+    #[test]
+    fn failed_infix_argument_application_rolls_back_typed_state() {
+        let source_text = "class Box { def combine(value: Int): Int = value }; class Use { def bad(left: Box, right: Box): Int = left `combine` right }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "bad");
+        let checkpoint = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let context = typer.expression_context_for(method).unwrap();
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::OverloadApplicationNoApplicable { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
     }
 
     #[test]
