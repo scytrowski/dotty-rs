@@ -302,11 +302,11 @@ non-value inferred infos return a focused error. Both typed explicit and
 inferred locals are entered with one stable symbol identity; a later failure in
 the block rolls back local symbols, source mappings, and typed nodes.
 
-### Local-definition source audit
+### Local-definition source audit v1 (historical)
 
-The focused audit scans the pinned Scala 3.9.0 `library/src` and `compiler/src`
-trees and tries source typing for named method bodies that contain local
-definitions. Reproduce it with:
+The first-generation audit scanned the pinned Scala 3.9.0 `library/src` and
+`compiler/src` trees and tried source typing for named method bodies that
+contain local definitions, without a real classpath resolver. Its command was:
 
 ```text
 SCALA39_ROOT=/tmp/scala3-3.9.0 \
@@ -340,6 +340,81 @@ The five largest local-method failure categories were `ImportQualifierNotFound`
 `ProtoTypes.scala`). The audit reports stable sorted buckets and representative
 paths. Its fixture tests repeated-run determinism and excludes local-class
 members from the enclosing method's local-definition counts.
+
+This result is retained for historical comparison. The classpath-backed
+second-generation run below supersedes its missing-classpath limitation and
+is the current audit reference.
+
+### Classpath-backed Scala 3.9.0 source audit
+
+The second-generation audit uses the same pinned `library/src` and
+`compiler/src` roots and runs the real `ClasspathSymbolResolver` through the
+integration path validated by #580. Each Scala source file is one isolated
+audit unit with one `SemanticStore`, one `Definitions`, source packages seeded
+into one `LoadingSession`, and (when the file has target methods) one
+`SourceTyper`; the resolver session is shared throughout that unit. A single
+read-only classpath index is shared by the units. Per-file read, parser, namer,
+and typing failures are captured without stopping the corpus run. Per-file
+stores prevent unrelated source declarations from affecting each other's
+IDs. Audit-only instrumentation counts resolver requests and outcomes without
+changing production APIs. Session cache reuse across files is not counted
+because stores are intentionally independent.
+
+Reproduce the two-run normalized determinism check and regenerate the checked
+report with:
+
+```sh
+SCALA39_ROOT=/path/to/scala3-3.9.0 \
+JAVA_HOME=/path/to/jdk-21 \
+SCALA39_JDK_RELEASE=21 \
+tools/typer-classpath-corpus-audit/run
+```
+
+The script rejects a Scala checkout whose `HEAD` is not
+`777528f19a58e794c9954a42f433373472ec57f8`. It constructs
+`SCALA39_CLASSPATH` itself from these pinned Maven artifacts under
+`COURSIER_MAVEN_ROOT` (default
+`$HOME/.cache/coursier/v1/https/repo1.maven.org/maven2`):
+
+- `org.scala-lang:scala3-library_3:3.9.0`;
+- `org.scala-lang:scala-library:3.9.0`;
+- `org.scala-lang:scala3-compiler_3:3.9.0`;
+- `org.scala-lang:tasty-core_3:3.9.0`;
+- `org.scala-lang:scala3-interfaces:3.9.0`;
+- `org.scala-lang.modules:scala-asm:9.9.0-scala-1`;
+- `org.scala-sbt:compiler-interface:1.12.0`;
+- `org.scala-sbt:util-interface:1.11.5`.
+
+The explicit `JAVA_HOME/jmods` plus those jars are the complete classpath
+inputs; ambient `CLASSPATH` is ignored. The corpus checkout's `out/` is empty,
+so the pinned published library/compiler jars provide compiled Scala symbols.
+The script runs the ignored corpus test twice, extracts only its normalized
+report section, compares the sections byte-for-byte, and then writes
+[`typer-classpath-corpus-audit-3.9.0.md`](typer-classpath-corpus-audit-3.9.0.md).
+In the recorded environment (JDK 21), one run took about five seconds; peak
+memory was not measured. The normal workspace test suite skips this audit.
+
+The report keeps v1 counts and shows deltas, exact
+`UnsupportedExpression::<AST kind>` and
+`LocalBlockDeclarationDeferred::<kind>` buckets, method-body structural AST
+counts, parser/namer/recovery separation, up to five deterministic representative
+paths per bucket, and a top-ten list of Typer-owned first blockers with
+per-bucket scope notes for the top five. `NoSuccessfulEnclosingMethodTyping`
+is reported as a downstream count and excluded from semantic-gap ranking.
+Classpath-resolution buckets are also reported separately and excluded from
+the Typer-semantic ranking so missing external symbols cannot masquerade as
+Typer features.
+
+The real classpath resolves packages but current class materialization still
+has measured limitations: in this run 1,965 package resolutions came from the
+classpath and 5,025 reused source packages; there were no external class or
+member successes, 3,884 unresolved member requests, and 91 resolver errors.
+The errors include recursive `java/lang/Object` / `java/lang/Class` loading and
+unresolved supertype names in published TASTy. Therefore the ranked list is a
+deterministic inventory of Typer-owned first errors observed after the
+available resolver calls, not a claim that all dependencies were resolved or
+that later failures in those bodies are known. Resolution failures remain
+visible as their own buckets rather than being attributed to Typer semantics.
 
 Application sites can resolve lexical, imported, and selected overload buckets
 for supported monomorphic methods and `Poly -> Method` candidates. Generic
