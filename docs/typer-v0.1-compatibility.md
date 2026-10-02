@@ -269,7 +269,12 @@ flag. The synthetic missing annotation's source `TypeTree` maps to the typed
 Blocks type their statements in order, preserve the typed Block shape and
 source position, and use the final expression's own type without widening it.
 Each block allocates an empty scope in `SemanticStore` owned by the current
-semantic expression owner; nested blocks push nested scopes. Before typing
+semantic expression owner; nested blocks push nested scopes. A block-local
+import is retained as a typed `Import` statement, then becomes active for later
+statements. Nested blocks inherit active outer imports, but imports declared in
+them do not leak outward. Local import state is typer-owned and rolls back with
+failed expression transactions. Explicit, wildcard, renamed, and hidden
+selectors reuse source-import resolution for term and type names. Before typing
 statements, each block pre-enters its direct local method headers in source
 order. A local method receives a typer-owned `Method` symbol and a distinct
 method-owned scope; the local method index retains its source tree, scope, and
@@ -509,7 +514,7 @@ are ready:
   `return` subset, including `match`, `try`, lambdas, and other forms that are
   not currently handled by the expression typer;
 - other local `def` signature/body shapes, class, type, and pattern
-  declarations, plus imports in block statements;
+  declarations;
 - generic overload inference outside the structural candidate-local subset,
   contextual/implicit argument insertion and search, dependent result
   application, and right-associative extension normalization;

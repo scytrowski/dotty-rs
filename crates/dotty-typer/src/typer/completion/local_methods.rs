@@ -198,6 +198,10 @@ impl SourceTyper<'_> {
         }
         self.active_local_type_scopes
             .push((declaration_context.lexical, method_scope));
+        self.active_local_import_scopes.push((
+            declaration_context.lexical,
+            declaration_context.local_scopes,
+        ));
         let signature = self.complete_method_signature_body(
             method,
             method_tree_index,
@@ -205,6 +209,7 @@ impl SourceTyper<'_> {
             infer_result,
             info_journal,
         );
+        self.active_local_import_scopes.pop();
         self.active_local_type_scopes.pop();
         if infer_result {
             self.inferred_method_results_in_progress.remove(&method);

@@ -237,7 +237,11 @@ impl SourceTyper<'_> {
         let declared_type = if inferred {
             None
         } else {
-            Some(self.type_of_tpt_inner(definition.tpt, context.lexical)?)
+            self.active_local_import_scopes
+                .push((context.lexical, context.local_scopes));
+            let projected = self.type_of_tpt_inner(definition.tpt, context.lexical);
+            self.active_local_import_scopes.pop();
+            Some(projected?)
         };
 
         // Scala 3 gives a local definition scope over the entire statement
@@ -583,6 +587,10 @@ impl SourceTyper<'_> {
         }
         self.active_local_type_scopes
             .push((declaration_context.lexical, method_scope));
+        self.active_local_import_scopes.push((
+            declaration_context.lexical,
+            declaration_context.local_scopes,
+        ));
         let typed_rhs = self.type_expression_expected_inner(
             rhs,
             method_context,
@@ -590,6 +598,7 @@ impl SourceTyper<'_> {
             info_journal,
             new_mappings,
         );
+        self.active_local_import_scopes.pop();
         self.active_local_type_scopes.pop();
         if !definition.type_params.is_empty() {
             self.active_local_type_binders.pop();
@@ -727,6 +736,30 @@ impl SourceTyper<'_> {
                     tree_index: stat.index(),
                 });
             };
+            if let TreeKind::Import(import) = &source_stat.kind {
+                let typed = self.type_local_import_statement(
+                    stat,
+                    import.clone(),
+                    source_stat.position,
+                    block_context,
+                    info_journal,
+                    new_mappings,
+                )?;
+                stats.push(typed);
+                let Some(scope_stack) = block_context.local_scopes else {
+                    return Err(TyperError::LocalBlockDeclarationDeferred {
+                        source: self.source,
+                        tree_index: stat.index(),
+                        kind: "import scope",
+                    });
+                };
+                self.expression_scopes
+                    .get_mut(scope_stack.index())
+                    .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack: scope_stack })?
+                    .imports
+                    .push((stat, block_context));
+                continue;
+            }
             if let Some(kind) = local_block_declaration_kind(&source_stat.kind) {
                 if let TreeKind::DefDef(definition) = &source_stat.kind
                     && definition.rhs.is_some()

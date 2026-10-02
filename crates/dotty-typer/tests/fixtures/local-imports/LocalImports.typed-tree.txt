@@ -1,0 +1,11 @@
+// Scala 3.9.0 `-Vprint:typer` output. Imports remain block statements and
+// make their selected term/type names available to following statements.
+def term: Int = {
+  import lib.Owner.member
+  lib.Owner.member
+}
+def localType(value: lib.Owner.Box): lib.Owner.Box = {
+  import lib.Owner.Box
+  val box: lib.Owner.Box = value
+  box
+}

@@ -101,6 +101,7 @@ pub struct SourceTyper<'a> {
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     local_methods: LocalMethodIndex,
     active_local_type_scopes: Vec<(SourceContextId, ScopeId)>,
+    active_local_import_scopes: Vec<(SourceContextId, Option<ExpressionScopeId>)>,
     active_local_type_binders: Vec<(TypeId, Vec<SymbolId>)>,
     initializing_local_symbols: HashSet<SymbolId>,
     inferred_method_results_in_progress: HashSet<SymbolId>,
@@ -144,6 +145,7 @@ impl<'a> SourceTyper<'a> {
             local_symbols: HashMap::new(),
             local_methods: LocalMethodIndex::default(),
             active_local_type_scopes: Vec::new(),
+            active_local_import_scopes: Vec::new(),
             active_local_type_binders: Vec::new(),
             initializing_local_symbols: HashSet::new(),
             inferred_method_results_in_progress: HashSet::new(),
@@ -10024,16 +10026,10 @@ mod tests {
 
     #[test]
     fn unsupported_block_declaration_statements_are_deferred_explicitly() {
-        let sources = [
-            (
-                "class C { def use: Int = { 1; type Local = Int; 3 } }",
-                "type definition",
-            ),
-            (
-                "class Lib { val item: Int = 1 }; class C { def use: Int = { 1; import Lib.item; 3 } }",
-                "import",
-            ),
-        ];
+        let sources = [(
+            "class C { def use: Int = { 1; type Local = Int; 3 } }",
+            "type definition",
+        )];
 
         for (source_text, expected_kind) in sources {
             let (parsed, mut store, packages, definitions, index, source) =
@@ -10063,6 +10059,321 @@ mod tests {
             assert!(typer.source_typed_index().is_empty());
             assert_eq!(typer.store().checkpoint(), store_checkpoint);
             assert_eq!(typer.expression_scopes.len(), expression_scope_checkpoint);
+        }
+    }
+
+    #[test]
+    fn block_local_imports_type_following_terms_and_type_trees() {
+        let source_text = include_str!("../../tests/fixtures/local-imports/LocalImports.scala");
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (term_method, term_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "term");
+        let (type_method, type_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "localType");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let term_context = typer.expression_context_for(term_method).unwrap();
+        let TreeKind::Block(source_term_block) = &parsed.ast.get(term_rhs).kind else {
+            panic!("term method should retain its source block")
+        };
+        let source_import_tree = source_term_block.stats[0];
+        let TreeKind::Import(source_import) = &parsed.ast.get(source_import_tree).kind else {
+            panic!("first source statement should be an import")
+        };
+        let typed_term = typer.type_expression(term_rhs, term_context).unwrap();
+        let TreeKind::Block(term_block) = &typer.typed_ast().get(typed_term).kind else {
+            panic!("local term import should remain in its typed block")
+        };
+        let TreeKind::Import(typed_import) = &typer.typed_ast().get(term_block.stats[0]).kind
+        else {
+            panic!("the first block statement should be a typed import")
+        };
+        assert_eq!(typed_import.selectors.len(), 1);
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(term_block.stats[0]).ty),
+            Type::NoType
+        ));
+        assert_eq!(
+            typer.source_typed_index().get(source, source_import_tree),
+            Some(term_block.stats[0])
+        );
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, source_import.expr)
+                .is_some()
+        );
+        assert!(matches!(
+            typer.typed_ast().get(term_block.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(term_block.expr).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if typer.store().names.resolve(typer.store().symbols.get(*symbol).name.text()) == "member"
+        ));
+
+        let type_context = typer.expression_context_for(type_method).unwrap();
+        let typed_type = typer.type_expression(type_rhs, type_context).unwrap();
+        let TreeKind::Block(type_block) = &typer.typed_ast().get(typed_type).kind else {
+            panic!("local type import should remain in its typed block")
+        };
+        assert!(matches!(
+            typer.typed_ast().get(type_block.stats[0]).kind,
+            TreeKind::Import(_)
+        ));
+        let TreeKind::ValDef(local_value) = &typer.typed_ast().get(type_block.stats[1]).kind else {
+            panic!("local value should remain in the typed block")
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(local_value.tpt).ty),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }
+                if *symbol == class_symbol(&parsed, typer.store(), &index, source, "Box")
+        ));
+
+        let oracle = include_str!("../../tests/fixtures/local-imports/LocalImports.typed-tree.txt");
+        assert!(oracle.contains("import lib.Owner.member"));
+        assert!(oracle.contains("val box: lib.Owner.Box = value"));
+    }
+
+    #[test]
+    fn local_import_selectors_follow_statement_and_nested_scope_rules() {
+        let source_text = "package lib { object First { val item: Int = 1; val other: Int = 2 }; object Second { val item: Int = 3 } }; package app { object Use { def renamed: Int = { import lib.First.{item as alias}; alias }; def wildcard: Int = { import lib.First.*; other }; def hidden: Int = { import lib.First.{item as _, *}; item }; def ambiguous: Int = { import lib.First.*; import lib.Second.*; item }; def before: Int = { val earlier: Int = item; import lib.First.item; item }; def direct: Int = { val item: Int = 4; import lib.First.item; item }; def parameter(item: Int): Int = { import lib.First.item; item }; def nested: Int = { import lib.First.item; { item } }; def leak: Int = { { import lib.First.item; item }; item } } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for name in ["renamed", "wildcard", "nested"] {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+            let context = typer.expression_context_for(method).unwrap();
+            typer.type_expression(rhs, context).unwrap_or_else(|error| {
+                panic!("local import method `{name}` should type: {error:?}")
+            });
+        }
+
+        let (_, rhs) = method_definition_and_rhs(&parsed, typer.store(), &index, source, "renamed");
+        let TreeKind::Block(source_block) = &parsed.ast.get(rhs).kind else {
+            panic!("renamed import method should have a block")
+        };
+        let source_import_tree = source_block.stats[0];
+        let TreeKind::Import(source_import) = &parsed.ast.get(source_import_tree).kind else {
+            panic!("first source statement should be the import")
+        };
+        let renamed_source_tree = source_import.selectors[0]
+            .renamed
+            .expect("renamed selector should have a name tree");
+        let typed_rhs = typer.source_typed_index().get(source, rhs).unwrap();
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_rhs).kind else {
+            panic!("renamed import method should have a typed block")
+        };
+        let TreeKind::Import(typed_import) = &typer.typed_ast().get(typed_block.stats[0]).kind
+        else {
+            panic!("first typed statement should be the import")
+        };
+        let typed_renamed_tree = typed_import.selectors[0]
+            .renamed
+            .expect("typed renamed selector should retain its name tree");
+        assert!(matches!(
+            typer.typed_ast().get(typed_renamed_tree).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            typer.source_typed_index().get(source, renamed_source_tree),
+            Some(typed_renamed_tree)
+        );
+
+        for name in ["hidden", "before", "leak"] {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+            let context = typer.expression_context_for(method).unwrap();
+            assert!(
+                matches!(
+                    typer.type_expression(rhs, context),
+                    Err(TyperError::TermNameNotFound { name, .. })
+                        if typer.store().names.resolve(name.text()) == "item"
+                ),
+                "`{name}` should not resolve an inactive or hidden local import"
+            );
+        }
+
+        for name in ["ambiguous", "parameter"] {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+            let context = typer.expression_context_for(method).unwrap();
+            assert!(
+                matches!(
+                    typer.type_expression(rhs, context),
+                    Err(TyperError::AmbiguousTermReference { name, .. })
+                        if typer.store().names.resolve(name.text()) == "item"
+                ),
+                "`{name}` should report a same-depth local import ambiguity"
+            );
+        }
+
+        let (method, rhs) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "direct");
+        let TreeKind::Block(source_block) = &parsed.ast.get(rhs).kind else {
+            panic!("expected direct-shadowing method body to be a block")
+        };
+        let source_local = source_block.stats[0];
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let local_symbol = typer.local_symbol_at(source, source_local).unwrap();
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected typed direct-shadowing block")
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_block.expr).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == local_symbol
+        ));
+    }
+
+    #[test]
+    fn failed_later_local_import_block_rolls_back_import_state_for_retry() {
+        let source_text = "package lib { object Owner { val item: Int = 1 } }; package app { object Use { def broken: Int = { import lib.Owner.item; missing } } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "broken");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let scope_count = typer.expression_scopes.len();
+        let store_checkpoint = typer.store().checkpoint();
+
+        for _ in 0..2 {
+            assert!(matches!(
+                typer.type_expression(rhs, context),
+                Err(TyperError::TermNameNotFound { name, .. })
+                    if typer.store().names.resolve(name.text()) == "missing"
+            ));
+            assert_eq!(typer.expression_scopes.len(), scope_count);
+            assert!(typer.source_typed_index().is_empty());
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        }
+    }
+
+    #[test]
+    fn local_imports_precede_source_imports_but_conflict_with_enclosing_members() {
+        let source_text = "package lib { object First { val shared: Int = 1 }; object Second { val shared: Int = 2 } }; package app { import lib.First.*; object Use { def sourceImport: Int = { import lib.Second.*; shared } } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "sourceImport");
+        let shared_symbols = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "shared" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let second = *shared_symbols
+            .get(1)
+            .expect("both imported members should be indexed");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == second
+        ));
+
+        let source_text = "package lib { object Owner { val shared: Int = 1 } }; package app { object Use { val shared: Int = 2; def conflict: Int = { import lib.Owner.shared; shared } } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "conflict");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::AmbiguousTermReference { name, .. })
+                if typer.store().names.resolve(name.text()) == "shared"
+        ));
+    }
+
+    #[test]
+    fn local_type_import_conflicts_with_enclosing_type_member() {
+        let source_text = "package lib { object Owner { class Box } }; package app { class Use { class Box; def conflict(value: lib.Owner.Box): Box = { import lib.Owner.Box; val local: Box = value; local } } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "conflict");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::AmbiguousTypeName { name, .. })
+                if typer.store().names.resolve(name.text()) == "Box"
+        ));
+    }
+
+    #[test]
+    fn local_import_qualifiers_resolve_prior_locals_and_import_aliases() {
+        let source_text = "package lib { object Owner { val member: Int = 1 } }; package app { import lib.Owner; object Use { def viaLocalValue: Int = { val local = Owner; import local.member; member }; def viaImportedAlias: Int = { import lib.{Owner as O}; import O.member; member } } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for name in ["viaLocalValue", "viaImportedAlias"] {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+            let context = typer.expression_context_for(method).unwrap();
+            typer.type_expression(rhs, context).unwrap_or_else(|error| {
+                panic!("local import qualifier in `{name}` should resolve: {error:?}")
+            });
         }
     }
 
@@ -10308,7 +10619,7 @@ mod tests {
         assert!(index.declaration_context_of(method).is_none());
         let method_context = typer.expression_context_for(method).unwrap();
         assert_eq!(method_context.owner, method);
-        let method_frame = typer.expression_scopes[method_context.local_scopes.unwrap().index()];
+        let method_frame = &typer.expression_scopes[method_context.local_scopes.unwrap().index()];
         assert_eq!(method_frame.scope, method_scope);
         assert_eq!(method_frame.parent, block_context.local_scopes);
     }
