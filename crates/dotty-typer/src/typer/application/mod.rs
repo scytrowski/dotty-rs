@@ -22,6 +22,28 @@ pub(in crate::typer) struct ResolvedApplicationFunction {
     pub(in crate::typer) arguments: Vec<TypedArgument>,
 }
 
+pub(in crate::typer) struct ResolvedApplication {
+    pub(in crate::typer) tree_index: u32,
+    pub(in crate::typer) application_kind: ApplyKind,
+    pub(in crate::typer) argument_trees: Vec<TreeId<Untyped>>,
+    pub(in crate::typer) position: Option<SourceSpan>,
+    pub(in crate::typer) context: ExpressionContext,
+    pub(in crate::typer) function: TreeId<Typed>,
+    pub(in crate::typer) callable: TypeId,
+    pub(in crate::typer) typed_arguments: Option<Vec<TypedArgument>>,
+    pub(in crate::typer) is_constructor_application: bool,
+}
+
+pub(in crate::typer) struct InfixApplicationRequest {
+    pub(in crate::typer) operator: Name,
+    pub(in crate::typer) qualifier: TreeId<Typed>,
+    pub(in crate::typer) receiver_type: TypeId,
+    pub(in crate::typer) argument_tree: TreeId<Untyped>,
+    pub(in crate::typer) context: ExpressionContext,
+    pub(in crate::typer) tree_index: u32,
+    pub(in crate::typer) position: Option<SourceSpan>,
+}
+
 #[derive(Clone, Copy)]
 pub(in crate::typer) struct ApplicationRequest<'a> {
     pub(in crate::typer) function_tree: TreeId<Untyped>,
@@ -81,15 +103,17 @@ impl SourceTyper<'_> {
             (function, callable, None)
         };
         self.type_resolved_application(
-            tree.index(),
-            application.kind,
-            &application.args,
-            position,
-            context,
-            function,
-            callable,
-            typed_arguments,
-            is_constructor_application,
+            ResolvedApplication {
+                tree_index: tree.index(),
+                application_kind: application.kind,
+                argument_trees: application.args,
+                position,
+                context,
+                function,
+                callable,
+                typed_arguments,
+                is_constructor_application,
+            },
             info_journal,
             new_mappings,
         )
@@ -97,24 +121,27 @@ impl SourceTyper<'_> {
 
     pub(in crate::typer) fn type_resolved_application(
         &mut self,
-        tree_index: u32,
-        application_kind: ApplyKind,
-        argument_trees: &[TreeId<Untyped>],
-        position: Option<SourceSpan>,
-        context: ExpressionContext,
-        function: TreeId<Typed>,
-        mut callable: TypeId,
-        mut typed_arguments: Option<Vec<TypedArgument>>,
-        is_constructor_application: bool,
+        request: ResolvedApplication,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
+        let ResolvedApplication {
+            tree_index,
+            application_kind,
+            argument_trees,
+            position,
+            context,
+            function,
+            mut callable,
+            mut typed_arguments,
+            is_constructor_application,
+        } = request;
         if let Some(Type::Poly(poly)) = self.store.types.try_get(callable).cloned() {
             let arguments = if let Some(arguments) = typed_arguments.take() {
                 arguments
             } else {
                 let mut arguments = Vec::with_capacity(argument_trees.len());
-                for argument_tree in argument_trees {
+                for argument_tree in &argument_trees {
                     let typed = self.type_expression_inner(
                         *argument_tree,
                         context,
@@ -165,7 +192,7 @@ impl SourceTyper<'_> {
                         ..
                     } => TyperError::InferredTypeArgumentBoundViolation {
                         source: self.source,
-                        tree_index: tree_index,
+                        tree_index,
                         parameter_index,
                         argument,
                         bound,
@@ -177,7 +204,7 @@ impl SourceTyper<'_> {
                         ..
                     } => TyperError::UnsupportedInferredTypeArgumentBounds {
                         source: self.source,
-                        tree_index: tree_index,
+                        tree_index,
                         parameter_index,
                         argument,
                         bounds,
@@ -190,7 +217,7 @@ impl SourceTyper<'_> {
                         ..
                     } => TyperError::InferredTypeArgumentBoundCheckUnsupported {
                         source: self.source,
-                        tree_index: tree_index,
+                        tree_index,
                         parameter_index,
                         argument,
                         bound,
@@ -207,7 +234,7 @@ impl SourceTyper<'_> {
             _ => {
                 return Err(TyperError::ApplicationCalleeNotMethod {
                     source: self.source,
-                    tree_index: tree_index,
+                    tree_index,
                     ty: callable,
                 });
             }
@@ -215,15 +242,15 @@ impl SourceTyper<'_> {
         if !application_kind_accepts(application_kind, method.kind) {
             return Err(TyperError::ApplicationMethodKindMismatch {
                 source: self.source,
-                tree_index: tree_index,
-                application_kind: application_kind,
+                tree_index,
+                application_kind,
                 method_kind: method.kind,
             });
         }
         if argument_trees.len() != method.params.len() {
             return Err(TyperError::ApplicationArityMismatch {
                 source: self.source,
-                tree_index: tree_index,
+                tree_index,
                 expected: method.params.len(),
                 actual: argument_trees.len(),
             });
@@ -232,14 +259,14 @@ impl SourceTyper<'_> {
             if parameter.erased {
                 return Err(TyperError::ErasedApplicationParameterDeferred {
                     source: self.source,
-                    tree_index: tree_index,
+                    tree_index,
                     parameter_index,
                 });
             }
             if parameter.varargs {
                 return Err(TyperError::VarargsApplicationParameterDeferred {
                     source: self.source,
-                    tree_index: tree_index,
+                    tree_index,
                     parameter_index,
                 });
             }
@@ -249,7 +276,7 @@ impl SourceTyper<'_> {
             ) {
                 return Err(TyperError::ByNameApplicationParameterDeferred {
                     source: self.source,
-                    tree_index: tree_index,
+                    tree_index,
                     parameter_index,
                 });
             }
@@ -257,7 +284,7 @@ impl SourceTyper<'_> {
         if self.type_contains_param_ref(method.result, callable)? {
             return Err(TyperError::DependentMethodApplicationDeferred {
                 source: self.source,
-                tree_index: tree_index,
+                tree_index,
                 binder: callable,
                 result: method.result,
             });
@@ -298,7 +325,7 @@ impl SourceTyper<'_> {
                 Ok(false) => {
                     return Err(TyperError::ApplicationArgumentTypeMismatch {
                         source: self.source,
-                        tree_index: tree_index,
+                        tree_index,
                         argument_index,
                         actual,
                         expected: parameter.ty,
@@ -307,7 +334,7 @@ impl SourceTyper<'_> {
                 Err(error) => {
                     return Err(TyperError::ApplicationArgumentConformanceUnsupported {
                         source: self.source,
-                        tree_index: tree_index,
+                        tree_index,
                         argument_index,
                         actual,
                         expected: parameter.ty,

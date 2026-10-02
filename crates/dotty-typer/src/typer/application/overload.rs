@@ -24,16 +24,19 @@ fn supported_override_signature(method: &MethodType, store: &SemanticStore) -> b
 impl SourceTyper<'_> {
     pub(in crate::typer) fn resolve_infix_application_function(
         &mut self,
-        operator: dotty_core::Name,
-        qualifier: TreeId<Typed>,
-        receiver_type: TypeId,
-        argument_tree: TreeId<Untyped>,
-        context: ExpressionContext,
-        tree_index: u32,
-        position: Option<dotty_core::SourceSpan>,
+        request: InfixApplicationRequest,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<ResolvedApplicationFunction, TyperError> {
+        let InfixApplicationRequest {
+            operator,
+            qualifier,
+            receiver_type,
+            argument_tree,
+            context,
+            tree_index,
+            position,
+        } = request;
         if !operator.is_term() {
             return Err(TyperError::InfixOperatorMustBeTerm {
                 source: self.source,

@@ -1,5 +1,6 @@
 //! Expression typing orchestration and shared expression helpers.
 
+use super::application::{InfixApplicationRequest, ResolvedApplication};
 use super::{ExpressionContext, SourceTyper, TyperError, tree_kind_name};
 use dotty_core::ast::*;
 use dotty_core::types::*;
@@ -34,26 +35,30 @@ impl SourceTyper<'_> {
         let left = self.type_expression_inner(infix.left, context, info_journal, new_mappings)?;
         let receiver_type = self.typed_arena.get(left).ty;
         let resolved = self.resolve_infix_application_function(
-            infix.op,
-            left,
-            receiver_type,
-            infix.right,
-            context,
-            tree.index(),
-            position,
+            InfixApplicationRequest {
+                operator: infix.op,
+                qualifier: left,
+                receiver_type,
+                argument_tree: infix.right,
+                context,
+                tree_index: tree.index(),
+                position,
+            },
             info_journal,
             new_mappings,
         )?;
         self.type_resolved_application(
-            tree.index(),
-            ApplyKind::Regular,
-            &[infix.right],
-            position,
-            context,
-            resolved.typed,
-            resolved.callable,
-            Some(resolved.arguments),
-            false,
+            ResolvedApplication {
+                tree_index: tree.index(),
+                application_kind: ApplyKind::Regular,
+                argument_trees: vec![infix.right],
+                position,
+                context,
+                function: resolved.typed,
+                callable: resolved.callable,
+                typed_arguments: Some(resolved.arguments),
+                is_constructor_application: false,
+            },
             info_journal,
             new_mappings,
         )

@@ -12,7 +12,7 @@ use dotty_core::types::{
     TypeParamSpec, TypeRefTarget, method_type_from_symbols, poly_type_from_symbols,
 };
 use dotty_core::{
-    AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, NoResolver, Packages,
+    AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, Name, NoResolver, Packages,
     ResolutionError, ScopeId, SemanticStore, SourceContextId, SourceDefinition, SourceId,
     SourceSemanticIndex, SourceSpan, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin,
     SymbolResolver, TreeId, TypeId, Typed, Untyped,
@@ -33,8 +33,8 @@ mod transaction;
 mod type_projection;
 
 use application::{
-    ApplicationCandidate, ApplicationRequest, InferenceLocation, ResolvedApplicationFunction,
-    TypedArgument,
+    ApplicationCandidate, ApplicationRequest, InferenceLocation, InfixApplicationRequest,
+    ResolvedApplicationFunction, TypedArgument,
 };
 pub use context::{ExpressionContext, ExpressionScopeId};
 use context::{ExpressionScopeFrame, next_expression_scope_owner};
