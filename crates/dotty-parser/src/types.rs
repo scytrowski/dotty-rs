@@ -300,8 +300,23 @@ where
         mark: crate::Mark,
         selector: TreeId<Untyped>,
     ) -> TreeId<Untyped> {
+        let mut lookahead = 1;
+        while matches!(
+            self.cursor.lookahead(lookahead).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            lookahead += 1;
+        }
+        let has_braced_cases =
+            self.cursor.lookahead(lookahead).kind == TokenKind::Punctuation(Punctuation::LeftBrace);
+        let case_region = if has_braced_cases {
+            None
+        } else {
+            self.observe_match_cases_indented()
+        };
         self.advance();
-        let indented = if self.accept(TokenKind::Punctuation(Punctuation::LeftBrace)) {
+        let braced = self.accept(TokenKind::Punctuation(Punctuation::LeftBrace));
+        let indented = if braced {
             false
         } else {
             self.consume_match_type_separators();
@@ -319,13 +334,30 @@ where
         let cases = self.parse_match_type_cases();
         if indented {
             self.consume_match_type_separators();
-            if !self.accept(TokenKind::Outdent) {
+            let closed_by_delimiter = matches!(
+                self.current().kind,
+                TokenKind::Punctuation(
+                    Punctuation::RightParen | Punctuation::RightBracket | Punctuation::RightBrace
+                )
+            );
+            if closed_by_delimiter
+                && case_region.is_some_and(|(_, opened_by_feedback)| opened_by_feedback)
+            {
+                self.observe_outdented_by_delimiter();
+            } else if !self.cursor.at(TokenKind::Outdent) {
+                if let Some((indent_offset, _)) = case_region {
+                    self.observe_outdented_layout_region(indent_offset);
+                } else {
+                    self.observe_outdented();
+                }
+            }
+            if !self.accept(TokenKind::Outdent) && !closed_by_delimiter {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
                     "expected an outdent to close match-type cases",
                 );
             }
-        } else if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
+        } else if braced && !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
             self.report(
                 ParseDiagnosticKind::ExpectedToken,
                 "expected `}` to close match-type cases",
@@ -458,7 +490,6 @@ where
             self.current().kind,
             TokenKind::Newline
                 | TokenKind::Newlines
-                | TokenKind::Indent
                 | TokenKind::Punctuation(Punctuation::Semicolon)
         ) {
             let checkpoint = self.cursor.checkpoint();
@@ -3288,6 +3319,62 @@ mod tests {
             TextRange::new(0, 48).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_indented_match_type_case_region() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "T match\n  case A => B\n",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Keyword(HardKeyword::Match), 2, 7),
+                token(TokenKind::Newline, 7, 8),
+                token(TokenKind::Indent, 10, 10),
+                token(TokenKind::Keyword(HardKeyword::Case), 10, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Operator, 17, 19),
+                token(TokenKind::Identifier, 20, 21),
+                token(TokenKind::Newline, 21, 22),
+                token(TokenKind::Outdent, 22, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::MatchTypeTree(MatchTypeTree { ref cases, .. }) = parser.ast().get(id).kind
+        else {
+            panic!("expected an indented match type");
+        };
+        assert_eq!(cases.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_a_missing_indented_match_type_region_before_following_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "T match\nNext",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Keyword(HardKeyword::Match), 2, 7),
+                token(TokenKind::Newline, 7, 8),
+                token(TokenKind::Identifier, 8, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::MatchTypeTree(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Identifier);
+        assert_eq!(parser.current().span.start(), 8);
+        assert!(!parser.diagnostics().is_empty());
     }
 
     #[test]
