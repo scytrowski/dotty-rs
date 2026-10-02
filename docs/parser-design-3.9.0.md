@@ -153,15 +153,18 @@ owners; the parser does not infer indentation or enable general layout inside
 braced scopes.
 
 The scanner classifies line-final `end name` forms as `EndMarker` tokens. At
-statement-sequence boundaries the parser matches a marker to the innermost
-not-yet-closed matching construct inside the last parsed statement (for
-example, consecutive nested `end if` markers close the inner and outer `if`
-nodes in order), then extends only that construct's source span through the
-marker. A marker for an enclosing construct is left for the outer sequence; a
-repeated marker for an already-closed construct is diagnosed as duplicate,
-and a marker without a matching owner is diagnosed as misaligned. The parser
-does not infer layout from source indentation; it uses the scanner's existing
-Outdent-feedback contract when an enclosing template ends at an `end` marker.
+statement-sequence boundaries the parser matches a marker only against the
+last direct statement in that sequence, then extends that statement's source
+span through the marker. It does not search nested branches for a later-starting
+construct: for example, one `end if` after a nested pair closes the outer `if`,
+as in Dotty 3.9. Nested constructs consume their own markers in their own
+statement sequences; a marker for an enclosing construct is left for the outer
+sequence. A repeated marker for an already-closed construct is diagnosed as
+duplicate, and a marker without a matching owner is diagnosed as misaligned.
+The parser does not infer layout from source indentation; it uses scanner
+Outdent feedback to close the active match-case region before an explicit
+`end` marker, including legacy layouts where the marker and `case` clauses
+share an indentation column.
 Nested feedback regions are closed by their owning indentation boundary, even
 when a nested body's `Outdent` is already present before the marker; the
 enclosing template then consumes its own marker and closing delimiter.
