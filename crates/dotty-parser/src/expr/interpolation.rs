@@ -7,7 +7,7 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
-    pub(super) fn parse_interpolated_string(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+    pub(crate) fn parse_interpolated_string(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         let prefix = match self.intern_current_term_name() {
             Ok(prefix) => *prefix.as_name(),
             Err(_) => return self.unexpected_expression(),

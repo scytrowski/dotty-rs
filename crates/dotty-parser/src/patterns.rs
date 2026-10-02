@@ -311,6 +311,7 @@ where
             | TokenKind::ExponentLiteral
             | TokenKind::FloatLiteral
             | TokenKind::DoubleLiteral => self.parse_number(mark),
+            TokenKind::InterpolationId => self.parse_interpolated_string(mark),
             TokenKind::CharLiteral => self.parse_char(mark),
             TokenKind::StringLiteral => self.parse_string(mark),
             TokenKind::Keyword(HardKeyword::True) => {
@@ -785,6 +786,43 @@ mod tests {
         assert_eq!(
             parser.ast().get(pattern).position.unwrap().span().range(),
             TextRange::new(0, 15).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_interpolated_string_pattern_with_a_braced_splice() {
+        let source = "s\"hello ${name}\"";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::StringPart, 1, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 9, 10),
+                token(TokenKind::Identifier, 10, 14),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 14, 15),
+                token(TokenKind::StringPart, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let pattern = parser.pattern();
+        let TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(interpolation)) =
+            &parser.ast().get(pattern).kind
+        else {
+            panic!("expected an interpolated-string pattern");
+        };
+
+        assert_eq!(interpolation.parts.len(), 3);
+        assert!(matches!(
+            parser.ast().get(interpolation.parts[1]).kind,
+            TreeKind::Block(_)
+        ));
+        assert_eq!(
+            parser.ast().get(pattern).position.unwrap().span().range(),
+            TextRange::new(0, 16).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
     }
