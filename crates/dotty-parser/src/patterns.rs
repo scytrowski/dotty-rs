@@ -311,7 +311,7 @@ where
             | TokenKind::ExponentLiteral
             | TokenKind::FloatLiteral
             | TokenKind::DoubleLiteral => self.parse_number(mark),
-            TokenKind::InterpolationId => self.parse_interpolated_string(mark),
+            TokenKind::InterpolationId => self.parse_interpolated_string_pattern(mark),
             TokenKind::CharLiteral => self.parse_char(mark),
             TokenKind::StringLiteral => self.parse_string(mark),
             TokenKind::Keyword(HardKeyword::True) => {
@@ -825,6 +825,43 @@ mod tests {
             parser.ast().get(pattern).position.unwrap().span().range(),
             TextRange::new(0, 16).unwrap()
         );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn treats_a_wildcard_in_an_interpolated_pattern_splice_as_a_pattern() {
+        let source = "s\"${_}\"";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::StringPart, 1, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 5, 6),
+                token(TokenKind::StringPart, 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let pattern = parser.pattern();
+        parser.report_escaping_placeholders();
+
+        let TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(interpolation)) =
+            &parser.ast().get(pattern).kind
+        else {
+            panic!("expected an interpolated-string pattern");
+        };
+        let TreeKind::Block(block) = &parser.ast().get(interpolation.parts[1]).kind else {
+            panic!("expected a braced pattern splice");
+        };
+        let TreeKind::Ident(wildcard) = &parser.ast().get(block.expr).kind else {
+            panic!("expected wildcard pattern identifier");
+        };
+        assert_eq!(parser.names.resolve(wildcard.name.text()), "_");
+        assert!(block.stats.is_empty());
         assert!(parser.diagnostics().is_empty());
     }
 
