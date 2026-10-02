@@ -877,3 +877,59 @@ Recreate the report from the pinned checkout with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-599-scala3-3.9.0.json
 ```
+
+## Corpus rerun after PR #618
+
+Issue #619 reran the same sorted 1,236-file corpus at measurement revision
+`030f9765ce84d82b43ad6bfbfd4420fa9d6ea752`, based on latest `origin/main`
+`79a41183daffbe037fda7cc0734c42ca83a8c288` (which includes parser PR #618).
+The intervening corpus-runner-only fix ensures its temporary files are cleaned
+up. The Scala 3.9.0 source revision is unchanged. Two full runs produced
+byte-identical normalized reports. The machine-readable report is
+[`parser-post-issue-619-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-619-scala3-3.9.0.json).
+
+| Measure | After #597 | After #618 | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parses | 1,163 (94.09%) | 1,168 (94.50%) | +5 (+0.40 pp) |
+| Recoverable files | 73 (5.91%) | 68 (5.50%) | -5 |
+| Hard parser failures / process failures / panics / hangs | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | unchanged |
+| Scanner diagnostics | 13 | 13 | 0 |
+| Scala oracle files / failures | 1,236 / 0 | 1,236 / 0 | unchanged |
+
+The capture-checking-disabled cohort changed from 926/994 to 929/994 clean;
+the enabled cohort changed from 237/242 to 239/242. Total diagnostic
+occurrences fell from 642 to 563 (-79, or 12.3%):
+
+| Diagnostic occurrences | After #597 | After #618 | Change |
+| --- | ---: | ---: | ---: |
+| `ExpectedExpression` | 308 | 290 | -18 |
+| `ExpectedToken` | 102 | 78 | -24 |
+| `ExpectedType` | 1 | 1 | 0 |
+| `UnboundPlaceholderParameter` | 2 | 0 | -2 |
+| `UnexpectedToken` | 162 | 141 | -21 |
+| `UnsupportedSyntax` | 67 | 53 | -14 |
+| **Total** | **642** | **563** | **-79 (-12.3%)** |
+
+The reported `MapView.scala` projection case now parses without diagnostics,
+as verified by both the focused Scala 3.9 differential fixture and a
+single-file corpus run. Across the whole corpus, first-failure counts changed
+from 27 to 28 for `ExpectedExpression`, 21 to 16 for `ExpectedToken`, and 1
+to 0 for `UnboundPlaceholderParameter`; the remaining named unsupported
+syntax and `UnexpectedToken` counts were unchanged. These first-failure
+counts classify only the earliest diagnostic per file. The aggregate change
+spans all parser changes between #597 and #618; it does not attribute every
+clean-file or diagnostic-count delta to the structural-projection fix alone.
+The largest current first-failure buckets are `ExpectedExpression` (28
+files), `UnexpectedToken` (19), and `ExpectedToken` (16); the named unsupported
+forms remain interleaved type parameter clauses (1), unsupported `match`
+starts (2), and an unsupported contextual modifier (1). The 68 recoverable
+files and newly exposed examples remain concrete inputs for a later coverage
+sprint, while reliability metrics and the Scala oracle remain clean.
+
+Recreate the report from the pinned checkout with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-619-scala3-3.9.0.json
+```
