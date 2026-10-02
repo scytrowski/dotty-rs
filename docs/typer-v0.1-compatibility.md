@@ -454,11 +454,12 @@ first-error movements, not by themselves proof of semantic completion. Two
 `RightAssociativeInfixDeferred` sites remain; ordinary left-associative infix
 blockers are gone. The
 report also records Match readiness: 191 Match first-blocker local methods in
-70 files (199 in 71 files in #581), 7,353 structural Match nodes overall, and
-2,046 Match nodes in the named method bodies whose first failure is Match.
-Those methods contain 6,331 cases (600 guarded), dominated by identifier/bind
-(2,327), typed (1,829), and extractor-looking Apply/TypeApply (1,263) patterns.
-Pattern-shape examples and the refreshed top-ten ranking are in the report.
+70 files (199 in 71 files in #581), and 7,353 structural Match nodes overall.
+Across the 1,666 named method bodies whose first failure is Match, there are
+2,151 structural Match nodes and 6,615 cases (639 guarded). The cases are
+dominated by identifier/bind (2,327), typed (1,829), and extractor-looking
+Apply/TypeApply (1,324) patterns. Pattern-shape examples and the refreshed
+top-ten ranking are in the report.
 
 The ranked list remains a deterministic inventory of Typer-owned first errors
 observed after the resolver calls that succeeded; unresolved external symbols

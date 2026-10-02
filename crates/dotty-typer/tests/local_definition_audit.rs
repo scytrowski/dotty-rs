@@ -1282,7 +1282,7 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         if !metrics.classes.is_empty() && !metrics.members.is_empty() {
             "passed"
         } else {
-            "BLOCKED: no external class/member materialization"
+            "BLOCKED: external members not materialized"
         }
     );
     println!("resolver_581_comparison:");

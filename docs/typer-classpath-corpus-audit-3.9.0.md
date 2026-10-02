@@ -159,7 +159,7 @@ resolver_metrics:
   distinct_packages=25
   distinct_classes=1
   distinct_members=0
-  classloader_success_gate=BLOCKED: no external class/member materialization
+  classloader_success_gate=BLOCKED: external members not materialized
 resolver_581_comparison:
   external_package_successes=2530 (baseline=1965, delta=+565)
   external_package_unresolved=7327 (baseline=5816, delta=+1511)
