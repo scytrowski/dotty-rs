@@ -13,6 +13,7 @@ use dotty_tasty::tasty::{
     TYPEDEF_TAG, TYPEREF_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError,
     TermValue, VALDEF_TAG,
 };
+use std::collections::HashSet;
 use std::fmt;
 
 /// The class-level facts reconstructable from a `.tasty` file without full
@@ -631,17 +632,13 @@ fn decode_shared_tree<'a>(file: &TastyFile<'a>, address: u32) -> Option<RawTree<
 ///   subtree by address instead of re-emitting it; followed via
 ///   [`decode_shared_tree`] and resolved recursively.
 ///
-/// Every other prefix shape — `THIS` (a nested class's own enclosing
+/// Other prefix shapes — `THIS` (a nested class's own enclosing
 /// instance), `TERMREFin`/`TYPEREFin` (disambiguating an owner from a
-/// name clash), `TERMREFdirect`/`TYPEREFdirect`/`TERMREFsymbol`/
-/// `TYPEREFsymbol` (an AST-address reference to the defining symbol
-/// itself), or a reference nested inside another object/module path —
-/// returns `None`. Resolving those needs either the requested class's
-/// own identity or real symbol resolution (walking a definition's owner
-/// chain), neither of which this best-effort decoder has; `None` here
-/// means the caller falls back to its own pre-existing heuristic exactly
-/// as if this function did not exist, rather than fabricating a
-/// plausible-looking but wrong answer.
+/// name clash), direct symbol references, and references nested inside
+/// another object/module path — return `None` here. Direct
+/// `TERMREFsymbol`/`TYPEREFsymbol` targets are handled by
+/// [`resolve_reference_name`]; this helper stays limited to package
+/// prefixes so it does not guess at an owner path.
 fn resolve_reference_prefix(file: &TastyFile<'_>, prefix: &RawTree<'_>) -> Option<String> {
     resolve_reference_prefix_in_package(file, prefix, None)
 }
@@ -651,6 +648,19 @@ fn resolve_reference_prefix_in_package(
     prefix: &RawTree<'_>,
     current_package: Option<&str>,
 ) -> Option<String> {
+    resolve_reference_prefix_at_depth(file, prefix, current_package, 0)
+}
+
+fn resolve_reference_prefix_at_depth(
+    file: &TastyFile<'_>,
+    prefix: &RawTree<'_>,
+    current_package: Option<&str>,
+    depth: usize,
+) -> Option<String> {
+    const MAX_REFERENCE_DEPTH: usize = 256;
+    if depth >= MAX_REFERENCE_DEPTH {
+        return None;
+    }
     match prefix {
         RawTree::Leaf(term) if term.tag == TERMREFPKG_TAG => {
             let reference = term.name_ref()?;
@@ -667,7 +677,7 @@ fn resolve_reference_prefix_in_package(
         RawTree::Leaf(term) if matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG) => {
             let reference = term.ast_ref()?;
             let shared = decode_shared_tree(file, reference.address)?;
-            resolve_reference_prefix_in_package(file, &shared, current_package)
+            resolve_reference_prefix_at_depth(file, &shared, current_package, depth + 1)
         }
         _ => None,
     }
@@ -688,14 +698,14 @@ fn resolve_reference_prefix_in_package(
 /// explicit, reported [`TastyDecodeError::UnresolvedSupertype`] instead
 /// (see `docs/classloader.md`'s Milestone 9 follow-up notes and
 /// https://github.com/scytrowski/dotty-rs/issues/7).
+#[derive(Debug)]
 enum ReferenceResolution {
     Resolved(BinaryName),
-    /// Definitely a real, post-typecheck reference (a `TERMREF`/`TYPEREF`/
-    /// `TERMREFsymbol`/`TYPEREFsymbol` node), but this decoder cannot name
-    /// its prefix — classpath-aware alias lookup may resolve package-object
-    /// aliases, but general scope/import resolution is still outside this
-    /// best-effort decoder (see [`resolve_reference_prefix`]'s doc comment
-    /// for exactly which prefix shapes it does understand).
+    /// Definitely a real, post-typecheck reference, but this decoder cannot
+    /// name its target — classpath-aware alias lookup may resolve
+    /// package-object aliases, but general scope/import resolution is still
+    /// outside this best-effort decoder (see [`resolve_reference_prefix`]'s
+    /// doc comment for exactly which prefix shapes it does understand).
     Unresolved,
     /// Not a reference shape this function recognizes at all — the caller
     /// should fall back to its own heuristic exactly as if this function
@@ -711,15 +721,12 @@ enum ReferenceResolution {
 /// flatten-and-guess fallback.
 ///
 /// Returns [`ReferenceResolution::Unresolved`] — never a bare,
-/// unqualified name — when the simple name resolves but the prefix does
-/// not, and for `TERMREFsymbol`/`TYPEREFsymbol` (whose `reference` field
-/// is an AST address naming the defining symbol directly, not a
-/// `NameRef` — resolving one needs the same real symbol resolution
-/// [`resolve_reference_prefix`]'s own doc comment says this decoder does
-/// not have): in every one of these cases the tree unambiguously *is* a
-/// real reference, so [`resolve_parent_name`]'s same-package guess would
-/// be a wrong answer being presented as a real one, not a best-effort
-/// fallback — see [`ReferenceResolution`]'s own doc comment.
+/// unqualified name — when the simple name resolves but its prefix does
+/// not. `TERMREFsymbol`/`TYPEREFsymbol` carry AST addresses rather than
+/// name-table references; their target is resolved through the AST owner
+/// chain, using the current package when the owner chain has no package
+/// node. Other unreadable references stay unresolved so the caller does not
+/// turn them into a same-package guess.
 fn resolve_reference_name(file: &TastyFile<'_>, tree: &RawTree<'_>) -> ReferenceResolution {
     resolve_reference_name_in_package(file, tree, None)
 }
@@ -729,6 +736,19 @@ fn resolve_reference_name_in_package(
     tree: &RawTree<'_>,
     current_package: Option<&str>,
 ) -> ReferenceResolution {
+    resolve_reference_name_at_depth(file, tree, current_package, 0)
+}
+
+fn resolve_reference_name_at_depth(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    current_package: Option<&str>,
+    depth: usize,
+) -> ReferenceResolution {
+    const MAX_REFERENCE_DEPTH: usize = 256;
+    if depth >= MAX_REFERENCE_DEPTH {
+        return ReferenceResolution::Unresolved;
+    }
     let Ok(structured) = tree.decode_structured() else {
         return ReferenceResolution::NotAReference;
     };
@@ -746,21 +766,120 @@ fn resolve_reference_name_in_package(
                 None => resolve_reference_prefix(file, &qualifier),
             };
             match prefix {
-                Some(package) => ReferenceResolution::Resolved(BinaryName::from_internal(format!(
-                    "{package}/{simple_name}"
-                ))),
+                Some(package) => {
+                    let package = package.trim_matches('/');
+                    let name = if package.is_empty() {
+                        simple_name
+                    } else {
+                        format!("{package}/{simple_name}")
+                    };
+                    ReferenceResolution::Resolved(BinaryName::from_internal(name))
+                }
                 None => ReferenceResolution::Unresolved,
             }
         }
         StructuredTree::Reference(ReferenceNode {
             tag: TERMREFSYMBOL_TAG | TYPEREFSYMBOL_TAG,
+            reference,
             ..
-        }) => ReferenceResolution::Unresolved,
+        }) => {
+            let resolved = resolve_symbol_address(file, reference);
+            resolved
+                .map(|name| {
+                    let name = match current_package {
+                        Some(package) if !package.is_empty() && !name.contains('/') => {
+                            format!("{package}/{name}")
+                        }
+                        _ => name,
+                    };
+                    ReferenceResolution::Resolved(BinaryName::from_internal(name))
+                })
+                .unwrap_or(ReferenceResolution::Unresolved)
+        }
         StructuredTree::Ident(IdentNode { type_tree, .. }) => {
-            resolve_reference_name_in_package(file, &type_tree, current_package)
+            resolve_reference_name_at_depth(file, &type_tree, current_package, depth + 1)
         }
         _ => ReferenceResolution::NotAReference,
     }
+}
+
+/// Resolves a TASTy-local symbol address through its defining tree and owner
+/// chain. The address is an AST address, never a name-table index. Only
+/// visible type definitions inside a package owner chain produce a binary
+/// name; malformed, cyclic, or unsupported shapes stay unresolved.
+fn resolve_symbol_address(file: &TastyFile<'_>, address: u32) -> Option<String> {
+    const MAX_OWNER_DEPTH: usize = 256;
+
+    let index = file.ast_address_index().ok()?;
+    let definition = index.get(address)?;
+    if definition.tag != TYPEDEF_TAG {
+        return None;
+    }
+    let StructuredNode::TypeDef(DefinitionBody::TypeDef { name, .. }) =
+        definition.decode_structured().ok()?
+    else {
+        return None;
+    };
+    let mut names = vec![file.render_name(name).ok()?];
+    let mut package = None;
+    let mut parent = index.parent_of(address);
+    let mut visited = HashSet::new();
+    for _ in 0..MAX_OWNER_DEPTH {
+        let Some(node) = parent else {
+            break;
+        };
+        let parent_address = u32::try_from(node.offset).ok()?;
+        if !visited.insert(parent_address) {
+            return None;
+        }
+        if node.tag == TYPEDEF_TAG {
+            let owner = index.get(parent_address)?;
+            if let Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef { name, .. })) =
+                owner.decode_structured()
+            {
+                names.push(file.render_name(name).ok()?);
+            }
+        } else if node.tag == dotty_tasty::tasty::PACKAGE_TAG {
+            let package_node = index.get(parent_address)?;
+            if let Ok(StructuredNode::Package(package_node)) = package_node.decode_structured() {
+                package = package_node
+                    .path
+                    .decode_structured()
+                    .ok()
+                    .and_then(|path| match path {
+                        StructuredTree::Reference(ReferenceNode {
+                            tag: TERMREFPKG_TAG,
+                            reference,
+                            ..
+                        }) => resolve_qualified_name(file, reference),
+                        _ => None,
+                    });
+            }
+            parent = None;
+            break;
+        }
+        parent = index.parent_of(parent_address);
+    }
+    if parent.is_some() {
+        return None;
+    }
+    names.reverse();
+    let mut nested_name = names.first().cloned().unwrap_or_default();
+    for name in names.iter().skip(1) {
+        let name = name.trim_start_matches('$');
+        if !nested_name.ends_with('$') {
+            nested_name.push('$');
+        }
+        nested_name.push_str(name);
+    }
+    let internal = format!(
+        "{}{}",
+        package
+            .map(|package| format!("{package}/"))
+            .unwrap_or_default(),
+        nested_name
+    );
+    Some(internal)
 }
 
 /// Reconstructs a supertype parent's referenced [`BinaryName`], or
@@ -880,10 +999,9 @@ fn resolve_parent_name_with_alias(
     package: &str,
     resolve_alias: &mut impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
 ) -> Option<BinaryName> {
-    resolve_parent_name(file, parent, package).or_else(|| {
-        let (owner, alias) = unresolved_alias_reference(file, parent)?;
-        resolve_alias(&owner, &alias)
-    })
+    let package_alias = unresolved_alias_reference(file, parent)
+        .and_then(|(owner, alias)| resolve_alias(&owner, &alias));
+    package_alias.or_else(|| resolve_parent_name(file, parent, package))
 }
 
 /// Extracts the owner and simple name of a reference that could not be
@@ -1067,13 +1185,9 @@ pub(crate) fn resolve_type_alias_target(
         {
             return Ok(Some(TypeAliasTarget::Alias { owner, name }));
         }
-        return Ok(resolve_parent_name_in_package(
-            file,
-            &rhs,
-            current_package,
-            Some(current_package),
-        )
-        .map(TypeAliasTarget::Candidate));
+        let candidate =
+            resolve_parent_name_in_package(file, &rhs, current_package, Some(current_package));
+        return Ok(candidate.map(TypeAliasTarget::Candidate));
     }
     Ok(None)
 }
@@ -1123,6 +1237,33 @@ mod tests {
         assert_eq!(
             resolve_type_alias_candidate(&file, "Iterator", "scala"),
             Some(BinaryName::from_internal("collection/Iterator"))
+        );
+    }
+
+    #[test]
+    fn resolves_a_symbol_reference_through_its_tasty_owner_chain() {
+        let bytes = fixture_bytes("scala3-library/scala/math/Ordering.tasty");
+        let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let address = index
+            .iter()
+            .find_map(|node| {
+                if node.tag != TYPEDEF_TAG {
+                    return None;
+                }
+                let StructuredNode::TypeDef(DefinitionBody::TypeDef { name, .. }) =
+                    node.decode_structured().ok()?
+                else {
+                    return None;
+                };
+                (wire_name(&file, name).as_deref() == Some("Reverse"))
+                    .then(|| u32::try_from(node.offset).ok())
+                    .flatten()
+            })
+            .expect("Reverse's type definition should have an AST address");
+        assert_eq!(
+            resolve_symbol_address(&file, address).as_deref(),
+            Some("Ordering$Reverse")
         );
     }
 
