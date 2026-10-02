@@ -2314,6 +2314,14 @@ fn parses_an_unchecked_type_ascription_as_a_match_selector() {
         parser.ast().get(*tpt).kind,
         TreeKind::Annotated(Annotated { .. })
     ));
+    assert_eq!(
+        parser.ast().get(*inner).position.unwrap().span().range(),
+        TextRange::new(1, 20).unwrap()
+    );
+    assert_eq!(
+        parser.ast().get(*tpt).position.unwrap().span().range(),
+        TextRange::new(8, 20).unwrap()
+    );
     assert_eq!(cases.len(), 1);
     assert_eq!(
         parser.ast().get(tree).position.unwrap().span().range(),
