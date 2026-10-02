@@ -331,6 +331,20 @@ impl ZipArchive {
         Ok(Some(decompressed))
     }
 
+    /// Whether the archive has a direct class or TASTy file below this
+    /// directory prefix. File contents are not needed to establish package
+    /// evidence, so this only inspects the already-validated central index.
+    pub(crate) fn contains_package(&self, prefix: &str) -> bool {
+        self.entries.keys().any(|name| {
+            let Some(file) = name.strip_prefix(prefix) else {
+                return false;
+            };
+            !file.is_empty()
+                && !file.contains('/')
+                && (file.ends_with(".class") || file.ends_with(".tasty"))
+        })
+    }
+
     /// Reads the local file header at `entry.local_header_offset` to find
     /// where the entry's data starts, then decompresses
     /// `entry.compressed_size` bytes from there. Sizes and the

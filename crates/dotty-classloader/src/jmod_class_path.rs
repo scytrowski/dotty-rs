@@ -57,6 +57,19 @@ impl ClassPathEntry for JmodClassPath {
             None => Ok(None),
         }
     }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        if !crate::class_path::safe_package_segments(package) {
+            return Ok(false);
+        }
+        let path = package.join("/");
+        let prefix = if path.is_empty() {
+            "classes/".to_owned()
+        } else {
+            format!("classes/{path}/")
+        };
+        Ok(self.archive.contains_package(&prefix))
+    }
 }
 
 #[cfg(test)]

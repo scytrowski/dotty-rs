@@ -157,6 +157,16 @@ pub trait ClassPathEntry: Send + Sync {
     /// class-file bytes elsewhere on the classpath, not just a
     /// compiler-driven lookup, so it must never be resolved unchecked.
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError>;
+
+    /// Whether this entry contains at least one direct class or TASTy
+    /// resource in `package`. `false` means this entry provides no positive
+    /// evidence for the package; it is deliberately not a negative cache
+    /// result (another entry may contain it, or an implementation may not
+    /// support package inspection).
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        let _ = package;
+        Ok(false)
+    }
 }
 
 /// A [`ClassPathEntry`] backed by a single filesystem directory, mapping
@@ -210,6 +220,39 @@ impl ClassPathEntry for DirectoryClassPath {
             None => Ok(None),
         }
     }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        if !safe_package_segments(package) {
+            return Ok(false);
+        }
+        let directory = package
+            .iter()
+            .fold(self.root.clone(), |path, segment| path.join(segment));
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let metadata = match std::fs::metadata(entry.path()) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            if entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "class" || extension == "tasty")
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 /// An ordered, first-match-wins composite of [`ClassPathEntry`]s: entries
@@ -237,6 +280,27 @@ impl ClassPathEntry for CompositeClassPath {
 
         Ok(None)
     }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        for entry in &self.entries {
+            if entry.contains_package(package)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+pub(crate) fn safe_package_segments(package: &[&str]) -> bool {
+    package.iter().all(|segment| {
+        !segment.is_empty()
+            && *segment != "."
+            && *segment != ".."
+            && !segment.contains('/')
+            && !segment.contains('\\')
+            && !segment.contains(':')
+            && !segment.contains('\0')
+    })
 }
 
 #[cfg(test)]

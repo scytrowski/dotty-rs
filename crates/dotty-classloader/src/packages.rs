@@ -13,6 +13,7 @@ use dotty_core::{Name, Packages, ScopeId, SemanticStore, SymbolId, SymbolOrigin}
 #[derive(Debug, Default)]
 pub(crate) struct PackageRegistry {
     packages: Packages,
+    class_entries: Vec<(ScopeId, SymbolId)>,
 }
 
 impl PackageRegistry {
@@ -22,7 +23,10 @@ impl PackageRegistry {
 
     /// Adopts the session-wide registry another adapter has been filling.
     pub(crate) fn from_packages(packages: Packages) -> Self {
-        Self { packages }
+        Self {
+            packages,
+            class_entries: Vec::new(),
+        }
     }
 
     /// Hands the session-wide registry back, to give to the next adapter.
@@ -34,6 +38,26 @@ impl PackageRegistry {
     /// owns the shared registry.
     pub(crate) fn scope_of(&self, package: SymbolId) -> Option<ScopeId> {
         self.packages.scope_of(package)
+    }
+
+    pub(crate) fn get<S: AsRef<str>>(&self, path: &[S]) -> Option<SymbolId> {
+        self.packages.symbol(path)
+    }
+
+    pub(crate) fn checkpoint(&self) -> (usize, usize) {
+        (self.packages.mark(), self.class_entries.len())
+    }
+
+    /// Undoes package-scope links and package entries added after `mark`.
+    /// Must run before the matching SemanticStore rollback.
+    pub(crate) fn rollback_to(&mut self, store: &mut SemanticStore, mark: (usize, usize)) {
+        while self.class_entries.len() > mark.1 {
+            let (scope, symbol) = self.class_entries.pop().expect("length checked");
+            if store.scopes.contains(scope) {
+                store.scopes.get_mut(scope).remove(symbol);
+            }
+        }
+        self.packages.roll_back_to(store, mark.0);
     }
 
     /// Returns `name`'s containing package's `SymbolId` — the deepest
@@ -67,6 +91,7 @@ impl PackageRegistry {
         let declarations = store.scopes.get_mut(scope);
         if !declarations.lookup_all(&name).contains(&class) {
             declarations.enter(name, class);
+            self.class_entries.push((scope, class));
         }
     }
 

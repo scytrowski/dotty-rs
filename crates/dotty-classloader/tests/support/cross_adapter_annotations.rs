@@ -4,15 +4,11 @@
 //! both attach `AnnotationId`s to `Symbol.annotations`, from the very same
 //! `dotty_core::types::Annotation`/`AnnotationArena` shared representation.
 //!
-//! Milestone 6 (classloader/`SymbolResolver` integration) has not landed yet,
-//! so the two adapters cannot yet run against one shared `SemanticStore`:
-//! `ClassLoader::new` bootstraps its own `Definitions` internally, with no
-//! way to hand it an existing one, and `Definitions::bootstrap` is
-//! documented as exactly-once per store. This test therefore runs each
-//! adapter over its own store and compares the *contract* their results
-//! satisfy, not one shared arena — which is what issue #129 §33 actually
-//! asks for ("the semantic storage contract should converge", not "equal
-//! payloads").
+//! The classloader now exposes `ClasspathSymbolResolver` for shared-store
+//! use. This test still gives each adapter its own store because it compares
+//! their annotation storage contract rather than their resolver/session
+//! integration; issue #129 §33 asks for that shared contract, not equal
+//! annotation payloads.
 
 use std::fs;
 use std::path::{Path, PathBuf};
