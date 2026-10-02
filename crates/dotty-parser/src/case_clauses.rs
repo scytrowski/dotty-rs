@@ -171,21 +171,28 @@ where
         body_indent_offset: Option<u32>,
     ) -> TreeId<Untyped> {
         self.consume_case_newlines();
-        let body_starts_after_unindented_newline = body_indent_offset.is_none()
-            && self
-                .source
-                .as_str()
-                .get(mark.start as usize..self.current().span.start() as usize)
-                .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
-        if body_starts_after_unindented_newline
-            || matches!(
-                self.current().kind,
-                TokenKind::Keyword(HardKeyword::Case)
-                    | TokenKind::Punctuation(Punctuation::RightBrace)
-                    | TokenKind::Outdent
-                    | TokenKind::Eof
-            )
+        let body_starts_after_newline = self
+            .source
+            .as_str()
+            .get(mark.start as usize..self.current().span.start() as usize)
+            .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
+        if body_indent_offset.is_none()
+            && body_starts_after_newline
+            && !crate::expr::can_start_prefix_expr(self.current().kind)
         {
+            // A case whose body starts on the next line may have no eager or
+            // parser-requested body Indent. Give the scanner a chance to close
+            // the active layout region before deciding whether the first token
+            // belongs to this body or is a dedented sibling statement/member.
+            self.observe_outdented();
+        }
+        if matches!(
+            self.current().kind,
+            TokenKind::Keyword(HardKeyword::Case)
+                | TokenKind::Punctuation(Punctuation::RightBrace)
+                | TokenKind::Outdent
+                | TokenKind::Eof
+        ) {
             // Dotty accepts an empty case statement sequence; the shared AST
             // represents it as an empty block with the usual synthetic Unit.
             let expr = self.synthetic_unit();
@@ -806,6 +813,7 @@ mod tests {
                 token(TokenKind::Identifier, 7, 8),
                 token(TokenKind::Operator, 9, 11),
                 token(TokenKind::Newline, 11, 12),
+                token(TokenKind::Outdent, 12, 12),
                 token(TokenKind::Keyword(HardKeyword::Def), 12, 15),
                 token(TokenKind::Identifier, 16, 24),
                 token(TokenKind::Operator, 25, 26),
@@ -830,6 +838,8 @@ mod tests {
                 value: dotty_core::Constant::Unit
             })
         ));
+        assert_eq!(parser.current().kind, TokenKind::Outdent);
+        parser.advance();
         assert_eq!(parser.current().kind, TokenKind::Keyword(HardKeyword::Def));
         assert!(parser.diagnostics().is_empty());
     }
