@@ -649,6 +649,7 @@ fn can_start_simple_pattern_kind(kind: TokenKind) -> bool {
             kind,
             TokenKind::StringLiteral
                 | TokenKind::CharLiteral
+                | TokenKind::InterpolationId
                 | TokenKind::Keyword(HardKeyword::True)
                 | TokenKind::Keyword(HardKeyword::False)
                 | TokenKind::Keyword(HardKeyword::Null)
@@ -1587,6 +1588,37 @@ mod tests {
         assert!(matches!(
             result.ast.get(result.root).kind,
             TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_an_interpolated_string_pattern_after_a_newline_operator() {
+        let source = "head ::\ns\"$name\"";
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::ColonOp, 5, 7),
+                token(TokenKind::Newline, 7, 8),
+                token(TokenKind::InterpolationId, 8, 9),
+                token(TokenKind::StringPart, 9, 11),
+                token(TokenKind::Identifier, 11, 15),
+                token(TokenKind::StringPart, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = result.ast.get(result.root).kind
+        else {
+            panic!("expected an infix pattern");
+        };
+        assert!(matches!(
+            result.ast.get(infix.right).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(_))
         ));
         assert!(result.diagnostics.is_empty());
     }
