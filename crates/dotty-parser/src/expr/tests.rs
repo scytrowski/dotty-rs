@@ -2,8 +2,8 @@ use super::*;
 use crate::ParseDiagnosticKind;
 use crate::compilation_unit::tests::{parser_for, token};
 use dotty_core::ast::{
-    Apply, ApplyKind, Block, CaseDef, Literal, Match, New, NumberKind, Parens, Select, Super, This,
-    Tuple, UntypedNode,
+    Annotated, Apply, ApplyKind, Block, CaseDef, Literal, Match, New, NumberKind, Parens, Select,
+    Super, This, Tuple, TypedExpr, UntypedNode,
 };
 use dotty_core::{
     Constant, HardKeyword, NameInterner, ScannerEvent, SourceId, SourceText, TextRange, Token,
@@ -2269,6 +2269,62 @@ fn parses_a_simple_type_ascription() {
         TextRange::new(0, 13).unwrap()
     );
     assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_an_unchecked_type_ascription_as_a_match_selector() {
+    let source = "(value: T @unchecked) match { case _ => value }";
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        source,
+        vec![
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+            token(TokenKind::Identifier, 1, 6),
+            token(TokenKind::ColonFollow, 6, 7),
+            token(TokenKind::Identifier, 8, 9),
+            token(TokenKind::Operator, 10, 11),
+            token(TokenKind::Identifier, 11, 20),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 20, 21),
+            token(TokenKind::Keyword(HardKeyword::Match), 22, 27),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 28, 29),
+            token(TokenKind::Keyword(HardKeyword::Case), 30, 34),
+            token(TokenKind::Identifier, 35, 36),
+            token(TokenKind::Operator, 37, 39),
+            token(TokenKind::Identifier, 40, 45),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 46, 47),
+            token(TokenKind::Eof, 47, 47),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Match(Match { selector, cases }) = &parser.ast().get(tree).kind else {
+        panic!("expected a match expression");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::Parens(Parens { inner })) =
+        &parser.ast().get(*selector).kind
+    else {
+        panic!("expected the ascribed selector to retain its parentheses");
+    };
+    let TreeKind::Typed(TypedExpr { expr, tpt }) = &parser.ast().get(*inner).kind else {
+        panic!("expected the selector's type ascription");
+    };
+    assert!(matches!(parser.ast().get(*expr).kind, TreeKind::Ident(_)));
+    assert!(matches!(
+        parser.ast().get(*tpt).kind,
+        TreeKind::Annotated(Annotated { .. })
+    ));
+    assert_eq!(cases.len(), 1);
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 47).unwrap()
+    );
+    assert_eq!(
+        parser.ast().get(*selector).position.unwrap().span().range(),
+        TextRange::new(0, 21).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(parser.current().kind, TokenKind::Eof);
 }
 
 #[test]
