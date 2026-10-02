@@ -16067,6 +16067,56 @@ mod tests {
     }
 
     #[test]
+    fn parenthesized_literal_maps_to_the_inner_typed_tree() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = (1) }");
+        let (method, expression) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = parsed.ast.get(expression).kind
+        else {
+            panic!("the source parser should preserve the parentheses wrapper");
+        };
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let first = typer.type_expression(expression, context).unwrap();
+        let second = typer.type_expression(expression, context).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            typer.source_typed_index().get(source, expression),
+            Some(first)
+        );
+        assert_eq!(
+            typer.source_typed_index().get(source, parens.inner),
+            Some(first)
+        );
+        assert!(matches!(
+            typer.typed_ast().get(first).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Int(1)
+            })
+        ));
+        assert_eq!(
+            typer.typed_ast().get(first).position,
+            parsed.ast.get(parens.inner).position,
+            "the disappearing wrapper must not overwrite the inner source position"
+        );
+        assert_eq!(typer.typed_ast().iter().count(), 1);
+    }
+
+    #[test]
     fn expected_expression_type_accepts_a_matching_widened_literal() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def use: Int = 1 }");
