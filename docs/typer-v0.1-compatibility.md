@@ -88,6 +88,44 @@ is evidence about the audit environment or missing semantic inputs; it should
 not be read as a count of typer features that need implementation. No corpus
 counts are recorded here unless the pinned full audit is run for that change.
 
+## Classpath-backed source typing
+
+Run the integration harness with:
+
+```text
+cargo test --test classpath_source_typing
+```
+
+The harness exercises the public parser/namer/typer pipeline with a
+`ClasspathSymbolResolver` in the root facade test target. This keeps the
+production dependency direction unchanged: `dotty-typer` depends on
+`dotty-core`, while the facade test target can use both the typer and
+classloader. It checks an imported external package/class, classfile-backed
+member selection and application, canonical package/class/member ownership,
+missing and malformed symbols, ambiguity propagation, and rollback followed
+by a successful retry. A companion case hands a package registry produced by
+the TASTy unpickler to the classpath resolver and checks that an already
+entered class keeps its `SymbolId`.
+
+The session lifecycle is:
+
+1. Create one `SemanticStore` and call `Definitions::bootstrap` once.
+2. Parse and name source using one `Packages` registry.
+3. Move that registry into `LoadingSession::with_packages` and construct the
+   classpath resolver with the same store's `Definitions`.
+4. Construct `SourceTyper` with the named source and install the resolver with
+   `with_resolver`.
+5. After typing, hand the resolver's session to the next adapter with
+   `into_session`; use `into_packages` only when that adapter accepts
+   `Packages` directly.
+
+The generic Java fixture confirms that `GenericSample<T>` and its `first`
+member load into the shared store. Typing the member through a source receiver
+of type `GenericSample[A]` is currently reported as
+`ExternalGenericInstantiationDeferred`, because external generic argument
+order is not modeled by the typer. The integration test pins this typed
+limitation rather than treating it as successful adaptation.
+
 ## Supported source contract
 
 For the tested subset, source Typer completion currently supports:
