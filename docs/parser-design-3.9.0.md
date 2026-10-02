@@ -112,10 +112,13 @@ grammar decisions remain in the parser.
 Match-case regions use the same feedback contract: when braced scopes prevent
 eager indentation, the parser requests a match-specific case-region indent
 after `match`. This also covers Dotty's same-indent `case` clauses inside a
-braced scope; the scanner distinguishes their boundary from outdents requested
-while parsing an individual case body. Indented `match` case regions also
-retain their ownership when opened by eager layout, so a same-indentation
-`catch` closes the match cases before the enclosing `try` parses its handler.
+braced scope. Feedback indents are anchored at the first case token, and the
+scanner closes the active case region before a dedented leading operator can
+be consumed as part of the final case body. The scanner distinguishes case
+region boundaries from outdents requested while parsing an individual case
+body. Indented `match` case regions also retain their ownership when opened by
+eager layout, so a same-indentation `catch` closes the match cases before the
+enclosing `try` parses its handler.
 At a known case/body boundary, the parser can request closure of the named
 innermost layout region regardless of whether eager scanning or parser
 feedback opened it; ordinary outdent feedback remains restricted to
