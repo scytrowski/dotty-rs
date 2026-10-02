@@ -362,6 +362,14 @@ where
         self.observe(ScannerEvent::OutdentedLayoutRegion { indent_offset });
     }
 
+    /// Closes the exact parser-requested match-case region after its grammar
+    /// has stopped consuming clauses. This is distinct from a physical
+    /// outdent: in braced scopes the following statement can align with the
+    /// `case` clauses while still being outside the match expression.
+    pub(crate) fn observe_match_cases_closed(&mut self, indent_offset: u32) {
+        self.observe(ScannerEvent::MatchCasesClosed { indent_offset });
+    }
+
     /// Identifies the match-case indentation, requesting parser feedback only
     /// when the scanner has not already emitted the region's `Indent`.
     pub(crate) fn observe_match_cases_indented(&mut self) -> Option<(u32, bool)> {

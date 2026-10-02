@@ -27,6 +27,12 @@ pub enum ScannerEvent {
     MatchCasesIndented,
     /// Closes a parser-requested `match` case region after its case clauses.
     MatchCasesOutdented,
+    /// Closes the named parser-requested `match` case region after its case
+    /// clauses. The parser has already established that the next token is
+    /// outside this match, even when it is aligned with the case clauses.
+    MatchCasesClosed {
+        indent_offset: u32,
+    },
     /// Opens a case body whose statement indentation is relative to the case
     /// clause, not merely to its first expression.
     CaseBodyIndented {

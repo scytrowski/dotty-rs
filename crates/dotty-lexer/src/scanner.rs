@@ -736,6 +736,20 @@ impl TokenSource for ContextualScanner {
                     self.feedback_regions.pop();
                 }
             }
+            ScannerEvent::MatchCasesClosed { indent_offset } => {
+                let owns_top_region = self.feedback_regions.last().is_some_and(|region| {
+                    region.kind == FeedbackRegionKind::MatchCases
+                        && region.indent_offset == indent_offset
+                });
+                if owns_top_region
+                    && !self.current_starts_match_case()
+                    && self.innermost_open_indent_offset(self.current_index())
+                        == Some(indent_offset)
+                    && self.insert_outdent_before_current(true, true, Some(indent_offset))
+                {
+                    self.feedback_regions.pop();
+                }
+            }
             ScannerEvent::CaseBodyIndented { case_start } => {
                 if self.insert_indent_after_current() {
                     self.feedback_regions.push(FeedbackRegion {
@@ -5303,6 +5317,85 @@ mod tests {
         });
 
         assert_eq!(scanner.current().kind, TokenKind::Identifier);
+    }
+
+    #[test]
+    fn match_case_owner_closes_feedback_region_at_aligned_following_statement() {
+        let source = "def f = {\n    value match\n    case A => a\n    next\n  }";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        let match_index = scanner
+            .tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::Keyword(HardKeyword::Match))
+            .expect("match token");
+        scanner.position = match_index;
+        scanner.observe(ScannerEvent::MatchCasesIndented);
+        let indent_offset = scanner
+            .tokens
+            .iter()
+            .find(|token| token.kind == TokenKind::Keyword(HardKeyword::Case))
+            .expect("case token")
+            .span
+            .start();
+        scanner.position = scanner
+            .tokens
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Identifier
+                    && source.get(token.span.start() as usize..token.span.end() as usize)
+                        == Some("next")
+            })
+            .expect("following statement");
+
+        scanner.observe(ScannerEvent::MatchCasesClosed {
+            indent_offset: indent_offset + 1,
+        });
+
+        assert_eq!(scanner.feedback_regions.len(), 1);
+        assert_eq!(scanner.current().kind, TokenKind::Identifier);
+
+        scanner.observe(ScannerEvent::MatchCasesClosed { indent_offset });
+
+        assert!(scanner.feedback_regions.is_empty());
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Identifier);
+    }
+
+    #[test]
+    fn match_case_owner_does_not_close_before_an_aligned_sibling_case() {
+        let source = "def f = {\n    value match\n    case A => a\n    case B => b\n  }";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        let match_index = scanner
+            .tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::Keyword(HardKeyword::Match))
+            .expect("match token");
+        scanner.position = match_index;
+        scanner.observe(ScannerEvent::MatchCasesIndented);
+        let cases: Vec<_> = scanner
+            .tokens
+            .iter()
+            .filter(|token| token.kind == TokenKind::Keyword(HardKeyword::Case))
+            .map(|token| token.span.start())
+            .collect();
+        scanner.position = scanner
+            .tokens
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Keyword(HardKeyword::Case)
+                    && token.span.start() == cases[1]
+            })
+            .expect("second case token");
+
+        scanner.observe(ScannerEvent::MatchCasesClosed {
+            indent_offset: cases[0],
+        });
+
+        assert_eq!(scanner.feedback_regions.len(), 1);
+        assert_eq!(
+            scanner.current().kind,
+            TokenKind::Keyword(HardKeyword::Case)
+        );
     }
 
     #[test]

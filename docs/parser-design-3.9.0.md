@@ -854,10 +854,14 @@ and pattern semantics remain future work.
 
 Nested match and case-body boundaries are closed by their active scanner
 `Indent` region, not by treating every encountered `case` as belonging to the
-innermost match. The parser requests closure at a less-indented case boundary;
-the scanner decides from source layout whether to materialize the `Outdent`.
-This applies both to eager layout tokens and to regions opened through parser
-feedback, including layout suppressed inside braces.
+innermost match. For parser-feedback match/catch case regions, the parser names
+the exact region when its case-list production ends. This grammar-owned closure
+can occur at the same indentation as the `case` clauses (for example, a
+following local definition in a braced scope); it is distinct from a generic
+physical outdent. Eager layout tokens and case-body regions continue to use
+their own scanner layout boundaries. This keeps nested regions from being
+closed by a sibling match while avoiding dependence on strictly decreasing
+indentation for a feedback-owned case list.
 
 The complete-expression boundary also recognizes the initial explicit function
 literal subset:
