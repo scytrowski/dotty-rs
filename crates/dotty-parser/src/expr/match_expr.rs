@@ -100,9 +100,13 @@ where
                 } else if closed_by_delimiter && !self.cursor.at(TokenKind::Outdent) {
                     self.observe_outdented();
                 } else if !self.cursor.at(TokenKind::Outdent)
-                    && let Some((indent_offset, _)) = case_region
+                    && let Some((indent_offset, opened_by_feedback)) = case_region
                 {
-                    self.observe_outdented_layout_region(indent_offset);
+                    if opened_by_feedback {
+                        self.observe_match_cases_closed(indent_offset);
+                    } else {
+                        self.observe_outdented_layout_region(indent_offset);
+                    }
                 } else if !self.cursor.at(TokenKind::Outdent) {
                     self.observe_outdented();
                 }
@@ -313,7 +317,7 @@ mod tests {
                     );
                     self.feedback_regions.pop();
                 }
-                (ScannerEvent::MatchCasesOutdented, _)
+                (ScannerEvent::MatchCasesClosed { .. }, _)
                     if self
                         .feedback_regions
                         .last()
