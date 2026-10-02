@@ -7,6 +7,7 @@ edition = "2024"
 dotty-core = { path = "../dotty-core" }
 
 [dev-dependencies]
+dotty-classloader = { path = "../dotty-classloader" }
 dotty-namer = { path = "../dotty-namer" }
 dotty-lexer = { path = "../dotty-lexer" }
 dotty-parser = { path = "../dotty-parser" }

@@ -2,12 +2,143 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use dotty_classloader::classloader::{
+    ClassPathEntry, ClasspathSymbolResolver, CompositeClassPath, JarClassPath, JdkClassPath,
+    LoadingSession,
+};
 use dotty_core::ast::{TreeKind, Untyped, UntypedNode};
-use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText, TextRange};
+use dotty_core::{
+    Definitions, MemberRequest, Packages, ResolutionError, ResolverCheckpoint, SemanticStore,
+    SourceId, SourceText, SymbolId, SymbolResolver, TextRange,
+};
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamerError, name_compilation_unit};
 use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
 use dotty_typer::{SourceTyper, TyperError};
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ResolverMetrics {
+    package_requests: usize,
+    package_successes: usize,
+    package_unresolved: usize,
+    package_errors: usize,
+    member_requests: usize,
+    member_successes: usize,
+    member_unresolved: usize,
+    member_errors: usize,
+    packages: BTreeSet<String>,
+    classes: BTreeSet<String>,
+    members: BTreeSet<String>,
+}
+
+struct AuditResolver<E: ClassPathEntry> {
+    inner: ClasspathSymbolResolver<E>,
+    metrics: Rc<RefCell<ResolverMetrics>>,
+}
+
+#[derive(Clone)]
+struct SharedClassPath(Arc<CompositeClassPath>);
+
+impl ClassPathEntry for SharedClassPath {
+    fn find_class(
+        &self,
+        name: &dotty_classloader::classloader::BinaryName,
+    ) -> Result<
+        Option<dotty_classloader::classloader::ClassResource>,
+        dotty_classloader::classloader::ClassPathError,
+    > {
+        self.0.find_class(name)
+    }
+
+    fn contains_package(
+        &self,
+        package: &[&str],
+    ) -> Result<bool, dotty_classloader::classloader::ClassPathError> {
+        self.0.contains_package(package)
+    }
+}
+
+impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        self.inner.checkpoint()
+    }
+
+    fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
+        self.inner.rollback_to(store, checkpoint);
+    }
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        let result = self.inner.resolve_member(store, request);
+        let mut metrics = self.metrics.borrow_mut();
+        metrics.member_requests += 1;
+        match &result {
+            Ok(Some(symbol)) => {
+                metrics.member_successes += 1;
+                let path = audit_symbol_path(store, *symbol);
+                match store.symbols.get(*symbol).kind {
+                    dotty_core::SymbolKind::Class
+                    | dotty_core::SymbolKind::Trait
+                    | dotty_core::SymbolKind::Object
+                    | dotty_core::SymbolKind::ModuleClass => {
+                        metrics.classes.insert(path);
+                    }
+                    _ => {
+                        metrics.members.insert(path);
+                    }
+                }
+            }
+            Ok(None) => metrics.member_unresolved += 1,
+            Err(_) => metrics.member_errors += 1,
+        }
+        result
+    }
+
+    fn resolve_package(
+        &mut self,
+        store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        let result = self.inner.resolve_package(store, path);
+        let mut metrics = self.metrics.borrow_mut();
+        metrics.package_requests += 1;
+        match &result {
+            Ok(Some(_)) => {
+                metrics.package_successes += 1;
+                metrics.packages.insert(path.join("."));
+            }
+            Ok(None) => metrics.package_unresolved += 1,
+            Err(_) => metrics.package_errors += 1,
+        }
+        result
+    }
+}
+
+fn audit_symbol_path(store: &SemanticStore, symbol: SymbolId) -> String {
+    let mut parts = Vec::new();
+    let mut current = Some(symbol);
+    let mut visited = HashSet::new();
+    while let Some(symbol) = current {
+        if !visited.insert(symbol) {
+            parts.push("<owner-cycle>".to_owned());
+            break;
+        }
+        let entry = store.symbols.get(symbol);
+        let name = store.names.resolve(entry.name.text());
+        if !name.is_empty() {
+            parts.push(name.to_owned());
+        }
+        current = entry.owner;
+    }
+    parts.reverse();
+    parts.join(".")
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 enum FailureFamily {
@@ -41,6 +172,10 @@ struct FailureClassification {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Audit {
+    files_attempted: usize,
+    parser_failed_files: usize,
+    namer_failed_files: usize,
+    recovered_parser_files: usize,
     local_definitions: usize,
     buckets: BTreeMap<String, usize>,
     local_defdefs: usize,
@@ -53,6 +188,10 @@ struct Audit {
 impl Default for Audit {
     fn default() -> Self {
         Self {
+            files_attempted: 0,
+            parser_failed_files: 0,
+            namer_failed_files: 0,
+            recovered_parser_files: 0,
             local_definitions: 0,
             buckets: BTreeMap::new(),
             local_defdefs: 0,
@@ -68,11 +207,16 @@ impl Default for Audit {
 struct FailureBucket {
     family: FailureFamily,
     count: usize,
+    files: BTreeSet<String>,
     examples: BTreeSet<String>,
 }
 
 impl Audit {
     fn merge(&mut self, other: Self) {
+        self.files_attempted += other.files_attempted;
+        self.parser_failed_files += other.parser_failed_files;
+        self.namer_failed_files += other.namer_failed_files;
+        self.recovered_parser_files += other.recovered_parser_files;
         self.local_definitions += other.local_definitions;
         self.local_defdefs += other.local_defdefs;
         self.typed_local_defdefs += other.typed_local_defdefs;
@@ -89,6 +233,7 @@ impl Audit {
             let target = self.failures.entry(name).or_default();
             target.family = bucket.family;
             target.count += bucket.count;
+            target.files.extend(bucket.files);
             target.examples.extend(bucket.examples);
             target.examples = target.examples.iter().take(5).cloned().collect();
         }
@@ -96,7 +241,7 @@ impl Audit {
 }
 
 #[test]
-#[ignore = "run with SCALA39_ROOT=/path/to/pinned/scala3 checkout to regenerate the compatibility audit"]
+#[ignore = "run with explicit SCALA39_ROOT, JAVA_HOME, SCALA39_JDK_RELEASE, and SCALA39_CLASSPATH"]
 fn pinned_scala39_local_definition_audit() {
     let root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT is required"));
     let revision = git_revision(&root);
@@ -104,23 +249,33 @@ fn pinned_scala39_local_definition_audit() {
         revision, "777528f19a58e794c9954a42f433373472ec57f8",
         "audit requires the repository's pinned Scala 3.9.0 source revision"
     );
+    let classpath = audit_classpath_from_environment();
+    let resolver_metrics = Rc::new(RefCell::new(ResolverMetrics::default()));
     let files = scala_files(&[root.join("library/src"), root.join("compiler/src")]);
     let mut audit = Audit::default();
-    for file in files {
+    for (index, file) in files.iter().enumerate() {
+        if index % 100 == 0 {
+            eprintln!("audited {index}/{} Scala files", files.len());
+        }
         let relative = file
             .strip_prefix(&root)
             .unwrap_or(&file)
             .to_string_lossy()
             .replace('\\', "/");
         let source = fs::read_to_string(&file).expect("Scala source should be readable");
-        audit.merge(audit_source(&source, &relative));
+        audit.merge(audit_source_with_classpath(
+            &source,
+            &relative,
+            classpath.clone(),
+            Rc::clone(&resolver_metrics),
+        ));
     }
 
     println!("scala_revision={revision}");
-    println!(
-        "files={}",
-        scala_files(&[root.join("library/src"), root.join("compiler/src")]).len()
-    );
+    println!("files={}", audit.files_attempted);
+    println!("parser_failed_files={}", audit.parser_failed_files);
+    println!("namer_failed_files={}", audit.namer_failed_files);
+    println!("recovered_parser_files={}", audit.recovered_parser_files);
     println!("local_definitions={}", audit.local_definitions);
     let mut local_buckets = audit.buckets.iter().collect::<Vec<_>>();
     local_buckets.sort_by(|(name_a, count_a), (name_b, count_b)| {
@@ -147,6 +302,36 @@ fn pinned_scala39_local_definition_audit() {
     }
     println!("local_defdefs={}", audit.local_defdefs);
     println!("typed_local_defdefs={}", audit.typed_local_defdefs);
+    println!(
+        "unsupported_expression_total={}",
+        sum_buckets_with_prefix(&audit.failures, "UnsupportedExpression::")
+    );
+    println!(
+        "local_block_declaration_deferred={}",
+        sum_buckets_with_prefix(&audit.failures, "LocalBlockDeclarationDeferred::")
+    );
+    println!(
+        "no_successful_enclosing_method_typing={}",
+        audit
+            .failures
+            .get("NoSuccessfulEnclosingMethodTyping")
+            .map_or(0, |bucket| bucket.count)
+    );
+    println!(
+        "import_qualifier_not_found={}",
+        audit
+            .failures
+            .get("ImportQualifierNotFound")
+            .map_or(0, |bucket| bucket.count)
+    );
+    println!(
+        "external_name_or_member_resolution_failures={}",
+        sum_buckets_with_prefix(&audit.failures, "TypeNameNotFound")
+            + sum_buckets_with_prefix(&audit.failures, "TermNameNotFound")
+            + sum_buckets_with_prefix(&audit.failures, "MemberNotFound")
+            + sum_buckets_with_prefix(&audit.failures, "MemberLookup")
+            + sum_buckets_with_prefix(&audit.failures, "SymbolResolution")
+    );
     let mut family_counts = BTreeMap::<FailureFamily, usize>::new();
     for bucket in audit.failures.values() {
         *family_counts.entry(bucket.family).or_default() += bucket.count;
@@ -162,15 +347,141 @@ fn pinned_scala39_local_definition_audit() {
         println!("  {}={count}", family.label());
     }
     println!("local_defdef_failures:");
-    let mut failures = audit.failures.into_iter().collect::<Vec<_>>();
+    let mut failures = audit.failures.iter().collect::<Vec<_>>();
     failures.sort_by(|(name_a, a), (name_b, b)| b.count.cmp(&a.count).then(name_a.cmp(name_b)));
     for (name, bucket) in failures {
         println!(
-            "  {name} [{}]: {} [{}]",
+            "  {name} [{}]: {} ({} files) [{}]",
             bucket.family.label(),
             bucket.count,
-            bucket.examples.into_iter().collect::<Vec<_>>().join(", ")
+            bucket.files.len(),
+            bucket
+                .examples
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
         );
+    }
+    print_ranked_gaps(&audit.failures);
+    print_resolver_metrics(&resolver_metrics.borrow());
+}
+
+fn sum_buckets_with_prefix(failures: &BTreeMap<String, FailureBucket>, prefix: &str) -> usize {
+    failures
+        .iter()
+        .filter(|(name, _)| name.starts_with(prefix))
+        .map(|(_, bucket)| bucket.count)
+        .sum()
+}
+
+fn print_ranked_gaps(failures: &BTreeMap<String, FailureBucket>) {
+    let mut ranked = failures
+        .iter()
+        .filter(|(_, bucket)| bucket.family != FailureFamily::ParserNamer)
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(name_a, a), (name_b, b)| b.count.cmp(&a.count).then(name_a.cmp(name_b)));
+    println!("top_semantic_gaps:");
+    for (rank, (name, bucket)) in ranked.iter().take(10).enumerate() {
+        let category = implementation_category(name);
+        println!(
+            "  {}. {name}: count={}, files={}, category={}, examples={}",
+            rank + 1,
+            bucket.count,
+            bucket.files.len(),
+            category,
+            bucket
+                .examples
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    println!("implementation_scope_notes:");
+    let mut seen = BTreeSet::new();
+    for (name, _) in ranked.iter().take(5) {
+        let category = implementation_category(name);
+        if !seen.insert(category) {
+            continue;
+        }
+        let (slice, owner, prerequisites, non_goals) = scope_note(category);
+        println!(
+            "  {category}: first_slice={slice}; owner={owner}; prerequisites={prerequisites}; non_goals={non_goals}"
+        );
+    }
+}
+
+fn implementation_category(bucket: &str) -> &'static str {
+    if bucket.starts_with("UnsupportedExpression::") {
+        "expression typing"
+    } else if bucket.starts_with("LocalBlockDeclarationDeferred::") {
+        "local declaration support"
+    } else if bucket.contains("Pattern") || bucket.contains("Match") {
+        "pattern typing"
+    } else if bucket.contains("Inference")
+        || bucket.contains("TypeRelation")
+        || bucket.contains("Subtype")
+    {
+        "inference/type-relation support"
+    } else if bucket.contains("Implicit") || bucket.contains("Contextual") {
+        "implicit/contextual search"
+    } else if bucket.starts_with("ImportQualifierNotFound")
+        || bucket.starts_with("TypeNameNotFound")
+        || bucket.starts_with("TermNameNotFound")
+        || bucket.starts_with("MemberNotFound")
+        || bucket.starts_with("MemberLookup")
+    {
+        "external resolution"
+    } else {
+        "other"
+    }
+}
+
+fn scope_note(category: &str) -> (&'static str, &'static str, &'static str, &'static str) {
+    match category {
+        "expression typing" => (
+            "lower one reported expression node through existing expression typing",
+            "dotty-typer/src/typer/expression",
+            "the parsed AST node and its child typing rules",
+            "control-flow or inference redesign",
+        ),
+        "local declaration support" => (
+            "enter one local declaration kind transactionally in block typing",
+            "dotty-typer/src/typer/expression/blocks.rs",
+            "source symbol and scope metadata from dotty-core",
+            "local classes, imports, or type definitions beyond the selected kind",
+        ),
+        "pattern typing" => (
+            "type one pattern form against an already known expected type",
+            "dotty-typer/src/typer/patterns",
+            "the expected type and existing pattern AST shape",
+            "exhaustivity analysis and match-result inference",
+        ),
+        "inference/type-relation support" => (
+            "add the smallest missing relation or inference case with exact unsupported errors",
+            "dotty-typer/src/types",
+            "focused type relation regression cases",
+            "general-purpose constraint solving",
+        ),
+        "implicit/contextual search" => (
+            "resolve one explicit contextual argument shape with unique-candidate checks",
+            "dotty-typer/src/typer/application",
+            "typed contextual parameter and scope lookup",
+            "implicit scope derivation and recursive search",
+        ),
+        "external resolution" => (
+            "resolve the exact missing package, type, or member through the classpath port",
+            "dotty-classloader plus the existing typer resolver boundary",
+            "classpath fixture and canonical package/session identity",
+            "source lowering and classloader redesign",
+        ),
+        _ => (
+            "reproduce the exact error bucket with a focused semantic fixture",
+            "the narrow module producing that TyperError",
+            "the relevant source semantic metadata",
+            "adjacent unsupported language features",
+        ),
     }
 }
 
@@ -351,15 +662,46 @@ fn local_expression_failure_examples_keep_the_smallest_five_paths() {
             .collect::<Vec<_>>(),
         ["a.scala", "v.scala", "w.scala", "x.scala", "y.scala"]
     );
+    assert_eq!(
+        first
+            .failures
+            .get("UnsupportedExpression::InfixOp")
+            .unwrap()
+            .files
+            .len(),
+        6
+    );
 }
 
 fn audit_source(text: &str, path: &str) -> Audit {
+    audit_source_inner(text, path, None)
+}
+
+fn audit_source_with_classpath(
+    text: &str,
+    path: &str,
+    classpath: SharedClassPath,
+    metrics: Rc<RefCell<ResolverMetrics>>,
+) -> Audit {
+    audit_source_inner(text, path, Some((classpath, metrics)))
+}
+
+fn audit_source_inner(
+    text: &str,
+    path: &str,
+    classpath: Option<(SharedClassPath, Rc<RefCell<ResolverMetrics>>)>,
+) -> Audit {
     let source = SourceId::from_index(0);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
     let scanner = match ContextualScanner::new(text) {
         Ok(scanner) => scanner,
-        Err(_) => return Audit::default(),
+        Err(_) => {
+            let mut audit = Audit::default();
+            audit.files_attempted = 1;
+            audit.parser_failed_files = 1;
+            return audit;
+        }
     };
     let parsed = parse_compilation_unit(
         SourceText::new(text).expect("source text should be valid"),
@@ -368,7 +710,9 @@ fn audit_source(text: &str, path: &str) -> Audit {
         &mut store.names,
     );
     let mut audit = collect_local_nodes(&parsed.ast);
+    audit.files_attempted = 1;
     audit.expression_forms = collect_expression_histogram(&parsed.ast);
+    audit.recovered_parser_files = usize::from(!parsed.diagnostics.is_empty());
     for diagnostic in &parsed.diagnostics {
         let failure = classify_parse_diagnostic(diagnostic.kind());
         *audit.parser_diagnostics.entry(failure.bucket).or_default() += 1;
@@ -384,6 +728,7 @@ fn audit_source(text: &str, path: &str) -> Audit {
     ) {
         Ok(index) => index,
         Err(error) => {
+            audit.namer_failed_files = 1;
             if audit.local_defdefs != 0 {
                 let failure = classify_namer_error(&error);
                 for _ in 0..audit.local_defdefs {
@@ -413,14 +758,26 @@ fn audit_source(text: &str, path: &str) -> Audit {
 
     let local_method_trees = local_method_trees(&parsed.ast);
 
+    let typer_packages = Packages::new();
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
         &index,
         &mut store,
         definitions,
-        &packages,
+        &typer_packages,
     );
+    if let Some((classpath, metrics)) = classpath {
+        let resolver = ClasspathSymbolResolver::new(
+            classpath,
+            definitions,
+            LoadingSession::with_packages(packages),
+        );
+        typer = typer.with_resolver(Box::new(AuditResolver {
+            inner: resolver,
+            metrics,
+        }));
+    }
     let mut root_failures = Vec::new();
     for (method, rhs, range) in root_methods {
         let outcome = typer
@@ -450,6 +807,58 @@ fn audit_source(text: &str, path: &str) -> Audit {
         }
     }
     audit
+}
+
+fn audit_classpath_from_environment() -> SharedClassPath {
+    let java_home = PathBuf::from(
+        std::env::var_os("JAVA_HOME").expect("JAVA_HOME must identify the JDK used by the audit"),
+    );
+    let release = std::env::var("SCALA39_JDK_RELEASE")
+        .expect("SCALA39_JDK_RELEASE must explicitly select the JDK classfile release")
+        .parse::<u16>()
+        .expect("SCALA39_JDK_RELEASE must be a numeric Java feature release");
+    let classpath = std::env::var_os("SCALA39_CLASSPATH").expect(
+        "SCALA39_CLASSPATH must list the pinned Scala artifact jars; ambient CLASSPATH is ignored",
+    );
+    let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(
+        JdkClassPath::new(java_home.join("jmods"))
+            .expect("JAVA_HOME/jmods should be readable by the classpath loader"),
+    )];
+    let jars = std::env::split_paths(&classpath).collect::<Vec<_>>();
+    assert!(
+        !jars.is_empty(),
+        "SCALA39_CLASSPATH must contain Scala jars"
+    );
+    for jar in jars {
+        assert!(
+            jar.is_file(),
+            "classpath jar does not exist: {}",
+            jar.display()
+        );
+        entries.push(Box::new(
+            JarClassPath::new(jar.clone(), release)
+                .unwrap_or_else(|error| panic!("cannot index {}: {error}", jar.display())),
+        ));
+    }
+    SharedClassPath(Arc::new(CompositeClassPath::new(entries)))
+}
+
+fn print_resolver_metrics(metrics: &ResolverMetrics) {
+    println!("resolver_metrics:");
+    println!("  external_package_requests={}", metrics.package_requests);
+    println!("  external_package_successes={}", metrics.package_successes);
+    println!(
+        "  external_package_unresolved={}",
+        metrics.package_unresolved
+    );
+    println!("  external_package_errors={}", metrics.package_errors);
+    println!("  external_member_requests={}", metrics.member_requests);
+    println!("  external_member_successes={}", metrics.member_successes);
+    println!("  external_member_unresolved={}", metrics.member_unresolved);
+    println!("  external_member_errors={}", metrics.member_errors);
+    println!("  distinct_packages={}", metrics.packages.len());
+    println!("  distinct_classes={}", metrics.classes.len());
+    println!("  distinct_members={}", metrics.members.len());
 }
 
 fn collect_local_nodes(arena: &dotty_core::AstArena<Untyped>) -> Audit {
@@ -569,6 +978,7 @@ fn record_failure(audit: &mut Audit, failure: FailureClassification, path: &str)
     let bucket = audit.failures.entry(failure.bucket).or_default();
     bucket.family = failure.family;
     bucket.count += 1;
+    bucket.files.insert(path.to_owned());
     bucket.examples.insert(path.to_owned());
     bucket.examples = bucket.examples.iter().take(5).cloned().collect();
 }
