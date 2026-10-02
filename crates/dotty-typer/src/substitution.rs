@@ -46,6 +46,7 @@ impl SourceTyper<'_> {
     /// declaring-class view. The canonical declaration info is never changed.
     pub fn member_type_on(&mut self, candidate: &MemberCandidate) -> Result<TypeId, TyperError> {
         let store_checkpoint = self.store.checkpoint();
+        let resolver_checkpoint = self.resolver.checkpoint();
         let mut journal = Vec::new();
         let checkpoint = self.type_index.checkpoint();
         let result = self.member_type_on_journaled(candidate, &mut journal);
@@ -55,6 +56,7 @@ impl SourceTyper<'_> {
                     self.store.symbols.set_info(symbol, previous);
                 }
             }
+            self.resolver.rollback_to(self.store, resolver_checkpoint);
             self.store.rollback_to(store_checkpoint);
             self.type_index.restore(checkpoint);
         }
