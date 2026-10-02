@@ -215,7 +215,20 @@ pub(crate) fn decode(
     bytes: &[u8],
     requested: &BinaryName,
 ) -> Result<DecodedTastyClass, TastyDecodeError> {
-    decode_impl(bytes, requested, |_, _| None, |_, _| None, false)
+    decode_impl(
+        bytes,
+        requested,
+        |_, _| None,
+        |package, simple_name| {
+            let internal = if package.is_empty() {
+                simple_name.to_owned()
+            } else {
+                format!("{package}/{simple_name}")
+            };
+            Some(BinaryName::from_internal(internal))
+        },
+        false,
+    )
 }
 
 /// Decodes a class with classpath-backed resolution for aliases and bare
@@ -1229,8 +1242,8 @@ fn resolve_parent_name_in_package_with_bare_at_depth(
         return None;
     }
 
-    if !already_qualified && let Some(resolved) = resolve_bare(package, &names[0]) {
-        return Some(resolved);
+    if !already_qualified {
+        return resolve_bare(package, &names[0]);
     }
 
     let joined = names.join("/");
