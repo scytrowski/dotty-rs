@@ -7137,6 +7137,43 @@ mod tests {
     }
 
     #[test]
+    fn failed_expression_transaction_restores_nested_typed_mappings() {
+        let arena = AstArena::new();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let packages = Packages::new();
+        let source = SourceId::from_index(9);
+        let mut untyped_arena = AstArena::<Untyped>::new();
+        let untyped = untyped_arena.alloc(dotty_core::Tree {
+            kind: TreeKind::TypeTree(dotty_core::ast::TypeTree),
+            position: None,
+            ty: (),
+        });
+        let index = SourceSemanticIndex::new();
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        let result: Result<(), TyperError> = typer.run_expression_transaction(|typer, _, _| {
+            let typed = typer.typed_arena.alloc(dotty_core::Tree {
+                kind: TreeKind::TypeTree(dotty_core::ast::TypeTree),
+                position: None,
+                ty: definitions.any_type,
+            });
+            // Model a nested completion that commits mappings using its own
+            // journal rather than the outer expression transaction's journal.
+            typer.typed_index.insert(source, untyped, typed).unwrap();
+            Err(TyperError::TreeOutsideArena {
+                source,
+                tree_index: untyped.index(),
+            })
+        });
+
+        assert!(matches!(result, Err(TyperError::TreeOutsideArena { .. })));
+        assert!(typer.typed_arena.iter().next().is_none());
+        assert_eq!(typer.source_typed_index().get(source, untyped), None);
+    }
+
+    #[test]
     fn boolean_literal_becomes_a_typed_literal_with_the_boolean_type() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { val value: Boolean = true }");

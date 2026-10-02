@@ -48,6 +48,7 @@ impl SourceTyper<'_> {
         ) -> Result<T, TyperError>,
     ) -> Result<T, TyperError> {
         let ast_checkpoint = self.typed_arena.checkpoint();
+        let typed_index_checkpoint = self.typed_index.clone();
         let store_checkpoint = self.store.checkpoint();
         let resolver_checkpoint = self.resolver.checkpoint();
         let type_index_checkpoint = self.type_index.checkpoint();
@@ -74,9 +75,11 @@ impl SourceTyper<'_> {
                 self.local_methods = local_methods_checkpoint;
                 self.initializing_local_symbols = initializing_local_symbols_checkpoint;
                 self.expression_scopes = expression_scope_checkpoint;
-                for (source, source_tree) in new_mappings.into_iter().rev() {
-                    self.typed_index.remove(source, source_tree);
-                }
+                // Nested completion can type an inferred method body with its
+                // own mapping journal. Restore the full index so those
+                // successful nested mappings cannot outlive rolled-back AST
+                // nodes when this outer expression fails.
+                self.typed_index = typed_index_checkpoint;
                 Err(error)
             }
         }
