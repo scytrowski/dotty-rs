@@ -704,8 +704,16 @@ impl TokenSource for ContextualScanner {
                     .feedback_regions
                     .last()
                     .is_some_and(|region| region.indent_offset == indent_offset);
+                // A Scala end marker explicitly closes its matching construct,
+                // so a match-case region may end at the marker's own indentation
+                // (as in legacy layouts where `case` and `end match` align).
+                let closes_with_end_marker = self.current().kind == TokenKind::EndMarker;
                 if self.innermost_open_indent_offset(self.current_index()) == Some(indent_offset)
-                    && self.insert_outdent_before_current(false, true, Some(indent_offset))
+                    && self.insert_outdent_before_current(
+                        closes_with_end_marker,
+                        true,
+                        Some(indent_offset),
+                    )
                     && matches_top_feedback_region
                 {
                     self.feedback_regions.pop();
@@ -5232,6 +5240,69 @@ mod tests {
         assert!(scanner.feedback_regions.is_empty());
         assert_eq!(scanner.current().kind, TokenKind::Outdent);
         assert_eq!(scanner.lookahead(1).kind, TokenKind::Identifier);
+    }
+
+    #[test]
+    fn end_marker_closes_a_match_case_region_at_the_same_indentation() {
+        let source = "def f = {\n    value match\n    case A => a\n    end match\n  }";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        let match_index = scanner
+            .tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::Keyword(HardKeyword::Match))
+            .expect("match token");
+        scanner.position = match_index;
+        scanner.observe(ScannerEvent::MatchCasesIndented);
+        let marker_index = scanner
+            .tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::EndMarker)
+            .expect("end marker token");
+        let case_index = scanner
+            .tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::Keyword(HardKeyword::Case))
+            .expect("case token");
+        let indent_offset = scanner.tokens[case_index].span.start();
+        scanner.position = marker_index;
+        scanner.observe(ScannerEvent::OutdentedLayoutRegion { indent_offset });
+
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::EndMarker);
+    }
+
+    #[test]
+    fn named_layout_outdent_does_not_close_at_same_indent_without_end_marker() {
+        let source = "def f = {\n    value match\n    case A => a\n    next\n  }";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        let match_index = scanner
+            .tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::Keyword(HardKeyword::Match))
+            .expect("match token");
+        scanner.position = match_index;
+        scanner.observe(ScannerEvent::MatchCasesIndented);
+        let next_index = scanner
+            .tokens
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Identifier
+                    && source.get(token.span.start() as usize..token.span.end() as usize)
+                        == Some("next")
+            })
+            .expect("following identifier");
+        let case_index = scanner
+            .tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::Keyword(HardKeyword::Case))
+            .expect("case token");
+        scanner.position = next_index;
+
+        scanner.observe(ScannerEvent::OutdentedLayoutRegion {
+            indent_offset: scanner.tokens[case_index].span.start(),
+        });
+
+        assert_eq!(scanner.current().kind, TokenKind::Identifier);
     }
 
     #[test]
