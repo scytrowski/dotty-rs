@@ -28,6 +28,7 @@ struct ResolverMetrics {
     package_source_reuse: usize,
     resolver_member_requests: usize,
     member_successes: usize,
+    class_symbol_successes: usize,
     member_source_reuse: usize,
     member_unresolved: usize,
     member_errors: usize,
@@ -109,6 +110,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                         | dotty_core::SymbolKind::Trait
                         | dotty_core::SymbolKind::Object
                         | dotty_core::SymbolKind::ModuleClass => {
+                            metrics.class_symbol_successes += 1;
                             metrics.classes.insert(path);
                         }
                         _ => {
@@ -232,6 +234,7 @@ struct Audit {
     failures: BTreeMap<String, FailureBucket>,
     expression_forms: BTreeMap<String, usize>,
     parser_diagnostics: BTreeMap<String, usize>,
+    match_readiness: MatchReadiness,
 }
 
 impl Default for Audit {
@@ -250,8 +253,19 @@ impl Default for Audit {
             failures: BTreeMap::new(),
             expression_forms: empty_expression_histogram(),
             parser_diagnostics: BTreeMap::new(),
+            match_readiness: MatchReadiness::default(),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MatchReadiness {
+    first_blocker_methods: usize,
+    matches: usize,
+    cases: usize,
+    guarded_cases: usize,
+    pattern_shapes: BTreeMap<String, usize>,
+    pattern_shape_files: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -280,6 +294,7 @@ impl Audit {
         for (name, count) in other.parser_diagnostics {
             *self.parser_diagnostics.entry(name).or_default() += count;
         }
+        self.match_readiness.merge(other.match_readiness);
         for (name, count) in other.buckets {
             *self.buckets.entry(name).or_default() += count;
         }
@@ -290,6 +305,24 @@ impl Audit {
             target.files.extend(bucket.files);
             target.examples.extend(bucket.examples);
             target.examples = target.examples.iter().take(5).cloned().collect();
+        }
+    }
+}
+
+impl MatchReadiness {
+    fn merge(&mut self, other: Self) {
+        self.first_blocker_methods += other.first_blocker_methods;
+        self.matches += other.matches;
+        self.cases += other.cases;
+        self.guarded_cases += other.guarded_cases;
+        for (shape, count) in other.pattern_shapes {
+            *self.pattern_shapes.entry(shape).or_default() += count;
+        }
+        for (shape, files) in other.pattern_shape_files {
+            self.pattern_shape_files
+                .entry(shape)
+                .or_default()
+                .extend(files);
         }
     }
 }
@@ -438,6 +471,7 @@ fn pinned_scala39_local_definition_audit() {
         );
     }
     print_ranked_gaps(&audit.failures);
+    print_match_readiness(&audit.match_readiness);
     print_resolver_metrics(&resolver_metrics.borrow());
     println!("AUDIT_REPORT_END");
 }
@@ -451,6 +485,9 @@ fn print_v1_deltas(audit: &Audit) {
     const V1_UNSUPPORTED_EXPRESSION: usize = 572;
     const V1_LOCAL_DECLARATION_DEFERRED: usize = 272;
     const V1_NO_SUCCESSFUL_ENCLOSING_METHOD: usize = 483;
+    const V1_PARENS: usize = 146;
+    const V1_INFIX: usize = 146;
+    const V1_LOCAL_IMPORT: usize = 139;
 
     let failures = &audit.failures;
     let current_import = failures
@@ -502,6 +539,18 @@ fn print_v1_deltas(audit: &Audit) {
         current_no_success,
         signed_delta(current_no_success, V1_NO_SUCCESSFUL_ENCLOSING_METHOD)
     );
+    println!("audit_581_feature_comparison:");
+    for (bucket, baseline) in [
+        ("UnsupportedExpression::Parens", V1_PARENS),
+        ("UnsupportedExpression::InfixOp", V1_INFIX),
+        ("LocalBlockDeclarationDeferred::import", V1_LOCAL_IMPORT),
+    ] {
+        let current = failures.get(bucket).map_or(0, |entry| entry.count);
+        println!(
+            "  {bucket}={current} (baseline={baseline}, delta={})",
+            signed_delta(current, baseline)
+        );
+    }
 }
 
 fn signed_delta(current: usize, baseline: usize) -> String {
@@ -755,6 +804,36 @@ fn local_expression_audit_types_infix_calls_and_counts_them_structurally() {
 }
 
 #[test]
+fn match_readiness_counts_case_shapes_for_match_first_blockers() {
+    let source = "object Audit { def outer(value: Int): Int = { def local: Int = value match { case 0 => 1; case _ => 2 }; local } }";
+    let audit = audit_source(source, "Match.scala");
+
+    assert_eq!(
+        audit
+            .failures
+            .get("UnsupportedExpression::Match")
+            .map(|failure| failure.count),
+        Some(1),
+        "{audit:?}"
+    );
+    assert_eq!(audit.match_readiness.first_blocker_methods, 1);
+    assert_eq!(audit.match_readiness.matches, 1);
+    assert_eq!(audit.match_readiness.cases, 2);
+    assert_eq!(audit.match_readiness.guarded_cases, 0);
+    assert_eq!(
+        audit.match_readiness.pattern_shapes.get("literal"),
+        Some(&1)
+    );
+    assert_eq!(
+        audit
+            .match_readiness
+            .pattern_shapes
+            .get("wildcard/identifier/bind"),
+        Some(&1)
+    );
+}
+
+#[test]
 fn local_expression_audit_reports_lambda_and_deferred_declaration_subkinds() {
     let lambda = audit_source(
         "object Audit { def outer: Int = { def local: Int = (x: Int) => x; 0 } }",
@@ -995,7 +1074,11 @@ fn audit_source_inner(
             .expression_context_for(method)
             .and_then(|context| typer.type_expression(rhs, context));
         if let Err(error) = outcome {
-            root_failures.push((range, classify_typer_error(&error, &parsed.ast)));
+            let failure = classify_typer_error(&error, &parsed.ast);
+            if failure.bucket == "UnsupportedExpression::Match" {
+                collect_match_readiness(&parsed.ast, rhs, path, &mut audit.match_readiness);
+            }
+            root_failures.push((range, failure));
         }
     }
 
@@ -1018,6 +1101,104 @@ fn audit_source_inner(
         }
     }
     audit
+}
+
+fn print_match_readiness(readiness: &MatchReadiness) {
+    println!("match_readiness:");
+    println!(
+        "  first_blocker_methods={}",
+        readiness.first_blocker_methods
+    );
+    println!(
+        "  structural_matches_in_first_blocker_methods={}",
+        readiness.matches
+    );
+    println!("  cases_in_first_blocker_methods={}", readiness.cases);
+    println!("  guarded_cases={}", readiness.guarded_cases);
+    println!(
+        "  unguarded_cases={}",
+        readiness.cases - readiness.guarded_cases
+    );
+    println!("  pattern_root_shapes:");
+    for (shape, count) in &readiness.pattern_shapes {
+        let files = readiness
+            .pattern_shape_files
+            .get(shape)
+            .into_iter()
+            .flatten()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>();
+        println!("    {shape}={count} files=[{}]", files.join(", "));
+    }
+}
+
+fn collect_match_readiness(
+    arena: &dotty_core::AstArena<Untyped>,
+    root: dotty_core::TreeId<Untyped>,
+    path: &str,
+    readiness: &mut MatchReadiness,
+) {
+    readiness.first_blocker_methods += 1;
+    let nodes = arena
+        .iter()
+        .map(|(tree, node)| (tree.index(), node))
+        .collect::<BTreeMap<_, _>>();
+    let mut visited = HashSet::new();
+    let mut pending = VecDeque::from([root]);
+    while let Some(tree) = pending.pop_front() {
+        if !visited.insert(tree) {
+            continue;
+        }
+        let Some(node) = nodes.get(&tree.index()) else {
+            continue;
+        };
+        if let TreeKind::Match(matched) = &node.kind {
+            readiness.matches += 1;
+            for case_tree in &matched.cases {
+                let Some(case_node) = nodes.get(&case_tree.index()) else {
+                    continue;
+                };
+                let TreeKind::CaseDef(case) = &case_node.kind else {
+                    continue;
+                };
+                readiness.cases += 1;
+                if case.guard.is_some() {
+                    readiness.guarded_cases += 1;
+                }
+                let Some(pattern_node) = nodes.get(&case.pattern.index()) else {
+                    continue;
+                };
+                let shape = match &pattern_node.kind {
+                    TreeKind::Ident(_) | TreeKind::Bind(_) => "wildcard/identifier/bind",
+                    TreeKind::Literal(_) | TreeKind::PhaseSpecific(UntypedNode::Number(_)) => {
+                        "literal"
+                    }
+                    TreeKind::Typed(_) => "typed pattern",
+                    TreeKind::Alternative(_) => "alternative",
+                    TreeKind::PhaseSpecific(UntypedNode::Tuple(_)) => "tuple",
+                    TreeKind::Apply(_) | TreeKind::TypeApply(_) => {
+                        "extractor-looking Apply/TypeApply"
+                    }
+                    TreeKind::UnApply(_) => "UnApply",
+                    _ => "other",
+                };
+                *readiness
+                    .pattern_shapes
+                    .entry(shape.to_owned())
+                    .or_default() += 1;
+                readiness
+                    .pattern_shape_files
+                    .entry(shape.to_owned())
+                    .or_default()
+                    .insert(path.to_owned());
+            }
+        }
+        pending.extend(term_expression_children(&node.kind));
+        if let TreeKind::DefDef(definition) = &node.kind {
+            pending.extend(definition.rhs);
+        }
+    }
 }
 
 fn audit_classpath_from_environment() -> SharedClassPath {
@@ -1080,12 +1261,64 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         metrics.external_member_requests()
     );
     println!("  external_member_successes={}", metrics.member_successes);
+    println!(
+        "  external_class_symbol_successes={}",
+        metrics.class_symbol_successes
+    );
+    println!(
+        "  external_non_class_member_successes={}",
+        metrics
+            .member_successes
+            .saturating_sub(metrics.class_symbol_successes)
+    );
     println!("  source_member_reuse={}", metrics.member_source_reuse);
     println!("  external_member_unresolved={}", metrics.member_unresolved);
     println!("  external_member_errors={}", metrics.member_errors);
     println!("  distinct_packages={}", metrics.packages.len());
     println!("  distinct_classes={}", metrics.classes.len());
     println!("  distinct_members={}", metrics.members.len());
+    println!(
+        "  classloader_success_gate={}",
+        if !metrics.classes.is_empty() && !metrics.members.is_empty() {
+            "passed"
+        } else {
+            "BLOCKED: no external class/member materialization"
+        }
+    );
+    println!("resolver_581_comparison:");
+    for (name, current, baseline) in [
+        (
+            "external_package_successes",
+            metrics.package_successes,
+            1_965,
+        ),
+        (
+            "external_package_unresolved",
+            metrics.package_unresolved,
+            5_816,
+        ),
+        ("external_package_errors", metrics.package_errors, 0),
+        ("external_class_materializations", metrics.classes.len(), 0),
+        (
+            "external_non_class_member_successes",
+            metrics
+                .member_successes
+                .saturating_sub(metrics.class_symbol_successes),
+            0,
+        ),
+        (
+            "external_member_unresolved",
+            metrics.member_unresolved,
+            3_884,
+        ),
+        ("external_member_errors", metrics.member_errors, 91),
+        ("distinct_packages", metrics.packages.len(), 23),
+    ] {
+        println!(
+            "  {name}={current} (baseline={baseline}, delta={})",
+            signed_delta(current, baseline)
+        );
+    }
     println!("  member_error_kinds:");
     for (kind, count) in &metrics.member_error_kinds {
         println!("    {kind}={count}");
