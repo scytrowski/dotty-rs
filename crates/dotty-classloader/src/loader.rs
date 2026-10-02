@@ -4982,6 +4982,54 @@ mod tests {
         assert_eq!(store.symbols.get(b_symbol).info, SymbolInfo::Error);
     }
 
+    #[test]
+    fn bootstrap_member_dependency_may_reuse_an_in_progress_superclass_identity() {
+        let object_name = BinaryName::from_internal("java/lang/Object");
+        let class_name = BinaryName::from_internal("java/lang/Class");
+        let mut classes = HashMap::new();
+        classes.insert(
+            object_name.clone(),
+            synthetic_class_with_object_fields(
+                object_name.as_internal(),
+                None,
+                &[("class", class_name.as_internal())],
+            ),
+        );
+        classes.insert(
+            class_name.clone(),
+            synthetic_class(class_name.as_internal(), Some(object_name.as_internal())),
+        );
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        let canonical_object = loader.definitions().object_class;
+        let object = loader
+            .load_class(&object_name)
+            .expect("Object -> member Class -> superclass Object is not inheritance recursion");
+        let class = loader
+            .load_class(&class_name)
+            .expect("Class should remain loaded after Object completes");
+        drop(loader);
+
+        assert_eq!(object, canonical_object);
+        match store.symbols.get(object).info {
+            SymbolInfo::Complete(info) => info,
+            other => panic!("expected Object to complete, got {other:?}"),
+        };
+        let class_info = match store.symbols.get(class).info {
+            SymbolInfo::Complete(info) => info,
+            other => panic!("expected Class to complete, got {other:?}"),
+        };
+        let Type::ClassInfo(class_info) = store.types.get(class_info) else {
+            panic!("expected Class ClassInfo");
+        };
+        let class_parents = class_info.parents.clone();
+        assert_eq!(class_parents.len(), 1);
+        assert_eq!(parent_symbol(&store, class_parents[0]), canonical_object);
+        let object_class_type = member_type_id(&mut store, object, "class");
+        assert_eq!(parent_symbol(&store, object_class_type), class);
+    }
+
     /// Confirms the "reuse an in-progress shell" technique
     /// (`docs/classloader.md` §5/§9, Milestone 6): `Ping.other` is typed
     /// `Pong`, and `Pong.other` is typed `Ping` — a completely
