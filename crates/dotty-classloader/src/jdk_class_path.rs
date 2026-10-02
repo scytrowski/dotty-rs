@@ -47,6 +47,10 @@ impl ClassPathEntry for JdkClassPath {
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
         self.composite.find_class(name)
     }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.composite.contains_package(package)
+    }
 }
 
 #[cfg(test)]
@@ -85,6 +89,15 @@ mod tests {
             .unwrap();
 
         assert!(resource.is_none());
+    }
+
+    #[test]
+    fn reports_only_packages_with_class_resources() {
+        let class_path = JdkClassPath::new(fixture_path("tests/fixtures/jdk_classpath")).unwrap();
+
+        assert!(class_path.contains_package(&["pool"]).unwrap());
+        assert!(!class_path.contains_package(&["missing"]).unwrap());
+        assert!(!class_path.contains_package(&["..", "pool"]).unwrap());
     }
 
     #[test]

@@ -117,6 +117,30 @@ impl ClassPathEntry for JarClassPath {
             None => Ok(None),
         }
     }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        if !super::class_path::safe_package_segments(package) {
+            return Ok(false);
+        }
+        let path = package.join("/");
+        let base_prefix = if path.is_empty() {
+            String::new()
+        } else {
+            format!("{path}/")
+        };
+        if self.archive.contains_package(&base_prefix) {
+            return Ok(true);
+        }
+        if self.multi_release {
+            for version in MIN_VERSIONED_DIRECTORY..=self.release_version {
+                let prefix = format!("META-INF/versions/{version}/{base_prefix}");
+                if self.archive.contains_package(&prefix) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
 }
 
 #[cfg(test)]
