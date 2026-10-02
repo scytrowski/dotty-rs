@@ -62,9 +62,18 @@ use std::collections::HashMap;
 #[derive(Debug, Default)]
 pub struct LoadingSession {
     pub(crate) resolved: HashMap<BinaryName, SymbolId>,
+    resolved_order: Vec<BinaryName>,
     pub(crate) packages: PackageRegistry,
     pub(crate) metadata: HashMap<SymbolId, ClassfileMetadata>,
     pub(crate) origins: HashMap<SymbolId, ClassOrigin>,
+    sidecar_order: Vec<SymbolId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SessionCheckpoint {
+    resolved: usize,
+    sidecars: usize,
+    packages: (usize, usize),
 }
 
 impl LoadingSession {
@@ -90,9 +99,56 @@ impl LoadingSession {
     pub fn new() -> Self {
         Self {
             resolved: HashMap::new(),
+            resolved_order: Vec::new(),
             packages: PackageRegistry::new(),
             metadata: HashMap::new(),
             origins: HashMap::new(),
+            sidecar_order: Vec::new(),
         }
+    }
+
+    pub(crate) fn checkpoint(&self) -> SessionCheckpoint {
+        SessionCheckpoint {
+            resolved: self.resolved_order.len(),
+            sidecars: self.sidecar_order.len(),
+            packages: self.packages.checkpoint(),
+        }
+    }
+
+    pub(crate) fn cache_resolved(&mut self, name: BinaryName, symbol: SymbolId) {
+        if self.resolved.insert(name.clone(), symbol).is_none() {
+            self.resolved_order.push(name);
+        }
+    }
+
+    pub(crate) fn record_origin(&mut self, symbol: SymbolId, origin: ClassOrigin) {
+        if !self.origins.contains_key(&symbol) && !self.metadata.contains_key(&symbol) {
+            self.sidecar_order.push(symbol);
+        }
+        self.origins.insert(symbol, origin);
+    }
+
+    pub(crate) fn record_metadata(&mut self, symbol: SymbolId, metadata: ClassfileMetadata) {
+        if !self.origins.contains_key(&symbol) && !self.metadata.contains_key(&symbol) {
+            self.sidecar_order.push(symbol);
+        }
+        self.metadata.insert(symbol, metadata);
+    }
+
+    pub(crate) fn rollback_to(
+        &mut self,
+        store: &mut dotty_core::SemanticStore,
+        checkpoint: SessionCheckpoint,
+    ) {
+        while self.resolved_order.len() > checkpoint.resolved {
+            let name = self.resolved_order.pop().expect("length checked");
+            self.resolved.remove(&name);
+        }
+        while self.sidecar_order.len() > checkpoint.sidecars {
+            let symbol = self.sidecar_order.pop().expect("length checked");
+            self.metadata.remove(&symbol);
+            self.origins.remove(&symbol);
+        }
+        self.packages.rollback_to(store, checkpoint.packages);
     }
 }

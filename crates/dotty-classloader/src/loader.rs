@@ -306,6 +306,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.session
     }
 
+    /// Returns this loader's classpath and session when ownership needs to be
+    /// threaded through a short-lived adapter operation.
+    pub fn into_parts(self) -> (E, LoadingSession) {
+        (self.class_path, self.session)
+    }
+
     /// JVM-specific metadata for a `.class`-backed symbol previously
     /// returned by [`Self::load_class`] — `None` for a `.tasty`-backed
     /// symbol (not yet reconstructed from `.tasty`, see
@@ -362,7 +368,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         match self.load_uncached(name) {
             Ok(symbol) => {
                 self.repository.mark_loaded(name.clone(), symbol);
-                self.session.resolved.insert(name.clone(), symbol);
+                self.session.cache_resolved(name.clone(), symbol);
                 Ok(symbol)
             }
             Err(error) => {
@@ -979,7 +985,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let origin = SymbolOrigin::Tasty(self.store.origins.register_tasty());
         let (class_symbol, declarations) = self.enter_class(name, decoded.flags, origin);
-        self.session.origins.insert(class_symbol, resource_origin);
+        self.session.record_origin(class_symbol, resource_origin);
         self.repository.mark_loading(name.clone(), class_symbol);
 
         // `enter_class` derives visibility from `ClassAccessFlags` alone,
@@ -1159,7 +1165,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // rejected as `CircularInheritance`, exactly as before.
         let origin = SymbolOrigin::Classfile(self.store.origins.register_classfile());
         let (class_symbol, declarations) = self.enter_class(name, class_file.access_flags, origin);
-        self.session.origins.insert(class_symbol, resource_origin);
+        self.session.record_origin(class_symbol, resource_origin);
         self.repository.mark_loading(name.clone(), class_symbol);
 
         // Patches `Symbol::owner` from the package (set by `enter_class`,
@@ -1299,7 +1305,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             self.resolve_annotations(name, &class_file.attributes, &class_file.constant_pool)?;
         self.enter_annotations(class_symbol, &annotations);
 
-        self.session.metadata.insert(
+        self.session.record_metadata(
             class_symbol,
             ClassfileMetadata {
                 binary_name: name.clone(),
