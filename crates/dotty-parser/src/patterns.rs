@@ -754,6 +754,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_an_interpolated_string_pattern_with_a_simple_splice() {
+        let source = "s\"hello $name!\"";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::StringPart, 1, 9),
+                token(TokenKind::Identifier, 9, 13),
+                token(TokenKind::StringPart, 13, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let pattern = parser.pattern();
+        let TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(interpolation)) =
+            &parser.ast().get(pattern).kind
+        else {
+            panic!("expected an interpolated-string pattern");
+        };
+
+        assert_eq!(parser.names.resolve(interpolation.prefix.text()), "s");
+        assert_eq!(interpolation.parts.len(), 3);
+        assert!(matches!(
+            parser.ast().get(interpolation.parts[1]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.ast().get(pattern).position.unwrap().span().range(),
+            TextRange::new(0, 15).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn parses_unchecked_annotation_on_a_wildcard_type_pattern() {
         let mut names = NameInterner::new();
         let parser = parser_for(
