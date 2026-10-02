@@ -1970,7 +1970,7 @@ where
                 return self.simple_type();
             }
             TokenKind::Punctuation(Punctuation::LeftParen) => {
-                return self.parse_parenthesized_type(mark);
+                return self.simple_type1();
             }
             _ => {}
         }
@@ -9678,6 +9678,63 @@ mod tests {
         assert_eq!(applied.args.len(), 1);
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_projection_after_parenthesized_structural_type() {
+        let source = "({ type l[X, Y] = View[(X, Y)] })#l";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+                token(TokenKind::Keyword(HardKeyword::Type), 3, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 9, 10),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Punctuation(Punctuation::Comma), 11, 12),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 14, 15),
+                token(TokenKind::Operator, 16, 17),
+                token(TokenKind::Identifier, 18, 22),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 22, 23),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 23, 24),
+                token(TokenKind::Identifier, 24, 25),
+                token(TokenKind::Punctuation(Punctuation::Comma), 25, 26),
+                token(TokenKind::Identifier, 27, 28),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 28, 29),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 29, 30),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 31, 32),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 32, 33),
+                token(TokenKind::Operator, 33, 34),
+                token(TokenKind::Identifier, 34, 35),
+                token(TokenKind::Eof, 35, 35),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        let TreeKind::Select(selection) = &parser.ast().get(id).kind else {
+            panic!("expected a projection from the parenthesized structural type");
+        };
+        assert!(selection.name.is_type());
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) =
+            &parser.ast().get(selection.qualifier).kind
+        else {
+            panic!("expected the projected type to remain parenthesized");
+        };
+        assert!(matches!(
+            parser.ast().get(parens.inner).kind,
+            TreeKind::RefinedTypeTree(_)
+        ));
+        assert_eq!(
+            parser.ast().get(id).position.unwrap().span().range(),
+            TextRange::new(0, source.len() as u32).unwrap()
+        );
     }
 
     #[test]
