@@ -32,3 +32,6 @@ dotty-tasty-unpickler = { path = "crates/dotty-tasty-unpickler" }
 dotty-parser = { path = "crates/dotty-parser" }
 dotty-namer = { path = "crates/dotty-namer" }
 dotty-typer = { path = "crates/dotty-typer" }
+
+[dev-dependencies]
+dotty-lexer = { path = "crates/dotty-lexer" }
