@@ -908,6 +908,45 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_method_result_type_colon_on_the_following_line() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "def f\n  : Int = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Newline, 5, 8),
+                token(TokenKind::ColonFollow, 8, 9),
+                token(TokenKind::Identifier, 10, 13),
+                token(TokenKind::Operator, 14, 15),
+                token(TokenKind::IntegerLiteral, 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_method_definition(Location::Elsewhere)
+        else {
+            panic!("expected a method definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected DefDef");
+        };
+        assert!(matches!(
+            parser.ast().get(definition.tpt).kind,
+            TreeKind::Ident(ident) if ident.name.is_type()
+        ));
+        assert!(matches!(
+            parser
+                .ast()
+                .get(definition.rhs.expect("method body exists"))
+                .kind,
+            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn parses_a_secondary_constructor_with_parameters() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
