@@ -54,6 +54,15 @@ success and rolling back semantic mutations and typed-tree cache entries on
 failure. Keep cache insertion and rollback behavior in that orchestration
 layer when adding expression handlers.
 
+Source `Parens` wrappers are transparent expression nodes: they are typed in
+the same `ExpressionContext` as their enclosed tree and map to that exact
+typed-tree identity. The Typed AST keeps the enclosed expression's own type
+and source position; it has no synthetic parentheses node. The checked
+Scala 3.9.0 `-Vprint:typer` fixture in
+[`parenthesized-expressions`](../crates/dotty-typer/tests/fixtures/parenthesized-expressions/ParenthesizedExpressions.typed-tree.txt)
+pins nested `(x)` as `x` and `(1)` as `1`. Tuple syntax remains a separate
+`UntypedNode::Tuple` form.
+
 ## Real-source local-definition audit
 
 Run the pinned Scala 3.9.0 source audit with:
