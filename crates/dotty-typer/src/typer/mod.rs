@@ -16379,6 +16379,69 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_infix_call_matches_selected_member_application() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Box { def combine(other: Box): Box = this }; class Use { def infix(left: Box, right: Box): Box = left combine right; def direct(left: Box, right: Box): Box = left.combine(right) }",
+        );
+        let (infix_method, infix_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "infix");
+        let (direct_method, direct_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "direct");
+        let combine = method_symbol(&parsed, &store, &index, source, "combine");
+        assert!(matches!(
+            parsed.ast.get(infix_tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let infix_context = typer.expression_context_for(infix_method).unwrap();
+
+        let infix = typer.type_expression(infix_tree, infix_context).unwrap();
+
+        assert!(matches!(
+            typer.typed_ast().get(infix).kind,
+            TreeKind::Apply(_)
+        ));
+        assert_eq!(
+            type_symbol(typer.store(), typer.typed_ast().get(infix).ty),
+            class_symbol(&parsed, typer.store(), &index, source, "Box")
+        );
+        assert_eq!(
+            typer.source_typed_index().get(source, infix_tree),
+            Some(infix)
+        );
+
+        let direct_context = typer.expression_context_for(direct_method).unwrap();
+        let direct = typer.type_expression(direct_tree, direct_context).unwrap();
+        let TreeKind::Apply(direct_application) = &typer.typed_ast().get(direct).kind else {
+            panic!("dot-call should produce a typed application");
+        };
+        let TreeKind::Apply(infix_application) = &typer.typed_ast().get(infix).kind else {
+            unreachable!();
+        };
+        for function in [direct_application.function, infix_application.function] {
+            assert!(matches!(
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(function).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                    if *symbol == combine
+            ));
+        }
+        assert_eq!(
+            typer.typed_ast().get(infix).ty,
+            typer.typed_ast().get(direct).ty
+        );
+    }
+
+    #[test]
     fn expected_expression_type_accepts_a_supported_subtype() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class Parent; class Child extends Parent; class C { def use(child: Child): Parent = child }",
