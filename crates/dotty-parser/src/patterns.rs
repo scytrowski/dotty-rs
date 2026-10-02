@@ -311,6 +311,7 @@ where
             | TokenKind::ExponentLiteral
             | TokenKind::FloatLiteral
             | TokenKind::DoubleLiteral => self.parse_number(mark),
+            TokenKind::InterpolationId => self.parse_interpolated_string(mark),
             TokenKind::CharLiteral => self.parse_char(mark),
             TokenKind::StringLiteral => self.parse_string(mark),
             TokenKind::Keyword(HardKeyword::True) => {
@@ -648,6 +649,7 @@ fn can_start_simple_pattern_kind(kind: TokenKind) -> bool {
             kind,
             TokenKind::StringLiteral
                 | TokenKind::CharLiteral
+                | TokenKind::InterpolationId
                 | TokenKind::Keyword(HardKeyword::True)
                 | TokenKind::Keyword(HardKeyword::False)
                 | TokenKind::Keyword(HardKeyword::Null)
@@ -751,6 +753,79 @@ mod tests {
             result.ast.get(result.root).position.unwrap().span().range(),
             TextRange::new(0, 15).unwrap()
         );
+    }
+
+    #[test]
+    fn parses_an_interpolated_string_pattern_with_a_simple_splice() {
+        let source = "s\"hello $name!\"";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::StringPart, 1, 9),
+                token(TokenKind::Identifier, 9, 13),
+                token(TokenKind::StringPart, 13, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let pattern = parser.pattern();
+        let TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(interpolation)) =
+            &parser.ast().get(pattern).kind
+        else {
+            panic!("expected an interpolated-string pattern");
+        };
+
+        assert_eq!(parser.names.resolve(interpolation.prefix.text()), "s");
+        assert_eq!(interpolation.parts.len(), 3);
+        assert!(matches!(
+            parser.ast().get(interpolation.parts[1]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.ast().get(pattern).position.unwrap().span().range(),
+            TextRange::new(0, 15).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_interpolated_string_pattern_with_a_braced_splice() {
+        let source = "s\"hello ${name}\"";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::InterpolationId, 0, 1),
+                token(TokenKind::StringPart, 1, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 9, 10),
+                token(TokenKind::Identifier, 10, 14),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 14, 15),
+                token(TokenKind::StringPart, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let pattern = parser.pattern();
+        let TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(interpolation)) =
+            &parser.ast().get(pattern).kind
+        else {
+            panic!("expected an interpolated-string pattern");
+        };
+
+        assert_eq!(interpolation.parts.len(), 3);
+        assert!(matches!(
+            parser.ast().get(interpolation.parts[1]).kind,
+            TreeKind::Block(_)
+        ));
+        assert_eq!(
+            parser.ast().get(pattern).position.unwrap().span().range(),
+            TextRange::new(0, 16).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]
@@ -1513,6 +1588,37 @@ mod tests {
         assert!(matches!(
             result.ast.get(result.root).kind,
             TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn accepts_an_interpolated_string_pattern_after_a_newline_operator() {
+        let source = "head ::\ns\"$name\"";
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::ColonOp, 5, 7),
+                token(TokenKind::Newline, 7, 8),
+                token(TokenKind::InterpolationId, 8, 9),
+                token(TokenKind::StringPart, 9, 11),
+                token(TokenKind::Identifier, 11, 15),
+                token(TokenKind::StringPart, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = result.ast.get(result.root).kind
+        else {
+            panic!("expected an infix pattern");
+        };
+        assert!(matches!(
+            result.ast.get(infix.right).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(_))
         ));
         assert!(result.diagnostics.is_empty());
     }

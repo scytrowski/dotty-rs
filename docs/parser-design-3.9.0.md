@@ -825,6 +825,9 @@ Extractor-looking source patterns intentionally remain `Apply`/`TypeApply`;
 semantic `UnApply` lowering belongs to later phases. Quoted patterns preserve
 Dotty's parser-level `Quote` plus nested `SplicePattern` representation;
 `QuotePattern` construction and staging semantics remain later-phase work.
+Interpolated strings are also accepted as patterns and reuse the source-level
+`InterpolatedString` node, preserving literal parts and simple/braced splices;
+interpolator expansion and pattern semantics remain outside the parser.
 XML patterns, remaining refined-type forms, remaining definition forms and full
 template semantics, other legacy given migration syntax, remaining control flow (`do`/`while`),
 macros, and staging semantics remain follow-up increments.
