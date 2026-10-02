@@ -543,8 +543,11 @@ function arrows, and wildcard type arguments with optional lower and upper
 bounds. A type annotation such as `T @unchecked` is an `Annotated` type tree;
 the distinct ascription form `expr: @unchecked` follows Dotty's parser shape
 and wraps the expression in `Annotated(expr, annotation)` rather than creating
-a `Typed` node. Repeated annotations wrap in source order. Match-type patterns
-use `InfixType`, while results use the full
+a `Typed` node. Repeated annotations wrap in source order. The parenthesized
+scrutinee form `(expr: @unchecked) match { ... }` composes as a `Match` whose
+selector is `Parens(Annotated(expr, annotation))`, preserving both source
+spans independently. Match-type patterns use
+`InfixType`, while results use the full
 `type_expr()` entry. Match types support braced case regions, applied and
 tuple case patterns, infix case patterns, wildcard cases, and bounded aliases
 with an upper bound. For a bounded alias, the upper bound is stored in the
