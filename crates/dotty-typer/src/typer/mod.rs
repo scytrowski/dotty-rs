@@ -729,6 +729,23 @@ mod tests {
         panic!("source method `{target}` not found");
     }
 
+    fn method_symbol(
+        parsed: &dotty_parser::ParseResult,
+        store: &SemanticStore,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+        target: &str,
+    ) -> SymbolId {
+        for (tree, node) in parsed.ast.iter() {
+            if let TreeKind::DefDef(definition) = &node.kind
+                && store.names.resolve(definition.name.as_name().text()) == target
+            {
+                return index.symbol_at(source, tree).unwrap();
+            }
+        }
+        panic!("source method `{target}` not found");
+    }
+
     fn preindex_block_for_test(
         typer: &mut SourceTyper<'_>,
         block_tree: TreeId<Untyped>,
@@ -16092,9 +16109,11 @@ mod tests {
             &packages,
         );
 
+        let inner_first = typer.type_expression(parens.inner, context).unwrap();
         let first = typer.type_expression(expression, context).unwrap();
         let second = typer.type_expression(expression, context).unwrap();
 
+        assert_eq!(inner_first, first);
         assert_eq!(first, second);
         assert_eq!(
             typer.source_typed_index().get(source, expression),
@@ -16116,6 +16135,218 @@ mod tests {
             "the disappearing wrapper must not overwrite the inner source position"
         );
         assert_eq!(typer.typed_ast().iter().count(), 1);
+    }
+
+    #[test]
+    fn nested_parenthesized_identifier_preserves_term_reference_identity() {
+        let oracle_source = include_str!(
+            "../../tests/fixtures/parenthesized-expressions/ParenthesizedExpressions.scala"
+        );
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(oracle_source);
+        let (method, expression) = method_definition_and_rhs(&parsed, &store, &index, source, "f");
+        let parameter = method_parameter_symbol(&parsed, &index, source, method, 0);
+        let mut wrappers = Vec::new();
+        let mut inner = expression;
+        while let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &parsed.ast.get(inner).kind
+        {
+            wrappers.push(inner);
+            inner = parens.inner;
+        }
+        assert_eq!(wrappers.len(), 3, "parser should preserve nested wrappers");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(expression, context).unwrap();
+
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == parameter
+        ));
+        assert_eq!(typer.source_typed_index().get(source, inner), Some(typed));
+        for wrapper in wrappers {
+            assert_eq!(typer.source_typed_index().get(source, wrapper), Some(typed));
+        }
+        let oracle = include_str!(
+            "../../tests/fixtures/parenthesized-expressions/ParenthesizedExpressions.typed-tree.txt"
+        );
+        assert!(oracle.contains("def f(x: Int): Int = x"));
+        assert!(oracle.contains("def g: Int = 1"));
+        assert!(!oracle.contains("(((x)))"));
+    }
+
+    #[test]
+    fn parenthesized_selection_application_and_argument_keep_the_selected_method() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def id(x: Int): Int = x; def use(x: Int): Int = (this.id)((x)) }",
+        );
+        let (method, expression) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let selected_method = method_symbol(&parsed, &store, &index, source, "id");
+        let TreeKind::Apply(application) = &parsed.ast.get(expression).kind else {
+            panic!("source should retain an ordinary application");
+        };
+        assert!(matches!(
+            parsed.ast.get(application.function).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+        ));
+        assert!(matches!(
+            parsed.ast.get(application.args[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+        ));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(expression, context).unwrap();
+
+        let TreeKind::Apply(typed_application) = &typer.typed_ast().get(typed).kind else {
+            panic!("application should remain a typed Apply");
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if *symbol == selected_method
+        ));
+        assert_eq!(
+            typer.source_typed_index().get(source, application.args[0]),
+            Some(typed_application.args[0])
+        );
+    }
+
+    #[test]
+    fn expected_type_passes_through_parentheses_and_failed_inner_typing_rolls_back() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def good: Int = (1); def bad: Int = (missing) }");
+        let (good_method, good_expression) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "good");
+        let (bad_method, bad_expression) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "bad");
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(good_parens)) =
+            &parsed.ast.get(good_expression).kind
+        else {
+            panic!("expected parenthesized literal");
+        };
+        let good_inner = good_parens.inner;
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(bad_parens)) =
+            &parsed.ast.get(bad_expression).kind
+        else {
+            panic!("expected parenthesized unresolved identifier");
+        };
+        let bad_inner = bad_parens.inner;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let good_context = typer.expression_context_for(good_method).unwrap();
+
+        let good = typer
+            .type_expression_expected(good_expression, good_context, definitions.int)
+            .unwrap();
+
+        assert_eq!(
+            typer.source_typed_index().get(source, good_expression),
+            Some(good)
+        );
+        assert_eq!(
+            typer.source_typed_index().get(source, good_inner),
+            Some(good)
+        );
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(good).ty),
+            Type::Constant(dotty_core::Constant::Int(1))
+        ));
+
+        let store_checkpoint = typer.store().checkpoint();
+        let ast_len = typer.typed_ast().iter().count();
+        let bad_context = typer.expression_context_for(bad_method).unwrap();
+        assert!(matches!(
+            typer.type_expression(bad_expression, bad_context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.typed_ast().iter().count(), ast_len);
+        assert_eq!(typer.source_typed_index().get(source, bad_expression), None);
+        assert_eq!(typer.source_typed_index().get(source, bad_inner), None);
+    }
+
+    #[test]
+    fn parenthesized_if_block_and_constructor_keep_their_semantics() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Box(val value: Int); class C { def choose(flag: Boolean): Int = (if (flag) { 1 } else { 2 }); def block: Int = ({ val local = 1; local }); def make: Box = (new Box(1)); def tuple = (1, 2) }",
+        );
+        let box_symbol = class_symbol(&parsed, &store, &index, source, "Box");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for name in ["choose", "block", "make"] {
+            let (method, expression) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, name);
+            let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) =
+                &parsed.ast.get(expression).kind
+            else {
+                panic!("method `{name}` should have a parenthesized body");
+            };
+            let inner = parens.inner;
+            let context = typer.expression_context_for(method).unwrap();
+
+            let typed = typer.type_expression(expression, context).unwrap();
+
+            assert_eq!(
+                typer.source_typed_index().get(source, expression),
+                Some(typed)
+            );
+            assert_eq!(typer.source_typed_index().get(source, inner), Some(typed));
+            if name == "choose" {
+                assert!(matches!(typer.typed_ast().get(typed).kind, TreeKind::If(_)));
+            } else if name == "block" {
+                assert!(matches!(
+                    typer.typed_ast().get(typed).kind,
+                    TreeKind::Block(_)
+                ));
+            } else {
+                assert!(matches!(
+                    typer.typed_ast().get(typed).kind,
+                    TreeKind::Apply(_)
+                ));
+                assert_eq!(
+                    type_symbol(typer.store(), typer.typed_ast().get(typed).ty),
+                    box_symbol
+                );
+            }
+        }
+
+        let (_, tuple) = method_definition_and_rhs(&parsed, typer.store(), &index, source, "tuple");
+        assert!(matches!(
+            parsed.ast.get(tuple).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(_))
+        ));
     }
 
     #[test]
