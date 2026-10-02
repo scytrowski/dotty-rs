@@ -10,6 +10,7 @@ impl SourceTyper<'_> {
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
+        let mut local_type_candidates = Vec::new();
         for (local_context, scope) in self.active_local_type_scopes.iter().rev() {
             if *local_context != context {
                 continue;
@@ -24,10 +25,66 @@ impl SourceTyper<'_> {
                 .filter(|symbol| self.store.symbols.get(*symbol).kind == SymbolKind::TypeParameter)
                 .collect::<Vec<_>>();
             if !candidates.is_empty() {
-                return self.unique_type_candidate(&candidates, name, tree_index, position);
+                local_type_candidates = candidates;
+                break;
             }
         }
         let contexts = self.source_context_chain(context, tree_index)?;
+        let active_local_import_scopes = self.active_local_import_scopes.clone();
+        for (local_context, mut local_scopes) in active_local_import_scopes.into_iter().rev() {
+            if local_context != context {
+                continue;
+            }
+            while let Some(stack) = local_scopes {
+                let frame = self
+                    .expression_scopes
+                    .get(stack.index())
+                    .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack })?;
+                let imports = frame.imports.clone();
+                let parent = frame.parent;
+                for selection in [ImportSelection::Explicit, ImportSelection::Wildcard] {
+                    let candidates = self.lookup_local_import_candidates(
+                        &imports,
+                        name,
+                        true,
+                        selection,
+                        SourceTreeLocation {
+                            tree_index,
+                            position,
+                        },
+                    )?;
+                    if !candidates.is_empty() {
+                        let mut visible = local_type_candidates.clone();
+                        for context_id in &contexts {
+                            let source_context = self.index.source_context(*context_id);
+                            let lexical = self
+                                .store
+                                .scopes
+                                .get(source_context.lexical_scope)
+                                .lookup_all(&name);
+                            let type_members: Vec<_> = lexical
+                                .iter()
+                                .copied()
+                                .filter(|symbol| {
+                                    is_type_symbol(self.store.symbols.get(*symbol).kind)
+                                })
+                                .collect();
+                            if !type_members.is_empty() {
+                                visible.extend(type_members);
+                                break;
+                            }
+                        }
+                        visible.extend(candidates);
+                        self.deduplicate_import_candidates(&mut visible, true);
+                        return self.unique_type_candidate(&visible, name, tree_index, position);
+                    }
+                }
+                local_scopes = parent;
+            }
+        }
+        if !local_type_candidates.is_empty() {
+            return self.unique_type_candidate(&local_type_candidates, name, tree_index, position);
+        }
         let mut package_candidates = Vec::new();
         for context_id in &contexts {
             let source_context = self.index.source_context(*context_id);
@@ -154,4 +211,15 @@ impl SourceTyper<'_> {
             self.unique_symbol_candidate(&type_candidates, name, tree_index, position)
         }
     }
+}
+
+fn is_type_symbol(kind: SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Class
+            | SymbolKind::Trait
+            | SymbolKind::ModuleClass
+            | SymbolKind::TypeParameter
+            | SymbolKind::TypeAlias
+    )
 }

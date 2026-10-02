@@ -76,6 +76,12 @@ pub enum TyperError {
         source: SourceId,
         import_tree_index: u32,
     },
+    /// A local import qualifier did not resolve to a supported stable prefix.
+    ImportQualifierNotStable {
+        source: SourceId,
+        import_tree_index: u32,
+        symbol: SymbolId,
+    },
     /// An import tree has an unexpected AST shape or stale child reference.
     MalformedSourceImport {
         source: SourceId,

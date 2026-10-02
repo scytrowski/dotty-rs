@@ -772,9 +772,7 @@ fn local_expression_audit_reports_lambda_and_deferred_declaration_subkinds() {
         "Import.scala",
     );
     assert!(
-        import
-            .failures
-            .contains_key("LocalBlockDeclarationDeferred::import"),
+        import.failures.contains_key("ImportQualifierNotFound"),
         "{import:?}"
     );
 
@@ -1337,6 +1335,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::ExpressionLocalScopeStackForeign { .. } => "ExpressionLocalScopeStackForeign",
         TyperError::UnsupportedImportContext { .. } => "UnsupportedImportContext",
         TyperError::ImportQualifierNotFound { .. } => "ImportQualifierNotFound",
+        TyperError::ImportQualifierNotStable { .. } => "ImportQualifierNotStable",
         TyperError::MalformedSourceImport { .. } => "MalformedSourceImport",
         TyperError::UnsupportedSymbolCompletion { .. } => "UnsupportedSymbolCompletion",
         TyperError::MissingClassScope { .. } => "MissingClassScope",

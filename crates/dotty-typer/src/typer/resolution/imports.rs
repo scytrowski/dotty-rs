@@ -314,6 +314,250 @@ impl SourceTyper<'_> {
         }
     }
 
+    pub(in crate::typer) fn type_local_import_statement(
+        &mut self,
+        tree: TreeId<Untyped>,
+        import: dotty_core::ast::Import<Untyped>,
+        position: Option<SourceSpan>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let qualifier = self.type_import_qualifier(
+            import.expr,
+            context,
+            tree.index(),
+            info_journal,
+            new_mappings,
+        )?;
+        let mut selectors = Vec::with_capacity(import.selectors.len());
+        for selector in import.selectors {
+            let renamed = selector
+                .renamed
+                .map(|tree| {
+                    self.type_import_selector_child(
+                        tree,
+                        context.lexical,
+                        tree.index(),
+                        info_journal,
+                        new_mappings,
+                    )
+                })
+                .transpose()?;
+            let bound = selector
+                .bound
+                .map(|tree| {
+                    self.type_import_selector_child(
+                        tree,
+                        context.lexical,
+                        tree.index(),
+                        info_journal,
+                        new_mappings,
+                    )
+                })
+                .transpose()?;
+            selectors.push(dotty_core::ast::ImportSelector {
+                imported: selector.imported,
+                imported_backquoted: selector.imported_backquoted,
+                renamed,
+                bound,
+            });
+        }
+        // Scala 3.9 keeps Import as a statement node with no value type. The
+        // qualifier and selector children carry their own precise types.
+        let typed = self.typed_arena.alloc(Tree {
+            kind: TreeKind::Import(dotty_core::ast::Import {
+                expr: qualifier,
+                selectors,
+            }),
+            position,
+            ty: self.store.types.alloc(Type::NoType),
+        });
+        self.typed_index
+            .insert(self.source, tree, typed)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, tree));
+        Ok(typed)
+    }
+
+    fn type_import_qualifier(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        import_tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if let Some(typed) = self.typed_index.get(self.source, tree) {
+            return Ok(typed);
+        }
+        let source_node =
+            self.arena
+                .try_get(tree)
+                .cloned()
+                .ok_or(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: tree.index(),
+                })?;
+        let symbol = self
+            .resolve_qualifier_symbol(
+                tree,
+                context.lexical,
+                import_tree_index,
+                source_node.position,
+            )?
+            .ok_or(TyperError::ImportQualifierNotFound {
+                source: self.source,
+                import_tree_index,
+            })?;
+        let ty = self.import_qualifier_type(
+            symbol,
+            context.owner,
+            tree.index(),
+            import_tree_index,
+            info_journal,
+        )?;
+        let typed = match source_node.kind {
+            TreeKind::Ident(ident) => TypedAstBuilder::new(&mut self.typed_arena)
+                .ident_with_backquoted(ident.name, ident.backquoted, ty, source_node.position),
+            TreeKind::Select(selection) => {
+                let qualifier = self.type_import_qualifier(
+                    selection.qualifier,
+                    context,
+                    import_tree_index,
+                    info_journal,
+                    new_mappings,
+                )?;
+                TypedAstBuilder::new(&mut self.typed_arena).select(
+                    qualifier,
+                    selection.name,
+                    selection.backquoted,
+                    ty,
+                    source_node.position,
+                )
+            }
+            _ => {
+                return Err(TyperError::MalformedSourceImport {
+                    source: self.source,
+                    import_tree_index,
+                });
+            }
+        };
+        self.typed_index
+            .insert(self.source, tree, typed)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, tree));
+        Ok(typed)
+    }
+
+    fn import_qualifier_type(
+        &mut self,
+        symbol: SymbolId,
+        owner: SymbolId,
+        tree_index: u32,
+        import_tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let kind = self.store.symbols.get(symbol).kind;
+        match kind {
+            SymbolKind::Package => Ok(self.store.types.alloc(Type::NoType)),
+            SymbolKind::Object
+            | SymbolKind::Field
+            | SymbolKind::Value
+            | SymbolKind::Parameter
+            | SymbolKind::Local => {
+                let ty = self.expression_type_of_symbol(symbol, owner, tree_index, info_journal)?;
+                if self
+                    .require_stable_selection_prefix(ty, tree_index)
+                    .is_err()
+                {
+                    return Err(TyperError::ImportQualifierNotStable {
+                        source: self.source,
+                        import_tree_index,
+                        symbol,
+                    });
+                }
+                Ok(ty)
+            }
+            SymbolKind::Class
+            | SymbolKind::Trait
+            | SymbolKind::ModuleClass
+            | SymbolKind::TypeAlias => {
+                let prefix = self.type_symbol_prefix(symbol);
+                Ok(self.store.types.alloc(Type::TypeRef {
+                    prefix,
+                    target: TypeRefTarget::Symbol(symbol),
+                }))
+            }
+            _ => Err(TyperError::ImportQualifierNotStable {
+                source: self.source,
+                import_tree_index,
+                symbol,
+            }),
+        }
+    }
+
+    fn type_import_selector_child(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: SourceContextId,
+        import_tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if let Some(typed) = self.typed_index.get(self.source, tree) {
+            return Ok(typed);
+        }
+        let source_node =
+            self.arena
+                .try_get(tree)
+                .cloned()
+                .ok_or(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: tree.index(),
+                })?;
+        let ty = self.store.types.alloc(Type::NoType);
+        let typed = match source_node.kind {
+            TreeKind::Ident(ident) => TypedAstBuilder::new(&mut self.typed_arena)
+                .ident_with_backquoted(ident.name, ident.backquoted, ty, source_node.position),
+            TreeKind::TypeTree(_) => {
+                let ty = self.type_of_tpt_inner(tree, context)?;
+                self.typed_arena.alloc(Tree {
+                    kind: TreeKind::TypeTree(dotty_core::ast::TypeTree),
+                    position: source_node.position,
+                    ty,
+                })
+            }
+            _ => {
+                return Err(TyperError::MalformedSourceImport {
+                    source: self.source,
+                    import_tree_index,
+                });
+            }
+        };
+        self.typed_index
+            .insert(self.source, tree, typed)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, tree));
+        let _ = info_journal;
+        Ok(typed)
+    }
+
     pub(in crate::typer) fn import_qualifier_symbol(
         &mut self,
         qualifier: TreeId<Untyped>,
@@ -430,6 +674,44 @@ impl SourceTyper<'_> {
             }
         }
         Ok(Vec::new())
+    }
+
+    /// Resolves imports active in one typer-owned block scope. The statements
+    /// are kept in source order for identity and qualifier context, while all
+    /// imports at this lexical depth contribute to the same candidate bucket.
+    pub(in crate::typer) fn lookup_local_import_candidates(
+        &mut self,
+        imports: &[(TreeId<Untyped>, SourceContextId)],
+        name: dotty_core::Name,
+        type_only: bool,
+        selection: ImportSelection,
+        location: SourceTreeLocation,
+    ) -> Result<Vec<SymbolId>, TyperError> {
+        let mut candidates = Vec::new();
+        for (tree, context) in imports {
+            let source_context = self.index.try_source_context(*context).ok_or(
+                TyperError::SourceContextMissing {
+                    source: self.source,
+                    tree_index: location.tree_index,
+                    context_index: context.index(),
+                },
+            )?;
+            candidates.extend(self.lookup_imported_symbols(
+                SourceImport {
+                    tree: *tree,
+                    context: *context,
+                    parent: source_context.parent,
+                },
+                name,
+                type_only,
+                selection,
+                location,
+            )?);
+        }
+        candidates.sort_by_key(|symbol| symbol.index());
+        candidates.dedup();
+        self.deduplicate_import_candidates(&mut candidates, type_only);
+        Ok(candidates)
     }
 
     /// Returns the underlying symbol for a fully known chain of type aliases.
