@@ -13,6 +13,20 @@ mod references;
 pub(super) use blocks::LocalMethodIndex;
 
 impl SourceTyper<'_> {
+    pub(super) fn type_parenthesized_expression(
+        &mut self,
+        inner: TreeId<Untyped>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        // Parens is source-only. Dotty's typed tree keeps the enclosed
+        // expression, including its position and own type, as the result.
+        // `type_expression_inner` records the inner source mapping; the
+        // dispatcher records the wrapper against this same typed identity.
+        self.type_expression_inner(inner, context, info_journal, new_mappings)
+    }
+
     pub(in crate::typer) fn type_expression_expected_inner(
         &mut self,
         tree: TreeId<Untyped>,
