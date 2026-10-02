@@ -245,6 +245,8 @@ impl<'a> SourceTyper<'a> {
             self.prepare_raw_generic_constructor_chain(tree, context, info_journal, new_mappings)?;
         }
         let typed = match source_tree.kind {
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => self
+                .type_parenthesized_expression(parens.inner, context, info_journal, new_mappings),
             TreeKind::New(new) => self.type_new_expression(
                 tree,
                 new,
