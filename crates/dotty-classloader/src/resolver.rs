@@ -281,16 +281,17 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let Some((resolved_owner, scope)) = self.resolve_target(store, target)? else {
             return Ok(None);
         };
+        if store.symbols.get(resolved_owner).kind == SymbolKind::Package
+            && let Some(alias) =
+                self.compiler_builtin_class_alias(store, resolved_owner, request.name)
+        {
+            return Ok(Some(alias));
+        }
         let candidates = store.scopes.get(scope).lookup_all(&request.name);
         match candidates {
             [] if store.symbols.get(resolved_owner).kind == SymbolKind::Package
                 && request.name.is_type() =>
             {
-                if let Some(alias) =
-                    self.compiler_builtin_class_alias(store, resolved_owner, request.name)
-                {
-                    return Ok(Some(alias));
-                }
                 let package_path =
                     package_path_of_symbol(store, resolved_owner).ok_or_else(|| {
                         ResolutionError::Malformed {
@@ -684,6 +685,24 @@ mod tests {
         let scala_prefix = store
             .types
             .alloc(Type::type_ref(definitions.no_prefix, scala));
+        let scala_scope = resolver.session.packages.scope_of(scala).unwrap();
+        let any_ref_name = Name::new(store.names.intern("AnyRef"), Namespace::Type);
+        let noncanonical_any_ref = store.symbols.alloc(Symbol {
+            name: any_ref_name,
+            owner: Some(scala),
+            kind: SymbolKind::Class,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: dotty_core::SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store
+            .scopes
+            .get_mut(scala_scope)
+            .enter(any_ref_name, noncanonical_any_ref);
 
         for (name, expected) in [
             ("Any", definitions.any_class),
