@@ -1407,6 +1407,7 @@ fn audit_source_inner(
                     | TyperError::ExtractorPatternConstraintDeferred { .. }
                     | TyperError::UnsupportedExtractorResultProtocol { .. }
                     | TyperError::ExtractorPatternArityUnsupported { .. }
+                    | TyperError::BooleanExtractorPatternArityUnsupported { .. }
                     | TyperError::ExtractorResultMemberNotFound { .. }
                     | TyperError::ExtractorResultMemberOverloaded { .. }
                     | TyperError::ExtractorResultMemberUnsupported { .. }
@@ -2580,6 +2581,9 @@ fn typer_error_name(error: &TyperError) -> &'static str {
             "UnsupportedExtractorResultProtocol"
         }
         TyperError::ExtractorPatternArityUnsupported { .. } => "ExtractorPatternArityUnsupported",
+        TyperError::BooleanExtractorPatternArityUnsupported { .. } => {
+            "BooleanExtractorPatternArityUnsupported"
+        }
         TyperError::ExtractorResultMemberNotFound { .. } => "ExtractorResultMemberNotFound",
         TyperError::ExtractorResultMemberOverloaded { .. } => "ExtractorResultMemberOverloaded",
         TyperError::ExtractorResultMemberUnsupported { .. } => "ExtractorResultMemberUnsupported",

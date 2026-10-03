@@ -747,31 +747,43 @@ impl SourceTyper<'_> {
                     info_journal,
                     new_mappings,
                 )?;
-                let [source_pattern] = plan.source_patterns.as_slice() else {
-                    return Err(TyperError::ExtractorPatternArityUnsupported {
-                        source: self.source,
-                        tree_index: pattern.index(),
-                        unapply: plan.symbol,
-                        actual: plan.source_patterns.len(),
-                    });
+                let patterns = if plan.result_type == self.definitions.boolean {
+                    if !plan.source_patterns.is_empty() {
+                        return Err(TyperError::BooleanExtractorPatternArityUnsupported {
+                            source: self.source,
+                            tree_index: pattern.index(),
+                            unapply: plan.symbol,
+                            actual: plan.source_patterns.len(),
+                        });
+                    }
+                    Vec::new()
+                } else {
+                    let [source_pattern] = plan.source_patterns.as_slice() else {
+                        return Err(TyperError::ExtractorPatternArityUnsupported {
+                            source: self.source,
+                            tree_index: pattern.index(),
+                            unapply: plan.symbol,
+                            actual: plan.source_patterns.len(),
+                        });
+                    };
+                    let component_type = self.option_like_extractor_component_type(
+                        plan.result_type,
+                        pattern.index(),
+                        plan.symbol,
+                        info_journal,
+                    )?;
+                    vec![self.type_pattern(
+                        *source_pattern,
+                        component_type,
+                        context,
+                        info_journal,
+                        new_mappings,
+                    )?]
                 };
-                let component_type = self.option_like_extractor_component_type(
-                    plan.result_type,
-                    pattern.index(),
-                    plan.symbol,
-                    info_journal,
-                )?;
-                let typed_pattern = self.type_pattern(
-                    *source_pattern,
-                    component_type,
-                    context,
-                    info_journal,
-                    new_mappings,
-                )?;
                 TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).unapply(
                     plan.function,
                     Vec::new(),
-                    vec![typed_pattern],
+                    patterns,
                     plan.unapply_type,
                     source_tree.position,
                 )
@@ -2003,6 +2015,79 @@ mod tests {
             typer.typed_arena.get(unapply.patterns[0]).ty,
             definitions.int
         );
+    }
+
+    #[test]
+    fn boolean_extractor_types_zero_patterns_and_preserves_unapply_identity() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "object Even { def unapply(value: Int): Boolean = true }; class C { def choose(value: Int): Int = value match { case Even() => 1; case _ => 0 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let (pattern, unapply_symbol) = parsed
+            .ast
+            .iter()
+            .find_map(|(_tree, node)| match &node.kind {
+                TreeKind::CaseDef(case_def) => {
+                    let unapply = parsed
+                        .ast
+                        .iter()
+                        .find_map(|(tree, node)| match &node.kind {
+                            TreeKind::DefDef(definition)
+                                if store.names.resolve(definition.name.as_name().text())
+                                    == "unapply" =>
+                            {
+                                index.symbol_at(source, tree)
+                            }
+                            _ => None,
+                        })?;
+                    Some((case_def.pattern, unapply))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            })
+            .unwrap();
+        assert_eq!(typer.typed_arena.get(typed).ty, definitions.int);
+        let TreeKind::UnApply(unapply) = &typer.typed_arena.get(typed).kind else {
+            panic!("expected a typed UnApply node");
+        };
+        assert!(unapply.patterns.is_empty());
+        assert!(unapply.implicits.is_empty());
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(unapply.function).ty),
+            Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. })
+                if *symbol == unapply_symbol
+        ));
+        assert_eq!(typer.typed_index.get(source, pattern), Some(typed));
+    }
+
+    #[test]
+    fn boolean_extractors_reject_nested_patterns_with_a_focused_error() {
+        for source_text in [
+            "object Even { def unapply(value: Int): Boolean = true }; class C { def choose(value: Int): Int = value match { case Even(_) => 1; case _ => 0 } }",
+            "object Even { def unapply(value: Int): Boolean = true }; class C { def choose(value: Int): Int = value match { case Even(_, _) => 1; case _ => 0 } }",
+        ] {
+            let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(source_text);
+            assert!(matches!(
+                error,
+                TyperError::BooleanExtractorPatternArityUnsupported { actual: 1 | 2, .. }
+            ));
+            assert!(store_rolled_back);
+            assert!(typed_state_rolled_back);
+        }
     }
 
     #[test]

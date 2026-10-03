@@ -1202,6 +1202,13 @@ pub enum TyperError {
         unapply: SymbolId,
         actual: usize,
     },
+    /// A Boolean-result extractor pattern must not bind nested patterns.
+    BooleanExtractorPatternArityUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        unapply: SymbolId,
+        actual: usize,
+    },
     /// A required Option-like result member is absent.
     ExtractorResultMemberNotFound {
         source: SourceId,
