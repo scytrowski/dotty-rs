@@ -30,7 +30,7 @@ where
             };
         let then_branch = self.parse_control_body(then_body_feedback);
         let else_branch = if let Some((separator_end, body_feedback)) =
-            self.accept_else_after_optional_separator()
+            self.accept_else_after_optional_separator(mark.start)
         {
             if let Some(separator_end) = separator_end {
                 self.extend_tree_end(then_branch, separator_end);
@@ -50,11 +50,14 @@ where
         )
     }
 
-    fn accept_else_after_optional_separator(&mut self) -> Option<(Option<u32>, bool)> {
+    fn accept_else_after_optional_separator(
+        &mut self,
+        if_start: u32,
+    ) -> Option<(Option<u32>, bool)> {
         let mut lookahead = 0;
         let mut separator_end = None;
         loop {
-            let token = self.cursor.lookahead(lookahead);
+            let token = self.cursor.lookahead(lookahead).clone();
             let kind = token.kind;
             if is_else_separator(kind) {
                 if kind == TokenKind::Punctuation(Punctuation::Semicolon) {
@@ -64,6 +67,11 @@ where
                 continue;
             }
             if kind != TokenKind::Keyword(dotty_core::HardKeyword::Else) {
+                return None;
+            }
+            let if_indent = self.source_line_indent_prefix(if_start);
+            let else_indent = self.source_line_indent_prefix(token.span.start());
+            if else_indent.len() < if_indent.len() && if_indent.starts_with(&else_indent) {
                 return None;
             }
             break;
@@ -835,6 +843,51 @@ mod tests {
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::{Block, Match, ParsedTry, Return, Throw, UntypedNode};
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TokenKind, TreeKind};
+
+    #[test]
+    fn dedented_else_belongs_to_the_outer_if() {
+        let source = "if x then\n  if y then 1\nelse if z then 3\nelse 4";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Keyword(HardKeyword::If), 0, 2),
+                token(TokenKind::Identifier, 3, 4),
+                token(TokenKind::Keyword(HardKeyword::Then), 5, 9),
+                token(TokenKind::Newline, 9, 10),
+                token(TokenKind::Keyword(HardKeyword::If), 12, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Keyword(HardKeyword::Then), 17, 21),
+                token(TokenKind::IntegerLiteral, 22, 23),
+                token(TokenKind::Newline, 23, 24),
+                token(TokenKind::Keyword(HardKeyword::Else), 24, 28),
+                token(TokenKind::Keyword(HardKeyword::If), 29, 31),
+                token(TokenKind::Identifier, 32, 33),
+                token(TokenKind::Keyword(HardKeyword::Then), 34, 38),
+                token(TokenKind::IntegerLiteral, 39, 40),
+                token(TokenKind::Newline, 40, 41),
+                token(TokenKind::Keyword(HardKeyword::Else), 41, 45),
+                token(TokenKind::IntegerLiteral, 46, 47),
+                token(TokenKind::Eof, 47, 47),
+            ],
+            &mut names,
+        );
+
+        let expression = parser.expr();
+        let TreeKind::If(outer) = &parser.ast().get(expression).kind else {
+            panic!("expected an outer if expression");
+        };
+        assert!(matches!(
+            parser.ast().get(outer.then_branch).kind,
+            TreeKind::If(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(outer.else_branch).kind,
+            TreeKind::If(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
 
     #[test]
     fn keeps_parenthesized_legacy_if_branches_out_of_the_condition_application() {
