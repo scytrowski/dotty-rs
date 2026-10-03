@@ -2412,6 +2412,102 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn nested_package_path_is_only_a_qualifier() {
+        let source_text = "package p { package q { class C; object Extractor { def unapply(value: Int): Boolean = true } } }; package client { class C { def choose(value: Int): Int = value match { case p.q.Extractor() => 1; case _ => 0 }; def read: Any = p.q; def classAsTerm: Any = p.q.C } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let (choose, match_tree, package_path) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "choose" =>
+                {
+                    let match_tree = definition.rhs?;
+                    let TreeKind::Match(matching) = &parsed.ast.get(match_tree).kind else {
+                        return None;
+                    };
+                    let TreeKind::CaseDef(case) = &parsed.ast.get(matching.cases[0]).kind else {
+                        return None;
+                    };
+                    let TreeKind::Apply(application) = &parsed.ast.get(case.pattern).kind else {
+                        return None;
+                    };
+                    let TreeKind::Select(selection) = &parsed.ast.get(application.function).kind
+                    else {
+                        return None;
+                    };
+                    Some((
+                        index.symbol_at(source, tree)?,
+                        match_tree,
+                        selection.qualifier,
+                    ))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, choose_context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            choose,
+        );
+
+        typer.type_expression(match_tree, choose_context).unwrap();
+        let typed_path = typer.typed_index.get(source, package_path).unwrap();
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(typed_path).ty),
+            Some(Type::TermRef { target: TermRefTarget::Symbol(package), .. })
+                if typer.store.symbols.get(*package).kind == SymbolKind::Package
+        ));
+
+        let (read, rhs) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if typer.store.names.resolve(definition.name.as_name().text()) == "read" =>
+                {
+                    Some((index.symbol_at(source, tree)?, definition.rhs?))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let read_context = typer.expression_context_for(read).unwrap();
+        assert!(matches!(
+            typer.type_expression(rhs, read_context),
+            Err(TyperError::UnsupportedTermReference {
+                kind: SymbolKind::Package,
+                ..
+            })
+        ));
+
+        let (class_as_term, class_rhs) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if typer.store.names.resolve(definition.name.as_name().text())
+                        == "classAsTerm" =>
+                {
+                    Some((index.symbol_at(source, tree)?, definition.rhs?))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let class_context = typer.expression_context_for(class_as_term).unwrap();
+        assert!(matches!(
+            typer.type_expression(class_rhs, class_context),
+            Err(TyperError::UnsupportedTermReference {
+                kind: SymbolKind::Class,
+                ..
+            })
+        ));
+    }
+
     fn typed_function_symbol(typer: &SourceTyper<'_>, function: TreeId<Typed>) -> SymbolId {
         match typer
             .store

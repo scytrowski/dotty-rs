@@ -89,6 +89,14 @@ impl SourceTyper<'_> {
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         let typed = self.type_expression_inner(tree, context, info_journal, new_mappings)?;
+        if let Some(symbol) = self.non_value_term_mapping_symbol(tree, typed) {
+            return Err(TyperError::UnsupportedTermReference {
+                source: self.source,
+                tree_index: tree.index(),
+                symbol,
+                kind: self.store.symbols.get(symbol).kind,
+            });
+        }
         let expression_type = self.typed_arena.get(typed).ty;
         let mut actual = self.widen_expression_type_journaled(expression_type, info_journal, 0)?;
         for (binder, parameters) in self.active_local_type_binders.iter().rev() {
