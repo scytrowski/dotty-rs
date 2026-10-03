@@ -187,6 +187,14 @@ impl<'a> SourceTyper<'a> {
         context: ExpressionContext,
     ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
+            if let Some(symbol) = self.package_value_mapping_symbol(tree, typed) {
+                return Err(TyperError::UnsupportedTermReference {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    symbol,
+                    kind: SymbolKind::Package,
+                });
+            }
             return Ok(typed);
         }
         self.run_expression_transaction(|typer, info_journal, new_mappings| {
@@ -247,6 +255,14 @@ impl<'a> SourceTyper<'a> {
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
+            if let Some(symbol) = self.package_value_mapping_symbol(tree, typed) {
+                return Err(TyperError::UnsupportedTermReference {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    symbol,
+                    kind: SymbolKind::Package,
+                });
+            }
             return Ok(typed);
         }
         let Some(source_tree) = self.arena.try_get(tree).cloned() else {

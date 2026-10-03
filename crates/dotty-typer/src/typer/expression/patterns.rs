@@ -2290,9 +2290,10 @@ mod tests {
             panic!("expected extractor application");
         };
         let source_function = application.function;
-        let TreeKind::Select(_) = &parsed.ast.get(source_function).kind else {
+        let TreeKind::Select(selection) = &parsed.ast.get(source_function).kind else {
             panic!("expected package-selected extractor");
         };
+        let package_tree = selection.qualifier;
         let (mut typer, context) = context_for(
             &parsed,
             &mut store,
@@ -2350,10 +2351,21 @@ mod tests {
             panic!("expected package-qualified extractor selection");
         };
         let typed_package = extractor_selection.qualifier;
+        assert_eq!(
+            typer.typed_index.get(source, package_tree),
+            Some(typed_package)
+        );
         assert!(matches!(
             typer.store.types.try_get(typer.typed_arena.get(typed_package).ty),
             Some(Type::TermRef { target: TermRefTarget::Symbol(package), .. })
                 if typer.store.symbols.get(*package).kind == SymbolKind::Package
+        ));
+        assert!(matches!(
+            typer.type_expression(package_tree, context),
+            Err(TyperError::UnsupportedTermReference {
+                kind: SymbolKind::Package,
+                ..
+            })
         ));
         let typed_qualifier = typer.typed_index.get(source, source_function).unwrap();
         assert!(matches!(

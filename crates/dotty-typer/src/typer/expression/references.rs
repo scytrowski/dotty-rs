@@ -7,6 +7,29 @@ use dotty_core::types::*;
 use dotty_core::*;
 
 impl SourceTyper<'_> {
+    pub(in crate::typer) fn package_value_mapping_symbol(
+        &self,
+        source_tree: TreeId<Untyped>,
+        typed_tree: TreeId<Typed>,
+    ) -> Option<SymbolId> {
+        if !matches!(self.arena.try_get(source_tree)?.kind, TreeKind::Ident(_)) {
+            return None;
+        }
+        let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }) = self
+            .store
+            .types
+            .try_get(self.typed_arena.get(typed_tree).ty)
+        else {
+            return None;
+        };
+        (self.store.symbols.contains(*symbol)
+            && self.store.symbols.get(*symbol).kind == SymbolKind::Package)
+            .then_some(*symbol)
+    }
+
     pub(in crate::typer) fn enclosing_this_owner(
         &self,
         qualifier: Option<dotty_core::Name>,
@@ -397,6 +420,7 @@ impl SourceTyper<'_> {
             context,
             tree.index(),
             position,
+            new_mappings,
         )? {
             qualifier
         } else {
@@ -482,7 +506,14 @@ impl SourceTyper<'_> {
         context: ExpressionContext,
         tree_index: u32,
         position: Option<SourceSpan>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<Option<TreeId<Typed>>, TyperError> {
+        if let Some(typed) = self.typed_index.get(self.source, tree) {
+            return Ok(self
+                .package_value_mapping_symbol(tree, typed)
+                .is_some()
+                .then_some(typed));
+        }
         let Some(node) = self.arena.try_get(tree) else {
             return Err(TyperError::TreeOutsideArena {
                 source: self.source,
@@ -515,13 +546,17 @@ impl SourceTyper<'_> {
             prefix: self.definitions.no_prefix,
             target: TermRefTarget::Symbol(symbol),
         });
-        Ok(Some(
-            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).ident_with_backquoted(
-                ident.name,
-                ident.backquoted,
-                ty,
-                node.position,
-            ),
-        ))
+        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .ident_with_backquoted(ident.name, ident.backquoted, ty, node.position);
+        self.typed_index
+            .insert(self.source, tree, typed)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, tree));
+        Ok(Some(typed))
     }
 }
