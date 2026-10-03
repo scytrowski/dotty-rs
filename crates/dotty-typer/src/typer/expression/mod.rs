@@ -9,6 +9,7 @@ use dotty_core::*;
 mod assignment;
 mod blocks;
 mod control_flow;
+mod match_expr;
 mod new;
 mod patterns;
 mod references;
