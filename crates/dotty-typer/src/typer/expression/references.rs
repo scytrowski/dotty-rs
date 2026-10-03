@@ -12,7 +12,10 @@ impl SourceTyper<'_> {
         source_tree: TreeId<Untyped>,
         typed_tree: TreeId<Typed>,
     ) -> Option<SymbolId> {
-        let source_kind = &self.arena.try_get(source_tree)?.kind;
+        let mut source_kind = &self.arena.try_get(source_tree)?.kind;
+        while let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = source_kind {
+            source_kind = &self.arena.try_get(parens.inner)?.kind;
+        }
         if !matches!(source_kind, TreeKind::Ident(_) | TreeKind::Select(_)) {
             return None;
         }

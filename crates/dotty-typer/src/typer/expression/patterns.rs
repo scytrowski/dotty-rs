@@ -2414,7 +2414,7 @@ mod tests {
 
     #[test]
     fn nested_package_path_is_only_a_qualifier() {
-        let source_text = "package p { package q { class C; object Extractor { def unapply(value: Int): Boolean = true } } }; package client { class C { def choose(value: Int): Int = value match { case p.q.Extractor() => 1; case _ => 0 }; def read: Any = p.q; def classAsTerm: Any = p.q.C } }";
+        let source_text = "package p { package q { class C; object Extractor { def unapply(value: Int): Boolean = true } } }; package client { class C { def choose(value: Int): Int = value match { case p.q.Extractor() => 1; case _ => 0 }; def read: Any = p.q; def readParen: Any = (p.q); def classAsTerm: Any = p.q.C; def classAsTermParen: Any = (p.q.C) } }";
         let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
         let (choose, match_tree, package_path) = parsed
             .ast
@@ -2485,6 +2485,28 @@ mod tests {
             })
         ));
 
+        let (read_paren, read_paren_rhs) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if typer.store.names.resolve(definition.name.as_name().text())
+                        == "readParen" =>
+                {
+                    Some((index.symbol_at(source, tree)?, definition.rhs?))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let read_paren_context = typer.expression_context_for(read_paren).unwrap();
+        assert!(matches!(
+            typer.type_expression(read_paren_rhs, read_paren_context),
+            Err(TyperError::UnsupportedTermReference {
+                kind: SymbolKind::Package,
+                ..
+            })
+        ));
+
         let (class_as_term, class_rhs) = parsed
             .ast
             .iter()
@@ -2501,6 +2523,28 @@ mod tests {
         let class_context = typer.expression_context_for(class_as_term).unwrap();
         assert!(matches!(
             typer.type_expression(class_rhs, class_context),
+            Err(TyperError::UnsupportedTermReference {
+                kind: SymbolKind::Class,
+                ..
+            })
+        ));
+
+        let (class_paren, class_paren_rhs) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if typer.store.names.resolve(definition.name.as_name().text())
+                        == "classAsTermParen" =>
+                {
+                    Some((index.symbol_at(source, tree)?, definition.rhs?))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let class_paren_context = typer.expression_context_for(class_paren).unwrap();
+        assert!(matches!(
+            typer.type_expression(class_paren_rhs, class_paren_context),
             Err(TyperError::UnsupportedTermReference {
                 kind: SymbolKind::Class,
                 ..
