@@ -7,7 +7,7 @@
 //! this helper.
 
 use dotty_core::ast::{Modifier, Modifiers, ValDef};
-use dotty_core::{HardKeyword, Punctuation, TermName, TokenKind, TreeId, TreeKind, Untyped};
+use dotty_core::{HardKeyword, Name, Punctuation, TermName, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::{Location, ParseDiagnosticKind, Parser, RecoverySet};
 
@@ -33,13 +33,14 @@ where
     /// indented form the scanner has already classified the layout and the
     /// parser only consumes the resulting `Indent`/`Outdent` tokens.
     pub(crate) fn parse_template_body(&mut self, body: TemplateBody) -> TemplateBodyResult {
-        self.parse_template_body_with_feedback(body, None)
+        self.parse_template_body_with_feedback_and_owner(body, None, None)
     }
 
-    pub(crate) fn parse_template_body_with_feedback(
+    pub(crate) fn parse_template_body_with_feedback_and_owner(
         &mut self,
         body: TemplateBody,
         feedback_indent: Option<u32>,
+        expected_end_marker: Option<Name>,
     ) -> TemplateBodyResult {
         let (opening, closing) = match body {
             TemplateBody::Braced => (
@@ -60,11 +61,12 @@ where
         let result = self.with_placeholder_scope(|parser| {
             parser.with_location(Location::InBlock, |parser| {
                 parser.with_block_end(Some(closing), |parser| {
-                    parser.parse_template_members(closing, body_indent)
+                    parser.parse_template_members(closing, &body_indent, expected_end_marker)
                 })
             })
         });
-        let closes_at_end_marker = self.current().kind == TokenKind::EndMarker;
+        let closes_at_end_marker =
+            expected_end_marker.is_some_and(|owner| self.current_end_marker_matches_name(owner));
 
         if body == TemplateBody::Indented {
             if let Some(indent_offset) = feedback_indent {
@@ -85,10 +87,25 @@ where
         result
     }
 
+    fn current_end_marker_matches_name(&mut self, expected: Name) -> bool {
+        if self.current().kind != TokenKind::EndMarker {
+            return false;
+        }
+        let target = self.cursor.lookahead(1).clone();
+        if !matches!(
+            target.kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) {
+            return false;
+        }
+        self.names.resolve(expected.text()) == self.marker_target_text(target.kind, target.span)
+    }
+
     fn parse_template_members(
         &mut self,
         closing: TokenKind,
-        body_indent: String,
+        body_indent: &str,
+        expected_end_marker: Option<Name>,
     ) -> TemplateBodyResult {
         let mut members = Vec::new();
         self.consume_template_separators(closing);
@@ -97,10 +114,16 @@ where
 
         loop {
             if self.current().kind == TokenKind::EndMarker {
-                if !self.end_marker_matches_next(members.last().copied()) {
+                if expected_end_marker
+                    .is_some_and(|owner| self.current_end_marker_matches_name(owner))
+                {
                     break;
                 }
-                if !self.consume_end_marker(members.last().copied()) {
+                if self.end_marker_matches_next(members.last().copied()) {
+                    if !self.consume_end_marker(members.last().copied()) {
+                        break;
+                    }
+                } else if !self.consume_end_marker(members.last().copied()) {
                     break;
                 }
                 self.consume_template_separators(closing);
@@ -110,7 +133,7 @@ where
                 && closing == TokenKind::Outdent
                 && !self.last_advance_was_outdent
             {
-                self.feedback_template_outdent(&body_indent);
+                self.feedback_template_outdent(body_indent);
             }
             if closing == TokenKind::Outdent
                 && self.current().kind == TokenKind::Outdent
@@ -166,7 +189,7 @@ where
                 // own Outdent. Re-check before consuming the following
                 // newline, or the template's closing Outdent can be delayed
                 // until after the next enclosing statement.
-                self.feedback_template_outdent(&body_indent);
+                self.feedback_template_outdent(body_indent);
             }
             if self.is_template_separator(self.current().kind) {
                 self.consume_template_separators(closing);
@@ -184,7 +207,9 @@ where
             }
 
             while self.current().kind == TokenKind::EndMarker {
-                if !self.end_marker_matches_next(members.last().copied()) {
+                if expected_end_marker
+                    .is_some_and(|owner| self.current_end_marker_matches_name(owner))
+                {
                     break;
                 }
                 if !self.consume_end_marker(members.last().copied()) {

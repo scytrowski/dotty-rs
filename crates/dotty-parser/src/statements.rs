@@ -750,7 +750,7 @@ where
             && self.end_marker_matches(tree, target_kind, target_text)
     }
 
-    fn marker_target_text(&self, kind: TokenKind, span: TextRange) -> String {
+    pub(crate) fn marker_target_text(&self, kind: TokenKind, span: TextRange) -> String {
         let text = self.source.slice(span).unwrap_or_default();
         if kind == TokenKind::BackquotedIdentifier {
             text.strip_prefix('`')
