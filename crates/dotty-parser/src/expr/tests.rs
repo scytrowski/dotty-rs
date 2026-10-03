@@ -4352,6 +4352,31 @@ fn keeps_a_newline_before_an_infix_operator_as_a_statement_boundary() {
 }
 
 #[test]
+fn keeps_an_outdent_boundary_before_a_leading_identifier_operator() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "a next",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Identifier, 2, 6),
+            token(TokenKind::Eof, 6, 6),
+        ],
+        &mut names,
+    );
+
+    let left = parser.simple_expr();
+    parser.last_advance_was_outdent = true;
+    let expression = parser.infix_expr(left);
+
+    assert!(matches!(
+        parser.ast().get(expression).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Identifier);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn reports_mixed_associativity_at_equal_precedence() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

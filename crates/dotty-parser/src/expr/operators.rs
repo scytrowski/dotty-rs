@@ -24,6 +24,19 @@ where
         let mut operators = Vec::new();
 
         loop {
+            // The scanner suppresses a physical newline when an outdent
+            // closes a nested layout region. An alphabetic identifier at
+            // that boundary starts the enclosing statement, not an infix
+            // continuation. Symbolic operators still follow the Scala
+            // continuation rule below.
+            if self.last_advance_was_outdent
+                && matches!(
+                    self.current().kind,
+                    TokenKind::Identifier | TokenKind::BackquotedIdentifier
+                )
+            {
+                break;
+            }
             if self.is_argument_vararg_splice() {
                 break;
             }
