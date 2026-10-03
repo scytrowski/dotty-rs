@@ -811,7 +811,7 @@ fn match_readiness_counts_case_shapes_for_match_first_blockers() {
     assert_eq!(
         audit
             .failures
-            .get("UnsupportedExpression::Match")
+            .get("UnsupportedPattern")
             .map(|failure| failure.count),
         Some(1),
         "{audit:?}"
@@ -1075,7 +1075,16 @@ fn audit_source_inner(
             .and_then(|context| typer.type_expression(rhs, context));
         if let Err(error) = outcome {
             let failure = classify_typer_error(&error, &parsed.ast);
-            if failure.bucket == "UnsupportedExpression::Match" {
+            if matches!(
+                error,
+                TyperError::UnsupportedPattern { .. }
+                    | TyperError::MatchGuardDeferred { .. }
+                    | TyperError::MalformedCaseDef { .. }
+                    | TyperError::EmptyMatchCases { .. }
+                    | TyperError::MatchSelectorTypeCannotBeAdapted { .. }
+                    | TyperError::MatchCaseResultTypeCannotBeWidened { .. }
+                    | TyperError::MatchCaseJoinUnsupported { .. }
+            ) {
                 collect_match_readiness(&parsed.ast, rhs, path, &mut audit.match_readiness);
             }
             root_failures.push((range, failure));
