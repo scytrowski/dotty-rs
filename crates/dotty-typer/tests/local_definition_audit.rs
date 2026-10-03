@@ -1413,6 +1413,8 @@ fn audit_source_inner(
                     | TyperError::ExtractorResultMemberNotFound { .. }
                     | TyperError::ExtractorResultMemberOverloaded { .. }
                     | TyperError::ExtractorResultMemberUnsupported { .. }
+                    | TyperError::ExtractorProductSelectorCountMismatch { .. }
+                    | TyperError::UnsupportedExtractorProductProtocol { .. }
                     | TyperError::ExtractorPatternArgumentUnsupported { .. }
             ) {
                 collect_match_readiness(
@@ -2591,6 +2593,12 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::ExtractorResultMemberNotFound { .. } => "ExtractorResultMemberNotFound",
         TyperError::ExtractorResultMemberOverloaded { .. } => "ExtractorResultMemberOverloaded",
         TyperError::ExtractorResultMemberUnsupported { .. } => "ExtractorResultMemberUnsupported",
+        TyperError::ExtractorProductSelectorCountMismatch { .. } => {
+            "ExtractorProductSelectorCountMismatch"
+        }
+        TyperError::UnsupportedExtractorProductProtocol { .. } => {
+            "UnsupportedExtractorProductProtocol"
+        }
         TyperError::ExtractorPatternArgumentUnsupported { .. } => {
             "ExtractorPatternArgumentUnsupported"
         }

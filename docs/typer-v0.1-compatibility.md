@@ -152,14 +152,29 @@ binder machinery and may naturally contain another supported unary extractor.
 The pinned Scala 3.9.0 oracles and normalized shapes are recorded in
 [`unary-option-extractors`](../crates/dotty-typer/tests/fixtures/unary-option-extractors),
 [`boolean-extractors`](../crates/dotty-typer/tests/fixtures/boolean-extractors),
-and [`selected-extractors`](../crates/dotty-typer/tests/fixtures/selected-extractors).
+[`selected-extractors`](../crates/dotty-typer/tests/fixtures/selected-extractors),
+and [`binary-product-extractors`](../crates/dotty-typer/tests/fixtures/binary-product-extractors).
+
+Binary product extraction accepts exactly two source arguments and two ordered
+component selectors. The semantic subset discovers parameterless `_1` and
+`_2` members through ordinary inherited member lookup, and probes `_3` so a
+three-component result is rejected instead of truncated. The same selector
+lookup applies directly to an `unapply` result or to the value returned by an
+Option-like `get`. Each component is passed to recursive pattern typing in
+source order and remains in the existing CaseDef-local binding scope. A
+missing, ambiguous, methodic, or otherwise unsupported selector returns a
+focused extractor error. The normalized pinned fixture records both direct
+product and `get` result shapes.
 
 Zero or multiple nested patterns for Option-like extractors, nonzero nested
 patterns for Boolean extractors, missing/ambiguous selected qualifier members,
 missing/overloaded Option-like protocol members, and non-Boolean `isEmpty`
-return focused extractor errors. Generic or overloaded `unapply`, contextual,
-erased, repeated, or by-name parameters, `unapplySeq`, product result
-protocols, and pattern constraint inference remain unsupported. The
+return focused extractor errors. Products with selector sets other than
+exactly `_1`, `_2`, source argument counts other than two for product results,
+and unsupported component member types are rejected explicitly. Generic or
+overloaded `unapply`, contextual, erased, repeated, or by-name parameters,
+`unapplySeq`, tuple source patterns, and pattern constraint inference remain
+unsupported. The
 foundation resolution shape is recorded in
 [`extractor-foundation`](../crates/dotty-typer/tests/fixtures/extractor-foundation).
 
@@ -668,8 +683,9 @@ Most measured source shapes have one or two pattern arguments, while explicit
 type-applied calls and sequence wildcards are absent. The smallest useful
 first extractor increment is therefore a non-overloaded, non-generic `unapply`
 with one selector parameter and an `Option`-like result exposing `get`, first
-for one nested pattern. A following increment can extract product selectors
-for two-argument results. Defer `unapplySeq`, overloads, explicit extractor
+for one nested pattern. The binary increment extracts ordered `_1` and `_2`
+component types from direct product results and from product values returned
+by `get`. Defer `unapplySeq`, overloads, explicit extractor
 type arguments, contextual extractor clauses, and named arguments. The
 structural audit cannot establish prevalence of implicit/contextual extractor
 parameters: the classpath-backed run still materializes no external members,

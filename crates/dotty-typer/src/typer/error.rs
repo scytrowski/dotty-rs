@@ -49,6 +49,13 @@ pub enum ExtractorResultMemberIssue {
     IsEmptyNotBoolean,
 }
 
+/// Product-selector metadata encountered while typing a binary extractor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtractorProductIssue {
+    /// The product does not expose the ordered `_1` and `_2` selectors.
+    SelectorShape,
+}
+
 impl PatternKind {
     /// Returns the stable diagnostic/audit label for this pattern shape.
     pub const fn as_str(self) -> &'static str {
@@ -1244,6 +1251,22 @@ pub enum TyperError {
         member: Name,
         member_type: TypeId,
         issue: ExtractorResultMemberIssue,
+    },
+    /// The product result does not expose exactly the supported `_1`, `_2` selectors.
+    ExtractorProductSelectorCountMismatch {
+        source: SourceId,
+        tree_index: u32,
+        unapply: SymbolId,
+        result: TypeId,
+        selectors: Vec<dotty_core::Name>,
+    },
+    /// The extractor result does not expose the supported product selector protocol.
+    UnsupportedExtractorProductProtocol {
+        source: SourceId,
+        tree_index: u32,
+        unapply: SymbolId,
+        result: TypeId,
+        issue: ExtractorProductIssue,
     },
     /// Named arguments and sequence wildcards are not accepted by this plan.
     ExtractorPatternArgumentUnsupported {
