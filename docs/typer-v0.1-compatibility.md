@@ -137,9 +137,10 @@ patterns in any branch are rejected before they can enter the case scope. The
 literal and stable-value source shapes are pinned against Scala 3.9.0 in
 [`pattern-alternatives`](../crates/dotty-typer/tests/fixtures/pattern-alternatives).
 
-Extractor applications with a simple identifier or selected stable-value
-qualifier resolve through ordinary expression/stable-selection typing, look up
-exactly one `unapply`, validate its plain unary method shape, and check
+Extractor applications with a simple identifier, stable selected-value, or
+package-qualified object qualifier resolve through ordinary
+expression/stable-selection typing, look up exactly one `unapply`, validate
+its plain unary method shape, and check
 `selector <: input` with the bounded relation. Boolean-result extractors
 accept zero nested patterns and lower to `UnApply` with empty pattern and
 implicit lists. For the supported Option-like result protocol, the result must

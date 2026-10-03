@@ -1,8 +1,8 @@
 # Selected extractor oracle
 
-`SelectedExtractors.scala` compiles with Scala 3.9.0 at pinned revision
-`777528f19a58e794c9954a42f433373472ec57f8`; the typed tree is recorded in
-`SelectedExtractors.scala39-typed-tree.txt`.
+`SelectedExtractors.scala` and `PackageSelectedExtractor.scala` compile with
+Scala 3.9.0 at pinned revision `777528f19a58e794c9954a42f433373472ec57f8`;
+their typed trees are recorded in companion `*.scala39-typed-tree.txt` files.
 
 The nested stable selections `extractors.SomeInt` and `extractors.Even` are
 typed as ordinary stable references. Their source applications lower to
@@ -44,3 +44,8 @@ case extractors.Even()
     patterns = []
   ) : Int
 ```
+
+The package-qualified `p.Extractor()` case has the same `UnApply` shape, with
+`Ident(p)` as its package reference and the exact `p.Extractor.unapply`
+selection as the function. Its nested and implicit lists are empty, and its
+own type remains the selector prototype `Int`.

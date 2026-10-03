@@ -1,0 +1,25 @@
+[[syntax trees at end of                     typer]] // crates/dotty-typer/tests/fixtures/selected-extractors/PackageSelectedExtractor.scala
+package <empty> {
+  package p {
+    final lazy module val Extractor: p.Extractor = new p.Extractor()
+    final module class Extractor() extends Object() { this: p.Extractor.type =>
+      def unapply(value: Int): Boolean = true
+    }
+  }
+  package client {
+    final lazy module val PackageSelectedExtractor:
+      client.PackageSelectedExtractor = new client.PackageSelectedExtractor()
+    final module class PackageSelectedExtractor() extends Object() {
+      this: client.PackageSelectedExtractor.type =>
+      def matches(value: Int): Boolean =
+        value match
+          {
+            case p.Extractor() =>
+              true
+            case _ =>
+              false
+          }
+    }
+  }
+}
+

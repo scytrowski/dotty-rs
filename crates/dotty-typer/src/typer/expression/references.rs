@@ -67,10 +67,12 @@ impl SourceTyper<'_> {
                         | SymbolKind::Field
                         | SymbolKind::Value
                         | SymbolKind::Local
+                        | SymbolKind::Package
                         | SymbolKind::Object
                 ) && !declaration.flags.contains(SymbolFlags::MUTABLE)
                     && !by_name
-                    && (declaration.kind != SymbolKind::Object
+                    && (declaration.kind == SymbolKind::Package
+                        || declaration.kind != SymbolKind::Object
                         || self.source_module_class_of_object(*symbol).is_ok())
             }
             _ => false,
@@ -103,7 +105,8 @@ impl SourceTyper<'_> {
             | SymbolKind::Value
             | SymbolKind::Variable
             | SymbolKind::Local
-            | SymbolKind::Method => {}
+            | SymbolKind::Method
+            | SymbolKind::Package => {}
             SymbolKind::Object => {
                 if self.source_module_class_of_object(symbol).is_err() {
                     return Err(TyperError::ObjectTermReferenceDeferred {
@@ -122,7 +125,7 @@ impl SourceTyper<'_> {
                 });
             }
         }
-        if kind != SymbolKind::Object {
+        if !matches!(kind, SymbolKind::Object | SymbolKind::Package) {
             if self.initializing_local_symbols.contains(&symbol) {
                 return Err(TyperError::RecursiveLocalValueInitializer {
                     source: self.source,
@@ -394,6 +397,37 @@ impl SourceTyper<'_> {
             self.type_expression_inner(selection.qualifier, context, info_journal, new_mappings)?;
         let receiver_type = self.typed_arena.get(qualifier).ty;
         self.require_stable_selection_prefix(receiver_type, tree.index())?;
+        let package_receiver = matches!(
+            self.store.types.try_get(receiver_type),
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) if self.store.symbols.contains(*symbol)
+                && self.store.symbols.get(*symbol).kind == SymbolKind::Package
+        );
+        if package_receiver {
+            let candidate = self
+                .resolve_qualifier_symbol(tree, context.lexical, tree.index(), position)?
+                .ok_or(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    receiver: receiver_type,
+                    name: selection.name,
+                })?;
+            let ty = self.store.types.alloc(Type::TermRef {
+                prefix: receiver_type,
+                target: TermRefTarget::Symbol(candidate),
+            });
+            return Ok(
+                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).select(
+                    qualifier,
+                    selection.name,
+                    selection.backquoted,
+                    ty,
+                    position,
+                ),
+            );
+        }
         let receiver = self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
         let receiver = self.this_type_receiver_view(receiver)?;
         let candidates = self

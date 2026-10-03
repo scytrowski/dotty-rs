@@ -315,6 +315,13 @@ impl SourceTyper<'_> {
                     name: qualifier_name,
                 });
             }
+            Err(TyperError::AmbiguousTermReference { .. }) if selected_qualifier => {
+                return Err(TyperError::ExtractorQualifierMemberAmbiguous {
+                    source: self.source,
+                    tree_index: pattern.index(),
+                    name: qualifier_name,
+                });
+            }
             Err(TyperError::UnstableSelectionPrefix { qualifier_type, .. })
                 if selected_qualifier =>
             {
@@ -340,6 +347,13 @@ impl SourceTyper<'_> {
                 });
             }
         };
+        if self.store.symbols.get(extractor).kind == SymbolKind::Package {
+            return Err(TyperError::ExtractorQualifierNotValueLike {
+                source: self.source,
+                tree_index: pattern.index(),
+                qualifier_type: Some(qualifier_type),
+            });
+        }
         if self
             .require_stable_selection_prefix(qualifier_type, pattern.index())
             .is_err()
@@ -2247,6 +2261,104 @@ mod tests {
                 Some(unapply.function)
             );
         }
+    }
+
+    #[test]
+    fn package_qualified_boolean_extractor_uses_source_package_resolution() {
+        let source_text = "package p { object Extractor { def unapply(value: Int): Boolean = true } }; package client { class C { def choose(value: Int): Int = value match { case p.Extractor() => 1; case _ => 0 } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let (method, match_tree, pattern) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "choose" =>
+                {
+                    let match_tree = definition.rhs?;
+                    let TreeKind::Match(matching) = &parsed.ast.get(match_tree).kind else {
+                        return None;
+                    };
+                    let TreeKind::CaseDef(case) = &parsed.ast.get(matching.cases[0]).kind else {
+                        return None;
+                    };
+                    Some((index.symbol_at(source, tree)?, match_tree, case.pattern))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let TreeKind::Apply(application) = &parsed.ast.get(pattern).kind else {
+            panic!("expected extractor application");
+        };
+        let source_function = application.function;
+        let TreeKind::Select(selection) = &parsed.ast.get(source_function).kind else {
+            panic!("expected package-selected extractor");
+        };
+        let package_tree = selection.qualifier;
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+
+        let typed_match = typer.type_expression(match_tree, context).unwrap();
+        let TreeKind::Match(matching) = &typer.typed_arena.get(typed_match).kind else {
+            panic!("expected typed Match");
+        };
+        let TreeKind::CaseDef(case) = &typer.typed_arena.get(matching.cases[0]).kind else {
+            panic!("expected typed CaseDef");
+        };
+        let typed_pattern = case.pattern;
+        let TreeKind::UnApply(unapply) = &typer.typed_arena.get(typed_pattern).kind else {
+            panic!("expected typed UnApply");
+        };
+        assert!(unapply.patterns.is_empty());
+        assert_eq!(typer.typed_arena.get(typed_pattern).ty, definitions.int);
+        let unapply_symbol = typed_function_symbol(&typer, unapply.function);
+        let TreeKind::Select(function) = &typer.typed_arena.get(unapply.function).kind else {
+            panic!("expected selected unapply function");
+        };
+        let extractor_symbol = match typer
+            .store
+            .types
+            .try_get(typer.typed_arena.get(function.qualifier).ty)
+        {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) => *symbol,
+            other => panic!("expected selected unapply reference, found {other:?}"),
+        };
+        let module_class = typer
+            .source_module_class_of_object(extractor_symbol)
+            .unwrap();
+        assert_eq!(
+            typer.store.symbols.get(unapply_symbol).owner,
+            Some(module_class)
+        );
+        let SymbolInfo::Complete(signature) = typer.store.symbols.get(unapply_symbol).info else {
+            panic!("expected completed unapply signature");
+        };
+        let Some(Type::Method(signature)) = typer.store.types.try_get(signature) else {
+            panic!("expected unapply method");
+        };
+        assert_eq!(signature.result, definitions.boolean);
+        let typed_package = typer.typed_index.get(source, package_tree).unwrap();
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(typed_package).ty),
+            Some(Type::TermRef { target: TermRefTarget::Symbol(package), .. })
+                if typer.store.symbols.get(*package).kind == SymbolKind::Package
+        ));
+        let typed_qualifier = typer.typed_index.get(source, source_function).unwrap();
+        assert!(matches!(
+            &typer.typed_arena.get(typed_qualifier).kind,
+            TreeKind::Select(selection)
+                if typer.store.names.resolve(selection.name.text()) == "Extractor"
+        ));
+        assert_eq!(typer.typed_index.get(source, pattern), Some(typed_pattern));
     }
 
     fn typed_function_symbol(typer: &SourceTyper<'_>, function: TreeId<Typed>) -> SymbolId {
