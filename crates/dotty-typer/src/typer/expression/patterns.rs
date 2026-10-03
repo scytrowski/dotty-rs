@@ -154,9 +154,28 @@ impl SourceTyper<'_> {
             0,
         )?;
         let unapply_name = Name::new(self.store.names.intern("unapply"), Namespace::Term);
-        let candidates = self
-            .lookup_members_journaled(receiver, unapply_name, info_journal)
+        let members = self
+            .lookup_overload_members_journaled(receiver, unapply_name, info_journal)
             .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+        let mut candidates = members
+            .into_iter()
+            .map(|member| {
+                let callable = self.member_type_on_journaled(&member, info_journal)?;
+                self.complete_relation_type(
+                    callable,
+                    info_journal,
+                    &mut std::collections::HashSet::new(),
+                    0,
+                )?;
+                Ok(crate::typer::application::ApplicationCandidate {
+                    symbol: member.symbol,
+                    callable,
+                    member: Some(member),
+                    rejection: None,
+                })
+            })
+            .collect::<Result<Vec<_>, TyperError>>()?;
+        self.remove_overridden_overload_candidates(&mut candidates, pattern.index())?;
         let candidate = match candidates.as_slice() {
             [] => {
                 return Err(TyperError::ExtractorUnapplyNotFound {
@@ -179,7 +198,7 @@ impl SourceTyper<'_> {
             }
         };
         let unapply = candidate.symbol;
-        let callable = self.member_type_on_journaled(&candidate, info_journal)?;
+        let callable = candidate.callable;
         let method = match self.store.types.try_get(callable) {
             Some(Type::Poly(_)) => {
                 return Err(TyperError::ExtractorUnapplyPolymorphic {
@@ -1435,6 +1454,64 @@ mod tests {
     }
 
     #[test]
+    fn extractor_resolution_collapses_a_real_inherited_override() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "trait Base { def unapply(value: Any): Any = value }; object Extractor extends Base { override def unapply(value: Any): Any = value }; class C { def choose(value: Any): Int = value match { case Extractor(_) => 1 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let TreeKind::Apply(application) = &parsed.ast.get(pattern).kind else {
+            panic!("expected source extractor Apply");
+        };
+        let application = application.clone();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+
+        let plan = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.resolve_extractor_pattern_plan(
+                    pattern,
+                    &application,
+                    definitions.any_type,
+                    context,
+                    journal,
+                    mappings,
+                )
+            })
+            .unwrap();
+        drop(typer);
+
+        let declarations = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "unapply" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(declarations.len(), 2);
+        assert!(declarations.contains(&plan.symbol));
+    }
+
+    #[test]
     fn extractor_resolution_reports_focused_qualifier_and_unapply_errors() {
         let cases = [
             (
@@ -1454,6 +1531,10 @@ mod tests {
                 2,
             ),
             (
+                "trait Base { def unapply(value: Int): Any = value }; object Extractor extends Base { def unapply(value: Any): Any = value }; class C { def choose(value: Any): Int = value match { case Extractor(_) => 1 } }",
+                5,
+            ),
+            (
                 "object Extractor { def unapply[A](value: A): Any = value }; class C { def choose(value: Any): Int = value match { case Extractor(_) => 1 } }",
                 3,
             ),
@@ -1469,6 +1550,7 @@ mod tests {
                 (0, TyperError::ExtractorQualifierNotFound { .. })
                 | (1, TyperError::ExtractorUnapplyNotFound { .. })
                 | (2, TyperError::ExtractorUnapplyOverloaded { .. })
+                | (5, TyperError::ExtractorUnapplyOverloaded { .. })
                 | (3, TyperError::ExtractorUnapplyPolymorphic { .. })
                 | (4, TyperError::ExtractorPatternConstraintDeferred { .. }) => true,
                 (_, other) => panic!("unexpected extractor error: {other:?}"),
