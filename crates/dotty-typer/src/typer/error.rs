@@ -1098,6 +1098,34 @@ pub enum TyperError {
         source: SourceId,
         tree_index: u32,
     },
+    /// A source pattern binding is malformed or does not match the requested name.
+    MalformedPatternBinding {
+        source: SourceId,
+        tree_index: u32,
+    },
+    /// The wildcard spelling cannot introduce a pattern-bound symbol.
+    WildcardPatternBindingRejected {
+        source: SourceId,
+        tree_index: u32,
+    },
+    /// Pattern symbols may only be entered while a case scope is active.
+    PatternBindingOutsideCaseScope {
+        source: SourceId,
+        tree_index: u32,
+    },
+    /// A repeated source binding was presented with conflicting case ownership.
+    PatternBindingScopeConflict {
+        source: SourceId,
+        tree_index: u32,
+        existing_scope: dotty_core::ScopeId,
+        attempted_scope: dotty_core::ScopeId,
+    },
+    /// Two pattern bindings with the same name occur in one case scope.
+    DuplicatePatternBinding {
+        source: SourceId,
+        tree_index: u32,
+        name: dotty_core::Name,
+    },
     /// A source Match has no cases, so no result type can be derived.
     EmptyMatchCases {
         source: SourceId,

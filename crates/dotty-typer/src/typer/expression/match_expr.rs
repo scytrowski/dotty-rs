@@ -32,39 +32,45 @@ impl SourceTyper<'_> {
             });
         };
 
-        let pattern = self.type_pattern(
-            case_def.pattern,
-            selector_type,
-            context,
-            info_journal,
-            new_mappings,
-        )?;
-        if case_def.guard.is_some() {
-            return Err(TyperError::MatchGuardDeferred {
-                source: self.source,
-                tree_index: case_tree.index(),
-            });
-        }
-        let body =
-            self.type_expression_inner(case_def.body, context, info_journal, new_mappings)?;
-        let body_type = self.typed_arena.get(body).ty;
-        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).case_def(
-            pattern,
-            None,
-            body,
-            body_type,
-            source_tree.position,
-        );
-        self.typed_index
-            .insert(self.source, case_tree, typed)
-            .map_err(|error| TyperError::ConflictingTypedExpression {
-                source: error.source,
-                tree_index: error.untyped.index(),
-                existing: error.existing.index(),
-                attempted: error.attempted.index(),
-            })?;
-        new_mappings.push((self.source, case_tree));
-        Ok(typed)
+        let expression_scope_depth = self.expression_scopes.len();
+        let case_context = self.push_case_scope(context)?;
+        let result =
+            (|| {
+                let pattern = self.type_pattern(
+                    case_def.pattern,
+                    selector_type,
+                    case_context,
+                    info_journal,
+                    new_mappings,
+                )?;
+                if case_def.guard.is_some() {
+                    return Err(TyperError::MatchGuardDeferred {
+                        source: self.source,
+                        tree_index: case_tree.index(),
+                    });
+                }
+                let body = self.type_expression_inner(
+                    case_def.body,
+                    case_context,
+                    info_journal,
+                    new_mappings,
+                )?;
+                let body_type = self.typed_arena.get(body).ty;
+                let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                    .case_def(pattern, None, body, body_type, source_tree.position);
+                self.typed_index
+                    .insert(self.source, case_tree, typed)
+                    .map_err(|error| TyperError::ConflictingTypedExpression {
+                        source: error.source,
+                        tree_index: error.untyped.index(),
+                        existing: error.existing.index(),
+                        attempted: error.attempted.index(),
+                    })?;
+                new_mappings.push((self.source, case_tree));
+                Ok(typed)
+            })();
+        self.expression_scopes.truncate(expression_scope_depth);
+        result
     }
 
     pub(in crate::typer) fn type_match_expression(
@@ -140,10 +146,10 @@ impl SourceTyper<'_> {
 mod tests {
     use super::*;
     use crate::typer::SourceTyper;
-    use dotty_core::ast::{Tree, TreeKind};
+    use dotty_core::ast::{Bind, Tree, TreeKind};
     use dotty_core::{
         Definitions, Name, Namespace, Packages, SemanticStore, SourceSemanticIndex, SourceText,
-        Type,
+        TermRefTarget, Type,
     };
     use dotty_lexer::ContextualScanner;
     use dotty_namer::name_compilation_unit;
@@ -257,6 +263,22 @@ mod tests {
     ) -> Result<TreeId<Typed>, TyperError> {
         typer.run_expression_transaction(|typer, journal, mappings| {
             typer.type_case_def(case_tree, selector_type, context, journal, mappings)
+        })
+    }
+
+    fn synthetic_bind(
+        parsed: &mut dotty_parser::ParseResult,
+        name: Name,
+        body: TreeId<Untyped>,
+    ) -> TreeId<Untyped> {
+        parsed.ast.alloc(Tree {
+            kind: TreeKind::Bind(Bind {
+                name,
+                body,
+                given: false,
+            }),
+            position: None,
+            ty: (),
         })
     }
 
@@ -648,5 +670,182 @@ mod tests {
         ));
         assert!(typer.typed_index.is_empty());
         assert_eq!(typer.typed_arena.iter().count(), 0);
+    }
+
+    #[test]
+    fn pattern_bindings_are_case_local_canonical_symbols() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case _ => 1; case _ => 2 } }");
+        let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
+        let TreeKind::Match(matched) = parsed.ast.get(match_tree).kind.clone() else {
+            panic!("expected source Match")
+        };
+        let TreeKind::CaseDef(first_case) = parsed.ast.get(matched.cases[0]).kind else {
+            panic!("expected first source CaseDef")
+        };
+        let TreeKind::CaseDef(second_case) = parsed.ast.get(matched.cases[1]).kind else {
+            panic!("expected second source CaseDef")
+        };
+        let item = Name::new(store.names.intern("item"), Namespace::Term);
+        let x_name = Name::new(store.names.intern("x"), Namespace::Term);
+        let wildcard_name = Name::new(store.names.intern("_"), Namespace::Term);
+        let bind_first = synthetic_bind(&mut parsed, item, first_case.pattern);
+        let bind_second = synthetic_bind(&mut parsed, item, second_case.pattern);
+        let bind_duplicate = synthetic_bind(&mut parsed, item, first_case.pattern);
+        let bind_shadow = synthetic_bind(&mut parsed, x_name, first_case.pattern);
+        let bind_wildcard = synthetic_bind(&mut parsed, wildcard_name, first_case.pattern);
+        let outer_parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "x" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let original_scope_depth = typer.expression_scopes.len();
+        typer.type_expression(match_tree, context).unwrap();
+        assert_eq!(typer.expression_scopes.len(), original_scope_depth);
+
+        let case_one = typer.push_case_scope(context).unwrap();
+        let case_one_stack = case_one.local_scopes.unwrap();
+        let case_one_scope = typer.expression_scopes[case_one_stack.index()].scope;
+        assert_eq!(typer.store.scopes.get(case_one_scope).owner, Some(method));
+        let (first_symbol, first_ref) = typer
+            .enter_pattern_binding(bind_first, item, definitions.int, case_one)
+            .unwrap();
+        assert_eq!(
+            typer
+                .resolve_expression_term(item, case_one, bind_first.index(), None)
+                .unwrap(),
+            first_symbol
+        );
+        assert_eq!(
+            typer
+                .resolve_expression_term(x_name, case_one, bind_first.index(), None)
+                .unwrap(),
+            outer_parameter
+        );
+        assert_eq!(
+            typer.pattern_binding_symbol_at(source, bind_first),
+            Some(first_symbol)
+        );
+        assert_eq!(
+            typer.pattern_binding_scope(first_symbol),
+            Some(case_one_scope)
+        );
+        assert!(matches!(
+            typer.store.types.try_get(first_ref),
+            Some(Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(symbol),
+            }) if *prefix == definitions.no_prefix && *symbol == first_symbol
+        ));
+        let declaration = typer.store.symbols.get(first_symbol);
+        assert_eq!(declaration.kind, dotty_core::SymbolKind::Local);
+        assert_eq!(declaration.owner, Some(method));
+        assert_eq!(declaration.origin, dotty_core::SymbolOrigin::Source(source));
+        assert_eq!(declaration.visibility, dotty_core::Visibility::Public);
+        assert_eq!(declaration.flags, dotty_core::SymbolFlags::EMPTY);
+        assert_eq!(declaration.info, SymbolInfo::Complete(definitions.int));
+        assert!(matches!(
+            typer.enter_pattern_binding(bind_duplicate, item, definitions.int, case_one),
+            Err(TyperError::DuplicatePatternBinding { name, .. }) if name == item
+        ));
+        assert!(matches!(
+            typer.enter_pattern_binding(bind_wildcard, wildcard_name, definitions.int, case_one),
+            Err(TyperError::WildcardPatternBindingRejected { .. })
+        ));
+        let (shadow_symbol, _) = typer
+            .enter_pattern_binding(bind_shadow, x_name, definitions.int, case_one)
+            .unwrap();
+        assert_ne!(shadow_symbol, outer_parameter);
+        assert_eq!(
+            typer
+                .resolve_expression_term(x_name, case_one, bind_shadow.index(), None)
+                .unwrap(),
+            shadow_symbol
+        );
+        typer.expression_scopes.truncate(original_scope_depth);
+
+        let case_two = typer.push_case_scope(context).unwrap();
+        let case_two_stack = case_two.local_scopes.unwrap();
+        let case_two_scope = typer.expression_scopes[case_two_stack.index()].scope;
+        assert_ne!(case_one_scope, case_two_scope);
+        assert!(matches!(
+            typer.resolve_expression_term(item, case_two, bind_second.index(), None),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        let (second_symbol, _) = typer
+            .enter_pattern_binding(bind_second, item, definitions.int, case_two)
+            .unwrap();
+        assert_ne!(first_symbol, second_symbol);
+        assert_eq!(
+            typer
+                .resolve_expression_term(item, case_two, bind_second.index(), None)
+                .unwrap(),
+            second_symbol
+        );
+        assert_eq!(
+            typer.pattern_binding_symbol_at(source, bind_second),
+            Some(second_symbol)
+        );
+    }
+
+    #[test]
+    fn failed_pattern_binding_transaction_rolls_back_scope_symbol_index_and_type() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case _ => 1 } }");
+        let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
+        let TreeKind::Match(matched) = parsed.ast.get(match_tree).kind.clone() else {
+            panic!("expected source Match")
+        };
+        let TreeKind::CaseDef(case_def) = parsed.ast.get(matched.cases[0]).kind else {
+            panic!("expected source CaseDef")
+        };
+        let name = Name::new(store.names.intern("temporary"), Namespace::Term);
+        let binding = synthetic_bind(&mut parsed, name, case_def.pattern);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let original_scope_depth = typer.expression_scopes.len();
+        let mut allocated = None;
+        let result: Result<TreeId<Typed>, TyperError> =
+            typer.run_expression_transaction(|typer, _, _| {
+                let case_context = typer.push_case_scope(context)?;
+                let (symbol, term_ref) =
+                    typer.enter_pattern_binding(binding, name, definitions.int, case_context)?;
+                let scope = typer.pattern_binding_scope(symbol).unwrap();
+                allocated = Some((symbol, term_ref, scope));
+                Err(TyperError::MatchGuardDeferred {
+                    source,
+                    tree_index: matched.cases[0].index(),
+                })
+            });
+        assert!(matches!(result, Err(TyperError::MatchGuardDeferred { .. })));
+        let (symbol, term_ref, scope) = allocated.unwrap();
+        assert!(!typer.store.symbols.contains(symbol));
+        assert!(!typer.store.scopes.contains(scope));
+        assert!(!typer.store.types.contains(term_ref));
+        assert_eq!(typer.pattern_binding_symbol_at(source, binding), None);
+        assert_eq!(typer.expression_scopes.len(), original_scope_depth);
     }
 }

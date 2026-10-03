@@ -4,7 +4,10 @@ use super::{ExpressionContext, SourceTyper, TyperError};
 use crate::typer::PatternKind;
 use dotty_core::ast::{TreeKind, TypedAstBuilder, UntypedNode};
 use dotty_core::types::Type;
-use dotty_core::{SourceId, SymbolId, SymbolInfo, TreeId, TypeId, Typed, Untyped};
+use dotty_core::{
+    Name, SourceId, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TermRefTarget,
+    TreeId, TypeId, Typed, Untyped,
+};
 
 /// Classifies a pattern by its stable source-tree root category.
 pub(super) fn pattern_kind(kind: &TreeKind<Untyped>) -> PatternKind {
@@ -28,6 +31,126 @@ pub(super) fn pattern_kind(kind: &TreeKind<Untyped>) -> PatternKind {
 }
 
 impl SourceTyper<'_> {
+    /// Enters one already-typed source binding into the active case scope.
+    /// Recursive pattern traversal and source `Bind` typing remain deferred.
+    #[allow(dead_code)] // Pattern roots use this in the next typing increment.
+    pub(super) fn enter_pattern_binding(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        name: Name,
+        binding_type: TypeId,
+        case_context: ExpressionContext,
+    ) -> Result<(SymbolId, TypeId), TyperError> {
+        let Some(tree) = self.arena.try_get(source_tree) else {
+            return Err(TyperError::MalformedPatternBinding {
+                source: self.source,
+                tree_index: source_tree.index(),
+            });
+        };
+        let TreeKind::Bind(binding) = &tree.kind else {
+            return Err(TyperError::MalformedPatternBinding {
+                source: self.source,
+                tree_index: source_tree.index(),
+            });
+        };
+        if binding.name != name || !name.is_term() {
+            return Err(TyperError::MalformedPatternBinding {
+                source: self.source,
+                tree_index: source_tree.index(),
+            });
+        }
+        if self.store.names.resolve(name.text()) == "_" {
+            return Err(TyperError::WildcardPatternBindingRejected {
+                source: self.source,
+                tree_index: source_tree.index(),
+            });
+        }
+        let stack =
+            case_context
+                .local_scopes
+                .ok_or(TyperError::PatternBindingOutsideCaseScope {
+                    source: self.source,
+                    tree_index: source_tree.index(),
+                })?;
+        self.validate_expression_scope_stack(Some(stack))?;
+        let frame = self
+            .expression_scopes
+            .get(stack.index())
+            .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack })?;
+        if !frame.is_case_scope
+            || self.store.scopes.get(frame.scope).owner != Some(case_context.owner)
+        {
+            return Err(TyperError::PatternBindingOutsideCaseScope {
+                source: self.source,
+                tree_index: source_tree.index(),
+            });
+        }
+        let scope = frame.scope;
+        if let Some(existing) = self
+            .pattern_bindings
+            .by_tree
+            .get(&(self.source, source_tree))
+            .copied()
+        {
+            let Some(existing_scope) = self
+                .pattern_bindings
+                .scope_by_symbol
+                .get(&existing)
+                .copied()
+            else {
+                return Err(TyperError::PatternBindingScopeConflict {
+                    source: self.source,
+                    tree_index: source_tree.index(),
+                    existing_scope: scope,
+                    attempted_scope: scope,
+                });
+            };
+            if existing_scope != scope {
+                return Err(TyperError::PatternBindingScopeConflict {
+                    source: self.source,
+                    tree_index: source_tree.index(),
+                    existing_scope,
+                    attempted_scope: scope,
+                });
+            }
+            return Ok((existing, self.pattern_binding_term_ref(existing)));
+        }
+        if !self.store.scopes.get(scope).lookup_all(&name).is_empty() {
+            return Err(TyperError::DuplicatePatternBinding {
+                source: self.source,
+                tree_index: source_tree.index(),
+                name,
+            });
+        }
+
+        let symbol = self.store.symbols.alloc(dotty_core::Symbol {
+            name,
+            owner: Some(case_context.owner),
+            kind: SymbolKind::Local,
+            flags: SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Complete(binding_type),
+            origin: SymbolOrigin::Source(self.source),
+            annotations: Vec::new(),
+            position: tree.position,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        self.store.scopes.get_mut(scope).enter(name, symbol);
+        self.pattern_bindings
+            .by_tree
+            .insert((self.source, source_tree), symbol);
+        self.pattern_bindings.scope_by_symbol.insert(symbol, scope);
+        Ok((symbol, self.pattern_binding_term_ref(symbol)))
+    }
+
+    #[allow(dead_code)] // Pattern entry is infrastructure until Bind typing lands.
+    fn pattern_binding_term_ref(&mut self, symbol: SymbolId) -> TypeId {
+        self.store.types.alloc(Type::TermRef {
+            prefix: self.definitions.no_prefix,
+            target: TermRefTarget::Symbol(symbol),
+        })
+    }
+
     /// Types the initial supported pattern subset: an unquoted term wildcard.
     ///
     /// The context is accepted here to keep the recursive pattern API aligned

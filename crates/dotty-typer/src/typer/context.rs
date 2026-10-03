@@ -48,6 +48,7 @@ pub(super) struct ExpressionScopeFrame {
     pub(super) scope: dotty_core::ScopeId,
     pub(super) parent: Option<ExpressionScopeId>,
     pub(super) is_block_scope: bool,
+    pub(super) is_case_scope: bool,
     pub(super) imports: Vec<(TreeId<Untyped>, ExpressionContext)>,
 }
 
@@ -200,12 +201,43 @@ impl SourceTyper<'_> {
             scope,
             parent: context.local_scopes,
             is_block_scope: false,
+            is_case_scope: false,
             imports: Vec::new(),
         });
         Ok(ExpressionContext {
             local_scopes: Some(stack),
             ..context
         })
+    }
+
+    /// Creates an isolated typer-owned scope for one Match case. Its frame is
+    /// deliberately not a block scope, so block-only declarations remain
+    /// unavailable while pattern bindings can still be resolved from it.
+    pub(super) fn push_case_scope(
+        &mut self,
+        context: ExpressionContext,
+    ) -> Result<ExpressionContext, TyperError> {
+        self.validate_expression_scope_stack(context.local_scopes)?;
+        let scope = self
+            .store
+            .scopes
+            .alloc(dotty_core::Scope::new(Some(context.owner)));
+        let case_context = self.push_local_scope(context, scope)?;
+        let stack =
+            case_context
+                .local_scopes
+                .ok_or(TyperError::ExpressionLocalScopeStackMissing {
+                    stack: ExpressionScopeId::new(
+                        self.expression_scope_owner,
+                        self.expression_scopes.len(),
+                    ),
+                })?;
+        let frame = self
+            .expression_scopes
+            .get_mut(stack.index())
+            .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack })?;
+        frame.is_case_scope = true;
+        Ok(case_context)
     }
 
     pub(super) fn indexed_method_scope(
