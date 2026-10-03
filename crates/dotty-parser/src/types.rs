@@ -346,7 +346,7 @@ where
                 self.observe_outdented_by_delimiter();
             } else if !self.cursor.at(TokenKind::Outdent) {
                 if let Some((indent_offset, _)) = case_region {
-                    self.observe_outdented_layout_region(indent_offset);
+                    self.observe_match_cases_closed(indent_offset);
                 } else {
                     self.observe_outdented();
                 }
@@ -426,11 +426,30 @@ where
             );
         }
 
+        let body_indent = self.observe_arrow_indented_body();
         self.advance();
+        self.consume_match_type_separators();
+        let body_is_indented = self.accept(TokenKind::Indent);
         let body = self.with_block_end(
             Some(TokenKind::Punctuation(Punctuation::RightBrace)),
             |parser| parser.type_expr(),
         );
+        if body_is_indented {
+            self.consume_match_type_separators();
+            if !self.cursor.at(TokenKind::Outdent) {
+                if let Some(indent_offset) = body_indent {
+                    self.observe_outdented_region(indent_offset);
+                } else {
+                    self.observe_outdented();
+                }
+            }
+            if !self.accept(TokenKind::Outdent) {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected an outdent to close match-type case result",
+                );
+            }
+        }
         self.consume_match_type_case_end();
         self.alloc_from(
             mark,
@@ -3349,6 +3368,43 @@ mod tests {
         };
         assert_eq!(cases.len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_indented_match_type_case_result_before_the_next_type() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "T match\n  case A =>\n    B\nNext",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Keyword(HardKeyword::Match), 2, 7),
+                token(TokenKind::Newline, 7, 8),
+                token(TokenKind::Indent, 10, 10),
+                token(TokenKind::Keyword(HardKeyword::Case), 10, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Operator, 17, 19),
+                token(TokenKind::Newline, 19, 20),
+                token(TokenKind::Indent, 24, 24),
+                token(TokenKind::Identifier, 24, 25),
+                token(TokenKind::Newline, 25, 26),
+                token(TokenKind::Outdent, 26, 26),
+                token(TokenKind::Outdent, 26, 26),
+                token(TokenKind::Identifier, 26, 30),
+                token(TokenKind::Eof, 30, 30),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+
+        let TreeKind::MatchTypeTree(MatchTypeTree { ref cases, .. }) = parser.ast().get(id).kind
+        else {
+            panic!("expected an indented match type");
+        };
+        assert_eq!(cases.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Identifier);
+        assert_eq!(parser.current().span.start(), 26);
         assert!(parser.diagnostics().is_empty());
     }
 
