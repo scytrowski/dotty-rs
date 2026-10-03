@@ -560,14 +560,124 @@ For the #610 feature comparison against #581, first-blocker counts moved from
 first errors are recorded in the linked report. These are reachability and
 first-error movements, not by themselves proof of semantic completion. Two
 `RightAssociativeInfixDeferred` sites remain; ordinary left-associative infix
-blockers are gone. The
-report also records Match readiness: 191 Match first-blocker local methods in
-70 files (199 in 71 files in #581), and 7,353 structural Match nodes overall.
-Across the 1,666 named method bodies whose first failure is Match, there are
-2,151 structural Match nodes and 6,615 cases (639 guarded). The cases are
-dominated by identifier/bind (2,327), typed (1,829), and extractor-looking
-Apply/TypeApply (1,324) patterns. Pattern-shape examples and the refreshed
-top-ten ranking are in the report.
+blockers are gone. The latest audit after the Match pattern increments records 7,434 structural
+Match nodes and 21,787 cases (2,113 guarded). Its root histogram distinguishes
+wildcards (4,661), variable identifiers (1,142), stable identifiers (1,737),
+stable selections (623), literals (1,365), typed variables (5,392), typed
+wildcards (381), alternatives (443), tuples (479), and extractor-looking
+Apply roots (4,308). These are counts over the pinned source corpus, not counts
+of expressions that the Typer supports.
+
+The current supported-case probes successfully type 214 wildcard and 30
+variable/bind cases. The other probed families currently have zero successful
+cases under the audit's classpath and enclosing-method context. This is
+consistent with the audit's external-member materialization gate remaining
+blocked; it should not be read as evidence that the focused unit fixtures for
+literal, stable, guarded, or typed patterns fail. Among first Match/pattern
+errors, 65 methods stop at application/extractor patterns, 6 at binding bodies,
+5 at alternatives, 9 at literal/stable pattern relations, 31 at typed-pattern
+relations, 155 at typed-pattern runtime-test support, and 13 at selector
+adaptation. No Match-case result join or guard-specific error was observed.
+The detailed per-error examples and the refreshed top-ten ranking are in the
+[normalized audit report](typer-classpath-corpus-audit-3.9.0.md).
+
+The previous wildcard-only report recorded 1,666 Match first-blocker methods,
+2,151 Match nodes, and 6,615 cases. It stopped at `Match`, so downstream
+pattern counters below were not reached in that snapshot. The current
+collector includes the typed-pattern relation/runtime-test errors added by
+later increments; its 284 first-blocker methods are therefore a broader error
+inventory, not a strictly like-for-like total.
+
+| First blocker | Previous report | Current report | Movement |
+| --- | ---: | ---: | --- |
+| `UnsupportedExpression::Match` | 191 | 0 | -191 |
+| Unsupported variable identifier pattern | 0 observed | 0 | remains absent |
+| Binding-body unsupported pattern | 0 observed | 6 | now exposed downstream |
+| Literal pattern type mismatch/relation | 0 observed | 0 | none observed |
+| Stable-identifier pattern relation deferred | 0 observed | 9 | now exposed downstream |
+| Guard-specific deferred/error bucket | 0 observed | 0 | none observed |
+| Typed-pattern runtime-test deferral | 0 observed | 155 method blockers; 9 local-def failures | now exposed downstream |
+| Typed-pattern relation deferral | 0 observed | 31 method blockers | now exposed downstream |
+| Typed-pattern mismatch | 0 observed | 0 | none observed |
+| Match-case result widening/join errors | 0 observed | 0 | none observed |
+
+The current values count first errors, not every occurrence in every method;
+the isolated case probes separately find 450 runtime-test, 43 relation, and
+258 type-tree projection deferrals. `UnsupportedExpression::Match` and
+unsupported variable identifier patterns have ceased to appear as first
+blockers; the remaining errors point to concrete pattern families and
+selector adaptation.
+
+### Extractor-pattern sprint scope
+
+The normalized extractor profile contains 4,308 extractor-looking root
+patterns across the corpus. The AST walk sees 6,000 `Apply` nodes within
+extractor patterns: 5,561 simple identifiers and 439 selected extractors.
+Argument arities are concentrated at one (2,418) and two (2,838), followed by
+three (473). The audit found no type-applied extractor, sequence wildcard, or
+named pattern argument. It found 469 infix root patterns and 781 infix pattern
+forms including nested ones. Representative files include
+`compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala`,
+`compiler/src/dotty/tools/dotc/ast/Trees.scala`, and
+`compiler/src/dotty/tools/dotc/cc/SepCheck.scala`.
+
+Scala 3.9.0 source inspection and `-Vprint:typer` on a small pinned compiler
+fixture show that a source `Apply` extractor pattern is not typed as an
+ordinary method call. [`Applications.typedUnApply`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/typer/Applications.scala#L1718-L1975)
+resolves the extractor object/member, invokes
+`unapply` first and falls back to `unapplySeq`, applies the selector as the
+extractor input, and constructs a typed `UnApply` whose children are the typed
+argument patterns. Explicit type arguments are handled on the extractor
+function. Overloaded resolution, aliases, and trailing type parameters need
+their own constraints; Scala rejects `unapply` signatures with type parameters
+after the last explicit term clause because `UnApply` cannot encode them.
+
+Most measured source shapes have one or two pattern arguments, while explicit
+type-applied calls and sequence wildcards are absent. The smallest useful
+first extractor increment is therefore a non-overloaded, non-generic `unapply`
+with one selector parameter and an `Option`-like result exposing `get`, first
+for one nested pattern. A following increment can extract product selectors
+for two-argument results. Defer `unapplySeq`, overloads, explicit extractor
+type arguments, contextual extractor clauses, and named arguments. The
+structural audit cannot establish prevalence of implicit/contextual extractor
+parameters: the classpath-backed run still materializes no external members,
+and the inspected representative trees have none.
+
+Pinned Scala 3.9.0 `Applications.typedUnApply` checks the selector against the
+extractor's first parameter. If the selector conforms, that selector type is
+the `UnApply` type; otherwise Scala performs pattern-type constraint
+inference and types nested arguments from the extractor result. For
+`unapply`, Scala handles Boolean results (zero arguments), `Option`-like
+results through `get`, and product results through component selectors.
+`unapplySeq` additionally expands sequence/product tails.
+[`TypeAssigner.assignType(UnApply, ...)`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/typer/TypeAssigner.scala#L543-L544)
+gives `UnApply` its prototype type. `typedUnApply` supplies the selector type when it
+conforms to the extractor input, and the extractor input type when Scala must
+constrain the pattern; neither case uses the extractor's `Option` or product
+return type as `Typed UnApply.ty`. The existing case-scope transaction,
+explicit binder entry, and recursive pattern typing can be reused for each
+extracted component; component types should be passed as child prototypes and
+all bindings should remain inside the current case scope.
+
+The same audit counts 443 alternative roots and 479 tuple roots. Alternatives
+can be a small, independent Match increment before extractor support: type
+each branch under the same selector prototype and validate that all branches
+introduce compatible bindings. Tuple patterns should be included with product
+extractors rather than a separate sprint. The pinned typed tree for
+`case (left, right)` is `Tuple2.unapply[Int, String](left @ _, right @ _)`, so
+tuple support depends on the same `UnApply` and product-selector lowering.
+
+The post-sprint typed-pattern inventory has 155 first-blocker runtime-test
+deferrals, 31 unsupported type-relation deferrals, and 258 type-tree projection
+deferrals in the isolated corpus probes (the first two categories also appear
+as 450 and 43 probe failures across all candidate cases). The runtime-test
+error currently groups generic/erased and other unsupported runtime shapes;
+it does not expose separate counts for those subtypes. No GADT-refinement or
+`TypeTest`/`ClassTag` synthesis error is reported because neither operation is
+implemented as a distinct typer path yet. The evidence does not make that work
+urgent: retain these boundaries while the extractor and type-projection
+increments are developed, and split the runtime categories only when a
+focused implementation requires that distinction.
 
 The ranked list remains a deterministic inventory of Typer-owned first errors
 observed after the resolver calls that succeeded; unresolved external symbols
