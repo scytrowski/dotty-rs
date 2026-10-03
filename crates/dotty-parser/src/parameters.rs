@@ -315,7 +315,10 @@ where
         let tpt = if is_parameter_colon(self) {
             self.advance();
             self.with_parse_kind(ParseKind::Type, |parser| {
-                if parser.current_is_arrow() {
+                let is_pure_by_name = parser.features().capture_checking
+                    && parser.current().kind == TokenKind::Operator
+                    && parser.current_text_is("->");
+                if parser.current_is_arrow() || is_pure_by_name {
                     let mark = parser.mark();
                     if is_class_parameter_owner(owner)
                         && !metadata.modifiers.contains(&Modifier::PrivateLocal)
@@ -1649,6 +1652,70 @@ mod tests {
         );
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_pure_by_name_parameter_types_with_capture_checking_enabled() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x: -> B)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Operator, 4, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            capture_checking: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a method parameter");
+        };
+        let TreeKind::ByNameTypeTree(by_name) = &parser.ast().get(parameter.tpt).kind else {
+            panic!("expected a pure by-name parameter type");
+        };
+        assert!(matches!(
+            parser.ast().get(by_name.result).kind,
+            TreeKind::Ident(identifier) if identifier.name.is_type()
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn does_not_treat_pure_arrow_as_by_name_without_capture_checking() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(x: -> B)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Operator, 4, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a method parameter");
+        };
+        assert!(!matches!(
+            parser.ast().get(parameter.tpt).kind,
+            TreeKind::ByNameTypeTree(_)
+        ));
+        assert!(!parser.diagnostics().is_empty());
     }
 
     #[test]
