@@ -737,15 +737,78 @@ impl TokenSource for ContextualScanner {
                 }
             }
             ScannerEvent::MatchCasesClosed { indent_offset } => {
-                let owns_top_region = self.feedback_regions.last().is_some_and(|region| {
-                    region.kind == FeedbackRegionKind::MatchCases
-                        && region.indent_offset == indent_offset
-                });
-                if owns_top_region
-                    && !self.current_starts_match_case()
+                let index = self.current_index();
+                if self.current().kind == TokenKind::Outdent
+                    && self.innermost_open_indent_offset(index) == Some(indent_offset)
+                {
+                    let mut operator_index = index + 1;
+                    while self.tokens.get(operator_index).is_some_and(|token| {
+                        matches!(
+                            token.kind,
+                            TokenKind::Outdent | TokenKind::Newline | TokenKind::Newlines
+                        )
+                    }) {
+                        operator_index += 1;
+                    }
+                    let Some(operator) = self.tokens.get(operator_index) else {
+                        return;
+                    };
+                    let previous = previous_real_token(&self.tokens, index);
+                    let next = next_real_token(&self.tokens, operator_index);
+                    let is_dedented_infix_continuation =
+                        matches!(
+                            operator.kind,
+                            TokenKind::Operator | TokenKind::BackquotedIdentifier
+                        ) && previous.is_some_and(|previous| {
+                            can_end_statement(Some(previous.kind))
+                                && has_source_line_break(
+                                    &self.source,
+                                    previous.span.end(),
+                                    operator.span.start(),
+                                )
+                                && !has_blank_line(
+                                    &self.source,
+                                    previous.span.end(),
+                                    operator.span.start(),
+                                )
+                        }) && line_indentation(&self.source, operator.span.start())
+                            .ordering(&line_indentation(&self.source, indent_offset))
+                            == IndentOrdering::Less
+                            && next.is_some_and(|next| can_start_statement_kind(next.kind));
+
+                    if is_dedented_infix_continuation {
+                        let separator_offset = operator.span.end();
+                        let separator = Token::new(
+                            TokenKind::Newline,
+                            TextRange::new(separator_offset, separator_offset)
+                                .expect("empty separator range is valid"),
+                        );
+                        // The first outdent closes this match's cases. Any
+                        // following outdents would prematurely end the case
+                        // body before its infix continuation; move that
+                        // boundary past the operator so its RHS stays in the
+                        // same expression.
+                        self.tokens.drain(index + 1..operator_index);
+                        self.tokens.insert(index + 2, separator);
+                    }
+
+                    if self.feedback_regions.last().is_some_and(|region| {
+                        region.kind == FeedbackRegionKind::MatchCases
+                            && region.indent_offset == indent_offset
+                    }) {
+                        self.feedback_regions.pop();
+                    }
+                    return;
+                }
+
+                if !self.current_starts_match_case()
                     && self.innermost_open_indent_offset(self.current_index())
                         == Some(indent_offset)
                     && self.insert_outdent_before_current(true, true, Some(indent_offset))
+                    && self.feedback_regions.last().is_some_and(|region| {
+                        region.kind == FeedbackRegionKind::MatchCases
+                            && region.indent_offset == indent_offset
+                    })
                 {
                     self.feedback_regions.pop();
                 }
@@ -5395,6 +5458,82 @@ mod tests {
         assert_eq!(
             scanner.current().kind,
             TokenKind::Keyword(HardKeyword::Case)
+        );
+    }
+
+    #[test]
+    fn match_case_closure_keeps_the_outer_infix_continuation_in_its_case_body() {
+        let source = "    case A =>\n      false\n  ||rhs";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        let case = scanner
+            .tokens
+            .iter()
+            .find(|token| token.kind == TokenKind::Keyword(HardKeyword::Case))
+            .expect("match case")
+            .clone();
+        let false_token = scanner
+            .tokens
+            .iter()
+            .find(|token| token.kind == TokenKind::Keyword(HardKeyword::False))
+            .expect("case body")
+            .clone();
+        let operator_start = source.find("||rhs").expect("infix continuation") as u32;
+        let operator_index = scanner
+            .tokens
+            .iter()
+            .position(|token| token.span.start() == operator_start)
+            .expect("operator token");
+        let operator = scanner.tokens[operator_index].clone();
+        let rhs = scanner
+            .tokens
+            .iter()
+            .find(|token| {
+                token.kind == TokenKind::Identifier
+                    && source.get(token.span.start() as usize..token.span.end() as usize)
+                        == Some("rhs")
+            })
+            .expect("infix operand")
+            .clone();
+        let indent_offset = case.span.start();
+        let synthetic_outdent = || {
+            Token::new(
+                TokenKind::Outdent,
+                TextRange::new(operator_start, operator_start).expect("empty outdent span"),
+            )
+        };
+        scanner.tokens = vec![
+            Token::new(
+                TokenKind::Indent,
+                TextRange::new(indent_offset, indent_offset).expect("empty indent span"),
+            ),
+            case,
+            false_token,
+            synthetic_outdent(),
+            synthetic_outdent(),
+            operator,
+            rhs,
+            Token::new(
+                TokenKind::Eof,
+                TextRange::new(source.len() as u32, source.len() as u32).expect("empty EOF span"),
+            ),
+        ];
+        scanner.position = 3;
+        assert_eq!(
+            scanner.innermost_open_indent_offset(scanner.position),
+            Some(indent_offset)
+        );
+
+        scanner.observe(ScannerEvent::MatchCasesClosed { indent_offset });
+
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        assert_eq!(scanner.lookahead(1).kind, TokenKind::Operator);
+        assert_eq!(scanner.lookahead(2).kind, TokenKind::Newline);
+        assert_eq!(scanner.lookahead(3).kind, TokenKind::Identifier);
+        assert!(
+            scanner
+                .tokens
+                .windows(2)
+                .all(|pair| { pair[0].span.end() <= pair[1].span.start() })
         );
     }
 
