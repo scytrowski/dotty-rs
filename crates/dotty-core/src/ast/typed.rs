@@ -588,6 +588,7 @@ mod tests {
         let body = builder.literal(Constant::Int(1), binding_type, Some(position));
 
         let bind = builder.bind(name, body, term_ref, false, Some(position));
+        let given_bind = builder.bind(name, body, term_ref, true, Some(position));
 
         let node = arena.get(bind);
         assert_eq!(node.ty, term_ref);
@@ -604,6 +605,10 @@ mod tests {
                 target: crate::types::TermRefTarget::Symbol(symbol),
                 ..
             }) if *symbol == crate::SymbolId::new(7)
+        ));
+        assert!(matches!(
+            &arena.get(given_bind).kind,
+            TreeKind::Bind(bind) if bind.given
         ));
     }
 
