@@ -857,7 +857,10 @@ patterns, optional guards (including line breaks between a pattern and its
 `if` guard), and expression bodies. Case bodies are represented as source-level
 `Block` nodes, and extractor-looking source patterns remain
 `Apply`/`TypeApply` until later semantic lowering. Full case-clause features
-and pattern semantics remain future work.
+and pattern semantics remain future work. A `match` clause may continue its
+selector across intervening newline tokens, as in a multiline method chain;
+the parser only consumes those separators when the next token is `match` and
+does not cross an intervening layout boundary such as `Outdent`.
 
 Nested match and case-body boundaries are closed by their active scanner
 `Indent` region, not by treating every encountered `case` as belonging to the

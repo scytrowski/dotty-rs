@@ -812,6 +812,61 @@ mod tests {
     }
 
     #[test]
+    fn match_continues_a_selector_across_a_newline() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "value\nmatch { case x => x }",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Newline, 5, 6),
+                token(TokenKind::Keyword(HardKeyword::Match), 6, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 12, 13),
+                token(TokenKind::Keyword(HardKeyword::Case), 14, 18),
+                token(TokenKind::Identifier, 19, 20),
+                token(TokenKind::Operator, 21, 23),
+                token(TokenKind::Identifier, 24, 25),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 26, 27),
+                token(TokenKind::Eof, 27, 27),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        assert!(matches!(parser.ast().get(tree).kind, TreeKind::Match(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn match_does_not_continue_across_an_outdent() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "value\nmatch { case x => x }",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Newline, 5, 6),
+                token(TokenKind::Outdent, 6, 6),
+                token(TokenKind::Keyword(HardKeyword::Match), 6, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 12, 13),
+                token(TokenKind::Keyword(HardKeyword::Case), 14, 18),
+                token(TokenKind::Identifier, 19, 20),
+                token(TokenKind::Operator, 21, 23),
+                token(TokenKind::Identifier, 24, 25),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 26, 27),
+                token(TokenKind::Eof, 27, 27),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        assert!(matches!(parser.ast().get(tree).kind, TreeKind::Ident(_)));
+        assert_eq!(parser.current().kind, TokenKind::Newline);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn parses_an_indented_match_case_region() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
