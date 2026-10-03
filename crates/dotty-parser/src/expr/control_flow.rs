@@ -16,7 +16,7 @@ where
         let cond = self.parse_control_condition(dotty_core::HardKeyword::Then, condition_feedback);
         let then_body_feedback =
             if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Then) {
-                let feedback = self.observe_indented_body();
+                let feedback = self.observe_indented_body_region_from(mark.start).is_some();
                 self.advance();
                 feedback
             } else if !parenthesized_condition {
