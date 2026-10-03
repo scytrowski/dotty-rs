@@ -2381,6 +2381,54 @@ fn parses_a_colon_followed_by_an_indented_lambda_as_an_argument() {
 }
 
 #[test]
+fn parses_a_selector_after_an_indented_colon_lambda_argument() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo: cb =>\n  cb()\n.bar\nnext",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::ColonFollow, 3, 4),
+            token(TokenKind::Identifier, 5, 7),
+            token(TokenKind::Operator, 8, 10),
+            token(TokenKind::Indent, 11, 11),
+            token(TokenKind::Identifier, 13, 15),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 15, 16),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+            token(TokenKind::Outdent, 17, 17),
+            token(TokenKind::Punctuation(Punctuation::Dot), 18, 19),
+            token(TokenKind::Identifier, 19, 22),
+            token(TokenKind::Newline, 22, 23),
+            token(TokenKind::Identifier, 23, 27),
+            token(TokenKind::Eof, 27, 27),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Select(selection) = &parser.ast().get(tree).kind else {
+        panic!("expected the selector after the colon-lambda argument");
+    };
+    let TreeKind::Apply(colon_application) = &parser.ast().get(selection.qualifier).kind else {
+        panic!("expected the colon-lambda application before the selector");
+    };
+    assert!(matches!(
+        parser.ast().get(colon_application.args[0]).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Function(_))
+    ));
+    assert_eq!(parser.names.resolve(selection.name.text()), "bar");
+    assert_eq!(parser.current().kind, TokenKind::Newline);
+    assert!(
+        parser.diagnostics().is_empty(),
+        "{:?}",
+        parser.diagnostics()
+    );
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 22).unwrap()
+    );
+}
+
+#[test]
 fn parses_a_backquoted_parameter_in_a_colon_lambda_argument() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
