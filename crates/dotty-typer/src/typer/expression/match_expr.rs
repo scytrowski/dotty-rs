@@ -5,7 +5,7 @@ use dotty_core::ast::{TreeKind, TypedAstBuilder};
 use dotty_core::{SourceId, SymbolId, SymbolInfo, TreeId, TypeId, Typed, Untyped};
 
 impl SourceTyper<'_> {
-    /// Types one unguarded wildcard case without opening a nested transaction.
+    /// Types one supported match case without opening a nested transaction.
     pub(super) fn type_case_def(
         &mut self,
         case_tree: TreeId<Untyped>,
@@ -43,12 +43,18 @@ impl SourceTyper<'_> {
                     info_journal,
                     new_mappings,
                 )?;
-                if case_def.guard.is_some() {
-                    return Err(TyperError::MatchGuardDeferred {
-                        source: self.source,
-                        tree_index: case_tree.index(),
-                    });
-                }
+                let guard = case_def
+                    .guard
+                    .map(|guard| {
+                        self.type_expression_expected_inner(
+                            guard,
+                            case_context,
+                            self.definitions.boolean,
+                            info_journal,
+                            new_mappings,
+                        )
+                    })
+                    .transpose()?;
                 let body = self.type_expression_inner(
                     case_def.body,
                     case_context,
@@ -57,7 +63,7 @@ impl SourceTyper<'_> {
                 )?;
                 let body_type = self.typed_arena.get(body).ty;
                 let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
-                    .case_def(pattern, None, body, body_type, source_tree.position);
+                    .case_def(pattern, guard, body, body_type, source_tree.position);
                 self.typed_index
                     .insert(self.source, case_tree, typed)
                     .map_err(|error| TyperError::ConflictingTypedExpression {
@@ -350,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn guarded_case_is_deferred_and_rolls_back_its_pattern() {
+    fn wildcard_guard_is_typed_as_boolean_and_retained_on_the_case() {
         let (parsed, mut store, packages, definitions, index, source) =
             setup("class C { def choose(x: Int): Int = x match { case _ if true => 1 } }");
         let (method, case_tree) = method_and_case(&parsed, &store, &index, source);
@@ -363,12 +369,182 @@ mod tests {
             source,
             method,
         );
+        let typed_case = type_one_case(&mut typer, case_tree, definitions.int, context).unwrap();
+        let typed_node = typer.typed_arena.get(typed_case);
+        let TreeKind::CaseDef(case) = &typed_node.kind else {
+            panic!("expected typed CaseDef")
+        };
+        let guard = case.guard.expect("typed CaseDef should retain the guard");
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(guard).ty),
+            Some(Type::Constant(dotty_core::Constant::Boolean(true)))
+        ));
+        assert_eq!(typed_node.ty, typer.typed_arena.get(case.body).ty);
+        assert_eq!(typer.typed_arena.get(case.pattern).ty, definitions.int);
+    }
+
+    #[test]
+    fn variable_pattern_binding_is_visible_in_guard_and_body() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { def predicate(value: Int): Boolean = true; def choose(x: Int): Int = x match { case item if predicate(item) => item } }",
+        );
+        let (method, case_tree) = method_and_case(&parsed, &store, &index, source);
+        let TreeKind::CaseDef(source_case) = parsed.ast.get(case_tree).kind else {
+            panic!("expected source CaseDef")
+        };
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed_case = type_one_case(&mut typer, case_tree, definitions.int, context).unwrap();
+        let TreeKind::CaseDef(case) = typer.typed_arena.get(typed_case).kind.clone() else {
+            panic!("expected typed CaseDef")
+        };
+        let symbol = typer
+            .pattern_binding_symbol_at(source, source_case.pattern)
+            .unwrap();
+        let guard = case.guard.unwrap();
+        let TreeKind::Apply(application) = typer.typed_arena.get(guard).kind.clone() else {
+            panic!("guard should type as a method application")
+        };
+        let argument = application.args[0];
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(argument).ty),
+            Some(Type::TermRef { target: TermRefTarget::Symbol(actual), .. })
+                if *actual == symbol
+        ));
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(case.body).ty),
+            Some(Type::TermRef { target: TermRefTarget::Symbol(actual), .. })
+                if *actual == symbol
+        ));
+    }
+
+    #[test]
+    fn explicit_bind_and_literal_patterns_can_have_guards() {
+        for (case_pattern, selector, expected_pattern) in [
+            ("item @ _", "Int", "bind"),
+            ("1", "Int", "literal"),
+            ("Stable", "Int", "stable"),
+        ] {
+            let source_text = format!(
+                "class C {{ val Stable: Int = 1; def choose(x: {selector}): Int = x match {{ case {case_pattern} if true => 1 }} }}"
+            );
+            let (parsed, mut store, packages, definitions, index, source) = setup(&source_text);
+            let (method, case_tree) = method_and_case(&parsed, &store, &index, source);
+            let (mut typer, context) = context_for(
+                &parsed,
+                &mut store,
+                &packages,
+                definitions,
+                &index,
+                source,
+                method,
+            );
+            let typed_case =
+                type_one_case(&mut typer, case_tree, definitions.int, context).unwrap();
+            let TreeKind::CaseDef(case) = typer.typed_arena.get(typed_case).kind.clone() else {
+                panic!("expected typed CaseDef for {expected_pattern}")
+            };
+            assert!(case.guard.is_some(), "{expected_pattern} guard is present");
+        }
+    }
+
+    #[test]
+    fn non_boolean_guard_fails_before_the_body_is_typed() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case _ if 1 => missing } }");
+        let (method, case_tree) = method_and_case(&parsed, &store, &index, source);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
         assert!(matches!(
             type_one_case(&mut typer, case_tree, definitions.int, context),
-            Err(TyperError::MatchGuardDeferred { tree_index, .. }) if tree_index == case_tree.index()
+            Err(TyperError::ExpectedExpressionTypeMismatch { expected, .. })
+                if expected == definitions.boolean
         ));
         assert_eq!(typer.typed_arena.iter().count(), 0);
         assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn unsupported_pattern_fails_before_its_guard_is_typed() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case _: Int if missing => 1 } }");
+        let (method, case_tree) = method_and_case(&parsed, &store, &index, source);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        assert!(matches!(
+            type_one_case(&mut typer, case_tree, definitions.int, context),
+            Err(TyperError::UnsupportedPattern { .. })
+        ));
+        assert_eq!(typer.typed_arena.iter().count(), 0);
+        assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn guard_cannot_resolve_a_binding_from_a_sibling_case() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { def choose(x: Int): Int = x match { case first if true => 1; case other if first => other } }",
+        );
+        let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        assert!(matches!(
+            typer.type_expression(match_tree, context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+        assert!(typer.typed_index.is_empty());
+        assert_eq!(typer.typed_arena.iter().count(), 0);
+    }
+
+    #[test]
+    fn body_failure_rolls_back_previously_typed_guard_and_pattern() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case item if true => missing } }");
+        let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        assert!(matches!(
+            typer.type_expression(match_tree, context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+        assert!(typer.typed_index.is_empty());
+        assert_eq!(typer.typed_arena.iter().count(), 0);
     }
 
     #[test]
@@ -678,7 +854,7 @@ mod tests {
     #[test]
     fn a_later_match_case_failure_rolls_back_the_entire_match() {
         let (parsed, mut store, packages, definitions, index, source) = setup(
-            "class C { def choose(x: Int): Any = x match { case _ => 1; case _ if true => 2 } }",
+            "class C { def choose(x: Int): Any = x match { case _ => 1; case _ if 1 => 2 } }",
         );
         let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
         let (mut typer, context) = context_for(
@@ -692,7 +868,7 @@ mod tests {
         );
         assert!(matches!(
             typer.type_expression(match_tree, context),
-            Err(TyperError::MatchGuardDeferred { .. })
+            Err(TyperError::ExpectedExpressionTypeMismatch { .. })
         ));
         assert!(typer.typed_index.is_empty());
         assert_eq!(typer.typed_arena.iter().count(), 0);
@@ -1150,12 +1326,17 @@ mod tests {
                     typer.enter_pattern_binding(binding, name, definitions.int, case_context)?;
                 let scope = typer.pattern_binding_scope(symbol).unwrap();
                 allocated = Some((symbol, term_ref, scope));
-                Err(TyperError::MatchGuardDeferred {
+                Err(TyperError::PatternTypeMismatch {
                     source,
                     tree_index: matched.cases[0].index(),
+                    actual: definitions.int,
+                    selector: definitions.boolean,
                 })
             });
-        assert!(matches!(result, Err(TyperError::MatchGuardDeferred { .. })));
+        assert!(matches!(
+            result,
+            Err(TyperError::PatternTypeMismatch { .. })
+        ));
         let (symbol, term_ref, scope) = allocated.unwrap();
         assert!(!typer.store.symbols.contains(symbol));
         assert!(!typer.store.scopes.contains(scope));
