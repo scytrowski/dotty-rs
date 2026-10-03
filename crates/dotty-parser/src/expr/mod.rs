@@ -129,7 +129,8 @@ where
             return self.parse_ascription(lhs);
         }
         if self.current().kind == TokenKind::ColonEol {
-            return self.parse_colon_argument(lhs);
+            let application = self.parse_colon_argument(lhs);
+            return self.expr1_rest(application);
         }
         lhs
     }

@@ -16,14 +16,27 @@ where
             .unwrap_or_else(|| self.mark().start());
 
         let argument = self.parse_colon_argument_body();
-        self.alloc_from(
+        let application = self.alloc_from(
             crate::Mark { start },
             TreeKind::Apply(Apply {
                 function,
                 args: vec![argument],
                 kind: ApplyKind::Regular,
             }),
-        )
+        );
+
+        // Colon arguments are a simple-expression suffix in Scala's grammar.
+        // The case/block body may close an indentation region while the
+        // enclosing expression still has selectors or applications to parse.
+        let mark = crate::Mark {
+            start: self
+                .ast
+                .get(function)
+                .position
+                .map(|position| position.span().range().start())
+                .unwrap_or(start),
+        };
+        self.simple_expr_rest(mark, application, true)
     }
 
     pub(super) fn parse_colon_argument_body(&mut self) -> TreeId<Untyped> {
