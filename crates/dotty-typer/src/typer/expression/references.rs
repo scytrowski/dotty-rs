@@ -105,8 +105,7 @@ impl SourceTyper<'_> {
             | SymbolKind::Value
             | SymbolKind::Variable
             | SymbolKind::Local
-            | SymbolKind::Method
-            | SymbolKind::Package => {}
+            | SymbolKind::Method => {}
             SymbolKind::Object => {
                 if self.source_module_class_of_object(symbol).is_err() {
                     return Err(TyperError::ObjectTermReferenceDeferred {
@@ -393,8 +392,16 @@ impl SourceTyper<'_> {
                 tree_index: tree.index(),
             });
         }
-        let qualifier =
-            self.type_expression_inner(selection.qualifier, context, info_journal, new_mappings)?;
+        let qualifier = if let Some(qualifier) = self.type_package_identifier_qualifier(
+            selection.qualifier,
+            context,
+            tree.index(),
+            position,
+        )? {
+            qualifier
+        } else {
+            self.type_expression_inner(selection.qualifier, context, info_journal, new_mappings)?
+        };
         let receiver_type = self.typed_arena.get(qualifier).ty;
         self.require_stable_selection_prefix(receiver_type, tree.index())?;
         let package_receiver = matches!(
@@ -464,5 +471,57 @@ impl SourceTyper<'_> {
                 position,
             ),
         )
+    }
+
+    /// Packages can qualify a selection, but they are not values that can
+    /// appear as standalone expressions. Build their typed reference only
+    /// while typing the qualifier side of a selection.
+    fn type_package_identifier_qualifier(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<Option<TreeId<Typed>>, TyperError> {
+        let Some(node) = self.arena.try_get(tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            });
+        };
+        let TreeKind::Ident(ident) = &node.kind else {
+            return Ok(None);
+        };
+        let symbol =
+            match self.expression_term_candidates(ident.name, context, tree_index, position) {
+                Ok(candidates) if candidates.len() == 1 => candidates[0],
+                Ok(_) => return Ok(None),
+                Err(TyperError::TermNameNotFound { .. }) => {
+                    let Some(symbol) =
+                        self.resolve_qualifier_symbol(tree, context.lexical, tree_index, position)?
+                    else {
+                        return Ok(None);
+                    };
+                    symbol
+                }
+                Err(error) => return Err(error),
+            };
+        if !self.store.symbols.contains(symbol)
+            || self.store.symbols.get(symbol).kind != SymbolKind::Package
+        {
+            return Ok(None);
+        }
+        let ty = self.store.types.alloc(Type::TermRef {
+            prefix: self.definitions.no_prefix,
+            target: TermRefTarget::Symbol(symbol),
+        });
+        Ok(Some(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).ident_with_backquoted(
+                ident.name,
+                ident.backquoted,
+                ty,
+                node.position,
+            ),
+        ))
     }
 }

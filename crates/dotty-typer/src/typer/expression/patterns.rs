@@ -2290,10 +2290,9 @@ mod tests {
             panic!("expected extractor application");
         };
         let source_function = application.function;
-        let TreeKind::Select(selection) = &parsed.ast.get(source_function).kind else {
+        let TreeKind::Select(_) = &parsed.ast.get(source_function).kind else {
             panic!("expected package-selected extractor");
         };
-        let package_tree = selection.qualifier;
         let (mut typer, context) = context_for(
             &parsed,
             &mut store,
@@ -2346,7 +2345,11 @@ mod tests {
             panic!("expected unapply method");
         };
         assert_eq!(signature.result, definitions.boolean);
-        let typed_package = typer.typed_index.get(source, package_tree).unwrap();
+        let TreeKind::Select(extractor_selection) = &typer.typed_arena.get(function.qualifier).kind
+        else {
+            panic!("expected package-qualified extractor selection");
+        };
+        let typed_package = extractor_selection.qualifier;
         assert!(matches!(
             typer.store.types.try_get(typer.typed_arena.get(typed_package).ty),
             Some(Type::TermRef { target: TermRefTarget::Symbol(package), .. })
@@ -2359,6 +2362,42 @@ mod tests {
                 if typer.store.names.resolve(selection.name.text()) == "Extractor"
         ));
         assert_eq!(typer.typed_index.get(source, pattern), Some(typed_pattern));
+    }
+
+    #[test]
+    fn package_name_is_not_a_standalone_expression() {
+        let source_text = "package p { object Extractor { def unapply(value: Int): Boolean = true } }; package client { class C { def read: Any = p } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let (method, rhs) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "read" =>
+                {
+                    Some((index.symbol_at(source, tree)?, definition.rhs?))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+
+        let error = typer.type_expression(rhs, context).unwrap_err();
+        assert!(matches!(
+            error,
+            TyperError::UnsupportedTermReference {
+                kind: SymbolKind::Package,
+                ..
+            }
+        ));
     }
 
     fn typed_function_symbol(typer: &SourceTyper<'_>, function: TreeId<Typed>) -> SymbolId {
