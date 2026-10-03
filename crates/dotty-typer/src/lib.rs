@@ -45,8 +45,8 @@ pub use source_typed_index::{ConflictingTypedTree, SourceTypedIndex};
 pub use typer::{
     ConstructorCandidate, ExpressionContext, ExpressionScopeId, MAX_MEMBER_LOOKUP_DEPTH,
     MAX_TYPE_RELATION_DEPTH, MAX_TYPE_RELATION_VIEWS, MAX_UNION_RELATION_COMPARISONS,
-    MemberCandidate, MemberLookupError, SourceTyper, TypeArgumentBoundSide, TypeRelationError,
-    TyperError,
+    MemberCandidate, MemberLookupError, PatternKind, SourceTyper, TypeArgumentBoundSide,
+    TypeRelationError, TyperError,
 };
 pub use types::{
     MAX_TYPE_NORMALIZATION_DEPTH, SymbolInfoState, TypeNormalizeError, TypeNormalizer,

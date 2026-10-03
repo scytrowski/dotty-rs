@@ -1,4 +1,4 @@
-//! Mapping from source expression trees to their typed replacements.
+//! Mapping from source trees to their typed replacements.
 
 use std::collections::HashMap;
 use std::fmt;
