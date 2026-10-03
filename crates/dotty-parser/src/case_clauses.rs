@@ -9,6 +9,14 @@ where
 {
     /// Parses one `case Pattern [if Guard] =>` production.
     pub(crate) fn case_clause(&mut self, expr_only: bool) -> TreeId<Untyped> {
+        self.case_clause_in_region(expr_only, None)
+    }
+
+    fn case_clause_in_region(
+        &mut self,
+        expr_only: bool,
+        case_region_indent_offset: Option<u32>,
+    ) -> TreeId<Untyped> {
         let mark = self.mark();
         if !self.accept(TokenKind::Keyword(HardKeyword::Case)) {
             self.report(ParseDiagnosticKind::ExpectedToken, "expected `case`");
@@ -50,7 +58,11 @@ where
                     // indented expression as a BlockExpr. Keep the indentation
                     // token visible so the shared case-body parser consumes
                     // the complete statement sequence and its matching outdent.
-                    let body = parser.parse_case_body(body_mark, body_indent_offset);
+                    let body = parser.parse_case_body(
+                        body_mark,
+                        body_indent_offset,
+                        case_region_indent_offset,
+                    );
                     if let TreeKind::Block(Block { stats, expr }) = &parser.ast.get(body).kind
                         && stats.is_empty()
                     {
@@ -65,7 +77,7 @@ where
         } else {
             let body_indent_offset = self.observe_case_body_indented(mark.start);
             self.advance();
-            self.parse_case_body(body_mark, body_indent_offset)
+            self.parse_case_body(body_mark, body_indent_offset, case_region_indent_offset)
         };
         self.alloc_from(
             mark,
@@ -100,7 +112,7 @@ where
                 break;
             }
             let checkpoint = self.cursor.checkpoint();
-            cases.push(self.case_clause(false));
+            cases.push(self.case_clause_in_region(false, region_indent_offset));
             self.consume_case_separators();
             if !self.cursor.progressed_since(checkpoint) {
                 self.report(
@@ -169,6 +181,7 @@ where
         &mut self,
         mark: crate::Mark,
         body_indent: Option<(u32, bool)>,
+        case_region_indent_offset: Option<u32>,
     ) -> TreeId<Untyped> {
         self.consume_case_newlines();
         let body_starts_after_newline = self
@@ -176,9 +189,18 @@ where
             .as_str()
             .get(mark.start as usize..self.current().span.start() as usize)
             .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
-        if body_indent.is_none()
-            && body_starts_after_newline
-            && matches!(
+        if body_indent.is_none() && body_starts_after_newline {
+            // A case whose body starts on the next line may have no eager or
+            // parser-requested body Indent. Give the scanner a chance to close
+            // the active layout region before deciding whether the first token
+            // belongs to this body or is a dedented sibling statement/member.
+            // A nested case list can contain an empty last case followed by
+            // another expression in its enclosing case body. Close that
+            // exact match-case region, rather than an arbitrary outer layout
+            // region, before deciding whether the case body is empty.
+            if let Some(indent_offset) = case_region_indent_offset {
+                self.observe_outdented_layout_region(indent_offset);
+            } else if matches!(
                 self.current().kind,
                 TokenKind::Keyword(
                     HardKeyword::Class
@@ -194,13 +216,9 @@ where
                         | HardKeyword::Var
                         | HardKeyword::Def
                 )
-            )
-        {
-            // A case whose body starts on the next line may have no eager or
-            // parser-requested body Indent. Give the scanner a chance to close
-            // the active layout region before deciding whether the first token
-            // belongs to this body or is a dedented sibling statement/member.
-            self.observe_outdented();
+            ) {
+                self.observe_outdented();
+            }
         }
         if matches!(
             self.current().kind,
