@@ -55,7 +55,7 @@ impl SourceTyper<'_> {
                         )
                     })
                     .transpose()?;
-                let body = self.type_expression_inner(
+                let body = self.type_value_expression_inner(
                     case_def.body,
                     case_context,
                     info_journal,
@@ -95,8 +95,12 @@ impl SourceTyper<'_> {
             });
         }
 
-        let selector =
-            self.type_expression_inner(matched.selector, context, info_journal, new_mappings)?;
+        let selector = self.type_value_expression_inner(
+            matched.selector,
+            context,
+            info_journal,
+            new_mappings,
+        )?;
         let selector_type = self.typed_arena.get(selector).ty;
         let pattern_type = self
             .pattern_selector_type(selector_type, info_journal)

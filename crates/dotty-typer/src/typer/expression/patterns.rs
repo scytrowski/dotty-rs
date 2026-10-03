@@ -2414,7 +2414,7 @@ mod tests {
 
     #[test]
     fn nested_package_path_is_only_a_qualifier() {
-        let source_text = "package p { package q { class C; object Extractor { def unapply(value: Int): Boolean = true } } }; package client { class C { def choose(value: Int): Int = value match { case p.q.Extractor() => 1; case _ => 0 }; def read: Any = p.q; def readParen: Any = (p.q); def classAsTerm: Any = p.q.C; def classAsTermParen: Any = (p.q.C); def blockRead: Int = { p.q; 1 } } }";
+        let source_text = "package p { package q { class C; object Extractor { def unapply(value: Int): Boolean = true } } }; package client { class C { def choose(value: Int): Int = value match { case p.q.Extractor() => 1; case _ => 0 }; def read: Any = p.q; def readParen: Any = (p.q); def classAsTerm: Any = p.q.C; def classAsTermParen: Any = (p.q.C); def blockRead: Int = { p.q; 1 }; def whileRead: Unit = while true do p.q } }";
         let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
         let (choose, match_tree, package_path) = parsed
             .ast
@@ -2567,6 +2567,28 @@ mod tests {
         let block_context = typer.expression_context_for(block_read).unwrap();
         assert!(matches!(
             typer.type_expression(block_read_rhs, block_context),
+            Err(TyperError::UnsupportedTermReference {
+                kind: SymbolKind::Package,
+                ..
+            })
+        ));
+
+        let (while_read, while_read_rhs) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if typer.store.names.resolve(definition.name.as_name().text())
+                        == "whileRead" =>
+                {
+                    Some((index.symbol_at(source, tree)?, definition.rhs?))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let while_context = typer.expression_context_for(while_read).unwrap();
+        assert!(matches!(
+            typer.type_expression(while_read_rhs, while_context),
             Err(TyperError::UnsupportedTermReference {
                 kind: SymbolKind::Package,
                 ..

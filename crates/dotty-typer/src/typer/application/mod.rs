@@ -92,7 +92,7 @@ impl SourceTyper<'_> {
         } else if let Some(resolved) = resolved_function {
             (resolved.typed, resolved.callable, Some(resolved.arguments))
         } else {
-            let function = self.type_expression_inner(
+            let function = self.type_value_expression_inner(
                 application.function,
                 context,
                 info_journal,
@@ -142,7 +142,7 @@ impl SourceTyper<'_> {
             } else {
                 let mut arguments = Vec::with_capacity(argument_trees.len());
                 for argument_tree in &argument_trees {
-                    let typed = self.type_expression_inner(
+                    let typed = self.type_value_expression_inner(
                         *argument_tree,
                         context,
                         info_journal,
@@ -301,7 +301,7 @@ impl SourceTyper<'_> {
                 );
                 (typed_argument.typed, typed_argument.widened_type)
             } else {
-                let argument = self.type_expression_inner(
+                let argument = self.type_value_expression_inner(
                     *argument_tree,
                     context,
                     info_journal,
@@ -364,7 +364,7 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let function = match self.type_expression_inner(
+        let function = match self.type_value_expression_inner(
             application.function,
             context,
             info_journal,

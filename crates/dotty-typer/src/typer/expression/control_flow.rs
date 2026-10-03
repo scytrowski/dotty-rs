@@ -254,10 +254,18 @@ impl SourceTyper<'_> {
                 }
                 other => other,
             })?;
-        let then_branch =
-            self.type_expression_inner(if_expr.then_branch, context, info_journal, new_mappings)?;
-        let else_branch =
-            self.type_expression_inner(if_expr.else_branch, context, info_journal, new_mappings)?;
+        let then_branch = self.type_value_expression_inner(
+            if_expr.then_branch,
+            context,
+            info_journal,
+            new_mappings,
+        )?;
+        let else_branch = self.type_value_expression_inner(
+            if_expr.else_branch,
+            context,
+            info_journal,
+            new_mappings,
+        )?;
         let then_type = self
             .widen_expression_type_journaled(self.typed_arena.get(then_branch).ty, info_journal, 0)
             .map_err(|error| TyperError::IfBranchTypeCannotBeWidened {
@@ -334,7 +342,7 @@ impl SourceTyper<'_> {
                 other => other,
             })?;
         let body =
-            self.type_expression_inner(while_expr.body, context, info_journal, new_mappings)?;
+            self.type_value_expression_inner(while_expr.body, context, info_journal, new_mappings)?;
         Ok(
             TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).while_expr(
                 cond,

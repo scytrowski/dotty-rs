@@ -34,7 +34,8 @@ impl SourceTyper<'_> {
             });
         }
 
-        let left = self.type_expression_inner(infix.left, context, info_journal, new_mappings)?;
+        let left =
+            self.type_value_expression_inner(infix.left, context, info_journal, new_mappings)?;
         let receiver_type = self.typed_arena.get(left).ty;
         let resolved = self.resolve_infix_application_function(
             InfixApplicationRequest {
