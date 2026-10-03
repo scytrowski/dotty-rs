@@ -1,9 +1,11 @@
 # Binary product extractor oracle
 
 Pinned to Scala 3.9.0 revision
-`777528f19a58e794c9954a42f433373472ec57f8`. The fixture exercises both the
-direct product result and the Option-like `get` result path. Its normalized
-typed pattern shapes are:
+`777528f19a58e794c9954a42f433373472ec57f8`. The fixture exercises a direct
+`unapply` result that conforms to `scala.Product` and the Option-like `get`
+result path. For the latter, selectors come from the type of `get`, even when
+the wrapper itself also declares `_1` and `_2`. Its normalized typed pattern
+shapes are:
 
 ```text
 direct:

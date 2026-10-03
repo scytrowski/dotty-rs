@@ -54,6 +54,8 @@ pub enum ExtractorResultMemberIssue {
 pub enum ExtractorProductIssue {
     /// The product does not expose the ordered `_1` and `_2` selectors.
     SelectorShape,
+    /// The result's relation to `scala.Product` cannot be checked.
+    ProductRelationUnsupported,
 }
 
 impl PatternKind {

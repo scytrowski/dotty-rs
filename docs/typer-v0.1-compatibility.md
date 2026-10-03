@@ -156,15 +156,18 @@ The pinned Scala 3.9.0 oracles and normalized shapes are recorded in
 and [`binary-product-extractors`](../crates/dotty-typer/tests/fixtures/binary-product-extractors).
 
 Binary product extraction accepts exactly two source arguments and two ordered
-component selectors. The semantic subset discovers parameterless `_1` and
-`_2` members through ordinary inherited member lookup, and probes `_3` so a
-three-component result is rejected instead of truncated. The same selector
-lookup applies directly to an `unapply` result or to the value returned by an
-Option-like `get`. Each component is passed to recursive pattern typing in
-source order and remains in the existing CaseDef-local binding scope. A
-missing, ambiguous, methodic, or otherwise unsupported selector returns a
-focused extractor error. The normalized pinned fixture records both direct
-product and `get` result shapes.
+component selectors. A direct `unapply` result must conform to
+`scala.Product`; its parameterless `_1` and `_2` members are discovered through
+ordinary inherited member lookup. If the direct result does not satisfy that
+requirement, the Option-like path checks `isEmpty` and reads selectors from the
+type returned by `get`, without using selectors declared by the wrapper. The
+typer probes `_3` so a third valid parameterless value selector is rejected
+instead of truncated; a methodic or otherwise invalid `_3` is not a selector.
+Each component is passed to recursive pattern typing in source order and
+remains in the existing CaseDef-local binding scope. Missing, ambiguous, or
+otherwise unsupported required selectors return a focused extractor error.
+The normalized pinned fixture records both direct product and `get` result
+shapes.
 
 Zero or multiple nested patterns for scalar Option-like extractors, nonzero
 nested patterns for Boolean extractors, missing/ambiguous selected qualifier members,
