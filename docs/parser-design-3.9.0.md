@@ -195,10 +195,10 @@ being captured by a complete expression.
 Reusable recovery sets cover statements, arguments, type arguments, case
 clauses, and for enumerators. Every recovery loop checks that the token source
 advances; a broken external source cannot turn recovery into an infinite loop.
-Valid but not yet implemented constructs such as `do ... while` and XML syntax
-produce an `UnsupportedSyntax` diagnostic and a recoverable error tree instead
-of a panic. Scala 3 quotes are parsed by the expression and type grammar
-described below.
+Valid but not yet implemented constructs such as XML syntax produce an
+`UnsupportedSyntax` diagnostic and a recoverable error tree instead of a
+panic. Scala 3 quotes are parsed by the expression and type grammar described
+below.
 
 ## AST root and current grammar
 
@@ -321,6 +321,9 @@ markers; inline expansion and typing remain deferred
 including indented `try` bodies with local definitions represented in a shared
 expression `Block`, including scanner-feedback regions nested in braces, with
 `catch`/`finally` kept outside the body boundary
+legacy `do body while condition`, normalized like Dotty to a `While` whose
+condition is a block containing the body followed by the condition, and whose
+loop body is synthetic Unit
 braced and indented `match` expressions with `case` patterns, guards, and bodies
 single-case `match` expressions in the expression-only form
 braced partial-function literals (`{ case ... }`), including as a braced

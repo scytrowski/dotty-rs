@@ -73,6 +73,10 @@ where
     }
 
     fn expr1(&mut self) -> TreeId<Untyped> {
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Do) {
+            let mark = self.mark();
+            return self.parse_do_while_expr(mark);
+        }
         if self.current().kind == TokenKind::Identifier
             && self.current_text_is("inline")
             && (self.starts_inline_if() || self.starts_inline_match())
