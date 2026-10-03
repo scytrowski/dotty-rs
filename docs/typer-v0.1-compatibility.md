@@ -166,8 +166,8 @@ missing, ambiguous, methodic, or otherwise unsupported selector returns a
 focused extractor error. The normalized pinned fixture records both direct
 product and `get` result shapes.
 
-Zero or multiple nested patterns for Option-like extractors, nonzero nested
-patterns for Boolean extractors, missing/ambiguous selected qualifier members,
+Zero or multiple nested patterns for scalar Option-like extractors, nonzero
+nested patterns for Boolean extractors, missing/ambiguous selected qualifier members,
 missing/overloaded Option-like protocol members, and non-Boolean `isEmpty`
 return focused extractor errors. Products with selector sets other than
 exactly `_1`, `_2`, source argument counts other than two for product results,
@@ -182,7 +182,7 @@ The dedicated `type_case_def` helper in `expression/match_expr.rs` types
 supported `CaseDef` nodes independently; `Match` expression typing
 is supported for matches whose cases use wildcards, variable patterns, typed
 patterns in the bounded subset above, literal patterns, stable-value patterns,
-the unary Option-like extractors above, non-binding alternatives, or explicit
+the unary Option-like and binary product extractors above, non-binding alternatives, or explicit
 bindings over wildcard, literal, stable-value, and typed wildcard patterns. An explicit binder's info is normally the selector prototype; when
 its complete nested pattern is a typed wildcard, its info is narrowed to that
 pattern type. The nested pattern retains its own type. It types the
