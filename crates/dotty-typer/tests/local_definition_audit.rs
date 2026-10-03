@@ -1131,11 +1131,7 @@ fn probe_supported_match_cases(
     text: &str,
     path: &str,
     classpath: SharedClassPath,
-    typed_pattern_boundaries: &mut BTreeMap<String, usize>,
-    success_files: &mut BTreeMap<String, BTreeSet<String>>,
-    failures: &mut BTreeMap<String, usize>,
-    failure_files: &mut BTreeMap<String, BTreeSet<String>>,
-    extractor_protocol_successes: &mut BTreeMap<String, usize>,
+    profile: &mut MatchProfile,
 ) -> BTreeMap<String, usize> {
     let source = SourceId::from_index(0);
     let mut store = SemanticStore::new();
@@ -1273,12 +1269,14 @@ fn probe_supported_match_cases(
             Ok(_) => {
                 let bucket = family_success_bucket(&family).to_owned();
                 *successes.entry(bucket.clone()).or_default() += 1;
-                success_files
+                profile
+                    .typed_case_success_files
                     .entry(bucket)
                     .or_default()
                     .insert(path.to_owned());
                 if let Some(protocol) = protocol {
-                    *extractor_protocol_successes
+                    *profile
+                        .extractor_protocol_successes
                         .entry(protocol.to_owned())
                         .or_default() += 1;
                 }
@@ -1290,8 +1288,12 @@ fn probe_supported_match_cases(
             }
             Err(error) => {
                 let error_name = typed_case_failure_label(&error);
-                *failures.entry(error_name.clone()).or_default() += 1;
-                failure_files
+                *profile
+                    .typed_case_failures
+                    .entry(error_name.clone())
+                    .or_default() += 1;
+                profile
+                    .typed_case_failure_files
                     .entry(error_name)
                     .or_default()
                     .insert(path.to_owned());
@@ -1312,7 +1314,8 @@ fn probe_supported_match_cases(
                 };
                 if family.starts_with("typed") {
                     if let Some(boundary) = boundary {
-                        *typed_pattern_boundaries
+                        *profile
+                            .typed_pattern_boundaries
                             .entry(boundary.to_owned())
                             .or_default() += 1;
                     }
@@ -1595,16 +1598,9 @@ fn audit_source_inner(
         }
     }
     if let Some(classpath) = probe_classpath {
-        audit.match_profile.typed_case_successes = probe_supported_match_cases(
-            text,
-            path,
-            classpath,
-            &mut audit.match_profile.typed_pattern_boundaries,
-            &mut audit.match_profile.typed_case_success_files,
-            &mut audit.match_profile.typed_case_failures,
-            &mut audit.match_profile.typed_case_failure_files,
-            &mut audit.match_profile.extractor_protocol_successes,
-        );
+        let successes =
+            probe_supported_match_cases(text, path, classpath, &mut audit.match_profile);
+        audit.match_profile.typed_case_successes = successes;
     }
     audit
 }
