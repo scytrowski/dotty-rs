@@ -114,16 +114,19 @@ where
 
         loop {
             if self.current().kind == TokenKind::EndMarker {
+                if self.end_marker_matches_next(members.last().copied()) {
+                    if !self.consume_end_marker(members.last().copied()) {
+                        break;
+                    }
+                    self.consume_template_separators(closing);
+                    continue;
+                }
                 if expected_end_marker
                     .is_some_and(|owner| self.current_end_marker_matches_name(owner))
                 {
                     break;
                 }
-                if self.end_marker_matches_next(members.last().copied()) {
-                    if !self.consume_end_marker(members.last().copied()) {
-                        break;
-                    }
-                } else if !self.consume_end_marker(members.last().copied()) {
+                if !self.consume_end_marker(members.last().copied()) {
                     break;
                 }
                 self.consume_template_separators(closing);

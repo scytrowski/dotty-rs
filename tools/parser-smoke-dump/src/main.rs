@@ -1853,4 +1853,66 @@ mod tests {
             SOURCE.len() as u32
         );
     }
+
+    #[test]
+    fn same_named_nested_end_marker_does_not_close_outer_template() {
+        const SOURCE: &str = concat!(
+            "object Outer:\n",
+            "  class Outer:\n",
+            "    val x = 1\n",
+            "  end Outer\n",
+            "  val after = 2\n",
+            "end Outer",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source scans");
+        let source_text = SourceText::new(SOURCE).expect("source text is valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let outer_id = package
+            .stats
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    &result.ast.get(*id).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module))
+                        if names.resolve(module.name.as_name().text()) == "Outer"
+                )
+            })
+            .expect("Outer object remains in the compilation unit");
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(outer)) = &result.ast.get(outer_id).kind
+        else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &result.ast.get(outer.template).kind else {
+            panic!("expected Outer template");
+        };
+        assert!(template.body.iter().any(|id| matches!(
+            &result.ast.get(*id).kind,
+            TreeKind::TypeDef(definition)
+                if names.resolve(definition.name.as_name().text()) == "Outer"
+        )));
+        assert!(template.body.iter().any(|id| matches!(
+            &result.ast.get(*id).kind,
+            TreeKind::ValDef(definition)
+                if names.resolve(definition.name.as_name().text()) == "after"
+        )));
+        assert_eq!(
+            result
+                .ast
+                .get(outer_id)
+                .position
+                .unwrap()
+                .span()
+                .range()
+                .end(),
+            SOURCE.len() as u32
+        );
+    }
 }
