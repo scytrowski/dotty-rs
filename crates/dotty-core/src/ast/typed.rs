@@ -11,7 +11,7 @@ use crate::ast::tree::{Tree, TreeKind};
 use crate::ids::{TreeId, TypeId};
 use crate::names::Name;
 use crate::source::SourceSpan;
-use crate::types::Constant;
+use crate::types::{Constant, Type, TypeArena};
 
 pub type TypedTree = Tree<Typed>;
 pub type TypedTreeId = TreeId<Typed>;
@@ -19,14 +19,32 @@ pub type TypedAst = AstArena<Typed>;
 
 /// Builds `Tree<Typed>` nodes. Every constructor takes a `TypeId` argument,
 /// so a typed tree cannot be built without one *by construction*, not just
-/// by convention.
+/// by convention. CaseDef term-case types come from their bodies, while a
+/// Match result type is computed by the Typer and merely stored here.
 pub struct TypedAstBuilder<'a> {
     arena: &'a mut AstArena<Typed>,
+    types: &'a TypeArena,
 }
 
 impl<'a> TypedAstBuilder<'a> {
-    pub fn new(arena: &'a mut AstArena<Typed>) -> Self {
-        Self { arena }
+    pub fn new(arena: &'a mut AstArena<Typed>, types: &'a TypeArena) -> Self {
+        Self { arena, types }
+    }
+
+    fn assert_real_type(&self, ty: TypeId, description: &str) {
+        debug_assert!(
+            matches!(self.types.try_get(ty), Some(found) if !matches!(found, Type::NoType)),
+            "{description} must not use a missing, reserved, or NoType type"
+        );
+    }
+
+    fn assert_real_typed_tree(&self, id: TreeId<Typed>, description: &str) -> &TypedTree {
+        let tree = self
+            .arena
+            .try_get(id)
+            .unwrap_or_else(|| panic!("{description} must belong to the typed arena"));
+        self.assert_real_type(tree.ty, description);
+        tree
     }
 
     pub fn ident(&mut self, name: Name, ty: TypeId, position: Option<SourceSpan>) -> TreeId<Typed> {
@@ -246,18 +264,12 @@ impl<'a> TypedAstBuilder<'a> {
         ty: TypeId,
         position: Option<SourceSpan>,
     ) -> TreeId<Typed> {
-        debug_assert!(
-            self.arena.try_get(pattern).is_some(),
-            "a typed case pattern must belong to the typed arena"
-        );
-        debug_assert!(
-            guard.is_none_or(|guard| self.arena.try_get(guard).is_some()),
-            "a typed case guard must belong to the typed arena"
-        );
-        let body_tree = self
-            .arena
-            .try_get(body)
-            .expect("a typed case body must belong to the typed arena");
+        self.assert_real_typed_tree(pattern, "a typed case pattern");
+        if let Some(guard) = guard {
+            self.assert_real_typed_tree(guard, "a typed case guard");
+        }
+        let body_tree = self.assert_real_typed_tree(body, "a typed case body");
+        self.assert_real_type(ty, "a typed case");
         debug_assert_eq!(
             ty, body_tree.ty,
             "a typed term case must carry its body's type"
@@ -283,21 +295,18 @@ impl<'a> TypedAstBuilder<'a> {
         ty: TypeId,
         position: Option<SourceSpan>,
     ) -> TreeId<Typed> {
-        debug_assert!(
-            self.arena.try_get(selector).is_some(),
-            "a typed match selector must belong to the typed arena"
-        );
+        self.assert_real_typed_tree(selector, "a typed match selector");
+        self.assert_real_type(ty, "a typed match");
         for case in &cases {
-            let case_tree = self
-                .arena
-                .try_get(*case)
-                .expect("each typed match case must belong to the typed arena");
+            let case_tree = self.assert_real_typed_tree(*case, "each typed match case");
             let TreeKind::CaseDef(case_def) = &case_tree.kind else {
                 panic!("each typed match case must be a CaseDef")
             };
-            self.arena
-                .try_get(case_def.body)
-                .expect("each typed case body must belong to the typed arena");
+            self.assert_real_typed_tree(case_def.pattern, "each typed case pattern");
+            if let Some(guard) = case_def.guard {
+                self.assert_real_typed_tree(guard, "each typed case guard");
+            }
+            self.assert_real_typed_tree(case_def.body, "each typed case body");
         }
 
         self.arena.alloc(Tree {
@@ -365,7 +374,8 @@ mod tests {
     #[test]
     fn ident_produces_a_tree_with_the_given_type() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
 
         let id = builder.ident(
             Name::new(NameId::new(1), Namespace::Term),
@@ -379,7 +389,8 @@ mod tests {
     #[test]
     fn apply_references_its_function_and_args_with_the_given_type() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
 
         let function = builder.ident(
             Name::new(NameId::new(1), Namespace::Term),
@@ -405,7 +416,8 @@ mod tests {
     #[test]
     fn apply_with_kind_preserves_using_applications() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
         let function = builder.ident(
             Name::new(NameId::new(1), Namespace::Term),
             TypeId::new(2),
@@ -424,7 +436,8 @@ mod tests {
     #[test]
     fn block_references_typed_stats_and_uses_the_final_expression_type() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
         let stat = builder.ident(
             Name::new(NameId::new(1), Namespace::Term),
             TypeId::new(2),
@@ -449,7 +462,8 @@ mod tests {
     #[test]
     fn typed_expr_references_its_child_and_ascribed_type_tree() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
         let child_type = TypeId::new(2);
         let ascribed_type = TypeId::new(3);
         let expr = builder.literal(Constant::Int(1), child_type, None);
@@ -469,7 +483,8 @@ mod tests {
     #[test]
     fn assign_references_its_operands_and_uses_unit_type() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
         let lhs = builder.ident(
             Name::new(NameId::new(1), Namespace::Term),
             TypeId::new(2),
@@ -491,7 +506,8 @@ mod tests {
     #[test]
     fn if_expr_references_all_three_children_and_uses_join_type() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
         let condition = builder.literal(Constant::Boolean(true), TypeId::new(2), None);
         let then_branch = builder.literal(Constant::Int(1), TypeId::new(3), None);
         let else_branch = builder.literal(Constant::Int(2), TypeId::new(4), None);
@@ -511,13 +527,10 @@ mod tests {
     #[test]
     fn case_def_keeps_pattern_guard_body_position_and_body_type() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
-        let pattern = builder.ident(
-            Name::new(NameId::new(1), Namespace::Term),
-            TypeId::new(2),
-            None,
-        );
-        let body_type = TypeId::new(3);
+        let mut types = TypeArena::new();
+        let body_type = types.alloc(Type::Constant(Constant::Int(0)));
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
+        let pattern = builder.ident(Name::new(NameId::new(1), Namespace::Term), body_type, None);
         let body = builder.literal(Constant::Int(1), body_type, None);
         let source_position = position(10, 20);
 
@@ -539,14 +552,12 @@ mod tests {
     #[test]
     fn case_def_retains_a_present_guard() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
-        let pattern = builder.ident(
-            Name::new(NameId::new(1), Namespace::Term),
-            TypeId::new(2),
-            None,
-        );
-        let guard = builder.literal(Constant::Boolean(true), TypeId::new(3), None);
-        let body_type = TypeId::new(4);
+        let mut types = TypeArena::new();
+        let node_type = types.alloc(Type::Constant(Constant::Int(0)));
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
+        let pattern = builder.ident(Name::new(NameId::new(1), Namespace::Term), node_type, None);
+        let guard = builder.literal(Constant::Boolean(true), node_type, None);
+        let body_type = node_type;
         let body = builder.literal(Constant::Int(1), body_type, None);
 
         let case = builder.case_def(pattern, Some(guard), body, body_type, None);
@@ -558,29 +569,48 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "a typed case body must not use a missing, reserved, or NoType type")]
+    fn case_def_rejects_a_no_type_body() {
+        let mut arena = TypedAst::new();
+        let mut types = TypeArena::new();
+        let real_type = types.alloc(Type::Constant(Constant::Int(0)));
+        let no_type = types.alloc(Type::NoType);
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
+        let pattern = builder.ident(Name::new(NameId::new(1), Namespace::Term), real_type, None);
+        let body = builder.literal(Constant::Int(1), no_type, None);
+
+        builder.case_def(pattern, None, body, no_type, None);
+    }
+
+    #[test]
     fn match_expr_keeps_selector_ordered_cases_and_caller_result_type() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let mut types = TypeArena::new();
+        let selector_type = types.alloc(Type::Constant(Constant::Int(0)));
+        let first_body_type = types.alloc(Type::Constant(Constant::Int(1)));
+        let second_body_type = types.alloc(Type::Constant(Constant::Int(2)));
+        let result_type = types.alloc(Type::Constant(Constant::Int(3)));
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
         let selector = builder.ident(
             Name::new(NameId::new(1), Namespace::Term),
-            TypeId::new(2),
+            selector_type,
             None,
         );
         let first_pattern = builder.ident(
             Name::new(NameId::new(3), Namespace::Term),
-            TypeId::new(4),
+            selector_type,
             None,
         );
-        let first_body = builder.literal(Constant::Int(1), TypeId::new(5), None);
-        let first_case = builder.case_def(first_pattern, None, first_body, TypeId::new(5), None);
+        let first_body = builder.literal(Constant::Int(1), first_body_type, None);
+        let first_case = builder.case_def(first_pattern, None, first_body, first_body_type, None);
         let second_pattern = builder.ident(
             Name::new(NameId::new(6), Namespace::Term),
-            TypeId::new(7),
+            selector_type,
             None,
         );
-        let second_body = builder.literal(Constant::Int(2), TypeId::new(8), None);
-        let second_case = builder.case_def(second_pattern, None, second_body, TypeId::new(8), None);
-        let result_type = TypeId::new(9);
+        let second_body = builder.literal(Constant::Int(2), second_body_type, None);
+        let second_case =
+            builder.case_def(second_pattern, None, second_body, second_body_type, None);
         let source_position = position(0, 30);
 
         let matched: TypedTreeId = builder.match_expr(
@@ -601,9 +631,59 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "each typed match case must be a CaseDef")]
+    fn match_expr_rejects_non_case_trees() {
+        let mut arena = TypedAst::new();
+        let mut types = TypeArena::new();
+        let ty = types.alloc(Type::Constant(Constant::Int(0)));
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
+        let selector = builder.ident(Name::new(NameId::new(1), Namespace::Term), ty, None);
+        let not_a_case = builder.ident(Name::new(NameId::new(2), Namespace::Term), ty, None);
+
+        builder.match_expr(selector, vec![not_a_case], ty, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "each typed case body must belong to the typed arena")]
+    fn match_expr_rejects_a_case_with_a_body_outside_the_arena() {
+        let mut arena = TypedAst::new();
+        let mut types = TypeArena::new();
+        let ty = types.alloc(Type::Constant(Constant::Int(0)));
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
+        let selector = builder.ident(Name::new(NameId::new(1), Namespace::Term), ty, None);
+        drop(builder);
+        let case = arena.alloc(Tree {
+            kind: TreeKind::CaseDef(CaseDef {
+                pattern: selector,
+                guard: None,
+                body: TreeId::new(99),
+            }),
+            position: None,
+            ty,
+        });
+
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
+        builder.match_expr(selector, vec![case], ty, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "a typed match must not use a missing, reserved, or NoType type")]
+    fn match_expr_rejects_a_no_type_result() {
+        let mut arena = TypedAst::new();
+        let mut types = TypeArena::new();
+        let ty = types.alloc(Type::Constant(Constant::Int(0)));
+        let no_type = types.alloc(Type::NoType);
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
+        let selector = builder.ident(Name::new(NameId::new(1), Namespace::Term), ty, None);
+
+        builder.match_expr(selector, Vec::new(), no_type, None);
+    }
+
+    #[test]
     fn while_expr_references_condition_and_body_and_uses_result_type() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
         let condition = builder.literal(Constant::Boolean(true), TypeId::new(2), None);
         let body = builder.literal(Constant::Int(1), TypeId::new(3), None);
         let unit = TypeId::new(4);
@@ -621,7 +701,8 @@ mod tests {
     #[test]
     fn return_expr_preserves_optional_expression_and_target_and_uses_nothing() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
         let expr = builder.literal(Constant::Int(1), TypeId::new(2), None);
         let from = builder.ident(
             Name::new(NameId::new(3), Namespace::Term),
@@ -643,7 +724,8 @@ mod tests {
     #[test]
     fn literal_keeps_the_constant_and_explicit_type() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
         let ty = TypeId::new(2);
 
         let literal = builder.literal(Constant::Int(42), ty, None);
@@ -660,7 +742,8 @@ mod tests {
     #[test]
     fn select_keeps_the_typed_qualifier_and_explicit_type() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
         let qualifier = builder.ident(
             Name::new(NameId::new(1), Namespace::Term),
             TypeId::new(2),
@@ -685,7 +768,8 @@ mod tests {
     #[test]
     fn this_keeps_its_optional_qualifier_and_explicit_type() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
         let qualifier = Name::new(NameId::new(3), Namespace::Type);
         let ty = TypeId::new(4);
 
@@ -703,7 +787,8 @@ mod tests {
     #[test]
     fn type_apply_preserves_function_arguments_and_instantiated_type() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
         let function = builder.ident(
             Name::new(NameId::new(1), Namespace::Term),
             TypeId::new(2),
@@ -723,7 +808,8 @@ mod tests {
     #[test]
     fn type_tree_carries_the_projected_type() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
         let ty = TypeId::new(7);
 
         let tree = builder.type_tree(ty, None);
@@ -735,7 +821,8 @@ mod tests {
     #[test]
     fn new_references_a_typed_type_tree_and_keeps_the_instance_type() {
         let mut arena = TypedAst::new();
-        let mut builder = TypedAstBuilder::new(&mut arena);
+        let types = TypeArena::new();
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
         let instance_type = TypeId::new(8);
         let tpt = builder.type_tree(instance_type, None);
 

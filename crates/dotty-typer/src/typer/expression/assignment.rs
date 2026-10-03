@@ -78,11 +78,13 @@ impl SourceTyper<'_> {
             info_journal,
             new_mappings,
         )?;
-        Ok(TypedAstBuilder::new(&mut self.typed_arena).assign(
-            lhs,
-            rhs,
-            self.definitions.unit,
-            position,
-        ))
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).assign(
+                lhs,
+                rhs,
+                self.definitions.unit,
+                position,
+            ),
+        )
     }
 }

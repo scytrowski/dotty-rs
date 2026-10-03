@@ -470,7 +470,7 @@ impl SourceTyper<'_> {
             prefix: instance_type,
             target: TermRefTarget::Symbol(candidate.symbol),
         });
-        let typed = TypedAstBuilder::new(&mut self.typed_arena).select(
+        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).select(
             qualifier,
             selection.name,
             selection.backquoted,
@@ -841,7 +841,7 @@ impl SourceTyper<'_> {
             prefix: instance_type,
             target: TermRefTarget::Symbol(winner.symbol),
         });
-        let typed = TypedAstBuilder::new(&mut self.typed_arena).select(
+        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).select(
             qualifier,
             selection.name,
             selection.backquoted,
@@ -1102,7 +1102,7 @@ impl SourceTyper<'_> {
             });
         };
         let typed_tpt = self.reify_constructor_type_tree(new.tpt, instance_type, new_mappings)?;
-        let typed = TypedAstBuilder::new(&mut self.typed_arena).new_expr(
+        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).new_expr(
             typed_tpt,
             instance_type,
             source_tree.position,

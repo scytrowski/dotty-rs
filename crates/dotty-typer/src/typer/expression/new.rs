@@ -20,7 +20,8 @@ impl SourceTyper<'_> {
                 tree_index: source_tree.index(),
             });
         };
-        let typed = TypedAstBuilder::new(&mut self.typed_arena).type_tree(ty, source_node.position);
+        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .type_tree(ty, source_node.position);
         self.typed_index
             .insert(self.source, source_tree, typed)
             .map_err(|error| TyperError::ConflictingTypedExpression {
@@ -59,7 +60,7 @@ impl SourceTyper<'_> {
         self.ensure_constructor_class_info(class, info_journal)?;
         let typed_tpt = self.reify_constructor_type_tree(new.tpt, instance_type, new_mappings)?;
         Ok(
-            TypedAstBuilder::new(&mut self.typed_arena).new_expr(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).new_expr(
                 typed_tpt,
                 instance_type,
                 position,

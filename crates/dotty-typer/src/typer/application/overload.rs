@@ -139,7 +139,7 @@ impl SourceTyper<'_> {
             prefix: receiver_type,
             target: TermRefTarget::Symbol(winner.symbol),
         });
-        let function = TypedAstBuilder::new(&mut self.typed_arena).select(
+        let function = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).select(
             qualifier,
             operator,
             false,
@@ -317,12 +317,8 @@ impl SourceTyper<'_> {
                     function_tree.index(),
                     info_journal,
                 )?;
-                TypedAstBuilder::new(&mut self.typed_arena).ident_with_backquoted(
-                    ident.name,
-                    ident.backquoted,
-                    ty,
-                    function_node.position,
-                )
+                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                    .ident_with_backquoted(ident.name, ident.backquoted, ty, function_node.position)
             }
             ApplicationFunctionShape::Select {
                 selection,
@@ -342,7 +338,7 @@ impl SourceTyper<'_> {
                     prefix: receiver_type,
                     target: TermRefTarget::Symbol(winner.symbol),
                 });
-                TypedAstBuilder::new(&mut self.typed_arena).select(
+                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).select(
                     qualifier,
                     selection.name,
                     selection.backquoted,

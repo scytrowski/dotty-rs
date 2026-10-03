@@ -690,7 +690,8 @@ impl SourceTyper<'_> {
                 tree_kind: tree_kind_name(&source_node.kind),
             });
         }
-        let typed = TypedAstBuilder::new(&mut self.typed_arena).type_tree(ty, source_node.position);
+        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .type_tree(ty, source_node.position);
         self.typed_index
             .insert(self.source, source_tree, typed)
             .map_err(|error| TyperError::ConflictingTypedExpression {
@@ -810,7 +811,8 @@ impl SourceTyper<'_> {
         let expr =
             self.type_expression_inner(block.expr, block_context, info_journal, new_mappings)?;
         let ty = self.typed_arena.get(expr).ty;
-        let typed = TypedAstBuilder::new(&mut self.typed_arena).block(stats, expr, ty, position);
+        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .block(stats, expr, ty, position);
         if contains_local_method {
             self.typed_index
                 .insert(self.source, tree, typed)
