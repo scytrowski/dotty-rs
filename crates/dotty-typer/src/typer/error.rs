@@ -64,6 +64,7 @@ pub enum ExtractorProductIssue {
 pub enum TuplePatternResolutionIssue {
     TupleClassNotFound,
     CompanionNotFound,
+    CompanionModuleClassUnavailable,
     UnapplyNotFound,
     UnapplyShapeUnsupported,
     TupleTypeUnsupported,

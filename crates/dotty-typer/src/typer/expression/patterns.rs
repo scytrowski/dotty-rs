@@ -48,6 +48,27 @@ pub(super) fn pattern_kind(kind: &TreeKind<Untyped>) -> PatternKind {
 }
 
 impl SourceTyper<'_> {
+    fn tuple_companion_receiver(
+        &mut self,
+        companion_type: TypeId,
+        pattern: TreeId<Untyped>,
+        arity: usize,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let receiver = self
+            .widen_expression_type_journaled(companion_type, info_journal, 0)
+            .map_err(|error| match error {
+                TyperError::ObjectModuleClassUnavailable { .. } => self
+                    .tuple_pattern_resolution_error(
+                        pattern,
+                        arity,
+                        TuplePatternResolutionIssue::CompanionModuleClassUnavailable,
+                    ),
+                error => error,
+            })?;
+        self.this_type_receiver_view(receiver)
+    }
+
     fn extractor_result_member_type(
         &mut self,
         result_type: TypeId,
@@ -482,8 +503,8 @@ impl SourceTyper<'_> {
             target: TermRefTarget::Symbol(tuple_object),
         });
         let unapply_name = Name::new(self.store.names.intern("unapply"), Namespace::Term);
-        let receiver = self.widen_expression_type_journaled(companion_type, info_journal, 0)?;
-        let receiver = self.this_type_receiver_view(receiver)?;
+        let receiver =
+            self.tuple_companion_receiver(companion_type, pattern, arity, info_journal)?;
         self.complete_relation_type(
             receiver,
             info_journal,
@@ -2997,6 +3018,57 @@ mod tests {
         ));
         assert!(store_rolled_back);
         assert!(typed_state_rolled_back);
+    }
+
+    #[test]
+    fn classpath_tuple_companions_without_module_classes_defer_resolution() {
+        let source_text = "package scala { trait Product }; package app { class C { def choose(value: Any): Int = value match { case (first, second) => first; case _ => 0 } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                matches!(node.kind, TreeKind::PhaseSpecific(UntypedNode::Tuple(_))).then_some(tree)
+            })
+            .unwrap();
+        let object = store.symbols.alloc(Symbol {
+            name: Name::new(store.names.intern("Tuple2"), Namespace::Term),
+            owner: None,
+            kind: SymbolKind::Object,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Classfile(store.origins.register_classfile()),
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let companion_type = store.types.alloc(Type::TermRef {
+            prefix: definitions.no_prefix,
+            target: TermRefTarget::Symbol(object),
+        });
+        let (mut typer, _) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+
+        let error = typer
+            .tuple_companion_receiver(companion_type, pattern, 2, &mut Vec::new())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            TyperError::TuplePatternResolutionDeferred {
+                arity: 2,
+                issue: TuplePatternResolutionIssue::CompanionModuleClassUnavailable,
+                ..
+            }
+        ));
     }
 
     #[test]
