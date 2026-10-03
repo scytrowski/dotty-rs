@@ -919,6 +919,12 @@ fn build_tokens(
                         .last()
                         .is_some_and(|region| region.owner == LayoutRegionOwner::MatchCases)
                     && !current_case_has_arrow(source, &tokens);
+                let case_arrow_candidate = raw.kind == RawTokenKind::Operator
+                    && source.get(raw.span.start() as usize..raw.span.end() as usize) == Some("=>")
+                    && indentation_stack
+                        .last()
+                        .is_some_and(|region| region.owner == LayoutRegionOwner::MatchCases)
+                    && !current_case_has_arrow(source, &tokens);
 
                 if has_line_break && layout_enabled {
                     let mut closed_same_indent_case = false;
@@ -940,6 +946,7 @@ fn build_tokens(
                                 current_kind: raw.kind,
                                 leading_infix,
                                 case_guard_candidate,
+                                case_arrow_candidate,
                                 offset: raw.span.start(),
                             },
                         )?;
@@ -1143,6 +1150,7 @@ struct IndentationTransition<'a> {
     current_kind: RawTokenKind,
     leading_infix: bool,
     case_guard_candidate: bool,
+    case_arrow_candidate: bool,
     offset: u32,
 }
 
@@ -1158,6 +1166,7 @@ fn adjust_indentation(
         current_kind,
         leading_infix,
         case_guard_candidate,
+        case_arrow_candidate,
         offset,
     } = transition;
     let mut closed_same_indent_case = false;
@@ -1174,6 +1183,7 @@ fn adjust_indentation(
             ));
         } else if current_kind != RawTokenKind::Keyword(HardKeyword::Case)
             && !case_guard_candidate
+            && !case_arrow_candidate
             && stack
                 .last()
                 .is_some_and(|region| region.owner == LayoutRegionOwner::MatchCases)
@@ -1216,6 +1226,7 @@ fn adjust_indentation(
             if current == *indentation
                 && current_kind != RawTokenKind::Keyword(HardKeyword::Case)
                 && !case_guard_candidate
+                && !case_arrow_candidate
                 && stack
                     .last()
                     .is_some_and(|region| region.owner == LayoutRegionOwner::MatchCases)
@@ -4865,6 +4876,26 @@ mod tests {
                 TokenKind::Identifier,
                 TokenKind::Eof,
             ]
+        );
+    }
+
+    #[test]
+    fn keeps_a_case_region_open_for_an_arrow_after_a_multiline_guard() {
+        let source = "object CaseArrowNewline:\n  def f(tree: Tree): Tree = tree match\n    case Apply(fun, args)\n        if fun.name == \"apply\"\n        && fun.exists\n        && isElideableExpr(tree)\n    =>\n      rebuild(tree)\n    case _ => tree";
+        let scanner = ContextualScanner::new(source).expect("source should scan");
+        let arrow_start = source
+            .match_indices("=>")
+            .find(|(offset, _)| *offset > source.find("isElideableExpr").unwrap())
+            .map(|(offset, _)| offset as u32)
+            .expect("case arrow exists");
+
+        assert!(!scanner.tokens().iter().any(|token| {
+            token.kind == TokenKind::Outdent && token.span.start() == arrow_start
+        }));
+        assert!(
+            scanner.tokens().iter().any(|token| {
+                token.kind == TokenKind::Outdent && token.span.start() > arrow_start
+            })
         );
     }
 
