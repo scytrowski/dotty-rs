@@ -73,10 +73,13 @@ impl SourceTyper<'_> {
             });
         }
         for argument in &application.args {
-            if matches!(
-                self.arena.try_get(*argument).map(|tree| &tree.kind),
-                Some(TreeKind::NamedArg(_))
-            ) {
+            let Some(argument_tree) = self.arena.try_get(*argument) else {
+                return Err(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: argument.index(),
+                });
+            };
+            if matches!(&argument_tree.kind, TreeKind::NamedArg(_)) {
                 return Err(TyperError::ExtractorPatternArgumentUnsupported {
                     source: self.source,
                     tree_index: pattern.index(),
@@ -1603,6 +1606,67 @@ mod tests {
             assert!(store_rolled_back);
             assert!(typed_state_rolled_back);
         }
+    }
+
+    #[test]
+    fn extractor_plan_rejects_source_arguments_outside_the_arena() {
+        let (mut parsed, mut store, packages, definitions, index, source) = setup(
+            "object Extractor { def unapply(value: Any): Any = value }; class C { def choose(value: Any): Int = value match { case Extractor(_) => 1 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let TreeKind::Apply(application) = &parsed.ast.get(pattern).kind else {
+            panic!("expected source extractor Apply");
+        };
+        let mut application = application.clone();
+        let arena_checkpoint = parsed.ast.checkpoint();
+        let invalid_argument = parsed.ast.alloc(Tree {
+            kind: TreeKind::Ident(Ident {
+                name: Name::new(store.names.intern("orphan"), Namespace::Term),
+                backquoted: false,
+            }),
+            position: None,
+            ty: (),
+        });
+        parsed.ast.rollback_to(arena_checkpoint);
+        application.args[0] = invalid_argument;
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let checkpoint = typer.store.checkpoint();
+
+        let result = typer.run_expression_transaction(|typer, journal, mappings| {
+            typer.resolve_extractor_pattern_plan(
+                pattern,
+                &application,
+                definitions.any_type,
+                context,
+                journal,
+                mappings,
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(TyperError::TreeOutsideArena { tree_index, .. })
+                if tree_index == invalid_argument.index()
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert!(typer.typed_arena.iter().next().is_none());
+        assert!(typer.typed_index.is_empty());
     }
 
     #[test]
