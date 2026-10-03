@@ -1112,6 +1112,17 @@ pub enum TyperError {
         selector: TypeId,
         error: Box<TypeRelationError>,
     },
+    /// A stable-pattern root does not retain a well-formed selected term symbol.
+    MalformedStablePatternTarget {
+        source: SourceId,
+        tree_index: u32,
+    },
+    /// A resolved pattern value is mutable or otherwise not a stable term.
+    UnstablePatternValue {
+        source: SourceId,
+        tree_index: u32,
+        symbol: SymbolId,
+    },
     /// A source case tree is missing or does not have the required `CaseDef` shape.
     MalformedCaseDef {
         source: SourceId,

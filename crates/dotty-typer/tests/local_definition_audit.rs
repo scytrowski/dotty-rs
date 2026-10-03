@@ -1838,6 +1838,8 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::UnsupportedBindPatternBody { .. } => "UnsupportedBindPatternBody",
         TyperError::PatternTypeMismatch { .. } => "PatternTypeMismatch",
         TyperError::PatternTypeRelationDeferred { .. } => "PatternTypeRelationDeferred",
+        TyperError::MalformedStablePatternTarget { .. } => "MalformedStablePatternTarget",
+        TyperError::UnstablePatternValue { .. } => "UnstablePatternValue",
         TyperError::LocalBlockDeclarationDeferred { .. } => "LocalBlockDeclarationDeferred",
         TyperError::InvalidInferredLocalValueType { .. } => "InvalidInferredLocalValueType",
         TyperError::LocalValueRightHandSideMissing { .. } => "LocalValueRightHandSideMissing",
