@@ -50,7 +50,7 @@ impl SourceTyper<'_> {
             TreeKind::Ident(ident) => {
                 ident.name == name
                     && !ident.backquoted
-                    && is_variable_pattern_name(&self.store, name)
+                    && is_variable_pattern_name(self.store, name)
             }
             _ => false,
         };
@@ -158,7 +158,6 @@ impl SourceTyper<'_> {
         pattern: TreeId<Untyped>,
         selector_type: TypeId,
         context: ExpressionContext,
-        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, pattern) {
@@ -187,7 +186,7 @@ impl SourceTyper<'_> {
                             selector_type,
                             source_tree.position,
                         )
-                } else if !ident.backquoted && is_variable_pattern_name(&self.store, ident.name) {
+                } else if !ident.backquoted && is_variable_pattern_name(self.store, ident.name) {
                     let wildcard_name = Name::new(self.store.names.intern("_"), Namespace::Term);
                     let wildcard = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
                         .ident_with_backquoted(
@@ -235,13 +234,8 @@ impl SourceTyper<'_> {
                         tree_index: binding.body.index(),
                     });
                 }
-                let typed_body = self.type_pattern(
-                    binding.body,
-                    selector_type,
-                    context,
-                    info_journal,
-                    new_mappings,
-                )?;
+                let typed_body =
+                    self.type_pattern(binding.body, selector_type, context, new_mappings)?;
                 let (_symbol, binding_type) =
                     self.enter_pattern_binding(pattern, binding.name, selector_type, context)?;
                 TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).bind(
@@ -425,9 +419,8 @@ mod tests {
             method,
         );
         let first = typer
-            .run_expression_transaction(|typer, journal, mappings| {
-                let typed =
-                    typer.type_pattern(pattern, definitions.int, context, journal, mappings)?;
+            .run_expression_transaction(|typer, _journal, mappings| {
+                let typed = typer.type_pattern(pattern, definitions.int, context, mappings)?;
                 Ok(typed)
             })
             .unwrap();
@@ -437,10 +430,9 @@ mod tests {
         assert_eq!(typer.typed_index.get(source, pattern), Some(first));
 
         let repeated = typer
-            .run_expression_transaction(|typer, journal, mappings| {
+            .run_expression_transaction(|typer, _journal, mappings| {
                 let before = mappings.len();
-                let typed =
-                    typer.type_pattern(pattern, definitions.int, context, journal, mappings)?;
+                let typed = typer.type_pattern(pattern, definitions.int, context, mappings)?;
                 assert_eq!(mappings.len(), before);
                 Ok(typed)
             })
@@ -448,14 +440,8 @@ mod tests {
         assert_eq!(repeated, first);
 
         let reference_pattern = typer
-            .run_expression_transaction(|typer, journal, mappings| {
-                typer.type_pattern(
-                    second_pattern,
-                    definitions.object_type,
-                    context,
-                    journal,
-                    mappings,
-                )
+            .run_expression_transaction(|typer, _journal, mappings| {
+                typer.type_pattern(second_pattern, definitions.object_type, context, mappings)
             })
             .unwrap();
         assert_eq!(
@@ -500,8 +486,8 @@ mod tests {
             method,
         );
         let error = typer
-            .run_expression_transaction(|typer, journal, mappings| {
-                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            .run_expression_transaction(|typer, _journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, mappings)
             })
             .unwrap_err();
         assert!(matches!(
@@ -553,8 +539,8 @@ mod tests {
             method,
         );
         let error = typer
-            .run_expression_transaction(|typer, journal, mappings| {
-                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            .run_expression_transaction(|typer, _journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, mappings)
             })
             .unwrap_err();
         assert!(matches!(
@@ -604,8 +590,8 @@ mod tests {
                 method,
             );
             let error = typer
-                .run_expression_transaction(|typer, journal, mappings| {
-                    typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+                .run_expression_transaction(|typer, _journal, mappings| {
+                    typer.type_pattern(pattern, definitions.int, context, mappings)
                 })
                 .unwrap_err();
             assert!(matches!(error, TyperError::UnsupportedPattern { .. }));
@@ -634,8 +620,8 @@ mod tests {
             method,
         );
         let error = typer
-            .run_expression_transaction(|typer, journal, mappings| {
-                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            .run_expression_transaction(|typer, _journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, mappings)
             })
             .unwrap_err();
         assert!(matches!(
@@ -681,8 +667,8 @@ mod tests {
             definitions.int
         );
         let typed_pattern = typer
-            .run_expression_transaction(|typer, info_journal, mappings| {
-                typer.type_pattern(pattern, singleton, context, info_journal, mappings)
+            .run_expression_transaction(|typer, _info_journal, mappings| {
+                typer.type_pattern(pattern, singleton, context, mappings)
             })
             .unwrap();
         assert_eq!(typer.typed_arena.get(typed_pattern).ty, singleton);

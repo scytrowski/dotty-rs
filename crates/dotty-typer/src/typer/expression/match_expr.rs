@@ -36,13 +36,8 @@ impl SourceTyper<'_> {
         let case_context = self.push_case_scope(context)?;
         let result =
             (|| {
-                let pattern = self.type_pattern(
-                    case_def.pattern,
-                    selector_type,
-                    case_context,
-                    info_journal,
-                    new_mappings,
-                )?;
+                let pattern =
+                    self.type_pattern(case_def.pattern, selector_type, case_context, new_mappings)?;
                 if case_def.guard.is_some() {
                     return Err(TyperError::MatchGuardDeferred {
                         source: self.source,
@@ -873,14 +868,9 @@ mod tests {
                 Some(typed_case.pattern)
             );
             let repeated = typer
-                .run_expression_transaction(|typer, journal, mappings| {
-                    let typed = typer.type_pattern(
-                        source_pattern,
-                        definitions.int,
-                        context,
-                        journal,
-                        mappings,
-                    )?;
+                .run_expression_transaction(|typer, _journal, mappings| {
+                    let typed =
+                        typer.type_pattern(source_pattern, definitions.int, context, mappings)?;
                     assert!(mappings.is_empty());
                     Ok(typed)
                 })
