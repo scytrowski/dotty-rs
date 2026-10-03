@@ -3007,6 +3007,53 @@ fn parses_a_simple_colon_argument_body() {
 }
 
 #[test]
+fn parses_selectors_and_applications_after_an_indented_case_argument() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "foo:\n  case X => y\n.bar()",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::ColonEol, 3, 4),
+            token(TokenKind::Indent, 4, 4),
+            token(TokenKind::Keyword(HardKeyword::Case), 7, 11),
+            token(TokenKind::Identifier, 12, 13),
+            token(TokenKind::Operator, 14, 16),
+            token(TokenKind::Identifier, 17, 18),
+            token(TokenKind::Outdent, 19, 19),
+            token(TokenKind::Punctuation(Punctuation::Dot), 19, 20),
+            token(TokenKind::Identifier, 20, 23),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 23, 24),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 24, 25),
+            token(TokenKind::Eof, 25, 25),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+        panic!("expected application of the selected colon argument");
+    };
+    let TreeKind::Select(selection) = &parser.ast().get(application.function).kind else {
+        panic!("expected selector after the colon argument");
+    };
+    assert!(matches!(
+        parser.ast().get(selection.qualifier).kind,
+        TreeKind::Apply(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(
+        parser.diagnostics().is_empty(),
+        "{:?}",
+        parser.diagnostics()
+    );
+    assert_eq!(
+        parser.ast().get(tree).position.unwrap().span().range(),
+        TextRange::new(0, 25).unwrap()
+    );
+}
+
+#[test]
 fn parses_multiple_colon_argument_statements_as_a_block() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

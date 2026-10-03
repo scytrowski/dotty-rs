@@ -706,6 +706,15 @@ where
         allow_brace_application: bool,
     ) -> TreeId<Untyped> {
         loop {
+            if self.cursor.at(TokenKind::Punctuation(Punctuation::Dot))
+                && self
+                    .has_physical_line_break(self.last_real_token_end, self.current().span.start())
+            {
+                // A leading selector continues an expression unless it
+                // dedents out of an active layout body. Let the scanner close
+                // that body before deciding whether the dot is a suffix.
+                self.observe_outdented();
+            }
             let checkpoint = self.cursor.checkpoint();
             if self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
                 if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Match) {
