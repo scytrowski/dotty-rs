@@ -194,14 +194,19 @@ where
             .map(|position| position.span().range().start())
             .unwrap_or_else(|| self.mark().start());
         let argument = self.parse_colon_lambda_body();
-        self.alloc_from(
+        let application = self.alloc_from(
             crate::Mark { start },
             TreeKind::Apply(dotty_core::ast::Apply {
                 function,
                 args: vec![argument],
                 kind: dotty_core::ast::ApplyKind::Regular,
             }),
-        )
+        );
+
+        // As with a colon-EOL block argument, a lambda argument is an
+        // application suffix. Dotty permits further selections/applications
+        // after the indented lambda body has closed.
+        self.simple_expr_rest(crate::Mark { start }, application, true)
     }
 
     pub(super) fn parse_colon_lambda_body(&mut self) -> TreeId<Untyped> {
