@@ -6,8 +6,10 @@ use dotty_core::ast::{TreeKind, TypedAstBuilder, UntypedNode};
 use dotty_core::types::Type;
 use dotty_core::{
     Name, Namespace, SemanticStore, SourceId, SymbolFlags, SymbolId, SymbolInfo, SymbolKind,
-    SymbolOrigin, TermRefTarget, TreeId, TypeId, Typed, Untyped,
+    SymbolOrigin, TermRefTarget, TreeId, TypeId, TypeRefTarget, Typed, Untyped,
 };
+
+const MAX_REIFIABLE_TYPE_PREFIX_DEPTH: usize = 64;
 
 /// Classifies a pattern by its stable source-tree root category.
 pub(super) fn pattern_kind(kind: &TreeKind<Untyped>) -> PatternKind {
@@ -52,6 +54,15 @@ impl SourceTyper<'_> {
                     && !ident.backquoted
                     && is_variable_pattern_name(self.store, name)
             }
+            TreeKind::Typed(typed) => self.arena.try_get(typed.expr).is_some_and(|inner| {
+                matches!(
+                    &inner.kind,
+                    TreeKind::Ident(ident)
+                        if ident.name == name
+                            && !ident.backquoted
+                            && is_variable_pattern_name(self.store, name)
+                )
+            }),
             _ => false,
         };
         if !valid_source || !name.is_term() {
@@ -276,8 +287,13 @@ impl SourceTyper<'_> {
                     info_journal,
                     new_mappings,
                 )?;
+                let binding_value_type = if self.bind_pattern_body_is_typed(binding.body) {
+                    self.typed_arena.get(typed_body).ty
+                } else {
+                    selector_type
+                };
                 let (_symbol, binding_type) =
-                    self.enter_pattern_binding(pattern, binding.name, selector_type, context)?;
+                    self.enter_pattern_binding(pattern, binding.name, binding_value_type, context)?;
                 TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).bind(
                     binding.name,
                     typed_body,
@@ -286,6 +302,23 @@ impl SourceTyper<'_> {
                     source_tree.position,
                 )
             }
+            TreeKind::Typed(typed_pattern) => self.type_typed_pattern(
+                pattern,
+                typed_pattern.expr,
+                typed_pattern.tpt,
+                selector_type,
+                context,
+                source_tree.position,
+                info_journal,
+                new_mappings,
+            )?,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => self.type_pattern(
+                parens.inner,
+                selector_type,
+                context,
+                info_journal,
+                new_mappings,
+            )?,
             _ => {
                 return Err(TyperError::UnsupportedPattern {
                     source: self.source,
@@ -369,8 +402,315 @@ impl SourceTyper<'_> {
             }
             TreeKind::Literal(_) | TreeKind::PhaseSpecific(UntypedNode::Number(_)) => true,
             TreeKind::Select(selection) => selection.name.is_term(),
+            TreeKind::Typed(typed) => self.is_wildcard_pattern(typed.expr),
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                self.bind_pattern_body_is_supported(parens.inner)
+            }
             _ => false,
         }
+    }
+
+    fn is_wildcard_pattern(&self, tree: TreeId<Untyped>) -> bool {
+        self.arena.try_get(tree).is_some_and(|tree| {
+            matches!(
+                &tree.kind,
+                TreeKind::Ident(ident)
+                    if !ident.backquoted
+                        && ident.name.is_term()
+                        && self.store.names.resolve(ident.name.text()) == "_"
+            )
+        })
+    }
+
+    fn bind_pattern_body_is_typed(&self, body: TreeId<Untyped>) -> bool {
+        let Some(tree) = self.arena.try_get(body) else {
+            return false;
+        };
+        match &tree.kind {
+            TreeKind::Typed(_) => true,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                self.bind_pattern_body_is_typed(parens.inner)
+            }
+            _ => false,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn type_typed_pattern(
+        &mut self,
+        pattern: TreeId<Untyped>,
+        expr: TreeId<Untyped>,
+        tpt: TreeId<Untyped>,
+        selector_type: TypeId,
+        context: ExpressionContext,
+        position: Option<dotty_core::SourceSpan>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let Some(expr_tree) = self.arena.try_get(expr) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: expr.index(),
+            });
+        };
+        let (variable, source_name) = match &expr_tree.kind {
+            TreeKind::Ident(ident) if ident.name.is_term() => {
+                let spelling = self.store.names.resolve(ident.name.text());
+                if !ident.backquoted && spelling == "_" {
+                    (None, ident.name)
+                } else if !ident.backquoted && is_variable_pattern_name(self.store, ident.name) {
+                    (Some(ident.name), ident.name)
+                } else {
+                    return Err(TyperError::UnsupportedPattern {
+                        source: self.source,
+                        tree_index: pattern.index(),
+                        pattern_kind: PatternKind::Typed,
+                    });
+                }
+            }
+            _ => {
+                return Err(TyperError::UnsupportedPattern {
+                    source: self.source,
+                    tree_index: pattern.index(),
+                    pattern_kind: PatternKind::Typed,
+                });
+            }
+        };
+
+        let type_context = self.expression_type_context(context)?;
+        let pattern_type = self.type_of_tpt_inner(tpt, type_context)?;
+        if !self.typed_pattern_runtime_test_supported(pattern_type, info_journal)? {
+            return Err(TyperError::TypedPatternRuntimeTestDeferred {
+                source: self.source,
+                tree_index: pattern.index(),
+                pattern_type,
+                reason: "runtime type tests are limited to non-generic class and trait references",
+            });
+        }
+        self.complete_typed_pattern_relation_class(selector_type, info_journal)?;
+        self.require_typed_pattern_compatible(selector_type, pattern_type, pattern.index())?;
+        let typed_tpt = self.reify_type_ascription_tree(tpt, pattern_type, new_mappings)?;
+        let wildcard_name = if variable.is_some() {
+            Name::new(self.store.names.intern("_"), Namespace::Term)
+        } else {
+            source_name
+        };
+        let child_position = expr_tree.position;
+        let wildcard = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .ident_with_backquoted(wildcard_name, false, pattern_type, child_position);
+        let typed_test = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).typed_expr(
+            wildcard,
+            typed_tpt,
+            pattern_type,
+            position,
+        );
+        let result =
+            if let Some(name) = variable {
+                let (_symbol, binding_type) =
+                    self.enter_pattern_binding(pattern, name, pattern_type, context)?;
+                let typed_bind = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                    .bind(name, typed_test, binding_type, false, position);
+                self.insert_pattern_child_mapping(expr, typed_bind, new_mappings)?;
+                typed_bind
+            } else {
+                self.insert_pattern_child_mapping(expr, wildcard, new_mappings)?;
+                typed_test
+            };
+        Ok(result)
+    }
+
+    fn insert_pattern_child_mapping(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        typed_tree: TreeId<Typed>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<(), TyperError> {
+        if let Some(existing) = self.typed_index.get(self.source, source_tree) {
+            if existing != typed_tree {
+                return Err(TyperError::ConflictingTypedExpression {
+                    source: self.source,
+                    tree_index: source_tree.index(),
+                    existing: existing.index(),
+                    attempted: typed_tree.index(),
+                });
+            }
+        } else {
+            self.typed_index
+                .insert(self.source, source_tree, typed_tree)
+                .map_err(|conflict| TyperError::ConflictingTypedExpression {
+                    source: conflict.source,
+                    tree_index: conflict.untyped.index(),
+                    existing: conflict.existing.index(),
+                    attempted: conflict.attempted.index(),
+                })?;
+            new_mappings.push((self.source, source_tree));
+        }
+        Ok(())
+    }
+
+    fn typed_pattern_runtime_test_supported(
+        &mut self,
+        pattern_type: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<bool, TyperError> {
+        let Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(symbol),
+        }) = self.store.types.try_get(pattern_type)
+        else {
+            return Ok(false);
+        };
+        if !self.typed_pattern_prefix_is_reifiable(*prefix) {
+            return Ok(false);
+        }
+        let symbol = *symbol;
+        if !self.store.symbols.contains(symbol)
+            || !matches!(
+                self.store.symbols.get(symbol).kind,
+                SymbolKind::Class | SymbolKind::Trait
+            )
+        {
+            return Ok(false);
+        }
+        if matches!(
+            self.store.types.try_get(self.definitions.nothing_type),
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(target),
+                ..
+            }) if *target == symbol
+        ) {
+            return Ok(false);
+        }
+        if self.is_builtin_type_symbol(symbol) {
+            return Ok(true);
+        }
+        if !matches!(self.store.symbols.get(symbol).info, SymbolInfo::Complete(_)) {
+            self.complete_symbol_inner(symbol, info_journal)?;
+        }
+        let SymbolInfo::Complete(info) = self.store.symbols.get(symbol).info else {
+            return Ok(false);
+        };
+        let Some(Type::ClassInfo(class_info)) = self.store.types.try_get(info) else {
+            return Ok(false);
+        };
+        Ok(!self
+            .store
+            .scopes
+            .get(class_info.declarations)
+            .entered_symbols()
+            .any(|member| self.store.symbols.get(member).kind == SymbolKind::TypeParameter))
+    }
+
+    fn typed_pattern_prefix_is_reifiable(&self, mut prefix: TypeId) -> bool {
+        for _ in 0..MAX_REIFIABLE_TYPE_PREFIX_DEPTH {
+            match self.store.types.try_get(prefix) {
+                Some(Type::NoPrefix) => return true,
+                Some(Type::TypeRef {
+                    prefix: parent,
+                    target: TypeRefTarget::Symbol(package),
+                }) if self.store.symbols.contains(*package)
+                    && self.store.symbols.get(*package).kind == SymbolKind::Package =>
+                {
+                    prefix = *parent;
+                }
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    fn complete_typed_pattern_relation_class(
+        &mut self,
+        ty: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        }) = self.store.types.try_get(ty)
+        else {
+            return Ok(());
+        };
+        let symbol = *symbol;
+        if !self.store.symbols.contains(symbol)
+            || !matches!(
+                self.store.symbols.get(symbol).kind,
+                SymbolKind::Class | SymbolKind::Trait
+            )
+            || !matches!(self.store.symbols.get(symbol).info, SymbolInfo::Missing)
+            || self.is_builtin_type_symbol(symbol)
+        {
+            return Ok(());
+        }
+        self.complete_symbol_inner(symbol, info_journal)?;
+        Ok(())
+    }
+
+    fn is_builtin_type_symbol(&self, symbol: SymbolId) -> bool {
+        [
+            self.definitions.byte,
+            self.definitions.char,
+            self.definitions.double,
+            self.definitions.float,
+            self.definitions.int,
+            self.definitions.long,
+            self.definitions.short,
+            self.definitions.boolean,
+            self.definitions.unit,
+            self.definitions.object_type,
+            self.definitions.any_type,
+            self.definitions.nothing_type,
+        ]
+        .into_iter()
+        .any(|builtin| {
+            matches!(
+                self.store.types.try_get(builtin),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(target),
+                    ..
+                }) if *target == symbol
+            )
+        })
+    }
+
+    fn require_typed_pattern_compatible(
+        &mut self,
+        selector: TypeId,
+        pattern_type: TypeId,
+        tree_index: u32,
+    ) -> Result<(), TyperError> {
+        let pattern_conforms = self.conforms(pattern_type, selector);
+        if matches!(pattern_conforms, Ok(true)) {
+            return Ok(());
+        }
+        let selector_conforms = self.conforms(selector, pattern_type);
+        if matches!(selector_conforms, Ok(true)) {
+            return Ok(());
+        }
+        if let Err(error) = pattern_conforms {
+            return Err(TyperError::TypedPatternRelationDeferred {
+                source: self.source,
+                tree_index,
+                selector,
+                pattern_type,
+                error: Box::new(error),
+            });
+        }
+        if let Err(error) = selector_conforms {
+            return Err(TyperError::TypedPatternRelationDeferred {
+                source: self.source,
+                tree_index,
+                selector,
+                pattern_type,
+                error: Box::new(error),
+            });
+        }
+        Err(TyperError::TypedPatternTypeMismatch {
+            source: self.source,
+            tree_index,
+            selector,
+            pattern_type,
+        })
     }
 
     fn require_pattern_compatible(
@@ -649,6 +989,505 @@ mod tests {
             typer.typed_arena.get(reference_pattern).ty,
             definitions.object_type
         );
+    }
+
+    #[test]
+    fn typed_wildcard_projects_and_reifies_its_type_tree() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case _: Int => 1 } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let (pattern, source_tpt) = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::CaseDef(case) => match &parsed.ast.get(case.pattern).kind {
+                    TreeKind::Typed(typed) => Some((case.pattern, typed.tpt)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap();
+        let wildcard_name = Name::new(store.names.intern("_"), Namespace::Term);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            })
+            .unwrap();
+        let TreeKind::Typed(typed_pattern) = typer.typed_arena.get(typed).kind else {
+            panic!("typed wildcard pattern should retain a Typed node")
+        };
+        assert!(matches!(
+            typer.typed_arena.get(typed_pattern.expr).kind,
+            TreeKind::Ident(ident) if ident.name == wildcard_name
+        ));
+        assert!(matches!(
+            typer.typed_arena.get(typed_pattern.tpt).kind,
+            TreeKind::TypeTree(_)
+        ));
+        assert_eq!(typer.typed_arena.get(typed_pattern.tpt).ty, definitions.int);
+        assert_eq!(typer.typed_arena.get(typed).ty, definitions.int);
+        assert_eq!(
+            typer.typed_index.get(source, source_tpt),
+            Some(typed_pattern.tpt)
+        );
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+        let repeated = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                let mapped_before = mappings.len();
+                let repeated =
+                    typer.type_pattern(pattern, definitions.int, context, journal, mappings)?;
+                assert_eq!(mappings.len(), mapped_before);
+                Ok(repeated)
+            })
+            .unwrap();
+        assert_eq!(repeated, typed);
+    }
+
+    #[test]
+    fn typed_wildcard_accepts_a_supertype_of_the_selector() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case _: Any => 1 } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            })
+            .unwrap();
+        assert_eq!(typer.typed_arena.get(typed).ty, definitions.any_type);
+    }
+
+    #[test]
+    fn typed_pattern_accepts_source_class_subtyping_after_completing_both_sides() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class Parent; class Child extends Parent; class C { def choose(value: Parent): Int = value match { case _: Child => 1 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let parent = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Parent" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let parameter_tpt = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition) if index.symbol_at(source, tree) == Some(method) => {
+                    let parameter = definition.value_param_clauses[0][0];
+                    match &parsed.ast.get(parameter).kind {
+                        TreeKind::ValDef(parameter) => Some(parameter.tpt),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let selector_context = typer.expression_type_context(context).unwrap();
+        let selector = typer
+            .type_of_tpt_inner(parameter_tpt, selector_context)
+            .unwrap();
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, selector, context, journal, mappings)
+            })
+            .unwrap();
+        assert!(matches!(
+            typer.typed_arena.get(typed).kind,
+            TreeKind::Typed(_)
+        ));
+        assert!(matches!(
+            typer.store.symbols.get(parent).info,
+            SymbolInfo::Complete(_)
+        ));
+    }
+
+    #[test]
+    fn typed_pattern_defers_path_dependent_and_applied_type_prefixes() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class Outer[A] { class Inner }; class C { def choose(value: Any): Int = value match { case _: Outer.Inner => 1 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let mut outer = None;
+        let mut inner = None;
+        for (tree, node) in parsed.ast.iter() {
+            if let TreeKind::TypeDef(definition) = &node.kind {
+                match store.names.resolve(definition.name.as_name().text()) {
+                    "Outer" => outer = index.symbol_at(source, tree),
+                    "Inner" => inner = index.symbol_at(source, tree),
+                    _ => {}
+                }
+            }
+        }
+        let outer = outer.unwrap();
+        let inner = inner.unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let generic_outer = typer
+            .store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, outer));
+        let applied_outer = typer.store.types.alloc(Type::Applied {
+            tycon: generic_outer,
+            args: vec![definitions.int],
+        });
+        let applied_inner = typer
+            .store
+            .types
+            .alloc(Type::type_ref(applied_outer, inner));
+        assert!(
+            !typer
+                .typed_pattern_runtime_test_supported(applied_inner, &mut Vec::new())
+                .unwrap()
+        );
+
+        assert!(matches!(
+            typer.run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.any_type, context, journal, mappings)
+            }),
+            Err(TyperError::TypedPatternRuntimeTestDeferred { .. })
+        ));
+        assert_eq!(typer.typed_arena.iter().count(), 0);
+        assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn typed_variable_binds_once_and_exposes_its_type_to_guard_and_body() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { def predicate(value: Int): Boolean = true; def choose(x: Any): Int = x match { case item: Int if predicate(item) => item } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let case_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::CaseDef(_)).then_some(tree))
+            .unwrap();
+        let TreeKind::CaseDef(source_case) = parsed.ast.get(case_tree).kind else {
+            panic!("expected source CaseDef")
+        };
+        let TreeKind::Typed(source_pattern) = parsed.ast.get(source_case.pattern).kind else {
+            panic!("expected source typed pattern")
+        };
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed_case = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_case_def(case_tree, definitions.any_type, context, journal, mappings)
+            })
+            .unwrap();
+        let TreeKind::CaseDef(case) = typer.typed_arena.get(typed_case).kind.clone() else {
+            panic!("expected typed CaseDef")
+        };
+        let TreeKind::Bind(binding) = typer.typed_arena.get(case.pattern).kind.clone() else {
+            panic!("typed variable pattern should lower to Bind")
+        };
+        let symbol = typer
+            .pattern_binding_symbol_at(source, source_case.pattern)
+            .unwrap();
+        assert_eq!(typer.pattern_bindings.by_tree.len(), 1);
+        assert_eq!(
+            typer.store.symbols.get(symbol).info,
+            SymbolInfo::Complete(definitions.int)
+        );
+        let TreeKind::Typed(typed_pattern) = typer.typed_arena.get(binding.body).kind else {
+            panic!("Bind body should retain the typed test")
+        };
+        assert_eq!(
+            typer.typed_index.get(source, source_pattern.tpt),
+            Some(typed_pattern.tpt)
+        );
+        let guard = case.guard.unwrap();
+        let TreeKind::Apply(application) = typer.typed_arena.get(guard).kind.clone() else {
+            panic!("guard should be an application")
+        };
+        assert!(matches!(
+            typer
+                .store
+                .types
+                .try_get(typer.typed_arena.get(application.args[0]).ty),
+            Some(Type::TermRef { target: TermRefTarget::Symbol(actual), .. }) if *actual == symbol
+        ));
+        assert!(matches!(
+            typer
+                .store
+                .types
+                .try_get(typer.typed_arena.get(case.body).ty),
+            Some(Type::TermRef { target: TermRefTarget::Symbol(actual), .. }) if *actual == symbol
+        ));
+    }
+
+    #[test]
+    fn unrelated_typed_pattern_reports_a_focused_mismatch_and_rolls_back() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case _: Boolean => 1 } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let error = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            })
+            .unwrap_err();
+        assert!(
+            matches!(error, TyperError::TypedPatternTypeMismatch { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(typer.typed_arena.iter().count(), 0);
+        assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn generic_typed_pattern_defers_runtime_test_without_partial_state() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class Box[A] {}; class C { def choose(x: Any): Int = x match { case _: Box[Int] => 1 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let typed_tpt = match &parsed.ast.get(pattern).kind {
+            TreeKind::Typed(typed) => typed.tpt,
+            _ => unreachable!(),
+        };
+        let box_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Box" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let error = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.any_type, context, journal, mappings)
+            })
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            TyperError::TypedPatternRuntimeTestDeferred { .. }
+        ));
+        assert_eq!(typer.typed_arena.iter().count(), 0);
+        assert!(typer.typed_index.is_empty());
+        assert!(matches!(
+            typer.store.symbols.get(box_symbol).info,
+            SymbolInfo::Missing
+        ));
+        assert_eq!(typer.source_type_index().type_at(source, typed_tpt), None);
+    }
+
+    #[test]
+    fn nothing_typed_pattern_defers_missing_runtime_test_representation() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Any): Int = x match { case _: Nothing => 1 } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        assert!(matches!(
+            typer.run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.any_type, context, journal, mappings)
+            }),
+            Err(TyperError::TypedPatternRuntimeTestDeferred { .. })
+        ));
+        assert_eq!(typer.typed_arena.iter().count(), 0);
+        assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn unsupported_typed_pattern_relation_is_deferred_without_partial_state() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case _: Int => 1 } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let selector = typer.store.types.alloc(Type::And {
+            left: definitions.int,
+            right: definitions.object_type,
+        });
+        assert!(matches!(
+            typer.run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, selector, context, journal, mappings)
+            }),
+            Err(TyperError::TypedPatternRelationDeferred { .. })
+        ));
+        assert_eq!(typer.typed_arena.iter().count(), 0);
+        assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn explicit_bind_around_parenthesized_typed_wildcard_binds_the_narrow_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Any): Int = x match { case item @ (_: Int) => item } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let case_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::CaseDef(_)).then_some(tree))
+            .unwrap();
+        let TreeKind::CaseDef(source_case) = &parsed.ast.get(case_tree).kind else {
+            unreachable!()
+        };
+        let source_pattern = source_case.pattern;
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed_case = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_case_def(case_tree, definitions.any_type, context, journal, mappings)
+            })
+            .unwrap();
+        let TreeKind::CaseDef(case) = typer.typed_arena.get(typed_case).kind else {
+            panic!("expected typed CaseDef")
+        };
+        let TreeKind::Bind(bind) = typer.typed_arena.get(case.pattern).kind else {
+            panic!("expected explicit Bind around typed wildcard")
+        };
+        let symbol = typer
+            .pattern_binding_symbol_at(source, source_pattern)
+            .unwrap();
+        assert_eq!(
+            typer.store.symbols.get(symbol).info,
+            SymbolInfo::Complete(definitions.int)
+        );
+        assert_eq!(typer.typed_arena.get(bind.body).ty, definitions.int);
     }
 
     #[test]

@@ -1112,6 +1112,28 @@ pub enum TyperError {
         selector: TypeId,
         error: Box<TypeRelationError>,
     },
+    /// The selector and source typed-pattern type cannot match under the current relation.
+    TypedPatternTypeMismatch {
+        source: SourceId,
+        tree_index: u32,
+        selector: TypeId,
+        pattern_type: TypeId,
+    },
+    /// The bounded relation cannot decide whether a typed pattern can match.
+    TypedPatternRelationDeferred {
+        source: SourceId,
+        tree_index: u32,
+        selector: TypeId,
+        pattern_type: TypeId,
+        error: Box<TypeRelationError>,
+    },
+    /// Runtime testing for the projected typed-pattern type is not represented yet.
+    TypedPatternRuntimeTestDeferred {
+        source: SourceId,
+        tree_index: u32,
+        pattern_type: TypeId,
+        reason: &'static str,
+    },
     /// A stable-pattern root does not retain a well-formed selected term symbol.
     MalformedStablePatternTarget {
         source: SourceId,

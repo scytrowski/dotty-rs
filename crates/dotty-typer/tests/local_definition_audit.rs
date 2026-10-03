@@ -804,8 +804,8 @@ fn local_expression_audit_types_infix_calls_and_counts_them_structurally() {
 }
 
 #[test]
-fn match_readiness_counts_case_shapes_for_match_first_blockers() {
-    let source = "object Audit { def outer(value: Int): Int = { def local: Int = value match { case _: Int if true => 1; case _ => 2 }; local } }";
+fn match_readiness_counts_unsupported_case_shapes_for_match_first_blockers() {
+    let source = "object Audit { def outer(value: Int): Int = { def local: Int = value match { case Extractor(_) if true => 1; case _ => 2 }; local } }";
     let audit = audit_source(source, "Match.scala");
 
     assert_eq!(
@@ -821,7 +821,10 @@ fn match_readiness_counts_case_shapes_for_match_first_blockers() {
     assert_eq!(audit.match_readiness.cases, 2);
     assert_eq!(audit.match_readiness.guarded_cases, 1);
     assert_eq!(
-        audit.match_readiness.pattern_shapes.get("typed pattern"),
+        audit
+            .match_readiness
+            .pattern_shapes
+            .get("extractor-looking Apply/TypeApply"),
         Some(&1)
     );
     assert_eq!(
@@ -831,6 +834,16 @@ fn match_readiness_counts_case_shapes_for_match_first_blockers() {
             .get("wildcard/identifier/bind"),
         Some(&1)
     );
+}
+
+#[test]
+fn local_expression_audit_types_supported_typed_patterns() {
+    let source = "object Audit { def outer(value: Any): Int = { def local: Int = value match { case item: Int if true => item }; local } }";
+    let audit = audit_source(source, "TypedPattern.scala");
+
+    assert_eq!(audit.local_defdefs, 1);
+    assert_eq!(audit.typed_local_defdefs, 1, "{audit:?}");
+    assert!(audit.failures.is_empty(), "{audit:?}");
 }
 
 #[test]
@@ -1836,6 +1849,9 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::UnsupportedBindPatternBody { .. } => "UnsupportedBindPatternBody",
         TyperError::PatternTypeMismatch { .. } => "PatternTypeMismatch",
         TyperError::PatternTypeRelationDeferred { .. } => "PatternTypeRelationDeferred",
+        TyperError::TypedPatternTypeMismatch { .. } => "TypedPatternTypeMismatch",
+        TyperError::TypedPatternRelationDeferred { .. } => "TypedPatternRelationDeferred",
+        TyperError::TypedPatternRuntimeTestDeferred { .. } => "TypedPatternRuntimeTestDeferred",
         TyperError::MalformedStablePatternTarget { .. } => "MalformedStablePatternTarget",
         TyperError::UnstablePatternValue { .. } => "UnstablePatternValue",
         TyperError::LocalBlockDeclarationDeferred { .. } => "LocalBlockDeclarationDeferred",
