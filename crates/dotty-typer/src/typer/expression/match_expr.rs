@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn non_wildcard_pattern_keeps_pattern_specific_error() {
         let (parsed, mut store, packages, definitions, index, source) =
-            setup("class C { def choose(x: Int): Int = x match { case value => 1 } }");
+            setup("class C { def choose(x: Int): Int = x match { case Value => 1 } }");
         let (method, case_tree) = method_and_case(&parsed, &store, &index, source);
         let (mut typer, context) = context_for(
             &parsed,
@@ -802,6 +802,177 @@ mod tests {
             typer.pattern_binding_symbol_at(source, bind_second),
             Some(second_symbol)
         );
+    }
+
+    #[test]
+    fn variable_patterns_lower_to_binds_and_shadow_outer_locals_per_case() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case x => x; case x => x } }");
+        let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
+        let TreeKind::Match(source_match) = parsed.ast.get(match_tree).kind.clone() else {
+            panic!("expected source Match")
+        };
+        let source_cases = source_match.cases;
+        let source_patterns = source_cases
+            .iter()
+            .map(|case_tree| {
+                let TreeKind::CaseDef(case_def) = parsed.ast.get(*case_tree).kind else {
+                    panic!("expected source CaseDef")
+                };
+                (case_def.pattern, case_def.body)
+            })
+            .collect::<Vec<_>>();
+        let outer_parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "x" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed_match = typer.type_expression(match_tree, context).unwrap();
+        let TreeKind::Match(typed_match) = typer.typed_arena.get(typed_match).kind.clone() else {
+            panic!("expected typed Match")
+        };
+        let mut pattern_symbols = Vec::new();
+        for ((source_pattern, source_body), typed_case) in
+            source_patterns.into_iter().zip(typed_match.cases)
+        {
+            let TreeKind::CaseDef(typed_case) = typer.typed_arena.get(typed_case).kind.clone()
+            else {
+                panic!("expected typed CaseDef")
+            };
+            let TreeKind::Bind(typed_bind) = typer.typed_arena.get(typed_case.pattern).kind.clone()
+            else {
+                panic!("variable patterns lower to Typed Bind")
+            };
+            let symbol = typer
+                .pattern_binding_symbol_at(source, source_pattern)
+                .unwrap();
+            pattern_symbols.push(symbol);
+            assert_ne!(symbol, outer_parameter);
+            assert_eq!(
+                typer.store.symbols.get(symbol).info,
+                SymbolInfo::Complete(definitions.int)
+            );
+            assert_eq!(
+                typer.typed_index.get(source, source_pattern),
+                Some(typed_case.pattern)
+            );
+            let repeated = typer
+                .run_expression_transaction(|typer, journal, mappings| {
+                    let typed = typer.type_pattern(
+                        source_pattern,
+                        definitions.int,
+                        context,
+                        journal,
+                        mappings,
+                    )?;
+                    assert!(mappings.is_empty());
+                    Ok(typed)
+                })
+                .unwrap();
+            assert_eq!(repeated, typed_case.pattern);
+            assert!(matches!(
+                typer.store.types.try_get(typer.typed_arena.get(typed_case.pattern).ty),
+                Some(Type::TermRef { target: TermRefTarget::Symbol(actual), .. })
+                    if *actual == symbol
+            ));
+            assert_eq!(typer.typed_arena.get(typed_bind.body).ty, definitions.int);
+            assert_eq!(
+                typer.typed_index.get(source, source_body),
+                Some(typed_case.body)
+            );
+            assert!(matches!(
+                typer.store.types.try_get(typer.typed_arena.get(typed_case.body).ty),
+                Some(Type::TermRef { target: TermRefTarget::Symbol(actual), .. })
+                    if *actual == symbol
+            ));
+        }
+        assert_ne!(pattern_symbols[0], pattern_symbols[1]);
+    }
+
+    #[test]
+    fn explicit_wildcard_bind_shares_binding_semantics_and_source_mappings() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case item @ _ => item } }");
+        let (method, case_tree) = method_and_case(&parsed, &store, &index, source);
+        let TreeKind::CaseDef(source_case) = parsed.ast.get(case_tree).kind else {
+            panic!("expected source CaseDef")
+        };
+        let TreeKind::Bind(source_bind) = parsed.ast.get(source_case.pattern).kind else {
+            panic!("expected explicit source Bind")
+        };
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed_case = type_one_case(&mut typer, case_tree, definitions.int, context).unwrap();
+        let TreeKind::CaseDef(typed_case) = typer.typed_arena.get(typed_case).kind.clone() else {
+            panic!("expected typed CaseDef")
+        };
+        let TreeKind::Bind(typed_bind) = typer.typed_arena.get(typed_case.pattern).kind.clone()
+        else {
+            panic!("expected typed Bind")
+        };
+        assert_eq!(typed_bind.name, source_bind.name);
+        let symbol = typer
+            .pattern_binding_symbol_at(source, source_case.pattern)
+            .unwrap();
+        assert_eq!(
+            typer.typed_index.get(source, source_case.pattern),
+            Some(typed_case.pattern)
+        );
+        assert!(typer.typed_index.get(source, source_bind.body).is_some());
+        assert_eq!(
+            typer.store.symbols.get(symbol).info,
+            SymbolInfo::Complete(definitions.int)
+        );
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(typed_case.body).ty),
+            Some(Type::TermRef { target: TermRefTarget::Symbol(actual), .. })
+                if *actual == symbol
+        ));
+    }
+
+    #[test]
+    fn explicit_bind_rejects_non_wildcard_bodies_with_a_focused_error() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case item @ 1 => item } }");
+        let (method, case_tree) = method_and_case(&parsed, &store, &index, source);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        assert!(matches!(
+            type_one_case(&mut typer, case_tree, definitions.int, context),
+            Err(TyperError::UnsupportedBindPatternBody { .. })
+        ));
+        assert_eq!(typer.typed_arena.iter().count(), 0);
+        assert!(typer.typed_index.is_empty());
     }
 
     #[test]

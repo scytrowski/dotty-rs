@@ -5,8 +5,8 @@ use crate::typer::PatternKind;
 use dotty_core::ast::{TreeKind, TypedAstBuilder, UntypedNode};
 use dotty_core::types::Type;
 use dotty_core::{
-    Name, SourceId, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TermRefTarget,
-    TreeId, TypeId, Typed, Untyped,
+    Name, Namespace, SemanticStore, SourceId, SymbolFlags, SymbolId, SymbolInfo, SymbolKind,
+    SymbolOrigin, TermRefTarget, TreeId, TypeId, Typed, Untyped,
 };
 
 /// Classifies a pattern by its stable source-tree root category.
@@ -31,9 +31,7 @@ pub(super) fn pattern_kind(kind: &TreeKind<Untyped>) -> PatternKind {
 }
 
 impl SourceTyper<'_> {
-    /// Enters one already-typed source binding into the active case scope.
-    /// Recursive pattern traversal and source `Bind` typing remain deferred.
-    #[allow(dead_code)] // Pattern roots use this in the next typing increment.
+    /// Enters one pattern binding into the active case scope.
     pub(super) fn enter_pattern_binding(
         &mut self,
         source_tree: TreeId<Untyped>,
@@ -47,13 +45,16 @@ impl SourceTyper<'_> {
                 tree_index: source_tree.index(),
             });
         };
-        let TreeKind::Bind(binding) = &tree.kind else {
-            return Err(TyperError::MalformedPatternBinding {
-                source: self.source,
-                tree_index: source_tree.index(),
-            });
+        let valid_source = match &tree.kind {
+            TreeKind::Bind(binding) => binding.name == name,
+            TreeKind::Ident(ident) => {
+                ident.name == name
+                    && !ident.backquoted
+                    && is_variable_pattern_name(&self.store, name)
+            }
+            _ => false,
         };
-        if binding.name != name || !name.is_term() {
+        if !valid_source || !name.is_term() {
             return Err(TyperError::MalformedPatternBinding {
                 source: self.source,
                 tree_index: source_tree.index(),
@@ -143,7 +144,6 @@ impl SourceTyper<'_> {
         Ok((symbol, self.pattern_binding_term_ref(symbol)))
     }
 
-    #[allow(dead_code)] // Pattern entry is infrastructure until Bind typing lands.
     fn pattern_binding_term_ref(&mut self, symbol: SymbolId) -> TypeId {
         self.store.types.alloc(Type::TermRef {
             prefix: self.definitions.no_prefix,
@@ -151,17 +151,14 @@ impl SourceTyper<'_> {
         })
     }
 
-    /// Types the initial supported pattern subset: an unquoted term wildcard.
-    ///
-    /// The context is accepted here to keep the recursive pattern API aligned
-    /// with expression typing; a wildcard neither resolves a name nor binds a
-    /// symbol, so this first implementation does not inspect it.
+    /// Types wildcard and variable-pattern roots. Other pattern families are
+    /// introduced in later Match increments.
     pub(super) fn type_pattern(
         &mut self,
         pattern: TreeId<Untyped>,
         selector_type: TypeId,
-        _context: ExpressionContext,
-        _info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, pattern) {
@@ -173,27 +170,96 @@ impl SourceTyper<'_> {
                 tree_index: pattern.index(),
             });
         };
-        let is_wildcard = match source_tree.kind {
+        let typed = match &source_tree.kind {
             TreeKind::Ident(ident) => {
-                !ident.backquoted
-                    && ident.name.is_term()
-                    && self.store.names.resolve(ident.name.text()) == "_"
+                if !ident.name.is_term() {
+                    return Err(TyperError::MalformedVariablePattern {
+                        source: self.source,
+                        tree_index: pattern.index(),
+                    });
+                }
+                let spelling = self.store.names.resolve(ident.name.text());
+                if !ident.backquoted && spelling == "_" {
+                    TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                        .ident_with_backquoted(
+                            ident.name,
+                            false,
+                            selector_type,
+                            source_tree.position,
+                        )
+                } else if !ident.backquoted && is_variable_pattern_name(&self.store, ident.name) {
+                    let wildcard_name = Name::new(self.store.names.intern("_"), Namespace::Term);
+                    let wildcard = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                        .ident_with_backquoted(
+                            wildcard_name,
+                            false,
+                            selector_type,
+                            source_tree.position,
+                        );
+                    let (_symbol, binding_type) =
+                        self.enter_pattern_binding(pattern, ident.name, selector_type, context)?;
+                    TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).bind(
+                        ident.name,
+                        wildcard,
+                        binding_type,
+                        false,
+                        source_tree.position,
+                    )
+                } else {
+                    return Err(TyperError::UnsupportedPattern {
+                        source: self.source,
+                        tree_index: pattern.index(),
+                        pattern_kind: pattern_kind(&source_tree.kind),
+                    });
+                }
             }
-            _ => false,
+            TreeKind::Bind(binding) => {
+                if binding.given {
+                    return Err(TyperError::UnsupportedBindPatternBody {
+                        source: self.source,
+                        tree_index: binding.body.index(),
+                    });
+                }
+                let body_is_wildcard = self.arena.try_get(binding.body).is_some_and(|tree| {
+                    matches!(
+                        &tree.kind,
+                        TreeKind::Ident(body_ident)
+                            if !body_ident.backquoted
+                                && body_ident.name.is_term()
+                                && self.store.names.resolve(body_ident.name.text()) == "_"
+                    )
+                });
+                if !body_is_wildcard {
+                    return Err(TyperError::UnsupportedBindPatternBody {
+                        source: self.source,
+                        tree_index: binding.body.index(),
+                    });
+                }
+                let typed_body = self.type_pattern(
+                    binding.body,
+                    selector_type,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?;
+                let (_symbol, binding_type) =
+                    self.enter_pattern_binding(pattern, binding.name, selector_type, context)?;
+                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).bind(
+                    binding.name,
+                    typed_body,
+                    binding_type,
+                    false,
+                    source_tree.position,
+                )
+            }
+            _ => {
+                return Err(TyperError::UnsupportedPattern {
+                    source: self.source,
+                    tree_index: pattern.index(),
+                    pattern_kind: pattern_kind(&source_tree.kind),
+                });
+            }
         };
-        if !is_wildcard {
-            return Err(TyperError::UnsupportedPattern {
-                source: self.source,
-                tree_index: pattern.index(),
-                pattern_kind: pattern_kind(&source_tree.kind),
-            });
-        }
-
-        let TreeKind::Ident(ident) = source_tree.kind else {
-            unreachable!("wildcard classification requires an identifier")
-        };
-        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
-            .ident_with_backquoted(ident.name, false, selector_type, source_tree.position);
         self.typed_index
             .insert(self.source, pattern, typed)
             .map_err(|conflict| TyperError::ConflictingTypedExpression {
@@ -218,6 +284,19 @@ impl SourceTyper<'_> {
             _ => self.widen_expression_type_journaled(selector_type, info_journal, 0),
         }
     }
+}
+
+/// Mirrors the parser's pattern-variable first-character rule. Backquotes are
+/// checked by the caller; literal keywords and the wildcard are never binders.
+fn is_variable_pattern_name(store: &SemanticStore, name: Name) -> bool {
+    let spelling = store.names.resolve(name.text());
+    if matches!(spelling, "_" | "false" | "true" | "null") {
+        return false;
+    }
+    spelling
+        .chars()
+        .next()
+        .is_some_and(|first| first == '_' || (first.is_alphabetic() && first.is_lowercase()))
 }
 
 #[cfg(test)]
@@ -386,9 +465,9 @@ mod tests {
     }
 
     #[test]
-    fn non_wildcard_identifier_pattern_is_explicitly_unsupported() {
+    fn uppercase_identifier_pattern_is_not_a_variable_binding() {
         let (parsed, mut store, packages, definitions, index, source) =
-            setup("class C { def choose(x: Int): Int = x match { case value => 1 } }");
+            setup("class C { def choose(x: Int): Int = x match { case Value => 1 } }");
         let method = parsed
             .ast
             .iter()
@@ -405,7 +484,7 @@ mod tests {
             .ast
             .iter()
             .find_map(|(tree, node)| match &node.kind {
-                TreeKind::Ident(ident) if store.names.resolve(ident.name.text()) == "value" => {
+                TreeKind::Ident(ident) if store.names.resolve(ident.name.text()) == "Value" => {
                     Some(tree)
                 }
                 _ => None,
@@ -434,6 +513,105 @@ mod tests {
         ));
         assert_eq!(typer.typed_arena.iter().count(), 0);
         assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn backquoted_lowercase_identifier_is_not_a_variable_binding() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case `value` => 1 } }");
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "choose" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Ident(ident)
+                    if store.names.resolve(ident.name.text()) == "value" && ident.backquoted =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let error = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            })
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            TyperError::UnsupportedPattern {
+                pattern_kind: PatternKind::Identifier,
+                ..
+            }
+        ));
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+    }
+
+    #[test]
+    fn true_false_and_null_are_not_variable_patterns() {
+        for keyword in ["true", "false", "null"] {
+            let source_text = format!(
+                "class C {{ def choose(x: Int): Int = x match {{ case {keyword} => 1 }} }}"
+            );
+            let (parsed, mut store, packages, definitions, index, source) = setup(&source_text);
+            let method = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == "choose" =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let pattern = parsed
+                .ast
+                .iter()
+                .find_map(|(_tree, node)| match node.kind {
+                    TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                    _ => None,
+                })
+                .unwrap();
+            let (mut typer, context) = context_for(
+                &parsed,
+                &mut store,
+                &packages,
+                definitions,
+                &index,
+                source,
+                method,
+            );
+            let error = typer
+                .run_expression_transaction(|typer, journal, mappings| {
+                    typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+                })
+                .unwrap_err();
+            assert!(matches!(error, TyperError::UnsupportedPattern { .. }));
+            assert!(typer.pattern_bindings.by_tree.is_empty());
+            assert_eq!(typer.typed_arena.iter().count(), 0);
+        }
     }
 
     #[test]

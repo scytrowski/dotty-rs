@@ -68,12 +68,26 @@ pins nested `(x)` as `x` and `(1)` as `1`. Tuple syntax remains a separate
 Pattern typing has its own recursive-ready entry point under
 `typer/expression/patterns.rs`; it consumes the selector prototype type and
 the current expression context, and records source-to-typed identity in
-`SourceTypedIndex`. The initial supported subset is deliberately narrow: an
-ordinary, unquoted term identifier whose spelling is `_`. It becomes a typed
-`Ident(_)` carrying the selector prototype unchanged. The handler does not
-perform name lookup, create a binding, or allocate symbols. Backquoted `_` and
-all other pattern roots return `UnsupportedPattern`; expression support does
-not imply pattern support.
+`SourceTypedIndex`. The supported roots are an ordinary unquoted wildcard,
+lowercase variable identifiers, and explicit bindings over a wildcard.
+Wildcards become typed `Ident(_)` nodes carrying the selector prototype.
+Variable identifiers lower to typed `Bind(name, _)` nodes and introduce one
+typer-owned local symbol in the case scope. Explicit `name @ _` uses the same
+symbol creation path and maps both source Bind and source wildcard nodes.
+Pattern-bound identifiers in the case body resolve through ordinary local
+scope lookup, shadow outer names for that case, and remain isolated from sibling
+cases. Backquoted identifiers and uppercase-leading identifiers are not
+classified as variables; stable patterns and other pattern roots remain
+`UnsupportedPattern`.
+
+Variable classification mirrors the parser's source convention: unquoted
+names beginning with `_` or a lowercase Unicode character are variable
+patterns, except `_`, `true`, `false`, and `null`. This keeps the Typer
+independent of parser-private helpers while pinning the same rule with focused
+regressions. A variable's symbol info is the selector prototype, and the typed
+Bind's own type is a `TermRef` to that exact symbol. An implicit variable root
+maps to the typed Bind; the synthetic wildcard child does not get a fabricated
+source mapping.
 
 Pattern selector adaptation preserves an exact `ConstantType`. Other selector
 types use the existing expression type-widening rules. This follows the pinned
@@ -84,10 +98,13 @@ keeps a constant selector type and widens other selector types before typing
 the cases. The fixture in
 [`wildcard-patterns`](../crates/dotty-typer/tests/fixtures/wildcard-patterns)
 records the source shape and the normalized expected wildcard tree.
+The normalized variable and explicit Bind shapes are pinned in
+[`variable-patterns`](../crates/dotty-typer/tests/fixtures/variable-patterns).
 
-The dedicated `type_case_def` helper in `expression/match_expr.rs` now types
-unguarded wildcard `CaseDef` nodes independently; `Match` expression typing is
-supported for matches whose cases are all unguarded wildcards. It types the
+The dedicated `type_case_def` helper in `expression/match_expr.rs` types
+unguarded supported `CaseDef` nodes independently; `Match` expression typing
+is supported for matches whose cases use only wildcards, variable patterns, or
+explicit wildcard bindings. It types the
 selector once, preserves the selector's own type, and computes the shared
 pattern prototype by preserving constants and widening other expression
 types. It delegates each case to `type_case_def` in source order and builds a
@@ -98,11 +115,11 @@ values use the current `Type::Or` fallback. This intentionally does not
 implement Scala 3.9's general `TypeComparer.lub`; unions are not normalized
 beyond the existing relation rules. Nested wildcard matches are supported.
 
-Guards return `MatchGuardDeferred`. Binders, literals, stable identifiers,
-typed patterns, alternatives, tuple patterns, and extractor patterns remain
-deferred through `UnsupportedPattern`. Empty Match nodes and failed case
-typing return focused errors, and the enclosing expression transaction rolls
-back all case and selector state on failure. The normalized
+Guards return `MatchGuardDeferred`. Binders over non-wildcard patterns,
+literals, stable identifiers, typed patterns, alternatives, tuple patterns,
+and extractor patterns remain deferred through focused pattern errors. Empty
+Match nodes and failed case typing return focused errors, and the enclosing
+expression transaction rolls back all case and selector state on failure. The normalized
 [`wildcard-case-def` fixture](../crates/dotty-typer/tests/fixtures/wildcard-case-def)
 records this typed shape. In pinned Scala 3.9.0,
 [`typedCase`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/typer/Typer.scala#L2383-L2412)
