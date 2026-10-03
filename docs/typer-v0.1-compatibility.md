@@ -115,7 +115,8 @@ the cases. The fixture in
 [`wildcard-patterns`](../crates/dotty-typer/tests/fixtures/wildcard-patterns)
 records the source shape and the normalized expected wildcard tree.
 The `T` in a typed pattern must currently be a non-generic nominal class or
-trait reference (or one of the supported builtin types). The existing bounded
+trait reference (or a builtin with a supported runtime-test representation).
+The existing bounded
 relation must prove compatibility in at least one direction between `T` and
 the selector; proven unrelated types produce a focused mismatch, while
 unsupported relations and runtime-test shapes such as generic applications,

@@ -6,14 +6,14 @@ The normalized Scala 3.9.0 typed shapes for the supported source forms in
 ```text
 case _: Int => 1
   CaseDef(
-    pattern = Typed(Ident(_) : Int, TypeTree(Int) : Type) : Int,
+    pattern = Typed(Ident(_) : Int, TypeTree(Int) : Int) : Int,
     guard = None,
     body = Literal(1) : Constant(1)
   ) : Constant(1)
 
 case item: Int => item
   CaseDef(
-    pattern = Bind(item, Typed(Ident(_) : Int, TypeTree(Int) : Type) : Int)
+    pattern = Bind(item, Typed(Ident(_) : Int, TypeTree(Int) : Int) : Int)
       : TermRef(case-local item),
     guard = None,
     body = Ident(item) : TermRef(case-local item)
@@ -21,7 +21,7 @@ case item: Int => item
 
 case item @ (_: Int) => item
   CaseDef(
-    pattern = Bind(item, Typed(Ident(_) : Int, TypeTree(Int) : Type) : Int)
+    pattern = Bind(item, Typed(Ident(_) : Int, TypeTree(Int) : Int) : Int)
       : TermRef(case-local item),
     guard = None,
     body = Ident(item) : TermRef(case-local item)

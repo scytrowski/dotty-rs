@@ -567,6 +567,15 @@ impl SourceTyper<'_> {
         {
             return Ok(false);
         }
+        if matches!(
+            self.store.types.try_get(self.definitions.nothing_type),
+            Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(target),
+                ..
+            }) if *target == symbol
+        ) {
+            return Ok(false);
+        }
         if self.is_builtin_type_symbol(symbol) {
             return Ok(true);
         }
@@ -1001,6 +1010,7 @@ mod tests {
             typer.typed_arena.get(typed_pattern.tpt).kind,
             TreeKind::TypeTree(_)
         ));
+        assert_eq!(typer.typed_arena.get(typed_pattern.tpt).ty, definitions.int);
         assert_eq!(typer.typed_arena.get(typed).ty, definitions.int);
         assert_eq!(
             typer.typed_index.get(source, source_tpt),
@@ -1279,6 +1289,38 @@ mod tests {
             SymbolInfo::Missing
         ));
         assert_eq!(typer.source_type_index().type_at(source, typed_tpt), None);
+    }
+
+    #[test]
+    fn nothing_typed_pattern_defers_missing_runtime_test_representation() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Any): Int = x match { case _: Nothing => 1 } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        assert!(matches!(
+            typer.run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.any_type, context, journal, mappings)
+            }),
+            Err(TyperError::TypedPatternRuntimeTestDeferred { .. })
+        ));
+        assert_eq!(typer.typed_arena.iter().count(), 0);
+        assert!(typer.typed_index.is_empty());
     }
 
     #[test]
