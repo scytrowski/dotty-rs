@@ -235,13 +235,17 @@ impl SourceTyper<'_> {
                 tree_index: application.function.index(),
             });
         };
-        let TreeKind::Ident(qualifier) = &function_tree.kind else {
-            return Err(TyperError::ExtractorQualifierShapeUnsupported {
-                source: self.source,
-                tree_index: pattern.index(),
-            });
+        let (qualifier_name, selected_qualifier) = match &function_tree.kind {
+            TreeKind::Ident(qualifier) if qualifier.name.is_term() => (qualifier.name, false),
+            TreeKind::Select(selection) if selection.name.is_term() => (selection.name, true),
+            _ => {
+                return Err(TyperError::ExtractorQualifierShapeUnsupported {
+                    source: self.source,
+                    tree_index: pattern.index(),
+                });
+            }
         };
-        if !qualifier.name.is_term() || application.kind != dotty_core::ast::ApplyKind::Regular {
+        if application.kind != dotty_core::ast::ApplyKind::Regular {
             return Err(TyperError::ExtractorQualifierShapeUnsupported {
                 source: self.source,
                 tree_index: pattern.index(),
@@ -280,10 +284,16 @@ impl SourceTyper<'_> {
         ) {
             Ok(typed) => typed,
             Err(TyperError::TermNameNotFound { .. }) => {
-                return Err(TyperError::ExtractorQualifierNotFound {
+                if !selected_qualifier {
+                    return Err(TyperError::ExtractorQualifierNotFound {
+                        source: self.source,
+                        tree_index: pattern.index(),
+                        name: qualifier_name,
+                    });
+                }
+                return Err(TyperError::ExtractorQualifierShapeUnsupported {
                     source: self.source,
                     tree_index: pattern.index(),
-                    name: qualifier.name,
                 });
             }
             Err(
@@ -295,6 +305,29 @@ impl SourceTyper<'_> {
                     source: self.source,
                     tree_index: pattern.index(),
                     qualifier_type: None,
+                });
+            }
+            Err(TyperError::MemberNotFound { .. }) if selected_qualifier => {
+                return Err(TyperError::ExtractorQualifierMemberNotFound {
+                    source: self.source,
+                    tree_index: pattern.index(),
+                    name: qualifier_name,
+                });
+            }
+            Err(TyperError::OverloadedSelectionDeferred { .. }) if selected_qualifier => {
+                return Err(TyperError::ExtractorQualifierMemberAmbiguous {
+                    source: self.source,
+                    tree_index: pattern.index(),
+                    name: qualifier_name,
+                });
+            }
+            Err(TyperError::UnstableSelectionPrefix { qualifier_type, .. })
+                if selected_qualifier =>
+            {
+                return Err(TyperError::ExtractorQualifierNotStable {
+                    source: self.source,
+                    tree_index: pattern.index(),
+                    qualifier_type,
                 });
             }
             Err(error) => return Err(error),
@@ -1817,7 +1850,7 @@ mod tests {
         );
         assert!(matches!(
             selected.0,
-            TyperError::ExtractorQualifierShapeUnsupported { .. }
+            TyperError::ExtractorQualifierNotStable { .. }
         ));
         assert!(selected.1 && selected.2);
 
@@ -2088,6 +2121,182 @@ mod tests {
             assert!(store_rolled_back);
             assert!(typed_state_rolled_back);
         }
+    }
+
+    #[test]
+    fn selected_option_and_boolean_extractors_reuse_stable_selection_typing() {
+        let source_text = "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object extractors { object SomeInt { def unapply(value: Any): MaybeInt = value }; object Even { def unapply(value: Int): Boolean = true } }; class C { def option(value: Any): Int = value match { case extractors.SomeInt(x) => x; case _ => 0 }; def boolean(value: Int): Int = value match { case extractors.Even() => 1; case _ => 0 } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+
+        for (method_name, selected_name, expected_result) in [
+            ("option", "SomeInt", None),
+            ("boolean", "Even", Some(definitions.boolean)),
+        ] {
+            let (method, match_tree, pattern) = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == method_name =>
+                    {
+                        let match_tree = definition.rhs?;
+                        let TreeKind::Match(matching) = &parsed.ast.get(match_tree).kind else {
+                            return None;
+                        };
+                        let pattern = matching.cases.iter().find_map(|case| {
+                            let TreeKind::CaseDef(case) = &parsed.ast.get(*case).kind else {
+                                return None;
+                            };
+                            matches!(parsed.ast.get(case.pattern).kind, TreeKind::Apply(_))
+                                .then_some(case.pattern)
+                        })?;
+                        Some((index.symbol_at(source, tree)?, match_tree, pattern))
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let TreeKind::Apply(application) = &parsed.ast.get(pattern).kind else {
+                panic!("expected source extractor application");
+            };
+            let source_function = application.function;
+            let TreeKind::Select(source_selection) = &parsed.ast.get(source_function).kind else {
+                panic!("expected a selected extractor qualifier");
+            };
+            let source_qualifier = source_selection.qualifier;
+            let (mut typer, context) = context_for(
+                &parsed,
+                &mut store,
+                &packages,
+                definitions,
+                &index,
+                source,
+                method,
+            );
+            let typed_match = typer.type_expression(match_tree, context).unwrap();
+            let TreeKind::Match(matching) = &typer.typed_arena.get(typed_match).kind else {
+                panic!("expected typed Match");
+            };
+            let TreeKind::CaseDef(case) = &typer.typed_arena.get(matching.cases[0]).kind else {
+                panic!("expected typed CaseDef");
+            };
+            let typed_pattern = case.pattern;
+            let TreeKind::UnApply(unapply) = &typer.typed_arena.get(typed_pattern).kind else {
+                panic!("expected typed UnApply");
+            };
+            let TreeKind::Select(typed_function) = &typer.typed_arena.get(unapply.function).kind
+            else {
+                panic!("expected exact selected unapply function");
+            };
+            assert_eq!(
+                typer.store.names.resolve(typed_function.name.text()),
+                "unapply"
+            );
+            let unapply_symbol = typed_function_symbol(&typer, unapply.function);
+            let selected_extractor_symbol = match typer
+                .store
+                .types
+                .try_get(typer.typed_arena.get(typed_function.qualifier).ty)
+            {
+                Some(Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                }) => *symbol,
+                other => panic!("expected selected extractor value, found {other:?}"),
+            };
+            let module_class = typer
+                .source_module_class_of_object(selected_extractor_symbol)
+                .unwrap();
+            assert_eq!(
+                typer.store.symbols.get(unapply_symbol).owner,
+                Some(module_class)
+            );
+            let SymbolInfo::Complete(signature) = typer.store.symbols.get(unapply_symbol).info
+            else {
+                panic!("selected unapply symbol should have a complete signature");
+            };
+            let Some(Type::Method(signature)) = typer.store.types.try_get(signature) else {
+                panic!("selected unapply should be a method");
+            };
+            if let Some(result_type) = expected_result {
+                assert_eq!(signature.result, result_type);
+                assert!(unapply.patterns.is_empty());
+            } else {
+                assert_eq!(
+                    typer.store.names.resolve(source_selection.name.text()),
+                    selected_name
+                );
+                assert_eq!(signature.params.len(), 1);
+                let source_binder = match &parsed.ast.get(application.args[0]).kind {
+                    TreeKind::Ident(ident) => ident.name,
+                    other => panic!("expected nested binder, found {other:?}"),
+                };
+                let binder = typer
+                    .pattern_binding_symbol_at(source, application.args[0])
+                    .unwrap();
+                assert_eq!(
+                    typer.store.symbols.get(binder).info,
+                    SymbolInfo::Complete(definitions.int),
+                );
+                assert_eq!(
+                    typer.store.symbols.get(binder).name.text(),
+                    source_binder.text()
+                );
+            }
+            assert_eq!(
+                typer.typed_index.get(source, source_function),
+                Some(typed_function.qualifier)
+            );
+            assert!(typer.typed_index.get(source, source_qualifier).is_some());
+            assert_eq!(typer.typed_index.get(source, pattern), Some(typed_pattern));
+            assert_ne!(
+                typer.typed_index.get(source, pattern),
+                Some(unapply.function)
+            );
+        }
+    }
+
+    fn typed_function_symbol(typer: &SourceTyper<'_>, function: TreeId<Typed>) -> SymbolId {
+        match typer
+            .store
+            .types
+            .try_get(typer.typed_arena.get(function).ty)
+        {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) => *symbol,
+            other => panic!("expected symbol-backed selected function, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn selected_extractor_qualifier_errors_are_focused_and_transaction_clean() {
+        let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(
+            "object extractors {}; class C { def choose(value: Any): Int = value match { case extractors.Missing(_) => 1; case _ => 0 } }",
+        );
+        assert!(matches!(
+            error,
+            TyperError::ExtractorQualifierMemberNotFound { .. }
+        ));
+        assert!(store_rolled_back && typed_state_rolled_back);
+
+        let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(
+            "object extractors { def Missing(): Any = 1; def Missing(value: Int): Any = value }; class C { def choose(value: Any): Int = value match { case extractors.Missing(_) => 1; case _ => 0 } }",
+        );
+        assert!(matches!(
+            error,
+            TyperError::ExtractorQualifierMemberAmbiguous { .. }
+        ));
+        assert!(store_rolled_back && typed_state_rolled_back);
+
+        let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(
+            "object extractors { var SomeInt: Any = 1 }; class C { def choose(value: Any): Int = value match { case extractors.SomeInt(_) => 1; case _ => 0 } }",
+        );
+        assert!(matches!(
+            error,
+            TyperError::ExtractorQualifierNotStable { .. }
+        ));
+        assert!(store_rolled_back && typed_state_rolled_back);
     }
 
     #[test]

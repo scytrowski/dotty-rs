@@ -1135,6 +1135,18 @@ pub enum TyperError {
         tree_index: u32,
         name: Name,
     },
+    /// A selected extractor qualifier member does not exist.
+    ExtractorQualifierMemberNotFound {
+        source: SourceId,
+        tree_index: u32,
+        name: Name,
+    },
+    /// A selected extractor qualifier resolves to multiple members.
+    ExtractorQualifierMemberAmbiguous {
+        source: SourceId,
+        tree_index: u32,
+        name: Name,
+    },
     /// The extractor qualifier uses a selected or otherwise unsupported source form.
     ExtractorQualifierShapeUnsupported {
         source: SourceId,

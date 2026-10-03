@@ -1397,6 +1397,8 @@ fn audit_source_inner(
                     | TyperError::PatternBindingScopeConflict { .. }
                     | TyperError::DuplicatePatternBinding { .. }
                     | TyperError::ExtractorQualifierNotFound { .. }
+                    | TyperError::ExtractorQualifierMemberNotFound { .. }
+                    | TyperError::ExtractorQualifierMemberAmbiguous { .. }
                     | TyperError::ExtractorQualifierShapeUnsupported { .. }
                     | TyperError::ExtractorQualifierNotValueLike { .. }
                     | TyperError::ExtractorQualifierNotStable { .. }
@@ -2565,6 +2567,8 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::PatternBindingInAlternative { .. } => "PatternBindingInAlternative",
         TyperError::PatternAlternativeJoinUnsupported { .. } => "PatternAlternativeJoinUnsupported",
         TyperError::ExtractorQualifierNotFound { .. } => "ExtractorQualifierNotFound",
+        TyperError::ExtractorQualifierMemberNotFound { .. } => "ExtractorQualifierMemberNotFound",
+        TyperError::ExtractorQualifierMemberAmbiguous { .. } => "ExtractorQualifierMemberAmbiguous",
         TyperError::ExtractorQualifierShapeUnsupported { .. } => {
             "ExtractorQualifierShapeUnsupported"
         }

@@ -137,26 +137,29 @@ patterns in any branch are rejected before they can enter the case scope. The
 literal and stable-value source shapes are pinned against Scala 3.9.0 in
 [`pattern-alternatives`](../crates/dotty-typer/tests/fixtures/pattern-alternatives).
 
-Extractor applications with a simple identifier qualifier resolve that stable
-value, look up exactly one `unapply`, validate its plain unary method shape,
-and check `selector <: input` with the bounded relation. Boolean-result
-extractors accept zero nested patterns and lower to `UnApply` with empty
-pattern and implicit lists. For the supported Option-like result protocol, the
-result must expose parameterless `isEmpty` with Boolean type and parameterless
-value `get`; the `get` type is passed unchanged as the nested pattern
-prototype. The typed `UnApply` retains the selector/input prototype as its own
-type and the exact selected `unapply` symbol. Nested patterns reuse the
-existing case-local binder machinery and may naturally contain another
-supported unary extractor. The pinned Scala 3.9.0 oracle and normalized shape
-are recorded in [`unary-option-extractors`](../crates/dotty-typer/tests/fixtures/unary-option-extractors)
-and [`boolean-extractors`](../crates/dotty-typer/tests/fixtures/boolean-extractors).
+Extractor applications with a simple identifier or selected stable-value
+qualifier resolve through ordinary expression/stable-selection typing, look up
+exactly one `unapply`, validate its plain unary method shape, and check
+`selector <: input` with the bounded relation. Boolean-result extractors
+accept zero nested patterns and lower to `UnApply` with empty pattern and
+implicit lists. For the supported Option-like result protocol, the result must
+expose parameterless `isEmpty` with Boolean type and parameterless value `get`;
+the `get` type is passed unchanged as the nested pattern prototype. The typed
+`UnApply` retains the selector/input prototype as its own type and the exact
+selected `unapply` symbol. Nested patterns reuse the existing case-local
+binder machinery and may naturally contain another supported unary extractor.
+The pinned Scala 3.9.0 oracles and normalized shapes are recorded in
+[`unary-option-extractors`](../crates/dotty-typer/tests/fixtures/unary-option-extractors),
+[`boolean-extractors`](../crates/dotty-typer/tests/fixtures/boolean-extractors),
+and [`selected-extractors`](../crates/dotty-typer/tests/fixtures/selected-extractors).
 
 Zero or multiple nested patterns for Option-like extractors, nonzero nested
-patterns for Boolean extractors, missing/overloaded protocol members, and
-non-Boolean `isEmpty` return focused extractor errors. Selected qualifiers,
-generic or overloaded `unapply`, contextual/erased/repeated/by-name parameters,
-`unapplySeq`, product result protocols, and pattern constraint inference
-remain unsupported. The foundation resolution shape is recorded in
+patterns for Boolean extractors, missing/ambiguous selected qualifier members,
+missing/overloaded Option-like protocol members, and non-Boolean `isEmpty`
+return focused extractor errors. Generic or overloaded `unapply`, contextual,
+erased, repeated, or by-name parameters, `unapplySeq`, product result
+protocols, and pattern constraint inference remain unsupported. The
+foundation resolution shape is recorded in
 [`extractor-foundation`](../crates/dotty-typer/tests/fixtures/extractor-foundation).
 
 The dedicated `type_case_def` helper in `expression/match_expr.rs` types
