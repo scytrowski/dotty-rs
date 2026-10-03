@@ -114,7 +114,7 @@ where
     pub(super) fn parse_try_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         let body_feedback = self.observe_indented_body();
         self.advance();
-        let expr = self.parse_try_body(body_feedback);
+        let expr = self.parse_try_body(body_feedback, "expected an expression after `try`");
 
         let handler = if let Some(feedback_opened) = self.accept_catch_keyword() {
             if self.catch_starts_case_handler() {
@@ -131,11 +131,11 @@ where
                 "catch handler cannot be empty",
             );
         }
-        let finalizer = if self.accept_layout_keyword(dotty_core::HardKeyword::Finally) {
-            Some(self.parse_layout_expression("expected an expression after `finally`"))
-        } else {
-            None
-        };
+        let finalizer = self
+            .accept_layout_keyword(dotty_core::HardKeyword::Finally)
+            .map(|feedback_opened| {
+                self.parse_try_body(feedback_opened, "expected an expression after `finally`")
+            });
 
         self.alloc_from(
             mark,
@@ -147,7 +147,7 @@ where
         )
     }
 
-    fn parse_try_body(&mut self, feedback_opened: bool) -> TreeId<Untyped> {
+    fn parse_try_body(&mut self, feedback_opened: bool, message: &str) -> TreeId<Untyped> {
         let mut lookahead = 0;
         while matches!(
             self.cursor.lookahead(lookahead).kind,
@@ -164,7 +164,7 @@ where
                 self.parse_indented_block()
             }
         } else {
-            self.parse_layout_expression("expected an expression after `try`")
+            self.parse_layout_expression(message)
         }
     }
 
@@ -233,26 +233,26 @@ where
         }
     }
 
-    fn accept_layout_keyword(&mut self, keyword: dotty_core::HardKeyword) -> bool {
-        if self.current().kind == TokenKind::Keyword(keyword) {
-            self.advance();
-            return true;
+    fn accept_layout_keyword(&mut self, keyword: dotty_core::HardKeyword) -> Option<bool> {
+        if self.current().kind != TokenKind::Keyword(keyword) {
+            let mut lookahead = 0;
+            while matches!(
+                self.cursor.lookahead(lookahead).kind,
+                TokenKind::Newline | TokenKind::Newlines
+            ) {
+                lookahead += 1;
+            }
+            if lookahead == 0
+                || self.cursor.lookahead(lookahead).kind != TokenKind::Keyword(keyword)
+            {
+                return None;
+            }
+            self.consume_control_newlines();
         }
 
-        let mut lookahead = 0;
-        while matches!(
-            self.cursor.lookahead(lookahead).kind,
-            TokenKind::Newline | TokenKind::Newlines
-        ) {
-            lookahead += 1;
-        }
-        if lookahead == 0 || self.cursor.lookahead(lookahead).kind != TokenKind::Keyword(keyword) {
-            return false;
-        }
-
-        self.consume_control_newlines();
+        let feedback_opened = self.observe_indented_body();
         self.advance();
-        true
+        Some(feedback_opened)
     }
 
     /// Consumes `catch`, opening a parser-requested case region when a
@@ -1813,6 +1813,60 @@ mod tests {
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_indented_finally_statement_block() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "try risky() finally\n  val x = 1\n  cleanup(x)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Try), 0, 3),
+                token(TokenKind::Identifier, 4, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Keyword(HardKeyword::Finally), 12, 19),
+                token(TokenKind::Newline, 19, 20),
+                token(TokenKind::Indent, 22, 22),
+                token(TokenKind::Keyword(HardKeyword::Val), 22, 25),
+                token(TokenKind::Identifier, 26, 27),
+                token(TokenKind::Operator, 28, 29),
+                token(TokenKind::IntegerLiteral, 30, 31),
+                token(TokenKind::Newline, 31, 32),
+                token(TokenKind::Identifier, 34, 41),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 41, 42),
+                token(TokenKind::Identifier, 42, 43),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 43, 44),
+                token(TokenKind::Outdent, 44, 44),
+                token(TokenKind::Eof, 44, 44),
+            ],
+            &mut names,
+        );
+
+        let id = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::ParsedTry(ParsedTry {
+            finalizer: Some(finalizer),
+            ..
+        })) = parser.ast().get(id).kind
+        else {
+            panic!("expected a parsed try with an indented finalizer");
+        };
+        let TreeKind::Block(Block { ref stats, expr }) = parser.ast().get(finalizer).kind else {
+            panic!("expected the indented finally statements to form a block");
+        };
+
+        assert_eq!(stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert!(matches!(parser.ast().get(expr).kind, TreeKind::Apply(_)));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(
+            parser.diagnostics().is_empty(),
+            "{:?}",
+            parser.diagnostics()
+        );
     }
 
     #[test]
