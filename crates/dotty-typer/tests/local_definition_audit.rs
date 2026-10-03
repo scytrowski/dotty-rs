@@ -1834,6 +1834,8 @@ fn typer_error_name(error: &TyperError) -> &'static str {
             "MatchCaseResultTypeCannotBeWidened"
         }
         TyperError::MatchCaseJoinUnsupported { .. } => "MatchCaseJoinUnsupported",
+        TyperError::MalformedVariablePattern { .. } => "MalformedVariablePattern",
+        TyperError::UnsupportedBindPatternBody { .. } => "UnsupportedBindPatternBody",
         TyperError::LocalBlockDeclarationDeferred { .. } => "LocalBlockDeclarationDeferred",
         TyperError::InvalidInferredLocalValueType { .. } => "InvalidInferredLocalValueType",
         TyperError::LocalValueRightHandSideMissing { .. } => "LocalValueRightHandSideMissing",

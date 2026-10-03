@@ -1087,6 +1087,16 @@ pub enum TyperError {
         tree_index: u32,
         pattern_kind: PatternKind,
     },
+    /// An identifier pattern is not a well-formed term-name pattern.
+    MalformedVariablePattern {
+        source: SourceId,
+        tree_index: u32,
+    },
+    /// An explicit Bind currently supports only a wildcard body.
+    UnsupportedBindPatternBody {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// A source case tree is missing or does not have the required `CaseDef` shape.
     MalformedCaseDef {
         source: SourceId,
