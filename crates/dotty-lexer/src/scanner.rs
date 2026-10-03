@@ -777,12 +777,11 @@ impl TokenSource for ContextualScanner {
                             && next.is_some_and(|next| can_start_statement_kind(next.kind));
 
                     if is_dedented_infix_continuation {
-                        let previous = previous.expect("validated previous operator operand");
-                        let operator_offset = operator.span.start();
+                        let separator_offset = operator.span.end();
                         let separator = Token::new(
                             TokenKind::Newline,
-                            TextRange::new(previous.span.end(), operator_offset)
-                                .expect("source-ordered line break range is valid"),
+                            TextRange::new(separator_offset, separator_offset)
+                                .expect("empty separator range is valid"),
                         );
                         // The first outdent closes this match's cases. Any
                         // following outdents would prematurely end the case
@@ -5530,6 +5529,12 @@ mod tests {
         assert_eq!(scanner.lookahead(1).kind, TokenKind::Operator);
         assert_eq!(scanner.lookahead(2).kind, TokenKind::Newline);
         assert_eq!(scanner.lookahead(3).kind, TokenKind::Identifier);
+        assert!(
+            scanner
+                .tokens
+                .windows(2)
+                .all(|pair| { pair[0].span.end() <= pair[1].span.start() })
+        );
     }
 
     #[test]
