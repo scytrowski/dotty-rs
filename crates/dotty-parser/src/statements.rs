@@ -661,7 +661,20 @@ where
         marker_start: u32,
         include_marked: bool,
     ) -> Option<TreeId<Untyped>> {
-        if self.end_marker_matches(tree, target_kind, target_text) {
+        let indentation_allows_owner = self.ast.get(tree).position.is_some_and(|position| {
+            let owner_start = position.span().range().start();
+            let owner_indent = self.source_line_indent_prefix(owner_start);
+            let source_before_owner = &self.source.as_str()[..owner_start as usize];
+            let owner_line_start = source_before_owner
+                .rfind(['\n', '\r', '\u{000c}', '\u{001a}'])
+                .map_or(0, |index| index + 1);
+            let owner_starts_after_only_indentation =
+                owner_start as usize - owner_line_start == owner_indent.len();
+
+            !owner_starts_after_only_indentation
+                || owner_indent == self.source_line_indent_prefix(marker_start)
+        });
+        if indentation_allows_owner && self.end_marker_matches(tree, target_kind, target_text) {
             return self
                 .end_marker_is_eligible(
                     tree,

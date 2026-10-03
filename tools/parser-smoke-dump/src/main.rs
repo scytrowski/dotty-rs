@@ -1915,4 +1915,54 @@ mod tests {
             SOURCE.len() as u32
         );
     }
+
+    #[test]
+    fn end_marker_at_outer_indentation_is_not_stolen_by_same_named_member() {
+        const SOURCE: &str = "object Outer:\n  class Outer {}\nend Outer";
+        let scanner = ContextualScanner::new(SOURCE).expect("source scans");
+        let source_text = SourceText::new(SOURCE).expect("source text is valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let outer_id = package
+            .stats
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    &result.ast.get(*id).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module))
+                        if names.resolve(module.name.as_name().text()) == "Outer"
+                )
+            })
+            .expect("Outer object remains at package scope");
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(outer)) = &result.ast.get(outer_id).kind
+        else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &result.ast.get(outer.template).kind else {
+            panic!("expected outer template");
+        };
+        assert!(template.body.iter().any(|id| matches!(
+            &result.ast.get(*id).kind,
+            TreeKind::TypeDef(definition)
+                if names.resolve(definition.name.as_name().text()) == "Outer"
+        )));
+        assert_eq!(
+            result
+                .ast
+                .get(outer_id)
+                .position
+                .unwrap()
+                .span()
+                .range()
+                .end(),
+            SOURCE.len() as u32
+        );
+    }
 }
