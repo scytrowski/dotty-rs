@@ -1312,13 +1312,13 @@ fn probe_supported_match_cases(
                     }
                     _ => None,
                 };
-                if family.starts_with("typed") {
-                    if let Some(boundary) = boundary {
-                        *profile
-                            .typed_pattern_boundaries
-                            .entry(boundary.to_owned())
-                            .or_default() += 1;
-                    }
+                if family.starts_with("typed")
+                    && let Some(boundary) = boundary
+                {
+                    *profile
+                        .typed_pattern_boundaries
+                        .entry(boundary.to_owned())
+                        .or_default() += 1;
                 }
             }
         }
