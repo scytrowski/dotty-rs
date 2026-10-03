@@ -288,6 +288,7 @@ match_corpus_profile:
     wildcard/identifier/bind=104
   sequence_wildcard_occurrences=0
   named_pattern_arguments=0
+  empty_tuple_unit_patterns=8
   infix_pattern_forms=780
   extractor_representative_files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala]
 resolver_metrics:

@@ -727,7 +727,8 @@ joins are explicit errors. Tuple patterns use the same `UnApply` and
 product-selector lowering as extractors. The pinned fixture confirms that
 `case (left, right)` becomes `Tuple2.unapply[Any, Any]`, nested tuple
 components lower recursively, `(single)` remains one binder, and `()` is the
-Unit literal pattern.
+Unit literal pattern. Of the 479 tuple-shaped source patterns in the corpus,
+8 are empty `()` patterns and lower as Unit literals.
 
 The post-sprint typed-pattern inventory has 155 first-blocker runtime-test
 deferrals, 31 unsupported type-relation deferrals, and 258 type-tree projection
