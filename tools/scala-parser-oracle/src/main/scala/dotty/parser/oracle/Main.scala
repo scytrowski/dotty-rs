@@ -183,6 +183,13 @@ object Main:
         }).size
         fields += field("type_param_count", typeParamCount.toString)
         fields += field(
+          "param_clause_kinds",
+          clauses.map:
+            case clause if clause.headOption.exists(_.isInstanceOf[dotty.tools.dotc.ast.Trees.TypeDef[?]]) => "type"
+            case _ => "term"
+          .map(quote).mkString("[", ",", "]")
+        )
+        fields += field(
           "param_clause_sizes",
           clauses.map(clause => clause.size).mkString("[", ",", "]")
         )

@@ -613,6 +613,7 @@ impl SourceTyper<'_> {
                 name: definition.name,
                 type_params: typed_type_params,
                 value_param_clauses: typed_clauses,
+                source_param_clause_order: definition.source_param_clause_order.clone(),
                 tpt: typed_result,
                 rhs: Some(typed_rhs),
                 metadata: (),

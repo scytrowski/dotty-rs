@@ -16,6 +16,7 @@ use crate::ast::phase::AstPhase;
 use crate::ids::TreeId;
 use crate::names::{Name, TermName, TypeName};
 use crate::types::{Constant, Variance};
+use std::ops::Range;
 
 /// `name`, preserving whether the source used backquotes around it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,19 +179,26 @@ pub struct ValDef<P: AstPhase> {
     pub metadata: P::DefMetadata,
 }
 
+/// An entry in a method's optional source-level parameter-clause ordering.
+/// The ranges and indexes refer to the corresponding flattened fields on
+/// [`DefDef`], avoiding duplicate tree references while preserving interleaved
+/// type and term clauses (including empty clauses).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DefParamClauseOrder {
+    TypeParams(Range<usize>),
+    ValueParams(usize),
+}
+
 /// `mods def name[type_params](value_param_clauses): tpt = rhs`.
-///
-/// Unlike Dotty's `DefDef`, which folds parameter clauses into a single
-/// unified `paramss: List[ParamClause]`, this keeps the leading type-parameter
-/// clause separate from the ordered term clauses. The parser currently scopes
-/// method syntax to that shape; interleaved type-parameter clauses remain an
-/// explicit unsupported syntax until the model grows an ordered mixed-clause
-/// representation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DefDef<P: AstPhase> {
     pub name: TermName,
     pub type_params: Vec<TreeId<P>>,
     pub value_param_clauses: Vec<Vec<TreeId<P>>>,
+    /// Source clause order when it cannot be reconstructed from the legacy
+    /// type-first fields. `None` means one leading type clause, followed by
+    /// all value clauses.
+    pub source_param_clause_order: Option<Vec<DefParamClauseOrder>>,
     pub tpt: TreeId<P>,
     pub rhs: Option<TreeId<P>>,
     pub metadata: P::DefMetadata,
@@ -498,6 +506,7 @@ mod tests {
             name: TermName::new(NameId::new(1)),
             type_params: vec![tree_id(2)],
             value_param_clauses: vec![vec![tree_id(3)], vec![tree_id(4)]],
+            source_param_clause_order: None,
             tpt: tree_id(5),
             rhs: None,
             metadata: crate::ast::modifiers::Modifiers::default(),

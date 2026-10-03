@@ -469,7 +469,7 @@ where
                 .unwrap_or(false)
     }
 
-    fn current_is_implicit_parameter_clause(&mut self) -> bool {
+    pub(crate) fn current_is_implicit_parameter_clause(&mut self) -> bool {
         if self.current().kind != TokenKind::Punctuation(Punctuation::LeftParen) {
             return false;
         }

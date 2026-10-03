@@ -427,6 +427,7 @@ where
                     name: signature.name,
                     type_params: signature.type_params,
                     value_param_clauses: signature.value_param_clauses,
+                    source_param_clause_order: None,
                     tpt: signature.tpt,
                     rhs: signature.rhs,
                     metadata: signature.metadata,
