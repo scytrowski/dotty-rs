@@ -104,6 +104,7 @@ mod tests {
     use crate::typer::{ExpressionContext, SourceTyper};
     use dotty_core::{
         Definitions, Name, Namespace, Packages, SemanticStore, SourceSemanticIndex, SourceText,
+        Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
     };
     use dotty_lexer::ContextualScanner;
     use dotty_namer::name_compilation_unit;
@@ -186,6 +187,24 @@ mod tests {
         let (parsed, mut store, packages, definitions, index, source) =
             setup("class C { def choose(x: Int): Int = x match { case _ => 1 } }");
         let (method, pattern) = method_and_pattern(&parsed, &store, &index, source, "choose");
+        let method_scope = index.scope_of(method).unwrap();
+        let underscore = Name::new(store.names.intern("_"), Namespace::Term);
+        let shadowed_wildcard = store.symbols.alloc(Symbol {
+            name: underscore,
+            owner: Some(method),
+            kind: SymbolKind::Local,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Complete(definitions.object_type),
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        store
+            .scopes
+            .get_mut(method_scope)
+            .enter(underscore, shadowed_wildcard);
         let (mut typer, context) = context_for(
             &parsed,
             &mut store,
@@ -361,5 +380,21 @@ mod tests {
             PatternKind::Identifier
         );
         assert_eq!(PatternKind::Identifier.as_str(), "identifier");
+    }
+
+    #[test]
+    fn pattern_root_classifier_covers_common_unsupported_shapes() {
+        let (parsed, _store, _packages, _definitions, _index, _source) = setup(
+            "class C { def choose(x: Any): Int = x match { case 1 => 1; case y: Int => y; case Some(y) => 2; case 2 | 3 => 3 } }",
+        );
+        let categories = parsed
+            .ast
+            .iter()
+            .map(|(_, tree)| pattern_kind(&tree.kind))
+            .collect::<std::collections::HashSet<_>>();
+        assert!(categories.contains(&PatternKind::Literal));
+        assert!(categories.contains(&PatternKind::Typed));
+        assert!(categories.contains(&PatternKind::Application));
+        assert!(categories.contains(&PatternKind::Alternative));
     }
 }
