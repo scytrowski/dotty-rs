@@ -1812,6 +1812,8 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::MemberLookup(..) => "MemberLookup",
         TyperError::UnsupportedExpression { .. } => "UnsupportedExpression",
         TyperError::UnsupportedPattern { .. } => "UnsupportedPattern",
+        TyperError::MalformedCaseDef { .. } => "MalformedCaseDef",
+        TyperError::MatchGuardDeferred { .. } => "MatchGuardDeferred",
         TyperError::LocalBlockDeclarationDeferred { .. } => "LocalBlockDeclarationDeferred",
         TyperError::InvalidInferredLocalValueType { .. } => "InvalidInferredLocalValueType",
         TyperError::LocalValueRightHandSideMissing { .. } => "LocalValueRightHandSideMissing",

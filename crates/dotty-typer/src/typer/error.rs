@@ -1087,6 +1087,17 @@ pub enum TyperError {
         tree_index: u32,
         pattern_kind: PatternKind,
     },
+    /// A source case tree is missing or does not have the required `CaseDef` shape.
+    MalformedCaseDef {
+        source: SourceId,
+        tree_index: u32,
+        actual_kind: &'static str,
+    },
+    /// Guard typing is not part of the current wildcard case subset.
+    MatchGuardDeferred {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// A block statement changes the local declaration or import environment.
     LocalBlockDeclarationDeferred {
         source: SourceId,

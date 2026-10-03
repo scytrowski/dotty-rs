@@ -85,6 +85,19 @@ the cases. The fixture in
 [`wildcard-patterns`](../crates/dotty-typer/tests/fixtures/wildcard-patterns)
 records the source shape and the normalized expected wildcard tree.
 
+The dedicated `type_case_def` helper in `expression/match_expr.rs` now types
+unguarded wildcard `CaseDef` nodes independently; `Match` expression typing is
+still deferred. It delegates pattern handling to `type_pattern`, types the
+body through the ordinary expression path, and assigns the case the body's
+own type. Guarded cases return `MatchGuardDeferred`, while unsupported
+patterns retain `UnsupportedPattern`. The normalized
+[`wildcard-case-def` fixture](../crates/dotty-typer/tests/fixtures/wildcard-case-def)
+records this typed shape. In pinned Scala 3.9.0,
+[`typedCase`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/typer/Typer.scala#L2383-L2412)
+types a pattern with the selector prototype, and
+[`assignType(CaseDef, ...)`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/typer/TypeAssigner.scala#L446-L464)
+uses the typed body type for ordinary term cases.
+
 ## Real-source local-definition audit
 
 Run the pinned Scala 3.9.0 source audit with:
