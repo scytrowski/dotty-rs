@@ -78,6 +78,10 @@ impl<'a> TypedAstBuilder<'a> {
     ) -> TreeId<Typed> {
         self.assert_real_typed_tree(body, "a typed pattern binding body");
         self.assert_real_type(ty, "a typed pattern binding");
+        debug_assert!(
+            matches!(self.types.try_get(ty), Some(Type::TermRef { .. })),
+            "a typed pattern binding must use its bound symbol's term reference"
+        );
         self.arena.alloc(Tree {
             kind: TreeKind::Bind(Bind { name, body, given }),
             position,

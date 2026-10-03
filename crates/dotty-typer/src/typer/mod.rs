@@ -99,6 +99,7 @@ pub struct SourceTyper<'a> {
     resolver: Box<dyn SymbolResolver + 'a>,
     type_index: SourceTypeIndex,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
+    pattern_bindings: PatternBindingIndex,
     local_methods: LocalMethodIndex,
     active_local_type_scopes: Vec<(SourceContextId, ScopeId)>,
     active_local_import_scopes: Vec<(SourceContextId, Option<ExpressionScopeId>)>,
@@ -115,6 +116,13 @@ pub struct SourceTyper<'a> {
 struct SourceTreeLocation {
     tree_index: u32,
     position: Option<SourceSpan>,
+}
+
+#[derive(Clone, Default)]
+struct PatternBindingIndex {
+    by_tree: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
+    #[allow(dead_code)] // Kept for case-scope provenance checks in pattern entry.
+    scope_by_symbol: HashMap<SymbolId, ScopeId>,
 }
 
 #[derive(Clone)]
@@ -143,6 +151,7 @@ impl<'a> SourceTyper<'a> {
             resolver: Box::new(NoResolver),
             type_index: SourceTypeIndex::default(),
             local_symbols: HashMap::new(),
+            pattern_bindings: PatternBindingIndex::default(),
             local_methods: LocalMethodIndex::default(),
             active_local_type_scopes: Vec::new(),
             active_local_import_scopes: Vec::new(),
@@ -410,6 +419,20 @@ impl<'a> SourceTyper<'a> {
     /// The typer-owned identities assigned to successfully typed block locals.
     pub fn local_symbol_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<SymbolId> {
         self.local_symbols.get(&(source, tree)).copied()
+    }
+
+    /// Returns the typer-owned symbol introduced by a source pattern binding.
+    pub fn pattern_binding_symbol_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        self.pattern_bindings.by_tree.get(&(source, tree)).copied()
+    }
+
+    #[allow(dead_code)] // Tests and later pattern typing inspect case ownership.
+    pub(super) fn pattern_binding_scope(&self, symbol: SymbolId) -> Option<ScopeId> {
+        self.pattern_bindings.scope_by_symbol.get(&symbol).copied()
     }
 
     /// Returns the typer-owned method identity entered for a local `DefDef`.

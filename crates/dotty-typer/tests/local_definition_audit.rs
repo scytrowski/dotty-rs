@@ -1823,6 +1823,11 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::UnsupportedPattern { .. } => "UnsupportedPattern",
         TyperError::MalformedCaseDef { .. } => "MalformedCaseDef",
         TyperError::MatchGuardDeferred { .. } => "MatchGuardDeferred",
+        TyperError::MalformedPatternBinding { .. } => "MalformedPatternBinding",
+        TyperError::WildcardPatternBindingRejected { .. } => "WildcardPatternBindingRejected",
+        TyperError::PatternBindingOutsideCaseScope { .. } => "PatternBindingOutsideCaseScope",
+        TyperError::PatternBindingScopeConflict { .. } => "PatternBindingScopeConflict",
+        TyperError::DuplicatePatternBinding { .. } => "DuplicatePatternBinding",
         TyperError::EmptyMatchCases { .. } => "EmptyMatchCases",
         TyperError::MatchSelectorTypeCannotBeAdapted { .. } => "MatchSelectorTypeCannotBeAdapted",
         TyperError::MatchCaseResultTypeCannotBeWidened { .. } => {
