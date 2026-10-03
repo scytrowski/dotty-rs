@@ -27,7 +27,6 @@ pub(super) fn pattern_kind(kind: &TreeKind<Untyped>) -> PatternKind {
     }
 }
 
-#[allow(dead_code)] // The Match typer consumes this entry point in the next increment.
 impl SourceTyper<'_> {
     /// Types the initial supported pattern subset: an unquoted term wildcard.
     ///

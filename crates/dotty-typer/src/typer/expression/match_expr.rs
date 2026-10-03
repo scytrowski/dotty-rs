@@ -4,7 +4,6 @@ use super::super::{ExpressionContext, SourceTyper, TyperError};
 use dotty_core::ast::{TreeKind, TypedAstBuilder};
 use dotty_core::{SourceId, SymbolId, SymbolInfo, TreeId, TypeId, Typed, Untyped};
 
-#[allow(dead_code)] // The Match dispatcher consumes this helper in the next increment.
 impl SourceTyper<'_> {
     /// Types one unguarded wildcard case without opening a nested transaction.
     pub(super) fn type_case_def(
@@ -66,6 +65,74 @@ impl SourceTyper<'_> {
             })?;
         new_mappings.push((self.source, case_tree));
         Ok(typed)
+    }
+
+    pub(in crate::typer) fn type_match_expression(
+        &mut self,
+        tree: TreeId<Untyped>,
+        matched: dotty_core::ast::Match<Untyped>,
+        position: Option<dotty_core::SourceSpan>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        if matched.cases.is_empty() {
+            return Err(TyperError::EmptyMatchCases {
+                source: self.source,
+                tree_index: tree.index(),
+            });
+        }
+
+        let selector =
+            self.type_expression_inner(matched.selector, context, info_journal, new_mappings)?;
+        let selector_type = self.typed_arena.get(selector).ty;
+        let pattern_type = self
+            .pattern_selector_type(selector_type, info_journal)
+            .map_err(|error| TyperError::MatchSelectorTypeCannotBeAdapted {
+                source: self.source,
+                tree_index: tree.index(),
+                error: Box::new(error),
+            })?;
+
+        let mut typed_cases = Vec::with_capacity(matched.cases.len());
+        let mut result_type = None;
+        for case_tree in matched.cases {
+            let typed_case =
+                self.type_case_def(case_tree, pattern_type, context, info_journal, new_mappings)?;
+            let case_type = self.typed_arena.get(typed_case).ty;
+            let case_type = self
+                .widen_expression_type_journaled(case_type, info_journal, 0)
+                .map_err(|error| TyperError::MatchCaseResultTypeCannotBeWidened {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    case_tree_index: case_tree.index(),
+                    error: Box::new(error),
+                })?;
+            result_type = Some(match result_type {
+                None => case_type,
+                Some(current) => {
+                    self.join_expression_types(current, case_type)
+                        .map_err(|error| TyperError::MatchCaseJoinUnsupported {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            left: current,
+                            right: case_type,
+                            error: Box::new(error),
+                        })?
+                }
+            });
+            typed_cases.push(typed_case);
+        }
+
+        let result_type = result_type.expect("non-empty Match has a case result");
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).match_expr(
+                selector,
+                typed_cases,
+                result_type,
+                position,
+            ),
+        )
     }
 }
 
@@ -139,6 +206,33 @@ mod tests {
             .find_map(|(tree, node)| matches!(node.kind, TreeKind::CaseDef(_)).then_some(tree))
             .unwrap();
         (method, case_tree)
+    }
+
+    fn method_and_match(
+        parsed: &dotty_parser::ParseResult,
+        store: &SemanticStore,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+    ) -> (SymbolId, TreeId<Untyped>) {
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "choose" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let match_tree = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| matches!(node.kind, TreeKind::Match(_)).then_some(tree))
+            .max_by_key(|tree| tree.index())
+            .unwrap();
+        (method, match_tree)
     }
 
     fn context_for<'a>(
@@ -356,5 +450,203 @@ mod tests {
         assert_eq!(typer.local_symbol_at(source, local_tree), None);
         assert_eq!(typer.typed_arena.iter().count(), 0);
         assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn wildcard_match_types_selector_once_and_joins_case_results() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Any = x match { case _ => 1; case _ => 2 } }");
+        let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
+        let TreeKind::Match(source_match) = &parsed.ast.get(match_tree).kind else {
+            panic!("expected a source Match")
+        };
+        let selector_tree = source_match.selector;
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+
+        let typed = typer.type_expression(match_tree, context).unwrap();
+        let TreeKind::Match(typed_match) = &typer.typed_arena.get(typed).kind else {
+            panic!("expected a typed Match")
+        };
+        assert_eq!(typed_match.cases.len(), 2);
+        assert_eq!(
+            typer.typed_index.get(source, selector_tree),
+            Some(typed_match.selector)
+        );
+        let selector_type = typer.typed_arena.get(typed_match.selector).ty;
+        assert!(typer.store.types.contains(selector_type));
+        let TreeKind::CaseDef(first) = &typer.typed_arena.get(typed_match.cases[0]).kind else {
+            panic!("expected a typed CaseDef")
+        };
+        assert_eq!(typer.typed_arena.get(first.pattern).ty, definitions.int);
+        assert_eq!(typer.typed_arena.get(typed).ty, definitions.int);
+
+        let repeated = typer.type_expression(match_tree, context).unwrap();
+        assert_eq!(repeated, typed);
+    }
+
+    #[test]
+    fn wildcard_match_joins_unrelated_results_with_or_and_nests() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { def choose(x: Int, y: Int): Any = x match { case _ => y match { case _ => 1 }; case _ => false } }",
+        );
+        let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer.type_expression(match_tree, context).unwrap();
+        let TreeKind::Match(_) = &typer.typed_arena.get(typed).kind else {
+            panic!("expected a typed outer Match")
+        };
+        let typed_matches = typer
+            .typed_arena
+            .iter()
+            .filter(|(_, node)| matches!(node.kind, TreeKind::Match(_)))
+            .count();
+        assert!(typed_matches >= 2, "expected nested typed matches");
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(typed).ty),
+            Some(Type::Or { .. })
+        ));
+    }
+
+    #[test]
+    fn constant_selector_keeps_its_type_and_empty_match_is_rejected() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = 1 match { case _ => 1 } }");
+        let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
+        let TreeKind::Match(source_match) = parsed.ast.get(match_tree).kind.clone() else {
+            panic!("expected source Match")
+        };
+        let empty_match = parsed.ast.alloc(Tree {
+            kind: TreeKind::Match(dotty_core::ast::Match {
+                selector: source_match.selector,
+                cases: Vec::new(),
+            }),
+            position: None,
+            ty: (),
+        });
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer.type_expression(match_tree, context).unwrap();
+        let TreeKind::Match(typed_match) = &typer.typed_arena.get(typed).kind else {
+            panic!("expected typed Match")
+        };
+        let selector_type = typer.typed_arena.get(typed_match.selector).ty;
+        assert!(matches!(
+            typer.store.types.try_get(selector_type),
+            Some(Type::Constant(dotty_core::Constant::Int(1)))
+        ));
+        let TreeKind::CaseDef(case_def) = &typer.typed_arena.get(typed_match.cases[0]).kind else {
+            panic!("expected typed CaseDef")
+        };
+        assert_eq!(typer.typed_arena.get(case_def.pattern).ty, selector_type);
+        assert!(matches!(
+            typer.type_expression(empty_match, context),
+            Err(TyperError::EmptyMatchCases { tree_index, .. })
+                if tree_index == empty_match.index()
+        ));
+    }
+
+    #[test]
+    fn match_result_uses_the_supertype_when_case_results_are_related() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class Parent; class Child extends Parent; class C { def choose(child: Child, parent: Parent): Any = child match { case _ => child; case _ => parent } }",
+        );
+        let symbol_named = |wanted: &str| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == wanted =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let parent = symbol_named("Parent");
+        let child = symbol_named("Child");
+        let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        typer.complete_symbol(parent).unwrap();
+        typer.complete_symbol(child).unwrap();
+        let typed = typer.type_expression(match_tree, context).unwrap();
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(typed).ty),
+            Some(Type::TypeRef { target, .. }) if target.symbol() == Some(parent)
+        ));
+    }
+
+    #[test]
+    fn nothing_case_joins_with_the_ordinary_case_result() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { def choose(x: Int): Any = x match { case _ => return 1; case _ => false } }",
+        );
+        let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer.type_expression(match_tree, context).unwrap();
+        assert_eq!(typer.typed_arena.get(typed).ty, definitions.boolean);
+    }
+
+    #[test]
+    fn a_later_match_case_failure_rolls_back_the_entire_match() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { def choose(x: Int): Any = x match { case _ => 1; case _ if true => 2 } }",
+        );
+        let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        assert!(matches!(
+            typer.type_expression(match_tree, context),
+            Err(TyperError::MatchGuardDeferred { .. })
+        ));
+        assert!(typer.typed_index.is_empty());
+        assert_eq!(typer.typed_arena.iter().count(), 0);
     }
 }

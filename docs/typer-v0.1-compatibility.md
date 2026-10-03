@@ -87,16 +87,31 @@ records the source shape and the normalized expected wildcard tree.
 
 The dedicated `type_case_def` helper in `expression/match_expr.rs` now types
 unguarded wildcard `CaseDef` nodes independently; `Match` expression typing is
-still deferred. It delegates pattern handling to `type_pattern`, types the
-body through the ordinary expression path, and assigns the case the body's
-own type. Guarded cases return `MatchGuardDeferred`, while unsupported
-patterns retain `UnsupportedPattern`. The normalized
+supported for matches whose cases are all unguarded wildcards. It types the
+selector once, preserves the selector's own type, and computes the shared
+pattern prototype by preserving constants and widening other expression
+types. It delegates each case to `type_case_def` in source order and builds a
+typed Match with its ordered typed cases. The Match result folds widened case
+body types through the same bounded branch join used by `if`: equivalent and
+subtype-related values retain the supported branch behavior, while unrelated
+values use the current `Type::Or` fallback. This intentionally does not
+implement Scala 3.9's general `TypeComparer.lub`; unions are not normalized
+beyond the existing relation rules. Nested wildcard matches are supported.
+
+Guards return `MatchGuardDeferred`. Binders, literals, stable identifiers,
+typed patterns, alternatives, tuple patterns, and extractor patterns remain
+deferred through `UnsupportedPattern`. Empty Match nodes and failed case
+typing return focused errors, and the enclosing expression transaction rolls
+back all case and selector state on failure. The normalized
 [`wildcard-case-def` fixture](../crates/dotty-typer/tests/fixtures/wildcard-case-def)
 records this typed shape. In pinned Scala 3.9.0,
 [`typedCase`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/typer/Typer.scala#L2383-L2412)
 types a pattern with the selector prototype, and
 [`assignType(CaseDef, ...)`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/typer/TypeAssigner.scala#L446-L464)
 uses the typed body type for ordinary term cases.
+The related [`wildcard-match` fixture](../crates/dotty-typer/tests/fixtures/wildcard-match)
+records simple, multi-case, and nested Match shapes and calls out the bounded
+join divergence.
 
 ## Real-source local-definition audit
 

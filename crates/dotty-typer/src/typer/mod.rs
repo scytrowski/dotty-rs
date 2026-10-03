@@ -290,6 +290,14 @@ impl<'a> SourceTyper<'a> {
                 info_journal,
                 new_mappings,
             ),
+            TreeKind::Match(matched) => self.type_match_expression(
+                tree,
+                matched,
+                source_tree.position,
+                context,
+                info_journal,
+                new_mappings,
+            ),
             TreeKind::While(while_expr) => self.type_while_expression(
                 tree,
                 while_expr,
