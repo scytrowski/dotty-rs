@@ -387,11 +387,14 @@ where
     }
 
     /// Opens a case-body region relative to the source indentation of `case`.
-    pub(crate) fn observe_case_body_indented(&mut self, case_start: u32) -> Option<u32> {
+    /// Returns its indent offset and whether the scanner opened it via feedback.
+    pub(crate) fn observe_case_body_indented(&mut self, case_start: u32) -> Option<(u32, bool)> {
         let existing_indent = self.next_indented_region_offset();
         let feedback_indent =
             self.observe_indented_body_region_with(ScannerEvent::CaseBodyIndented { case_start });
-        existing_indent.or(feedback_indent)
+        existing_indent
+            .map(|indent_offset| (indent_offset, false))
+            .or_else(|| feedback_indent.map(|indent_offset| (indent_offset, true)))
     }
 
     /// Closes a feedback-opened layout region at a grammar delimiter without

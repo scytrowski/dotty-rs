@@ -168,7 +168,7 @@ where
     fn parse_case_body(
         &mut self,
         mark: crate::Mark,
-        body_indent_offset: Option<u32>,
+        body_indent: Option<(u32, bool)>,
     ) -> TreeId<Untyped> {
         self.consume_case_newlines();
         let body_starts_after_newline = self
@@ -176,7 +176,7 @@ where
             .as_str()
             .get(mark.start as usize..self.current().span.start() as usize)
             .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
-        if body_indent_offset.is_none()
+        if body_indent.is_none()
             && body_starts_after_newline
             && matches!(
                 self.current().kind,
@@ -225,14 +225,24 @@ where
             self.advance();
             let result = self
                 .with_case_body(|parser| parser.parse_expression_block_body(TokenKind::Outdent));
-            if !self.cursor.at(TokenKind::Outdent)
-                && let Some(indent_offset) = body_indent_offset
-            {
-                self.observe_outdented_layout_region(indent_offset);
-            } else if !self.cursor.at(TokenKind::Outdent) {
-                self.observe_outdented();
+            let closed_by_delimiter = matches!(
+                self.current().kind,
+                TokenKind::Punctuation(Punctuation::RightParen | Punctuation::RightBrace)
+            );
+            if !self.cursor.at(TokenKind::Outdent) {
+                if let Some((indent_offset, opened_by_feedback)) = body_indent {
+                    if closed_by_delimiter {
+                        if opened_by_feedback {
+                            self.observe_outdented_by_delimiter();
+                        }
+                    } else {
+                        self.observe_outdented_layout_region(indent_offset);
+                    }
+                } else if !closed_by_delimiter {
+                    self.observe_outdented();
+                }
             }
-            if !self.accept(TokenKind::Outdent) {
+            if !self.accept(TokenKind::Outdent) && !closed_by_delimiter {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
                     "expected an outdent to close a case body",
