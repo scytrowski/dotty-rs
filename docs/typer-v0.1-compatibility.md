@@ -95,7 +95,10 @@ source mapping.
 
 Pattern selector adaptation preserves an exact `ConstantType`. Other selector
 types use the existing expression type-widening rules. Literal pattern types
-remain constant types and are checked against the selector prototype;
+remain constant types and are checked against the selector prototype; when the
+selector prototype is itself a constant, the literal must have the same
+constant value. Otherwise, the existing bounded conformance relation must
+prove compatibility;
 unresolved type relations are reported as deferred rather than guessed. This follows the pinned
 Scala 3.9.0 typer: [`typedIdent`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/typer/Typer.scala#L622-L637)
 returns the wildcard tree with the pattern prototype, while

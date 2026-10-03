@@ -7,6 +7,9 @@ object ValuePatterns:
   def literal(value: Int): Int = value match
     case 1 => 1
 
+  def constantSelector: Int = 1 match
+    case 1 => 1
+
   def boolean(value: Boolean): Int = value match
     case true => 1
 

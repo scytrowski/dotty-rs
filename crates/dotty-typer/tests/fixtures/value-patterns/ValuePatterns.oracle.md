@@ -9,6 +9,12 @@ case 1 => 1
 case true => 1
   Typed(Literal(true) : Constant(true)) : Constant(true)
 
+1 match { case 1 => 1 }
+  Match(
+    selector = Literal(1) : Constant(1),
+    pattern = Typed(Literal(1) : Constant(1)) : Constant(1)
+  )
+
 case Stable => 1
   Ident(Stable) : TermRef(ValuePatterns.Stable)
 
@@ -25,7 +31,8 @@ case bound @ Stable => bound
 ```
 
 Literal patterns retain their exact constant type and are checked for
-compatibility with the selector prototype. Stable identifiers and selections
+compatibility with the selector prototype. For a constant selector, the
+literal and selector constants must be equal. Stable identifiers and selections
 are resolved through ordinary term lookup and keep the resolved symbol in the
 typed reference. Explicit binders take their value type from the selector
 prototype, while the nested pattern keeps its own type. This is a semantic

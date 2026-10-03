@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn constant_selector_keeps_its_type_and_empty_match_is_rejected() {
         let (mut parsed, mut store, packages, definitions, index, source) =
-            setup("class C { def choose(x: Int): Int = 1 match { case _ => 1 } }");
+            setup("class C { def choose(x: Int): Int = 1 match { case 1 => 1 } }");
         let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
         let TreeKind::Match(source_match) = parsed.ast.get(match_tree).kind.clone() else {
             panic!("expected source Match")
@@ -582,12 +582,38 @@ mod tests {
         let TreeKind::CaseDef(case_def) = &typer.typed_arena.get(typed_match.cases[0]).kind else {
             panic!("expected typed CaseDef")
         };
-        assert_eq!(typer.typed_arena.get(case_def.pattern).ty, selector_type);
+        assert!(matches!(
+            typer
+                .store
+                .types
+                .try_get(typer.typed_arena.get(case_def.pattern).ty),
+            Some(Type::Constant(dotty_core::Constant::Int(1)))
+        ));
         assert!(matches!(
             typer.type_expression(empty_match, context),
             Err(TyperError::EmptyMatchCases { tree_index, .. })
                 if tree_index == empty_match.index()
         ));
+    }
+
+    #[test]
+    fn different_literal_constant_is_rejected_for_constant_selector() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = 1 match { case 2 => 1 } }");
+        let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let error = typer.type_expression(match_tree, context).unwrap_err();
+        assert!(matches!(error, TyperError::PatternTypeMismatch { .. }));
+        assert!(typer.typed_index.is_empty());
+        assert_eq!(typer.typed_arena.iter().count(), 0);
     }
 
     #[test]
