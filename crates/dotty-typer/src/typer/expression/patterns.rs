@@ -102,6 +102,7 @@ impl SourceTyper<'_> {
 mod tests {
     use super::*;
     use crate::typer::{ExpressionContext, SourceTyper};
+    use dotty_core::ast::{Ident, Tree};
     use dotty_core::{
         Definitions, Name, Namespace, Packages, SemanticStore, SourceSemanticIndex, SourceText,
         Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
@@ -184,7 +185,7 @@ mod tests {
 
     #[test]
     fn wildcard_uses_selector_type_and_repeated_typing_keeps_identity() {
-        let (parsed, mut store, packages, definitions, index, source) =
+        let (mut parsed, mut store, packages, definitions, index, source) =
             setup("class C { def choose(x: Int): Int = x match { case _ => 1 } }");
         let (method, pattern) = method_and_pattern(&parsed, &store, &index, source, "choose");
         let method_scope = index.scope_of(method).unwrap();
@@ -205,6 +206,14 @@ mod tests {
             .scopes
             .get_mut(method_scope)
             .enter(underscore, shadowed_wildcard);
+        let second_pattern = parsed.ast.alloc(Tree {
+            kind: TreeKind::Ident(Ident {
+                name: underscore,
+                backquoted: false,
+            }),
+            position: None,
+            ty: (),
+        });
         let (mut typer, context) = context_for(
             &parsed,
             &mut store,
@@ -236,6 +245,22 @@ mod tests {
             })
             .unwrap();
         assert_eq!(repeated, first);
+
+        let reference_pattern = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(
+                    second_pattern,
+                    definitions.object_type,
+                    context,
+                    journal,
+                    mappings,
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            typer.typed_arena.get(reference_pattern).ty,
+            definitions.object_type
+        );
     }
 
     #[test]
