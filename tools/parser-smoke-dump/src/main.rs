@@ -466,22 +466,53 @@ fn render_tree(
                 "\"name\":{}",
                 quote(names.resolve(definition.name.as_name().text()))
             ));
+            let order = definition
+                .source_param_clause_order
+                .clone()
+                .unwrap_or_else(|| {
+                    let mut order = Vec::new();
+                    if !definition.type_params.is_empty() {
+                        order.push(dotty_core::ast::DefParamClauseOrder::TypeParams(
+                            0..definition.type_params.len(),
+                        ));
+                    }
+                    order.extend(
+                        (0..definition.value_param_clauses.len())
+                            .map(dotty_core::ast::DefParamClauseOrder::ValueParams),
+                    );
+                    order
+                });
+            let type_param_count = match order.first() {
+                Some(dotty_core::ast::DefParamClauseOrder::TypeParams(range)) => range.len(),
+                _ => 0,
+            };
+            fields.push(format!("\"type_param_count\":{type_param_count}"));
             fields.push(format!(
-                "\"type_param_count\":{}",
-                definition.type_params.len()
+                "\"param_clause_kinds\":[{}]",
+                order
+                    .iter()
+                    .map(|clause| match clause {
+                        dotty_core::ast::DefParamClauseOrder::TypeParams(_) => "\"type\"",
+                        dotty_core::ast::DefParamClauseOrder::ValueParams(_) => "\"term\"",
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
             ));
-            let mut clause_sizes = Vec::with_capacity(
-                usize::from(!definition.type_params.is_empty())
-                    + definition.value_param_clauses.len(),
-            );
+            let mut clause_sizes = Vec::with_capacity(order.len());
             let mut using_clauses = Vec::with_capacity(clause_sizes.capacity());
             let mut implicit_clauses = Vec::with_capacity(clause_sizes.capacity());
-            if !definition.type_params.is_empty() {
-                clause_sizes.push(definition.type_params.len().to_string());
-                using_clauses.push("false".to_owned());
-                implicit_clauses.push("false".to_owned());
-            }
-            for clause in &definition.value_param_clauses {
+            for clause_order in &order {
+                let clause = match clause_order {
+                    dotty_core::ast::DefParamClauseOrder::TypeParams(range) => {
+                        clause_sizes.push(range.len().to_string());
+                        using_clauses.push("false".to_owned());
+                        implicit_clauses.push("false".to_owned());
+                        continue;
+                    }
+                    dotty_core::ast::DefParamClauseOrder::ValueParams(index) => {
+                        &definition.value_param_clauses[*index]
+                    }
+                };
                 clause_sizes.push(clause.len().to_string());
                 let has_modifier = |modifier| {
                     clause.first().is_some_and(|parameter| {
@@ -1121,9 +1152,23 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             children
         }
         TreeKind::DefDef(definition) => {
-            let mut children = definition.type_params.clone();
-            for clause in &definition.value_param_clauses {
-                children.extend(clause.iter().copied());
+            let mut children = Vec::new();
+            if let Some(order) = &definition.source_param_clause_order {
+                for clause in order {
+                    match clause {
+                        dotty_core::ast::DefParamClauseOrder::TypeParams(range) => {
+                            children.extend_from_slice(&definition.type_params[range.clone()]);
+                        }
+                        dotty_core::ast::DefParamClauseOrder::ValueParams(index) => {
+                            children.extend(definition.value_param_clauses[*index].iter().copied());
+                        }
+                    }
+                }
+            } else {
+                children.extend(definition.type_params.iter().copied());
+                for clause in &definition.value_param_clauses {
+                    children.extend(clause.iter().copied());
+                }
             }
             children.push(definition.tpt);
             if let Some(rhs) = definition.rhs {

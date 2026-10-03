@@ -330,16 +330,18 @@ final `expr*` splices in parenthesized argument lists, normalized as
 simple `val`/`var` definitions with inferred or explicit types, declarations
 without an RHS, and full-expression RHS values
 pattern definitions with tuple, extractor, binder, and infix-pattern LHSs
-method definitions with a leading type-parameter clause, ordered term
-parameter clauses, supported type-expression return types (including a colon
+method definitions with source-ordered type- and term-parameter clauses,
+supported type-expression return types (including a colon
 on the following line when it directly introduces the result type),
 declarations, and expression RHSs. A line separator is consumed only when a
 result-type colon follows it, so unrelated statement boundaries stay intact.
 parameter nodes are represented as `ValDef`; ordinary and named `using`
 clauses, inline parameters, default parameter expressions, and indented method
 bodies are supported. The soft name `inline` remains a parameter name when
-followed by `:`. Interleaved type/term parameter clauses are explicitly deferred
-because the current `DefDef` model keeps the leading type clause separate.
+followed by `:`. `DefDef` keeps its existing flattened type-parameter and
+term-clause fields, plus an optional source-order index for methods that
+interleave the two kinds of clause; this preserves empty term clauses without
+duplicating AST nodes.
 Final repeated parameter types (`T*`, including applied types such as
 `List[T]*`) are represented as source-level `PostfixOp` type trees. The parser
 diagnoses repeated parameters in `given`/legacy `implicit` clauses and those
