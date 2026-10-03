@@ -327,9 +327,19 @@ mod tests {
 
     #[test]
     fn body_failure_rolls_back_case_pattern_body_and_mappings() {
-        let (parsed, mut store, packages, definitions, index, source) =
-            setup("class C { def choose(x: Int): Int = x match { case _ => missing } }");
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { def choose(x: Int): Int = x match { case _ => { val local = 1; missing } } }",
+        );
         let (method, case_tree) = method_and_case(&parsed, &store, &index, source);
+        let local_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                matches!(&node.kind, TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "local")
+                .then_some(tree)
+            })
+            .unwrap();
         let (mut typer, context) = context_for(
             &parsed,
             &mut store,
@@ -339,7 +349,11 @@ mod tests {
             source,
             method,
         );
+        let before = typer.store.types.alloc(Type::NoType);
         assert!(type_one_case(&mut typer, case_tree, definitions.int, context).is_err());
+        let after = typer.store.types.alloc(Type::NoType);
+        assert_eq!(after.index(), before.index() + 1);
+        assert_eq!(typer.local_symbol_at(source, local_tree), None);
         assert_eq!(typer.typed_arena.iter().count(), 0);
         assert!(typer.typed_index.is_empty());
     }
