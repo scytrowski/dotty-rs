@@ -3,8 +3,8 @@
 
 use crate::ast::arena::AstArena;
 use crate::ast::common::{
-    Apply, ApplyKind, Assign, Block, Ident, If, Literal, New, Return, Select, This, TypeApply,
-    TypeTree, TypedExpr, While,
+    Apply, ApplyKind, Assign, Block, CaseDef, Ident, If, Literal, Match, New, Return, Select, This,
+    TypeApply, TypeTree, TypedExpr, While,
 };
 use crate::ast::phase::Typed;
 use crate::ast::tree::{Tree, TreeKind};
@@ -235,6 +235,78 @@ impl<'a> TypedAstBuilder<'a> {
         })
     }
 
+    /// Allocates a typed term case. For ordinary term matches, Scala 3.9's
+    /// `TypeAssigner.assignType(CaseDef, ...)` gives the case the type of its
+    /// typed body; type-match cases are outside this builder's contract.
+    pub fn case_def(
+        &mut self,
+        pattern: TreeId<Typed>,
+        guard: Option<TreeId<Typed>>,
+        body: TreeId<Typed>,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        debug_assert!(
+            self.arena.try_get(pattern).is_some(),
+            "a typed case pattern must belong to the typed arena"
+        );
+        debug_assert!(
+            guard.is_none_or(|guard| self.arena.try_get(guard).is_some()),
+            "a typed case guard must belong to the typed arena"
+        );
+        let body_tree = self
+            .arena
+            .try_get(body)
+            .expect("a typed case body must belong to the typed arena");
+        debug_assert_eq!(
+            ty, body_tree.ty,
+            "a typed term case must carry its body's type"
+        );
+
+        self.arena.alloc(Tree {
+            kind: TreeKind::CaseDef(CaseDef {
+                pattern,
+                guard,
+                body,
+            }),
+            position,
+            ty,
+        })
+    }
+
+    /// Allocates a typed match with the result type already computed by the
+    /// Typer. This builder stores that type and does not perform a join.
+    pub fn match_expr(
+        &mut self,
+        selector: TreeId<Typed>,
+        cases: Vec<TreeId<Typed>>,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        debug_assert!(
+            self.arena.try_get(selector).is_some(),
+            "a typed match selector must belong to the typed arena"
+        );
+        for case in &cases {
+            let case_tree = self
+                .arena
+                .try_get(*case)
+                .expect("each typed match case must belong to the typed arena");
+            let TreeKind::CaseDef(case_def) = &case_tree.kind else {
+                panic!("each typed match case must be a CaseDef")
+            };
+            self.arena
+                .try_get(case_def.body)
+                .expect("each typed case body must belong to the typed arena");
+        }
+
+        self.arena.alloc(Tree {
+            kind: TreeKind::Match(Match { selector, cases }),
+            position,
+            ty,
+        })
+    }
+
     /// Allocates a typed loop with its already-determined result type.
     pub fn while_expr(
         &mut self,
@@ -279,8 +351,16 @@ impl<'a> TypedAstBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::NameId;
+    use crate::ids::{NameId, SourceId};
     use crate::names::Namespace;
+    use crate::source::{Span, TextRange};
+
+    fn position(start: u32, end: u32) -> SourceSpan {
+        SourceSpan::new(
+            SourceId::new(1),
+            Span::without_point(TextRange::new(start, end).expect("valid range")),
+        )
+    }
 
     #[test]
     fn ident_produces_a_tree_with_the_given_type() {
@@ -426,6 +506,98 @@ mod tests {
         assert_eq!(if_expr.cond, condition);
         assert_eq!(if_expr.then_branch, then_branch);
         assert_eq!(if_expr.else_branch, else_branch);
+    }
+
+    #[test]
+    fn case_def_keeps_pattern_guard_body_position_and_body_type() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let pattern = builder.ident(
+            Name::new(NameId::new(1), Namespace::Term),
+            TypeId::new(2),
+            None,
+        );
+        let body_type = TypeId::new(3);
+        let body = builder.literal(Constant::Int(1), body_type, None);
+        let source_position = position(10, 20);
+
+        let case: TypedTreeId =
+            builder.case_def(pattern, None, body, body_type, Some(source_position));
+
+        let case_tree = arena.get(case);
+        assert_eq!(case_tree.ty, body_type);
+        assert_eq!(case_tree.position, Some(source_position));
+        let TreeKind::CaseDef(case_def) = &case_tree.kind else {
+            panic!("expected a typed CaseDef");
+        };
+        assert_eq!(case_def.pattern, pattern);
+        assert_eq!(case_def.guard, None);
+        assert_eq!(case_def.body, body);
+        assert_eq!(arena.get(case_def.body).ty, body_type);
+    }
+
+    #[test]
+    fn case_def_retains_a_present_guard() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let pattern = builder.ident(
+            Name::new(NameId::new(1), Namespace::Term),
+            TypeId::new(2),
+            None,
+        );
+        let guard = builder.literal(Constant::Boolean(true), TypeId::new(3), None);
+        let body_type = TypeId::new(4);
+        let body = builder.literal(Constant::Int(1), body_type, None);
+
+        let case = builder.case_def(pattern, Some(guard), body, body_type, None);
+
+        let TreeKind::CaseDef(case_def) = &arena.get(case).kind else {
+            panic!("expected a typed CaseDef");
+        };
+        assert_eq!(case_def.guard, Some(guard));
+    }
+
+    #[test]
+    fn match_expr_keeps_selector_ordered_cases_and_caller_result_type() {
+        let mut arena = TypedAst::new();
+        let mut builder = TypedAstBuilder::new(&mut arena);
+        let selector = builder.ident(
+            Name::new(NameId::new(1), Namespace::Term),
+            TypeId::new(2),
+            None,
+        );
+        let first_pattern = builder.ident(
+            Name::new(NameId::new(3), Namespace::Term),
+            TypeId::new(4),
+            None,
+        );
+        let first_body = builder.literal(Constant::Int(1), TypeId::new(5), None);
+        let first_case = builder.case_def(first_pattern, None, first_body, TypeId::new(5), None);
+        let second_pattern = builder.ident(
+            Name::new(NameId::new(6), Namespace::Term),
+            TypeId::new(7),
+            None,
+        );
+        let second_body = builder.literal(Constant::Int(2), TypeId::new(8), None);
+        let second_case = builder.case_def(second_pattern, None, second_body, TypeId::new(8), None);
+        let result_type = TypeId::new(9);
+        let source_position = position(0, 30);
+
+        let matched: TypedTreeId = builder.match_expr(
+            selector,
+            vec![first_case, second_case],
+            result_type,
+            Some(source_position),
+        );
+
+        let match_tree = arena.get(matched);
+        assert_eq!(match_tree.ty, result_type);
+        assert_eq!(match_tree.position, Some(source_position));
+        let TreeKind::Match(match_expr) = &match_tree.kind else {
+            panic!("expected a typed Match");
+        };
+        assert_eq!(match_expr.selector, selector);
+        assert_eq!(match_expr.cases, vec![first_case, second_case]);
     }
 
     #[test]
