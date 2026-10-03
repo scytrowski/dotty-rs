@@ -61,12 +61,15 @@ where
     pub(crate) fn pattern(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let first = self.pattern1();
-        if !self.current_text_is("|") {
+        let Some(mut pipe_offset) = self.pattern_alternative_operator_offset() else {
             return first;
-        }
+        };
 
         let mut alternatives = vec![first];
-        while self.current_text_is("|") {
+        loop {
+            if pipe_offset > 0 {
+                self.consume_pattern_newlines();
+            }
             self.advance();
             let Some(operand_offset) = pattern_alternative_operand_offset(self) else {
                 self.report(
@@ -81,6 +84,10 @@ where
             }
             let alternative = self.pattern1();
             alternatives.push(alternative);
+            let Some(next_pipe_offset) = self.pattern_alternative_operator_offset() else {
+                break;
+            };
+            pipe_offset = next_pipe_offset;
         }
 
         self.alloc_from(mark, TreeKind::Alternative(Alternative { alternatives }))
@@ -549,6 +556,21 @@ where
             _ => 1,
         };
         can_start_simple_pattern_at(self, offset).then_some(offset)
+    }
+
+    /// Finds a pattern-alternative bar after optional physical line separators.
+    /// Comments are trivia, so any lines they occupy arrive as newline tokens.
+    /// Leave those separators untouched unless a bar follows, preserving the
+    /// case arrow and the next case clause as their own grammar boundaries.
+    fn pattern_alternative_operator_offset(&mut self) -> Option<usize> {
+        let mut offset = 0;
+        while matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            offset += 1;
+        }
+        (self.token_text_at(offset) == Some("|")).then_some(offset)
     }
 
     fn current_is_pattern_colon(&self) -> bool {
@@ -1506,6 +1528,60 @@ mod tests {
             TextRange::new(0, 18).unwrap()
         );
         assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn continues_a_pattern_alternative_after_comment_lines_before_the_pipe() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "A\n//c\n| B",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Newline, 1, 2),
+                token(TokenKind::Newline, 5, 6),
+                token(TokenKind::Operator, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Alternative(Alternative { ref alternatives }) if alternatives.len() == 2
+        ));
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 9).unwrap()
+        );
+        assert!(result.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn recovers_from_a_line_leading_alternative_without_a_rhs() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "A\n|",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Newline, 1, 2),
+                token(TokenKind::Operator, 2, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(matches!(
+            result.ast.get(result.root).kind,
+            TreeKind::Alternative(Alternative { ref alternatives }) if alternatives.len() == 2
+        ));
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::ExpectedPattern
+        );
     }
 
     #[test]
