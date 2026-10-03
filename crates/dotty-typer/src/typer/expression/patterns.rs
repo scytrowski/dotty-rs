@@ -762,6 +762,39 @@ impl SourceTyper<'_> {
         })
     }
 
+    fn unary_extractor_component_type(
+        &mut self,
+        result_type: TypeId,
+        pattern_index: u32,
+        unapply: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let direct_product = self.product_extractor_component_types(
+            result_type,
+            pattern_index,
+            unapply,
+            1,
+            true,
+            info_journal,
+        );
+        let direct_arity_error = match direct_product {
+            Ok(Some(mut component_types)) => return Ok(component_types.remove(0)),
+            Ok(None) => None,
+            Err(error @ TyperError::ExtractorProductSelectorCountMismatch { .. }) => Some(error),
+            Err(error) => return Err(error),
+        };
+
+        match self.option_like_extractor_component_type(
+            result_type,
+            pattern_index,
+            unapply,
+            info_journal,
+        ) {
+            Ok(component_type) => Ok(component_type),
+            Err(error) => Err(direct_arity_error.unwrap_or(error)),
+        }
+    }
+
     fn resolve_extractor_pattern_plan(
         &mut self,
         pattern: TreeId<Untyped>,
@@ -1343,22 +1376,12 @@ impl SourceTyper<'_> {
                 } else {
                     match plan.source_patterns.as_slice() {
                         [source_pattern] => {
-                            let component_type = match self.product_extractor_component_types(
+                            let component_type = self.unary_extractor_component_type(
                                 plan.result_type,
                                 pattern.index(),
                                 plan.symbol,
-                                1,
-                                true,
                                 info_journal,
-                            )? {
-                                Some(mut component_types) => component_types.remove(0),
-                                None => self.option_like_extractor_component_type(
-                                    plan.result_type,
-                                    pattern.index(),
-                                    plan.symbol,
-                                    info_journal,
-                                )?,
-                            };
+                            )?;
                             vec![self.type_pattern(
                                 *source_pattern,
                                 component_type,
@@ -2870,6 +2893,54 @@ mod tests {
             _ => typed_binding.ty,
         };
         assert_eq!(actual_type, definitions.int);
+    }
+
+    #[test]
+    fn unary_extractor_falls_back_to_get_after_product_arity_mismatch() {
+        let source_text = "package scala { trait Product }; package app { class ProductResult extends scala.Product { def _1: Boolean = true; def _2: Boolean = false; def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): ProductResult = new ProductResult }; class C { def choose(value: Any): Int = value match { case Extractor(number) => number; case _ => 0 } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let method = method_symbol(&parsed, &store, &index, source);
+        let match_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Match(_)).then_some(tree))
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+
+        let typed_match = typer.type_expression(match_tree, context).unwrap();
+        let TreeKind::Match(matching) = &typer.typed_arena.get(typed_match).kind else {
+            panic!("expected a Typed Match");
+        };
+        let TreeKind::CaseDef(case) = &typer.typed_arena.get(matching.cases[0]).kind else {
+            panic!("expected a Typed CaseDef");
+        };
+        let TreeKind::UnApply(unapply) = &typer.typed_arena.get(case.pattern).kind else {
+            panic!("expected a Typed UnApply");
+        };
+        assert_eq!(unapply.patterns.len(), 1);
+        let child_type = typer.typed_arena.get(unapply.patterns[0]).ty;
+        let actual_type = match typer.store.types.try_get(child_type) {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) => match *typer.store.symbols.info(*symbol) {
+                SymbolInfo::Complete(binding_type) => binding_type,
+                info => panic!("pattern binder has incomplete info: {info:?}"),
+            },
+            _ => child_type,
+        };
+        assert_eq!(
+            typer.store.types.try_get(actual_type),
+            typer.store.types.try_get(definitions.int)
+        );
     }
 
     #[test]
