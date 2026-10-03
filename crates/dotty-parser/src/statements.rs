@@ -378,7 +378,8 @@ where
                 self.last_advance_was_outdent = false;
             } else if self.last_advance_consumed_statement_separator {
                 self.last_advance_consumed_statement_separator = false;
-            } else if !self.sequence_ended(boundary) {
+            } else if !self.sequence_ended(boundary) && self.current().kind != TokenKind::EndMarker
+            {
                 self.report(
                     ParseDiagnosticKind::UnexpectedToken,
                     "expected a top-level statement separator",
@@ -618,6 +619,34 @@ where
             false,
         )
         .is_some()
+    }
+
+    pub(crate) fn end_marker_matches_after_outdent(
+        &mut self,
+        tree: Option<TreeId<Untyped>>,
+    ) -> bool {
+        let Some(tree) = tree else {
+            return false;
+        };
+        if self.current().kind != TokenKind::Outdent {
+            return false;
+        }
+
+        let mut offset = 1;
+        while matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Newline | TokenKind::Newlines | TokenKind::Outdent
+        ) {
+            offset += 1;
+        }
+        let marker = self.cursor.lookahead(offset).clone();
+        if marker.kind != TokenKind::EndMarker {
+            return false;
+        }
+        let target = self.cursor.lookahead(offset + 1).clone();
+        let target_text = self.marker_target_text(target.kind, target.span);
+        self.end_marker_owner(tree, target.kind, &target_text, marker.span.start(), false)
+            .is_some()
     }
 
     /// Checks whether the statement itself owns an `end` marker. Dotty checks

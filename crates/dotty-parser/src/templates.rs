@@ -64,6 +64,7 @@ where
                 })
             })
         });
+        let closes_at_end_marker = self.current().kind == TokenKind::EndMarker;
 
         if body == TemplateBody::Indented {
             if let Some(indent_offset) = feedback_indent {
@@ -72,7 +73,9 @@ where
                 self.observe_outdented();
             }
         }
-        if !self.accept(closing) {
+        if !self.accept(closing)
+            && !(closes_at_end_marker && self.current().kind == TokenKind::EndMarker)
+        {
             self.report(
                 ParseDiagnosticKind::ExpectedToken,
                 format!("expected {closing:?} to close template body"),
@@ -108,6 +111,23 @@ where
                 && !self.last_advance_was_outdent
             {
                 self.feedback_template_outdent(&body_indent);
+            }
+            if closing == TokenKind::Outdent
+                && self.current().kind == TokenKind::Outdent
+                && self.end_marker_matches_after_outdent(members.last().copied())
+            {
+                // The eager outdent can precede a marker for the member that
+                // just finished. That marker closes the member, not this
+                // enclosing template, so leave it for the ordinary marker
+                // path before deciding that this body has ended.
+                self.advance();
+                while matches!(
+                    self.current().kind,
+                    TokenKind::Newline | TokenKind::Newlines | TokenKind::Outdent
+                ) {
+                    self.advance();
+                }
+                continue;
             }
             if self.template_body_ended(closing) {
                 break;
