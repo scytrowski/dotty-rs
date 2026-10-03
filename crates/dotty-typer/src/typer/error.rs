@@ -41,6 +41,14 @@ pub enum ExtractorPatternArgumentIssue {
     SequenceWildcard,
 }
 
+/// Unsupported shape of a member used by the Option-like extractor protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtractorResultMemberIssue {
+    NotParameterless,
+    NotValueType,
+    IsEmptyNotBoolean,
+}
+
 impl PatternKind {
     /// Returns the stable diagnostic/audit label for this pattern shape.
     pub const fn as_str(self) -> &'static str {
@@ -1187,19 +1195,43 @@ pub enum TyperError {
         unapply: SymbolId,
         result: TypeId,
     },
+    /// An extractor pattern has an unsupported number of nested patterns.
+    ExtractorPatternArityUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        unapply: SymbolId,
+        actual: usize,
+    },
+    /// A required Option-like result member is absent.
+    ExtractorResultMemberNotFound {
+        source: SourceId,
+        tree_index: u32,
+        result: TypeId,
+        member: Name,
+    },
+    /// A required Option-like result member has multiple visible declarations.
+    ExtractorResultMemberOverloaded {
+        source: SourceId,
+        tree_index: u32,
+        result: TypeId,
+        member: Name,
+        candidates: Vec<SymbolId>,
+    },
+    /// A required Option-like result member is not a supported parameterless value.
+    ExtractorResultMemberUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        result: TypeId,
+        member: Name,
+        member_type: TypeId,
+        issue: ExtractorResultMemberIssue,
+    },
     /// Named arguments and sequence wildcards are not accepted by this plan.
     ExtractorPatternArgumentUnsupported {
         source: SourceId,
         tree_index: u32,
         argument_tree_index: u32,
         issue: ExtractorPatternArgumentIssue,
-    },
-    /// The extractor is resolved, but nested pattern typing belongs to a later increment.
-    ExtractorPatternTypingDeferred {
-        source: SourceId,
-        tree_index: u32,
-        unapply: SymbolId,
-        argument_count: usize,
     },
     /// An identifier pattern is not a well-formed term-name pattern.
     MalformedVariablePattern {

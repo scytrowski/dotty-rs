@@ -1,7 +1,10 @@
 //! Pattern typing entry points and pattern-specific type adaptation.
 
 use super::{ExpressionContext, SourceTyper, TyperError};
-use crate::typer::{ExtractorMethodShapeIssue, ExtractorPatternArgumentIssue, PatternKind};
+use crate::typer::{
+    ExtractorMethodShapeIssue, ExtractorPatternArgumentIssue, ExtractorResultMemberIssue,
+    PatternKind,
+};
 use dotty_core::ast::{TreeKind, TypedAstBuilder, UntypedNode};
 use dotty_core::types::{MethodKind, MethodType, Type};
 use dotty_core::{
@@ -45,6 +48,178 @@ pub(super) fn pattern_kind(kind: &TreeKind<Untyped>) -> PatternKind {
 }
 
 impl SourceTyper<'_> {
+    fn extractor_result_member_type(
+        &mut self,
+        result_type: TypeId,
+        member_name: Name,
+        pattern_index: u32,
+        unapply: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let members =
+            match self.lookup_overload_members_journaled(result_type, member_name, info_journal) {
+                Ok(members) => members,
+                Err(crate::typer::lookup::MemberLookupError::ClassInfoUnavailable { .. })
+                | Err(crate::typer::lookup::MemberLookupError::UnsupportedReceiverType {
+                    ..
+                }) => {
+                    return Err(TyperError::UnsupportedExtractorResultProtocol {
+                        source: self.source,
+                        tree_index: pattern_index,
+                        unapply,
+                        result: result_type,
+                    });
+                }
+                Err(error) => return Err(TyperError::MemberLookup(Box::new(error))),
+            };
+        if members.is_empty() {
+            return Err(TyperError::ExtractorResultMemberNotFound {
+                source: self.source,
+                tree_index: pattern_index,
+                result: result_type,
+                member: member_name,
+            });
+        }
+        let mut candidates = members
+            .into_iter()
+            .map(|member| {
+                let callable = self.member_type_on_journaled(&member, info_journal)?;
+                Ok(crate::typer::application::ApplicationCandidate {
+                    symbol: member.symbol,
+                    callable,
+                    member: Some(member),
+                    rejection: None,
+                })
+            })
+            .collect::<Result<Vec<_>, TyperError>>()?;
+        self.remove_overridden_overload_candidates(&mut candidates, pattern_index)?;
+        let candidate = match candidates.as_slice() {
+            [] => {
+                return Err(TyperError::ExtractorResultMemberNotFound {
+                    source: self.source,
+                    tree_index: pattern_index,
+                    result: result_type,
+                    member: member_name,
+                });
+            }
+            [candidate] => *candidate,
+            _ => {
+                return Err(TyperError::ExtractorResultMemberOverloaded {
+                    source: self.source,
+                    tree_index: pattern_index,
+                    result: result_type,
+                    member: member_name,
+                    candidates: candidates
+                        .iter()
+                        .map(|candidate| candidate.symbol)
+                        .collect(),
+                });
+            }
+        };
+        let callable = candidate.callable;
+        let value_type = match self.store.types.try_get(callable) {
+            Some(Type::Method(_)) => {
+                return Err(TyperError::ExtractorResultMemberUnsupported {
+                    source: self.source,
+                    tree_index: pattern_index,
+                    result: result_type,
+                    member: member_name,
+                    member_type: callable,
+                    issue: ExtractorResultMemberIssue::NotParameterless,
+                });
+            }
+            Some(Type::Poly(_)) => {
+                return Err(TyperError::ExtractorResultMemberUnsupported {
+                    source: self.source,
+                    tree_index: pattern_index,
+                    result: result_type,
+                    member: member_name,
+                    member_type: callable,
+                    issue: ExtractorResultMemberIssue::NotValueType,
+                });
+            }
+            Some(_) => callable,
+            None => {
+                return Err(TyperError::ExtractorResultMemberUnsupported {
+                    source: self.source,
+                    tree_index: pattern_index,
+                    result: result_type,
+                    member: member_name,
+                    member_type: callable,
+                    issue: ExtractorResultMemberIssue::NotValueType,
+                });
+            }
+        };
+        if !self.is_supported_extractor_value_type(value_type) {
+            return Err(TyperError::ExtractorResultMemberUnsupported {
+                source: self.source,
+                tree_index: pattern_index,
+                result: result_type,
+                member: member_name,
+                member_type: value_type,
+                issue: ExtractorResultMemberIssue::NotValueType,
+            });
+        }
+        Ok(value_type)
+    }
+
+    fn is_supported_extractor_value_type(&self, ty: TypeId) -> bool {
+        !matches!(
+            self.store.types.try_get(ty),
+            None | Some(
+                Type::NoType
+                    | Type::Error(_)
+                    | Type::NoPrefix
+                    | Type::Bounds { .. }
+                    | Type::AliasingBounds { .. }
+                    | Type::ByName { .. }
+                    | Type::Method(_)
+                    | Type::Poly(_)
+                    | Type::TypeLambda(_)
+                    | Type::Wildcard { .. }
+                    | Type::ClassInfo(_)
+            )
+        )
+    }
+
+    fn option_like_extractor_component_type(
+        &mut self,
+        result_type: TypeId,
+        pattern_index: u32,
+        unapply: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let is_empty_name = Name::new(self.store.names.intern("isEmpty"), Namespace::Term);
+        let is_empty_type = self.extractor_result_member_type(
+            result_type,
+            is_empty_name,
+            pattern_index,
+            unapply,
+            info_journal,
+        )?;
+        let widened_is_empty =
+            self.widen_expression_type_journaled(is_empty_type, info_journal, 0)?;
+        if widened_is_empty != self.definitions.boolean {
+            return Err(TyperError::ExtractorResultMemberUnsupported {
+                source: self.source,
+                tree_index: pattern_index,
+                result: result_type,
+                member: is_empty_name,
+                member_type: is_empty_type,
+                issue: ExtractorResultMemberIssue::IsEmptyNotBoolean,
+            });
+        }
+
+        let get_name = Name::new(self.store.names.intern("get"), Namespace::Term);
+        self.extractor_result_member_type(
+            result_type,
+            get_name,
+            pattern_index,
+            unapply,
+            info_journal,
+        )
+    }
+
     fn resolve_extractor_pattern_plan(
         &mut self,
         pattern: TreeId<Untyped>,
@@ -572,12 +747,34 @@ impl SourceTyper<'_> {
                     info_journal,
                     new_mappings,
                 )?;
-                return Err(TyperError::ExtractorPatternTypingDeferred {
-                    source: self.source,
-                    tree_index: pattern.index(),
-                    unapply: plan.symbol,
-                    argument_count: plan.source_patterns.len(),
-                });
+                let [source_pattern] = plan.source_patterns.as_slice() else {
+                    return Err(TyperError::ExtractorPatternArityUnsupported {
+                        source: self.source,
+                        tree_index: pattern.index(),
+                        unapply: plan.symbol,
+                        actual: plan.source_patterns.len(),
+                    });
+                };
+                let component_type = self.option_like_extractor_component_type(
+                    plan.result_type,
+                    pattern.index(),
+                    plan.symbol,
+                    info_journal,
+                )?;
+                let typed_pattern = self.type_pattern(
+                    *source_pattern,
+                    component_type,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?;
+                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).unapply(
+                    plan.function,
+                    Vec::new(),
+                    vec![typed_pattern],
+                    plan.unapply_type,
+                    source_tree.position,
+                )
             }
             TreeKind::PhaseSpecific(UntypedNode::Number(number)) => {
                 let typed =
@@ -1326,6 +1523,32 @@ mod tests {
         (typer, context)
     }
 
+    fn type_match_error(source_text: &str) -> (TyperError, bool, bool) {
+        let (parsed, mut store, packages, _definitions, index, source) = setup(source_text);
+        let method = method_symbol(&parsed, &store, &index, source);
+        let match_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Match(_)).then_some(tree))
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            _definitions,
+            &index,
+            source,
+            method,
+        );
+        let checkpoint = typer.store.checkpoint();
+        let error = typer.type_expression(match_tree, context).unwrap_err();
+        (
+            error,
+            typer.store.checkpoint() == checkpoint,
+            typer.typed_arena.iter().next().is_none() && typer.typed_index.is_empty(),
+        )
+    }
+
     fn extractor_plan_error(
         source_text: &str,
         selector_is_boolean: bool,
@@ -1744,9 +1967,9 @@ mod tests {
     }
 
     #[test]
-    fn extractor_apply_dispatch_resolves_then_defers_nested_pattern_typing() {
+    fn extractor_apply_dispatch_types_a_unary_option_like_pattern() {
         let (parsed, mut store, packages, definitions, index, source) = setup(
-            "object Extractor { def unapply(value: Any): Any = value }; class C { def choose(value: Any): Int = value match { case Extractor(_) => 1 } }",
+            "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = value }; class C { def choose(value: Any): Int = value match { case Extractor(_) => 1 } }",
         );
         let method = method_symbol(&parsed, &store, &index, source);
         let pattern = parsed
@@ -1766,17 +1989,219 @@ mod tests {
             source,
             method,
         );
-        assert!(matches!(
-            typer.run_expression_transaction(|typer, journal, mappings| {
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
                 typer.type_pattern(pattern, definitions.any_type, context, journal, mappings)
-            }),
-            Err(TyperError::ExtractorPatternTypingDeferred {
-                argument_count: 1,
-                ..
             })
+            .unwrap();
+        assert_eq!(typer.typed_arena.get(typed).ty, definitions.any_type);
+        let TreeKind::UnApply(unapply) = &typer.typed_arena.get(typed).kind else {
+            panic!("expected a typed UnApply node");
+        };
+        assert_eq!(unapply.patterns.len(), 1);
+        assert_eq!(
+            typer.typed_arena.get(unapply.patterns[0]).ty,
+            definitions.int
+        );
+    }
+
+    #[test]
+    fn extractor_binding_uses_get_type_and_is_visible_to_guard_and_body() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object SomeInt { def unapply(value: Any): MaybeInt = value }; class C { def positive(value: Int): Boolean = true; def choose(value: Any): Int = value match { case SomeInt(x) if positive(x) => x; case _ => 0 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let match_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Match(_)).then_some(tree))
+            .unwrap();
+        let (source_pattern, source_binder, unapply_symbol) = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::CaseDef(case_def) => {
+                    let TreeKind::Apply(application) = &parsed.ast.get(case_def.pattern).kind
+                    else {
+                        return None;
+                    };
+                    let unapply_symbol =
+                        parsed
+                            .ast
+                            .iter()
+                            .find_map(|(tree, node)| match &node.kind {
+                                TreeKind::DefDef(definition)
+                                    if store.names.resolve(definition.name.as_name().text())
+                                        == "unapply" =>
+                                {
+                                    index.symbol_at(source, tree)
+                                }
+                                _ => None,
+                            })?;
+                    Some((case_def.pattern, application.args[0], unapply_symbol))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed_match_id = typer.type_expression(match_tree, context).unwrap();
+        assert_eq!(
+            typer.type_expression(match_tree, context).unwrap(),
+            typed_match_id
+        );
+        let TreeKind::Match(typed_match) = &typer.typed_arena.get(typed_match_id).kind else {
+            panic!("expected typed Match");
+        };
+        let TreeKind::CaseDef(typed_case) = &typer.typed_arena.get(typed_match.cases[0]).kind
+        else {
+            panic!("expected typed CaseDef");
+        };
+        let TreeKind::UnApply(typed_unapply) = &typer.typed_arena.get(typed_case.pattern).kind
+        else {
+            panic!("expected typed UnApply");
+        };
+        assert_eq!(
+            typer.typed_arena.get(typed_case.pattern).ty,
+            definitions.any_type
+        );
+        assert!(typed_case.guard.is_some());
+        assert_eq!(typed_unapply.implicits.len(), 0);
+        assert_eq!(typed_unapply.patterns.len(), 1);
+        assert_eq!(
+            typer.typed_index.get(source, source_pattern),
+            Some(typed_case.pattern)
+        );
+        let binder = typer
+            .pattern_binding_symbol_at(source, source_binder)
+            .unwrap();
+        assert_eq!(
+            typer.store.symbols.get(binder).info,
+            SymbolInfo::Complete(definitions.int)
+        );
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(typed_unapply.function).ty),
+            Some(Type::TermRef { target: TermRefTarget::Symbol(symbol), .. })
+                if *symbol == unapply_symbol
         ));
-        assert!(typer.typed_arena.iter().next().is_none());
-        assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn literal_typed_and_nested_option_like_extractors_type_recursively() {
+        let source_text = "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; class MaybeAny { def isEmpty: Boolean = false; def get: Any = 1 }; object SomeInt { def unapply(value: Any): MaybeInt = value }; object Outer { def unapply(value: Any): MaybeAny = value }; class C { def literal(value: Any): Int = value match { case SomeInt(1) => 1; case _ => 0 }; def typed(value: Any): Int = value match { case SomeInt(x: Int) => x; case _ => 0 }; def nested(value: Any): Int = value match { case Outer(SomeInt(x)) => x; case _ => 0 } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+
+        for method_name in ["literal", "typed", "nested"] {
+            let (method, match_tree) = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == method_name =>
+                    {
+                        let match_tree = definition.rhs?;
+                        if !matches!(parsed.ast.get(match_tree).kind, TreeKind::Match(_)) {
+                            return None;
+                        }
+                        Some((index.symbol_at(source, tree)?, match_tree))
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let (mut typer, context) = context_for(
+                &parsed,
+                &mut store,
+                &packages,
+                definitions,
+                &index,
+                source,
+                method,
+            );
+            assert!(
+                typer.type_expression(match_tree, context).is_ok(),
+                "{method_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn option_like_result_protocol_and_pattern_arity_fail_with_focused_errors() {
+        let cases = [
+            (
+                "class NoGet { def isEmpty: Boolean = false }; object Extractor { def unapply(value: Any): NoGet = value }; class C { def choose(value: Any): Int = value match { case Extractor(_) => 1; case _ => 0 } }",
+                0,
+            ),
+            (
+                "class BadIsEmpty { def isEmpty: Int = 0; def get: Int = 1 }; object Extractor { def unapply(value: Any): BadIsEmpty = value }; class C { def choose(value: Any): Int = value match { case Extractor(_) => 1; case _ => 0 } }",
+                1,
+            ),
+            (
+                "class BadGet { def isEmpty: Boolean = false; def get(index: Int): Int = index }; object Extractor { def unapply(value: Any): BadGet = value }; class C { def choose(value: Any): Int = value match { case Extractor(_) => 1; case _ => 0 } }",
+                4,
+            ),
+            (
+                "class EmptyClauseGet { def isEmpty(): Boolean = false; def get(): Int = 1 }; object Extractor { def unapply(value: Any): EmptyClauseGet = value }; class C { def choose(value: Any): Int = value match { case Extractor(_) => 1; case _ => 0 } }",
+                5,
+            ),
+            (
+                "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = value }; class C { def choose(value: Any): Int = value match { case Extractor() => 1; case _ => 0 } }",
+                2,
+            ),
+            (
+                "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = value }; class C { def choose(value: Any): Int = value match { case Extractor(_, _) => 1; case _ => 0 } }",
+                3,
+            ),
+        ];
+        for (source_text, expected) in cases {
+            let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(source_text);
+            assert!(
+                match (expected, error) {
+                    (0, TyperError::ExtractorResultMemberNotFound { .. }) => true,
+                    (
+                        1,
+                        TyperError::ExtractorResultMemberUnsupported {
+                            issue: ExtractorResultMemberIssue::IsEmptyNotBoolean,
+                            ..
+                        },
+                    ) => true,
+                    (
+                        4 | 5,
+                        TyperError::ExtractorResultMemberUnsupported {
+                            issue: ExtractorResultMemberIssue::NotParameterless,
+                            ..
+                        },
+                    ) => true,
+                    (2, TyperError::ExtractorPatternArityUnsupported { actual: 0, .. }) => true,
+                    (3, TyperError::ExtractorPatternArityUnsupported { actual: 2, .. }) => true,
+                    (_, other) => panic!("unexpected Option-like extractor error: {other:?}"),
+                },
+                "case {expected}"
+            );
+            assert!(store_rolled_back);
+            assert!(typed_state_rolled_back);
+        }
+    }
+
+    #[test]
+    fn failed_nested_extractor_pattern_rolls_back_the_whole_match() {
+        let source_text = "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object SomeInt { def unapply(value: Any): MaybeInt = value }; class C { def choose(value: Any): Int = value match { case SomeInt((left, right)) => 1; case _ => 0 } }";
+        let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(source_text);
+        assert!(matches!(
+            error,
+            TyperError::UnsupportedPattern {
+                pattern_kind: PatternKind::Tuple,
+                ..
+            }
+        ));
+        assert!(store_rolled_back);
+        assert!(typed_state_rolled_back);
     }
 
     #[test]

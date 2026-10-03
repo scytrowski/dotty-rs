@@ -1,0 +1,57 @@
+[[syntax trees at end of                     typer]] // crates/dotty-typer/tests/fixtures/unary-option-extractors/UnaryOptionExtractors.scala
+package <empty> {
+  final lazy module val SomeInt: SomeInt = new SomeInt()
+  final module class SomeInt() extends Object() { this: SomeInt.type =>
+    def unapply(value: Any): Option[Int] = Some.apply[Int](1)
+  }
+  final lazy module val Outer: Outer = new Outer()
+  final module class Outer() extends Object() { this: Outer.type =>
+    def unapply(value: Any): Option[Any] = Some.apply[Any](value)
+  }
+  final lazy module val UnaryOptionExtractors: UnaryOptionExtractors =
+    new UnaryOptionExtractors()
+  final module class UnaryOptionExtractors() extends Object() {
+    this: UnaryOptionExtractors.type =>
+    def wildcard(value: Any): Int =
+      value match
+        {
+          case SomeInt(_) =>
+            1
+          case _ =>
+            0
+        }
+    def binding(value: Any): Int =
+      value match
+        {
+          case SomeInt(x @ _) if x > 0 =>
+            x:Int
+          case _ =>
+            0
+        }
+    def literal(value: Any): Int =
+      value match
+        {
+          case SomeInt(1) =>
+            1
+          case _ =>
+            0
+        }
+    def typed(value: Any): Int =
+      value match
+        {
+          case SomeInt(x @ _:Int) =>
+            x:Int
+          case _ =>
+            0
+        }
+    def nested(value: Any): Int =
+      value match
+        {
+          case Outer(SomeInt(x @ _)) =>
+            x:Int
+          case _ =>
+            0
+        }
+  }
+}
+

@@ -1406,8 +1406,11 @@ fn audit_source_inner(
                     | TyperError::ExtractorUnapplyShapeUnsupported { .. }
                     | TyperError::ExtractorPatternConstraintDeferred { .. }
                     | TyperError::UnsupportedExtractorResultProtocol { .. }
+                    | TyperError::ExtractorPatternArityUnsupported { .. }
+                    | TyperError::ExtractorResultMemberNotFound { .. }
+                    | TyperError::ExtractorResultMemberOverloaded { .. }
+                    | TyperError::ExtractorResultMemberUnsupported { .. }
                     | TyperError::ExtractorPatternArgumentUnsupported { .. }
-                    | TyperError::ExtractorPatternTypingDeferred { .. }
             ) {
                 collect_match_readiness(
                     &parsed.ast,
@@ -2576,10 +2579,13 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::UnsupportedExtractorResultProtocol { .. } => {
             "UnsupportedExtractorResultProtocol"
         }
+        TyperError::ExtractorPatternArityUnsupported { .. } => "ExtractorPatternArityUnsupported",
+        TyperError::ExtractorResultMemberNotFound { .. } => "ExtractorResultMemberNotFound",
+        TyperError::ExtractorResultMemberOverloaded { .. } => "ExtractorResultMemberOverloaded",
+        TyperError::ExtractorResultMemberUnsupported { .. } => "ExtractorResultMemberUnsupported",
         TyperError::ExtractorPatternArgumentUnsupported { .. } => {
             "ExtractorPatternArgumentUnsupported"
         }
-        TyperError::ExtractorPatternTypingDeferred { .. } => "ExtractorPatternTypingDeferred",
         TyperError::MalformedCaseDef { .. } => "MalformedCaseDef",
         TyperError::MalformedPatternBinding { .. } => "MalformedPatternBinding",
         TyperError::WildcardPatternBindingRejected { .. } => "WildcardPatternBindingRejected",
