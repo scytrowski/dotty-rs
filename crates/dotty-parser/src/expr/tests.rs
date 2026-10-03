@@ -3645,6 +3645,36 @@ fn recovers_from_assignment_without_a_rhs() {
 }
 
 #[test]
+fn parses_an_assignment_with_an_indented_rhs() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "x =\n  1",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Operator, 2, 3),
+            token(TokenKind::Newline, 3, 4),
+            token(TokenKind::Indent, 6, 6),
+            token(TokenKind::IntegerLiteral, 6, 7),
+            token(TokenKind::Outdent, 7, 7),
+            token(TokenKind::Eof, 7, 7),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+
+    let TreeKind::Assign(assignment) = parser.ast().get(id).kind else {
+        panic!("expected assignment tree");
+    };
+    assert!(matches!(
+        parser.ast().get(assignment.rhs).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Number(_))
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn recovers_from_an_if_without_a_condition() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

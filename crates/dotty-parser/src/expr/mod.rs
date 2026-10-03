@@ -1,7 +1,7 @@
 use dotty_core::ast::{Annotated, Assign, Function, TypedExpr, UntypedNode};
 use dotty_core::{Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
 
-use crate::{ParseKind, Parser};
+use crate::{Location, ParseKind, Parser};
 
 mod arguments;
 mod control_flow;
@@ -208,17 +208,54 @@ where
 
     fn expr1_rest(&mut self, lhs: TreeId<Untyped>) -> TreeId<Untyped> {
         if self.current_is_bare_assignment() {
+            let assignment_end = self.current().span.end();
+            let feedback_indent = self.observe_definition_rhs_indentation();
             self.advance();
-            let rhs = self.expr();
+            let following_definition = self.definition_after_newlines();
+            if following_definition.is_none() {
+                self.consume_control_newlines();
+            }
+            let missing_rhs_start = following_definition.or_else(|| {
+                self.starts_definition_statement()
+                    .then(|| self.current().span.start())
+            });
+            let consumed_statement_separator = missing_rhs_start.is_some()
+                && matches!(
+                    self.context.location,
+                    Location::Elsewhere | Location::InBlock
+                )
+                && self
+                    .source
+                    .as_str()
+                    .get(assignment_end as usize..self.current().span.start() as usize)
+                    .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
+            let rhs = if let Some(start) = missing_rhs_start {
+                self.report(
+                    crate::ParseDiagnosticKind::ExpectedExpression,
+                    "expected an expression after `=`",
+                );
+                self.error_expr(self.zero_width_span(start))
+            } else if self.current().kind == TokenKind::Indent {
+                if let Some(indent_offset) = feedback_indent {
+                    self.parse_region_feedback_indented_block(indent_offset)
+                } else {
+                    self.parse_indented_block()
+                }
+            } else {
+                self.expr()
+            };
             if !is_assignable_lhs(&self.ast.get(lhs).kind) {
                 self.report(
                     crate::ParseDiagnosticKind::UnexpectedToken,
                     "left-hand side is not assignable",
                 );
+                self.last_advance_consumed_statement_separator |= consumed_statement_separator;
                 return lhs;
             }
 
-            return self.alloc_assign(lhs, rhs);
+            let assignment = self.alloc_assign(lhs, rhs);
+            self.last_advance_consumed_statement_separator |= consumed_statement_separator;
+            return assignment;
         }
 
         if self.current().kind == TokenKind::ColonFollow && self.colon_followed_by_indented_lambda()

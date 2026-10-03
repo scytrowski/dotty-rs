@@ -1490,6 +1490,57 @@ mod tests {
     }
 
     #[test]
+    fn missing_assignment_rhs_does_not_consume_following_definition() {
+        let source = concat!("def f(x: Int) =\n", "  x =\n", "  val y = 1\n", "  y\n",);
+        let scanner = ContextualScanner::new(source).expect("source should scan cleanly");
+        let source_text = SourceText::new(source).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            dotty_parser::ParseDiagnosticKind::ExpectedExpression
+        );
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected the compilation-unit package");
+        };
+        let method_id = package
+            .stats
+            .iter()
+            .copied()
+            .find(|id| matches!(result.ast.get(*id).kind, TreeKind::DefDef(_)))
+            .expect("method definition should remain at compilation-unit scope");
+        let TreeKind::DefDef(method) = &result.ast.get(method_id).kind else {
+            unreachable!();
+        };
+        let TreeKind::Block(body) = &result.ast.get(method.rhs.expect("method body")).kind else {
+            panic!("expected the indented method body block");
+        };
+        assert_eq!(body.stats.len(), 2);
+        assert!(matches!(
+            result.ast.get(body.stats[0]).kind,
+            TreeKind::Assign(_)
+        ));
+        let TreeKind::Assign(assignment) = &result.ast.get(body.stats[0]).kind else {
+            unreachable!();
+        };
+        assert!(matches!(
+            result.ast.get(assignment.rhs).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert!(matches!(
+            result.ast.get(body.stats[1]).kind,
+            TreeKind::ValDef(_)
+        ));
+        let TreeKind::Ident(final_expr) = &result.ast.get(body.expr).kind else {
+            panic!("expected the final `y` expression to remain in the block");
+        };
+        assert_eq!(names.resolve(final_expr.name.text()), "y");
+    }
+
+    #[test]
     fn missing_multiline_lambda_body_preserves_enclosing_argument_boundaries() {
         let source = "consume(values.map(x =>\n), fallback)";
         let scanner = ContextualScanner::new(source).expect("source should scan");

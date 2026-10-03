@@ -272,8 +272,11 @@ where
 
             if self.is_sequence_separator(boundary) {
                 self.consume_sequence_separators(boundary);
+                self.last_advance_consumed_statement_separator = false;
             } else if self.last_advance_was_outdent {
                 self.last_advance_was_outdent = false;
+            } else if self.last_advance_consumed_statement_separator {
+                self.last_advance_consumed_statement_separator = false;
             } else if !self.sequence_ended(boundary) {
                 self.report(
                     ParseDiagnosticKind::UnexpectedToken,
@@ -370,8 +373,11 @@ where
 
             if self.is_sequence_separator(boundary) {
                 self.consume_sequence_separators(boundary);
+                self.last_advance_consumed_statement_separator = false;
             } else if self.last_advance_was_outdent {
                 self.last_advance_was_outdent = false;
+            } else if self.last_advance_consumed_statement_separator {
+                self.last_advance_consumed_statement_separator = false;
             } else if !self.sequence_ended(boundary) {
                 self.report(
                     ParseDiagnosticKind::UnexpectedToken,
@@ -414,6 +420,34 @@ where
             self.advance();
         }
         ParsedStatement::Expression(self.error_expr(position))
+    }
+
+    pub(crate) fn starts_definition_statement(&mut self) -> bool {
+        self.starts_definition_prefix() || token_starts_definition(self.current().kind)
+    }
+
+    pub(crate) fn definition_after_newlines(&mut self) -> Option<u32> {
+        if !matches!(
+            self.current().kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            return None;
+        }
+
+        let mut offset = 1;
+        while matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            offset += 1;
+        }
+
+        let next = self.cursor.lookahead(offset);
+        if next.kind == TokenKind::Indent {
+            return None;
+        }
+
+        token_starts_definition(next.kind).then_some(next.span.start())
     }
 
     /// Places definitions in `stats` and leaves only the final expression in `expr`.
@@ -872,6 +906,27 @@ const fn is_top_level_statement_start(kind: TokenKind) -> bool {
                 | HardKeyword::Match
                 | HardKeyword::Enum
                 | HardKeyword::Given
+        ) | TokenKind::CaseClass
+            | TokenKind::CaseObject
+    )
+}
+
+const fn token_starts_definition(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Keyword(
+            HardKeyword::Val
+                | HardKeyword::Var
+                | HardKeyword::Def
+                | HardKeyword::Type
+                | HardKeyword::Enum
+                | HardKeyword::Class
+                | HardKeyword::Trait
+                | HardKeyword::Object
+                | HardKeyword::Given
+                | HardKeyword::Package
+                | HardKeyword::Import
+                | HardKeyword::Export
         ) | TokenKind::CaseClass
             | TokenKind::CaseObject
     )
