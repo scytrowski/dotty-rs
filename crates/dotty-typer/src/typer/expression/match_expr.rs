@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn unsupported_pattern_fails_before_its_guard_is_typed() {
         let (parsed, mut store, packages, definitions, index, source) =
-            setup("class C { def choose(x: Int): Int = x match { case _: Int if missing => 1 } }");
+            setup("class C { def choose(x: Int): Int = x match { case (1, _) if missing => 1 } }");
         let (method, case_tree) = method_and_case(&parsed, &store, &index, source);
         let (mut typer, context) = context_for(
             &parsed,

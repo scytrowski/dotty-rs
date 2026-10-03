@@ -70,12 +70,19 @@ Pattern typing has its own recursive-ready entry point under
 the current expression context, and records source-to-typed identity in
 `SourceTypedIndex`. The supported roots are an ordinary unquoted wildcard,
 lowercase variable identifiers, literal constants, stable term identifiers and
-selections, and explicit bindings over wildcard, literal, or stable-value
-patterns.
+selections, explicit bindings over wildcard, literal, or stable-value
+patterns, plus a bounded subset of typed patterns (`_: T`, `x: T`, and
+`x @ (_: T)`).
 Wildcards become typed `Ident(_)` nodes carrying the selector prototype.
 Variable identifiers lower to typed `Bind(name, _)` nodes and introduce one
 typer-owned local symbol in the case scope. Explicit `name @ _` uses the same
 symbol creation path and maps both source Bind and source wildcard nodes.
+Typed wildcard patterns project and reify `T` as a typed `TypeTree`; their
+typed `Typed` node carries `T`. Typed variable patterns lower to one `Bind`
+whose body retains the typed test, and the case-local binder has value info
+`T`, so guards and bodies see the narrowed type. An explicit binder around a
+typed wildcard uses the same narrowing when the typed pattern is the complete
+bound body.
 Pattern-bound identifiers in the case body resolve through ordinary local
 scope lookup, shadow outer names for that case, and remain isolated from sibling
 cases. Backquoted identifiers and uppercase-leading identifiers are resolved
@@ -107,6 +114,15 @@ keeps a constant selector type and widens other selector types before typing
 the cases. The fixture in
 [`wildcard-patterns`](../crates/dotty-typer/tests/fixtures/wildcard-patterns)
 records the source shape and the normalized expected wildcard tree.
+The `T` in a typed pattern must currently be a non-generic nominal class or
+trait reference (or one of the supported builtin types). The existing bounded
+relation must prove compatibility in at least one direction between `T` and
+the selector; proven unrelated types produce a focused mismatch, while
+unsupported relations and runtime-test shapes such as generic applications,
+aliases, intersections, and type parameters are deferred. This does not
+synthesize `TypeTest`/`ClassTag` evidence or implement GADT refinement.
+[`typed-patterns`](../crates/dotty-typer/tests/fixtures/typed-patterns)
+records the normalized source and typed shape for the supported subset.
 The normalized variable and explicit Bind shapes are pinned in
 [`variable-patterns`](../crates/dotty-typer/tests/fixtures/variable-patterns).
 Literal and stable-value pattern shapes are pinned in
@@ -114,10 +130,12 @@ Literal and stable-value pattern shapes are pinned in
 
 The dedicated `type_case_def` helper in `expression/match_expr.rs` types
 supported `CaseDef` nodes independently; `Match` expression typing
-is supported for matches whose cases use wildcards, variable patterns, literal
-patterns, stable-value patterns, or explicit bindings over wildcard, literal,
-and stable-value patterns. An explicit binder's info is the selector
-prototype, while its nested pattern retains its own type. It types the
+is supported for matches whose cases use wildcards, variable patterns, typed
+patterns in the bounded subset above, literal patterns, stable-value patterns,
+or explicit bindings over wildcard, literal, stable-value, and typed wildcard
+patterns. An explicit binder's info is normally the selector prototype; when
+its complete nested pattern is a typed wildcard, its info is narrowed to that
+pattern type. The nested pattern retains its own type. It types the
 selector once, preserves the selector's own type, and computes the shared
 pattern prototype by preserving constants and widening other expression
 types. It delegates each case to `type_case_def` in source order and builds a
@@ -133,7 +151,7 @@ and before the body, in the same case-local scope. They use canonical Boolean
 as the expected type and retain their own typed expression type. Guard types do
 not participate in Match result joining. Pattern, guard, and body failures
 roll back the case and enclosing Match transaction. Unsupported patterns,
-including typed patterns, alternatives, tuple patterns, and extractors, fail
+including alternatives, tuple patterns, and extractors, fail
 before guard or body typing. Empty Match nodes and failed case typing return
 focused errors, and the enclosing expression transaction rolls back all case
 and selector state on failure. The normalized
