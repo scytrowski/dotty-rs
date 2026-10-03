@@ -58,6 +58,18 @@ pub enum ExtractorProductIssue {
     ProductRelationUnsupported,
 }
 
+/// Why a tuple pattern could not be lowered through its canonical Scala tuple
+/// extractor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TuplePatternResolutionIssue {
+    EmptyTupleNeedsUnitRule,
+    TupleClassNotFound,
+    CompanionNotFound,
+    UnapplyNotFound,
+    UnapplyShapeUnsupported,
+    TupleTypeUnsupported,
+}
+
 impl PatternKind {
     /// Returns the stable diagnostic/audit label for this pattern shape.
     pub const fn as_str(self) -> &'static str {
@@ -1122,6 +1134,19 @@ pub enum TyperError {
         source: SourceId,
         tree_index: u32,
         pattern_kind: PatternKind,
+    },
+    /// The tuple pattern's canonical TupleN class, companion, or extractor
+    /// could not be resolved or instantiated soundly.
+    TuplePatternResolutionDeferred {
+        source: SourceId,
+        tree_index: u32,
+        arity: usize,
+        issue: TuplePatternResolutionIssue,
+    },
+    /// General infix extractor lowering remains deferred.
+    InfixPatternDeferred {
+        source: SourceId,
+        tree_index: u32,
     },
     /// Pattern alternatives cannot introduce bindings in any branch.
     PatternBindingInAlternative {

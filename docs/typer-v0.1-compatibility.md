@@ -176,10 +176,15 @@ nested patterns for Boolean extractors, missing/ambiguous selected qualifier mem
 missing/overloaded Option-like protocol members, and non-Boolean `isEmpty`
 return focused extractor errors. Products with missing or nonconsecutive
 selectors and source argument counts that do not match the discovered product
-arity are rejected explicitly. Generic or
-overloaded `unapply`, contextual, erased, repeated, or by-name parameters,
-`unapplySeq`, tuple source patterns, and pattern constraint inference remain
-unsupported. The
+arity are rejected explicitly. Tuple source patterns lower through the
+canonical `scala.TupleN` companion's generic `unapply`, retaining the selected
+extractor identity and recursively typing each component. Empty tuple syntax
+is the Unit literal pattern; one-element parentheses remain transparent. A
+missing canonical tuple class, companion, or supported `unapply` shape is
+reported through `TuplePatternResolutionDeferred`, without synthesizing tuple
+symbols. Generic or overloaded extractor APIs beyond the canonical tuple
+`unapply`, contextual, erased, repeated, or by-name parameters, `unapplySeq`,
+and pattern constraint inference remain unsupported. The
 foundation resolution shape is recorded in
 [`extractor-foundation`](../crates/dotty-typer/tests/fixtures/extractor-foundation).
 
@@ -187,7 +192,7 @@ The dedicated `type_case_def` helper in `expression/match_expr.rs` types
 supported `CaseDef` nodes independently; `Match` expression typing
 is supported for matches whose cases use wildcards, variable patterns, typed
 patterns in the bounded subset above, literal patterns, stable-value patterns,
-the unary Option-like and N-ary product extractors above, non-binding alternatives, or explicit
+the unary Option-like and N-ary product extractors above, tuple patterns, non-binding alternatives, or explicit
 bindings over wildcard, literal, stable-value, and typed wildcard patterns. An explicit binder's info is normally the selector prototype; when
 its complete nested pattern is a typed wildcard, its info is narrowed to that
 pattern type. The nested pattern retains its own type. It types the
@@ -206,7 +211,7 @@ and before the body, in the same case-local scope. They use canonical Boolean
 as the expected type and retain their own typed expression type. Guard types do
 not participate in Match result joining. Pattern, guard, and body failures
 roll back the case and enclosing Match transaction. Unsupported patterns,
-including tuple patterns and unsupported extractor protocols, fail
+including unsupported tuple resolution and extractor protocols, fail
 before guard or body typing. Empty Match nodes and failed case typing return
 focused errors, and the enclosing expression transaction rolls back all case
 and selector state on failure. The normalized

@@ -2566,6 +2566,8 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::MemberLookup(..) => "MemberLookup",
         TyperError::UnsupportedExpression { .. } => "UnsupportedExpression",
         TyperError::UnsupportedPattern { .. } => "UnsupportedPattern",
+        TyperError::TuplePatternResolutionDeferred { .. } => "TuplePatternResolutionDeferred",
+        TyperError::InfixPatternDeferred { .. } => "InfixPatternDeferred",
         TyperError::PatternBindingInAlternative { .. } => "PatternBindingInAlternative",
         TyperError::PatternAlternativeJoinUnsupported { .. } => "PatternAlternativeJoinUnsupported",
         TyperError::ExtractorQualifierNotFound { .. } => "ExtractorQualifierNotFound",
