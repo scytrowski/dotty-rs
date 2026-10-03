@@ -9,6 +9,8 @@ use dotty_core::{
     SymbolOrigin, TermRefTarget, TreeId, TypeId, TypeRefTarget, Typed, Untyped,
 };
 
+const MAX_REIFIABLE_TYPE_PREFIX_DEPTH: usize = 64;
+
 /// Classifies a pattern by its stable source-tree root category.
 pub(super) fn pattern_kind(kind: &TreeKind<Untyped>) -> PatternKind {
     match kind {
@@ -552,12 +554,15 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<bool, TyperError> {
         let Some(Type::TypeRef {
+            prefix,
             target: TypeRefTarget::Symbol(symbol),
-            ..
         }) = self.store.types.try_get(pattern_type)
         else {
             return Ok(false);
         };
+        if !self.typed_pattern_prefix_is_reifiable(*prefix) {
+            return Ok(false);
+        }
         let symbol = *symbol;
         if !self.store.symbols.contains(symbol)
             || !matches!(
@@ -594,6 +599,24 @@ impl SourceTyper<'_> {
             .get(class_info.declarations)
             .entered_symbols()
             .any(|member| self.store.symbols.get(member).kind == SymbolKind::TypeParameter))
+    }
+
+    fn typed_pattern_prefix_is_reifiable(&self, mut prefix: TypeId) -> bool {
+        for _ in 0..MAX_REIFIABLE_TYPE_PREFIX_DEPTH {
+            match self.store.types.try_get(prefix) {
+                Some(Type::NoPrefix) => return true,
+                Some(Type::TypeRef {
+                    prefix: parent,
+                    target: TypeRefTarget::Symbol(package),
+                }) if self.store.symbols.contains(*package)
+                    && self.store.symbols.get(*package).kind == SymbolKind::Package =>
+                {
+                    prefix = *parent;
+                }
+                _ => return false,
+            }
+        }
+        false
     }
 
     fn complete_typed_pattern_relation_class(
@@ -1125,6 +1148,70 @@ mod tests {
             typer.store.symbols.get(parent).info,
             SymbolInfo::Complete(_)
         ));
+    }
+
+    #[test]
+    fn typed_pattern_defers_path_dependent_and_applied_type_prefixes() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class Outer[A] { class Inner }; class C { def choose(value: Any): Int = value match { case _: Outer.Inner => 1 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let mut outer = None;
+        let mut inner = None;
+        for (tree, node) in parsed.ast.iter() {
+            if let TreeKind::TypeDef(definition) = &node.kind {
+                match store.names.resolve(definition.name.as_name().text()) {
+                    "Outer" => outer = index.symbol_at(source, tree),
+                    "Inner" => inner = index.symbol_at(source, tree),
+                    _ => {}
+                }
+            }
+        }
+        let outer = outer.unwrap();
+        let inner = inner.unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let generic_outer = typer
+            .store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, outer));
+        let applied_outer = typer.store.types.alloc(Type::Applied {
+            tycon: generic_outer,
+            args: vec![definitions.int],
+        });
+        let applied_inner = typer
+            .store
+            .types
+            .alloc(Type::type_ref(applied_outer, inner));
+        assert!(
+            !typer
+                .typed_pattern_runtime_test_supported(applied_inner, &mut Vec::new())
+                .unwrap()
+        );
+
+        assert!(matches!(
+            typer.run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.any_type, context, journal, mappings)
+            }),
+            Err(TyperError::TypedPatternRuntimeTestDeferred { .. })
+        ));
+        assert_eq!(typer.typed_arena.iter().count(), 0);
+        assert!(typer.typed_index.is_empty());
     }
 
     #[test]

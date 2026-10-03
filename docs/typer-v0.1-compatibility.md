@@ -120,7 +120,9 @@ The existing bounded
 relation must prove compatibility in at least one direction between `T` and
 the selector; proven unrelated types produce a focused mismatch, while
 unsupported relations and runtime-test shapes such as generic applications,
-aliases, intersections, and type parameters are deferred. This does not
+aliases, intersections, type parameters, and non-reifiable `TypeRef` prefixes
+are deferred. Package prefixes are permitted; path-dependent and applied
+prefixes are not. This does not
 synthesize `TypeTest`/`ClassTag` evidence or implement GADT refinement.
 [`typed-patterns`](../crates/dotty-typer/tests/fixtures/typed-patterns)
 records the normalized source and typed shape for the supported subset.
