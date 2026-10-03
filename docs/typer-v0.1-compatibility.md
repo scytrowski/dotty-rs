@@ -137,25 +137,31 @@ patterns in any branch are rejected before they can enter the case scope. The
 literal and stable-value source shapes are pinned against Scala 3.9.0 in
 [`pattern-alternatives`](../crates/dotty-typer/tests/fixtures/pattern-alternatives).
 
-Extractor applications with a simple identifier qualifier now resolve that
-stable value, look up exactly one `unapply`, validate its plain unary method
-shape, and check `selector <: input` with the bounded relation. The internal
-`ExtractorPlan` retains the exact selected method, input and result types, the
-selector prototype, and untyped source arguments. `TypedAstBuilder::unapply`
-stores the caller-provided prototype without interpreting the result. The
-source `Apply` path reports a focused typing deferral after successful plan
-resolution: nested patterns and the result protocol are implemented by later
-increments. Selected qualifiers, overloads, generic methods, contextual,
-erased, repeated, and by-name parameters, `unapplySeq`, and pattern constraint
-inference remain unsupported. The pinned Scala 3.9.0 shape is recorded in
+Extractor applications with a simple identifier qualifier resolve that stable
+value, look up exactly one `unapply`, validate its plain unary method shape,
+and check `selector <: input` with the bounded relation. For the supported
+Option-like result protocol, the result must expose parameterless `isEmpty`
+with Boolean type and parameterless value `get`; the `get` type is passed
+unchanged as the nested pattern prototype. The typed `UnApply` retains the
+selector/input prototype as its own type and the exact selected `unapply`
+symbol. Nested patterns reuse the existing case-local binder machinery and may
+naturally contain another supported unary extractor. The pinned Scala 3.9.0
+oracle and normalized shape are recorded in
+[`unary-option-extractors`](../crates/dotty-typer/tests/fixtures/unary-option-extractors).
+
+Zero or multiple nested patterns, missing/overloaded protocol members, and
+non-Boolean `isEmpty` return focused extractor errors. Selected qualifiers,
+generic or overloaded `unapply`, contextual/erased/repeated/by-name parameters,
+`unapplySeq`, Boolean/product result protocols, and pattern constraint
+inference remain unsupported. The foundation resolution shape is recorded in
 [`extractor-foundation`](../crates/dotty-typer/tests/fixtures/extractor-foundation).
 
 The dedicated `type_case_def` helper in `expression/match_expr.rs` types
 supported `CaseDef` nodes independently; `Match` expression typing
 is supported for matches whose cases use wildcards, variable patterns, typed
 patterns in the bounded subset above, literal patterns, stable-value patterns,
-non-binding alternatives, or explicit bindings over wildcard, literal,
-stable-value, and typed wildcard patterns. An explicit binder's info is normally the selector prototype; when
+the unary Option-like extractors above, non-binding alternatives, or explicit
+bindings over wildcard, literal, stable-value, and typed wildcard patterns. An explicit binder's info is normally the selector prototype; when
 its complete nested pattern is a typed wildcard, its info is narrowed to that
 pattern type. The nested pattern retains its own type. It types the
 selector once, preserves the selector's own type, and computes the shared
@@ -168,12 +174,12 @@ values use the current `Type::Or` fallback. This intentionally does not
 implement Scala 3.9's general `TypeComparer.lub`; unions are not normalized
 beyond the existing relation rules. Nested wildcard matches are supported.
 
-For supported patterns, guards are typed after pattern bindings are entered
+For supported patterns, including unary Option-like extractors, guards are typed after pattern bindings are entered
 and before the body, in the same case-local scope. They use canonical Boolean
 as the expected type and retain their own typed expression type. Guard types do
 not participate in Match result joining. Pattern, guard, and body failures
 roll back the case and enclosing Match transaction. Unsupported patterns,
-including tuple patterns, fail
+including tuple patterns and unsupported extractor protocols, fail
 before guard or body typing. Empty Match nodes and failed case typing return
 focused errors, and the enclosing expression transaction rolls back all case
 and selector state on failure. The normalized
