@@ -134,7 +134,7 @@ where
     ) -> ParsedStatement {
         let tail = self.with_secondary_constructor_allowed(false, |parser| {
             parser.with_enum_body(false, |parser| {
-                parser.parse_template_tail(false, Some(mark.start()))
+                parser.parse_template_tail(false, Some(mark.start()), *name.as_name())
             })
         });
         self.build_module_definition(mark, name, metadata, tail)
@@ -697,11 +697,11 @@ where
         let tail = self.with_secondary_constructor_allowed(!is_trait && !is_enum, |parser| {
             if is_enum {
                 parser.with_enum_body(true, |parser| {
-                    parser.parse_template_tail(true, Some(mark.start()))
+                    parser.parse_template_tail(true, Some(mark.start()), *name.as_name())
                 })
             } else {
                 parser.with_enum_body(false, |parser| {
-                    parser.parse_template_tail(false, Some(mark.start()))
+                    parser.parse_template_tail(false, Some(mark.start()), *name.as_name())
                 })
             }
         });
@@ -766,6 +766,7 @@ where
         &mut self,
         required_body: bool,
         indent_reference: Option<u32>,
+        expected_end_marker: dotty_core::Name,
     ) -> TemplateTail {
         let parents = self.parse_parent_clause();
         let derives = self.parse_derives_clause();
@@ -775,6 +776,7 @@ where
             None,
             false,
             indent_reference,
+            Some(expected_end_marker),
         );
         if required_body && !self.cursor.progressed_since(body_checkpoint) {
             self.report(
@@ -1063,6 +1065,7 @@ where
             feedback_indent,
             required,
             None,
+            None,
         )
     }
 
@@ -1071,6 +1074,7 @@ where
         feedback_indent: Option<u32>,
         required: bool,
         indent_reference: Option<u32>,
+        expected_end_marker: Option<dotty_core::Name>,
     ) -> TemplateBodyResult {
         self.consume_newlines_before_template_body();
         if required
@@ -1101,9 +1105,10 @@ where
                     .unwrap_or_else(|| self.observe_indented_body_region());
                 self.advance();
                 if self.current().kind == TokenKind::Indent {
-                    return self.parse_template_body_with_feedback(
+                    return self.parse_template_body_with_feedback_and_owner(
                         TemplateBody::Indented,
                         feedback_indent,
+                        expected_end_marker,
                     );
                 }
                 self.report(
@@ -1118,12 +1123,17 @@ where
         }
 
         match self.current().kind {
-            TokenKind::Punctuation(dotty_core::Punctuation::LeftBrace) => {
-                self.parse_template_body(TemplateBody::Braced)
-            }
-            TokenKind::Indent => {
-                self.parse_template_body_with_feedback(TemplateBody::Indented, feedback_indent)
-            }
+            TokenKind::Punctuation(dotty_core::Punctuation::LeftBrace) => self
+                .parse_template_body_with_feedback_and_owner(
+                    TemplateBody::Braced,
+                    None,
+                    expected_end_marker,
+                ),
+            TokenKind::Indent => self.parse_template_body_with_feedback_and_owner(
+                TemplateBody::Indented,
+                feedback_indent,
+                expected_end_marker,
+            ),
             _ => TemplateBodyResult {
                 self_val: None,
                 members: Vec::new(),
