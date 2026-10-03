@@ -1592,6 +1592,99 @@ mod tests {
     }
 
     #[test]
+    fn missing_match_case_arrow_preserves_following_case_and_template_member() {
+        const SOURCE: &str = concat!(
+            "object O:\n",
+            "  def f = {\n",
+            "    value match\n",
+            "      case A\n",
+            "      case B => 2\n",
+            "    after\n",
+            "  }\n",
+            "  def next = 3",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            dotty_parser::ParseDiagnosticKind::ExpectedToken
+        );
+        let next_case = SOURCE.find("case B").unwrap() as u32;
+        assert_eq!(
+            result.diagnostics[0].span(),
+            dotty_core::TextRange::new(next_case - 7, next_case).unwrap()
+        );
+
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+            &result.ast.get(package.stats[0]).kind
+        else {
+            panic!("expected object O");
+        };
+        let TreeKind::Template(template) = &result.ast.get(module.template).kind else {
+            panic!("expected object template");
+        };
+        let method_id = template
+            .body
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    &result.ast.get(*id).kind,
+                    TreeKind::DefDef(definition)
+                        if names.resolve(definition.name.as_name().text()) == "f"
+                )
+            })
+            .expect("f method remains inside the object");
+        let TreeKind::DefDef(method) = &result.ast.get(method_id).kind else {
+            unreachable!();
+        };
+        let TreeKind::Block(body) = &result.ast.get(method.rhs.unwrap()).kind else {
+            panic!("expected f's braced body");
+        };
+        let match_id = body
+            .stats
+            .iter()
+            .copied()
+            .find(|id| matches!(result.ast.get(*id).kind, TreeKind::Match(_)))
+            .expect("match expression remains in f's body");
+        let TreeKind::Match(match_tree) = &result.ast.get(match_id).kind else {
+            unreachable!();
+        };
+        assert!(
+            match_tree.cases.iter().any(|id| matches!(
+                &result.ast.get(*id).kind,
+                TreeKind::CaseDef(case_def)
+                    if matches!(
+                        &result.ast.get(case_def.pattern).kind,
+                        TreeKind::Ident(identifier)
+                            if names.resolve(identifier.name.text()) == "B"
+                    )
+            )),
+            "the later case must not be swallowed by recovery"
+        );
+        let TreeKind::Ident(after) = &result.ast.get(body.expr).kind else {
+            panic!("the following `after` expression remains in f's body");
+        };
+        assert_eq!(names.resolve(after.name.text()), "after");
+        assert!(
+            template.body.iter().any(|id| matches!(
+                &result.ast.get(*id).kind,
+                TreeKind::DefDef(definition)
+                    if names.resolve(definition.name.as_name().text()) == "next"
+            )),
+            "the following method remains at template scope"
+        );
+    }
+
+    #[test]
     fn match_valued_if_branch_keeps_outer_else_and_full_span() {
         const SOURCE: &str = concat!(
             "object IfElseAfterIndentedMatch:\n",
