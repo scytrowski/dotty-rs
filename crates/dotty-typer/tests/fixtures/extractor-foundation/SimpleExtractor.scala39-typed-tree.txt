@@ -1,0 +1,22 @@
+[[syntax trees at end of                     typer]] // crates/dotty-typer/tests/fixtures/extractor-foundation/SimpleExtractor.scala
+package <empty> {
+  final lazy module val SimpleExtractor: SimpleExtractor = new SimpleExtractor()
+  final module class SimpleExtractor() extends Object() {
+    this: SimpleExtractor.type =>
+    def unapply(value: Any): Option[Int] = Some.apply[Int](1)
+  }
+  final lazy module val ExtractorFoundation: ExtractorFoundation =
+    new ExtractorFoundation()
+  final module class ExtractorFoundation() extends Object() {
+    this: ExtractorFoundation.type =>
+    def choose(value: Any): Int =
+      value match
+        {
+          case SimpleExtractor(_) =>
+            1
+          case _ =>
+            0
+        }
+  }
+}
+

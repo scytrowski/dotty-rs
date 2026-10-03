@@ -22,6 +22,25 @@ pub enum PatternKind {
     Other,
 }
 
+/// Callable-shape limitation encountered while resolving `unapply`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtractorMethodShapeIssue {
+    NotMethod,
+    MethodKind,
+    ParameterArity,
+    ErasedParameter,
+    RepeatedParameter,
+    ByNameParameter,
+    TrailingClause,
+}
+
+/// Unsupported source syntax within an extractor pattern's argument list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtractorPatternArgumentIssue {
+    Named,
+    SequenceWildcard,
+}
+
 impl PatternKind {
     /// Returns the stable diagnostic/audit label for this pattern shape.
     pub const fn as_str(self) -> &'static str {
@@ -1101,6 +1120,86 @@ pub enum TyperError {
         left: TypeId,
         right: TypeId,
         error: Box<TypeRelationError>,
+    },
+    /// A simple extractor identifier did not resolve in the current context.
+    ExtractorQualifierNotFound {
+        source: SourceId,
+        tree_index: u32,
+        name: Name,
+    },
+    /// The extractor qualifier uses a selected or otherwise unsupported source form.
+    ExtractorQualifierShapeUnsupported {
+        source: SourceId,
+        tree_index: u32,
+    },
+    /// The resolved qualifier is not a symbol-backed value reference.
+    ExtractorQualifierNotValueLike {
+        source: SourceId,
+        tree_index: u32,
+        qualifier_type: Option<TypeId>,
+    },
+    /// The resolved extractor qualifier is mutable or otherwise unstable.
+    ExtractorQualifierNotStable {
+        source: SourceId,
+        tree_index: u32,
+        qualifier_type: TypeId,
+    },
+    /// No member named `unapply` exists on the extractor value type.
+    ExtractorUnapplyNotFound {
+        source: SourceId,
+        tree_index: u32,
+        extractor: SymbolId,
+    },
+    /// Several `unapply` declarations remain; overload selection is deferred.
+    ExtractorUnapplyOverloaded {
+        source: SourceId,
+        tree_index: u32,
+        extractor: SymbolId,
+        candidates: Vec<SymbolId>,
+    },
+    /// Generic `unapply` methods are outside this extractor increment.
+    ExtractorUnapplyPolymorphic {
+        source: SourceId,
+        tree_index: u32,
+        unapply: SymbolId,
+        callable: TypeId,
+    },
+    /// The method does not have the supported one-parameter plain shape.
+    ExtractorUnapplyShapeUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        unapply: SymbolId,
+        callable: TypeId,
+        issue: ExtractorMethodShapeIssue,
+    },
+    /// The selector is not proven to conform to the unapply input type.
+    ExtractorPatternConstraintDeferred {
+        source: SourceId,
+        tree_index: u32,
+        selector: TypeId,
+        input: TypeId,
+        error: Option<Box<TypeRelationError>>,
+    },
+    /// The unapply result is malformed or methodic before result protocols apply.
+    UnsupportedExtractorResultProtocol {
+        source: SourceId,
+        tree_index: u32,
+        unapply: SymbolId,
+        result: TypeId,
+    },
+    /// Named arguments and sequence wildcards are not accepted by this plan.
+    ExtractorPatternArgumentUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        argument_tree_index: u32,
+        issue: ExtractorPatternArgumentIssue,
+    },
+    /// The extractor is resolved, but nested pattern typing belongs to a later increment.
+    ExtractorPatternTypingDeferred {
+        source: SourceId,
+        tree_index: u32,
+        unapply: SymbolId,
+        argument_count: usize,
     },
     /// An identifier pattern is not a well-formed term-name pattern.
     MalformedVariablePattern {

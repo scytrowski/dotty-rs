@@ -38,7 +38,10 @@ use application::{
 };
 pub use context::{ExpressionContext, ExpressionScopeId};
 use context::{ExpressionScopeFrame, next_expression_scope_owner};
-pub use error::{PatternKind, TypeArgumentBoundSide, TyperError};
+pub use error::{
+    ExtractorMethodShapeIssue, ExtractorPatternArgumentIssue, PatternKind, TypeArgumentBoundSide,
+    TyperError,
+};
 
 #[path = "../lookup/mod.rs"]
 mod lookup;
