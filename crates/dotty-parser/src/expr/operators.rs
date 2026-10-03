@@ -106,7 +106,34 @@ where
         }
 
         let mut tree = self.reduce_operator_stack(&mut operators, top, 0, true, None);
-        while self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Match) {
+        loop {
+            if self.current().kind != TokenKind::Keyword(dotty_core::HardKeyword::Match) {
+                let mut lookahead = 1;
+                while matches!(
+                    self.cursor.lookahead(lookahead).kind,
+                    TokenKind::Newline | TokenKind::Newlines
+                ) {
+                    lookahead += 1;
+                }
+                if self.cursor.lookahead(lookahead).kind
+                    != TokenKind::Keyword(dotty_core::HardKeyword::Match)
+                {
+                    break;
+                }
+                while matches!(
+                    self.current().kind,
+                    TokenKind::Newline | TokenKind::Newlines
+                ) {
+                    let checkpoint = self.cursor.checkpoint();
+                    self.advance();
+                    if !self.cursor.progressed_since(checkpoint) {
+                        break;
+                    }
+                }
+            }
+            if self.current().kind != TokenKind::Keyword(dotty_core::HardKeyword::Match) {
+                break;
+            }
             tree = self.parse_match_clause(tree);
         }
         tree
