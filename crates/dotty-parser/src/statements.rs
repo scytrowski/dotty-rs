@@ -541,7 +541,9 @@ where
         });
         if let Some(tree) = matching_tree {
             self.end_marked_trees.insert(tree);
-            self.extend_tree_end(tree, target_end);
+            if let Some(last) = last {
+                self.extend_end_marker_owner_path(last, tree, target_end);
+            }
         } else if last.is_some_and(|tree| {
             self.end_marker_owner(tree, target_kind, &target_text, marker.start(), true)
                 .is_some()
@@ -596,8 +598,77 @@ where
         marker_start: u32,
         include_marked: bool,
     ) -> Option<TreeId<Untyped>> {
-        self.end_marker_is_eligible(tree, target_kind, target_text, marker_start, include_marked)
-            .then_some(tree)
+        if self.end_marker_matches(tree, target_kind, target_text) {
+            return self
+                .end_marker_is_eligible(
+                    tree,
+                    target_kind,
+                    target_text,
+                    marker_start,
+                    include_marked,
+                )
+                .then_some(tree);
+        }
+
+        let precedes_marker = self
+            .ast
+            .get(tree)
+            .position
+            .is_some_and(|position| position.span().range().end() <= marker_start);
+        if !precedes_marker {
+            return None;
+        }
+
+        // A scanner outdent can surface an end marker in the enclosing
+        // statement sequence after the template parser has returned. In that
+        // case the target may still name the last nested template member, not
+        // the enclosing object/package tree that is now the sequence's last
+        // direct statement.
+        self.last_nested_end_marker_owner(tree).and_then(|nested| {
+            self.end_marker_owner(
+                nested,
+                target_kind,
+                target_text,
+                marker_start,
+                include_marked,
+            )
+        })
+    }
+
+    fn last_nested_end_marker_owner(&self, tree: TreeId<Untyped>) -> Option<TreeId<Untyped>> {
+        use dotty_core::ast::UntypedNode;
+
+        match &self.ast.get(tree).kind {
+            TreeKind::PackageDef(package) => package.stats.last().copied(),
+            TreeKind::TypeDef(definition) => Some(definition.rhs),
+            TreeKind::Template(template) => template.body.last().copied(),
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) => {
+                Some(definition.template)
+            }
+            _ => None,
+        }
+    }
+
+    fn extend_end_marker_owner_path(
+        &mut self,
+        root: TreeId<Untyped>,
+        owner: TreeId<Untyped>,
+        end: u32,
+    ) -> bool {
+        if root == owner {
+            self.extend_tree_end(root, end);
+            return true;
+        }
+
+        let Some(nested) = self.last_nested_end_marker_owner(root) else {
+            return false;
+        };
+        if !self.extend_end_marker_owner_path(nested, owner, end) {
+            return false;
+        }
+
+        self.extend_tree_end(root, end);
+        true
     }
 
     fn end_marker_is_eligible(
@@ -810,7 +881,104 @@ const fn is_top_level_statement_start(kind: TokenKind) -> bool {
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
-    use dotty_core::{HardKeyword, NameInterner, Punctuation, TextRange, TokenKind, TreeKind};
+    use dotty_core::ast::{
+        Ident, Modifiers, ModuleDef, Template, TypeDef, UntypedNode, UntypedTemplateMetadata,
+    };
+    use dotty_core::{
+        HardKeyword, Name, NameInterner, Namespace, Punctuation, SourceId, SourceSpan, Span,
+        TermName, TextRange, TokenKind, TreeKind, TypeName,
+    };
+
+    fn nested_module_with_final_type<S: dotty_core::TokenSource>(
+        parser: &mut Parser<'_, '_, S>,
+    ) -> (
+        TreeId<Untyped>,
+        TreeId<Untyped>,
+        TreeId<Untyped>,
+        TreeId<Untyped>,
+    ) {
+        let position = Some(SourceSpan::new(
+            SourceId::from_index(1),
+            Span::without_point(TextRange::new(0, 1).unwrap()),
+        ));
+        let outer_name = parser.names.intern("Outer");
+        let inner_name = parser.names.intern("Inner");
+        let constructor = parser.alloc(
+            TreeKind::Ident(Ident {
+                name: Name::new(outer_name, Namespace::Term),
+                backquoted: false,
+            }),
+            position,
+        );
+        let inner_template = parser.alloc(
+            TreeKind::Template(Template {
+                constructor,
+                parents: Vec::new(),
+                self_val: None,
+                body: Vec::new(),
+                metadata: UntypedTemplateMetadata::default(),
+            }),
+            position,
+        );
+        let inner_definition = parser.alloc(
+            TreeKind::TypeDef(TypeDef {
+                name: TypeName::new(inner_name),
+                rhs: inner_template,
+                metadata: Modifiers::default(),
+                variance: None,
+            }),
+            position,
+        );
+        let outer_template = parser.alloc(
+            TreeKind::Template(Template {
+                constructor,
+                parents: Vec::new(),
+                self_val: None,
+                body: vec![inner_definition],
+                metadata: UntypedTemplateMetadata::default(),
+            }),
+            position,
+        );
+        let outer_definition = parser.alloc(
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(ModuleDef {
+                name: TermName::new(outer_name),
+                template: outer_template,
+                metadata: Modifiers::default(),
+            })),
+            position,
+        );
+
+        (
+            outer_definition,
+            outer_template,
+            inner_definition,
+            inner_template,
+        )
+    }
+
+    fn nested_end_marker_parser<'names>(
+        names: &'names mut NameInterner,
+        mismatched_target: bool,
+    ) -> Parser<'static, 'names, crate::compilation_unit::tests::VecTokenSource> {
+        let (source, target) = if mismatched_target {
+            ("x end Wrong", "Wrong")
+        } else {
+            ("x end Inner", "Inner")
+        };
+        let end_start = 2;
+        let target_start = 6;
+        let target_end = target_start + target.len() as u32;
+        parser_for(
+            source,
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::EndMarker, end_start, end_start + 3),
+                token(TokenKind::Identifier, target_start, target_end),
+                token(TokenKind::Eof, target_end, target_end),
+            ],
+            names,
+        )
+    }
 
     #[test]
     fn case_body_sequence_leaves_an_enclosing_else_for_the_if_parser() {
@@ -966,6 +1134,75 @@ mod tests {
         };
         assert_eq!(parser.names.resolve(result.name.text()), "y");
         assert!(parser.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn nested_end_marker_extends_only_the_matched_owner_path() {
+        let mut names = NameInterner::new();
+        let mut parser = nested_end_marker_parser(&mut names, false);
+        let (module, outer_template, inner_type, inner_template) =
+            nested_module_with_final_type(&mut parser);
+        parser.advance();
+
+        assert!(parser.consume_end_marker(Some(module)));
+        assert!(parser.diagnostics.is_empty());
+        for tree in [module, outer_template, inner_type] {
+            assert_eq!(
+                parser.ast.get(tree).position.unwrap().span().range(),
+                TextRange::new(0, 11).unwrap(),
+                "the owner path should extend through `end Inner`"
+            );
+        }
+        assert_eq!(
+            parser
+                .ast
+                .get(inner_template)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(0, 1).unwrap(),
+            "the unmatched rhs template is not itself extended"
+        );
+    }
+
+    #[test]
+    fn nested_mismatched_end_marker_is_diagnosed_without_extending_owner_spans() {
+        let mut names = NameInterner::new();
+        let mut parser = nested_end_marker_parser(&mut names, true);
+        let (module, outer_template, inner_type, _) = nested_module_with_final_type(&mut parser);
+        parser.advance();
+
+        assert!(parser.consume_end_marker(Some(module)));
+        assert_eq!(parser.diagnostics.len(), 1);
+        assert_eq!(parser.diagnostics[0].message(), "misaligned end marker");
+        for tree in [module, outer_template, inner_type] {
+            assert_eq!(
+                parser.ast.get(tree).position.unwrap().span().range(),
+                TextRange::new(0, 1).unwrap(),
+                "a mismatched marker must not extend any candidate owner"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_nested_end_marker_is_diagnosed_without_extending_owner_spans() {
+        let mut names = NameInterner::new();
+        let mut parser = nested_end_marker_parser(&mut names, false);
+        let (module, outer_template, inner_type, _) = nested_module_with_final_type(&mut parser);
+        parser.end_marked_trees.insert(inner_type);
+        parser.advance();
+
+        assert!(parser.consume_end_marker(Some(module)));
+        assert_eq!(parser.diagnostics.len(), 1);
+        assert_eq!(parser.diagnostics[0].message(), "duplicate end marker");
+        for tree in [module, outer_template, inner_type] {
+            assert_eq!(
+                parser.ast.get(tree).position.unwrap().span().range(),
+                TextRange::new(0, 1).unwrap(),
+                "a duplicate marker must not extend owner spans a second time"
+            );
+        }
     }
 
     #[test]
