@@ -62,7 +62,6 @@ pub enum ExtractorProductIssue {
 /// extractor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TuplePatternResolutionIssue {
-    EmptyTupleNeedsUnitRule,
     TupleClassNotFound,
     CompanionNotFound,
     UnapplyNotFound,

@@ -318,11 +318,23 @@ impl SourceTyper<'_> {
     ) -> Result<TreeId<Typed>, TyperError> {
         let arity = tuple.elements.len();
         if arity == 0 {
-            return Err(self.tuple_pattern_resolution_error(
+            let literal = self.type_literal_expression(
                 pattern,
-                arity,
-                TuplePatternResolutionIssue::EmptyTupleNeedsUnitRule,
-            ));
+                dotty_core::ast::Literal {
+                    value: dotty_core::Constant::Unit,
+                },
+                self.arena.get(pattern).position,
+            )?;
+            let literal_type = self.typed_arena.get(literal).ty;
+            let widened_type =
+                self.widen_expression_type_journaled(literal_type, info_journal, 0)?;
+            self.require_literal_pattern_compatible(
+                literal_type,
+                widened_type,
+                selector_type,
+                pattern.index(),
+            )?;
+            return Ok(literal);
         }
 
         let tree_index = pattern.index();
@@ -2962,6 +2974,42 @@ mod tests {
             ),
             "{error:?}"
         );
+        assert!(store_rolled_back);
+        assert!(typed_state_rolled_back);
+    }
+
+    #[test]
+    fn unit_pattern_is_typed_as_a_literal_without_tuple_resolution() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { def choose(value: Any): Int = value match { case () => 1; case _ => 0 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let match_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Match(_)).then_some(tree))
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+
+        typer
+            .type_expression(match_tree, context)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+    }
+
+    #[test]
+    fn infix_patterns_return_a_focused_deferred_error() {
+        let source_text = "class C { def choose(value: Any): Any = value match { case left op right => left; case _ => value } }";
+        let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(source_text);
+
+        assert!(matches!(error, TyperError::InfixPatternDeferred { .. }));
         assert!(store_rolled_back);
         assert!(typed_state_rolled_back);
     }

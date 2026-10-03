@@ -292,6 +292,7 @@ struct MatchProfile {
     extractor_nested_roots: BTreeMap<String, usize>,
     sequence_wildcards: usize,
     named_pattern_arguments: usize,
+    empty_tuple_unit_patterns: usize,
     infix_pattern_forms: usize,
     extractor_files: BTreeSet<String>,
 }
@@ -370,6 +371,7 @@ impl MatchProfile {
         self.guarded_cases += other.guarded_cases;
         self.sequence_wildcards += other.sequence_wildcards;
         self.named_pattern_arguments += other.named_pattern_arguments;
+        self.empty_tuple_unit_patterns += other.empty_tuple_unit_patterns;
         self.infix_pattern_forms += other.infix_pattern_forms;
         self.extractor_type_applied += other.extractor_type_applied;
         self.extractor_files.extend(other.extractor_files);
@@ -945,7 +947,7 @@ fn match_readiness_counts_unsupported_case_shapes_for_match_first_blockers() {
 
 #[test]
 fn match_profile_counts_tuple_infix_and_nested_nary_extractor_shapes() {
-    let source = "object Audit { def outer(value: Any): Any = value match { case Extractor(first, left | right, Nested(a, b, c)) => first; case (first, second) => first; case left op right => left; case _ => value } }";
+    let source = "object Audit { def outer(value: Any): Any = value match { case Extractor(first, left | right, Nested(a, b, c)) => first; case (first, second) => first; case () => value; case left op right => left; case _ => value } }";
     let audit = audit_source(source, "PatternProfile.scala");
 
     assert_eq!(audit.match_profile.matches, 1);
@@ -956,7 +958,8 @@ fn match_profile_counts_tuple_infix_and_nested_nary_extractor_shapes() {
             .get("extractor-looking Apply"),
         Some(&1)
     );
-    assert_eq!(audit.match_profile.pattern_roots.get("tuple"), Some(&1));
+    assert_eq!(audit.match_profile.pattern_roots.get("tuple"), Some(&2));
+    assert_eq!(audit.match_profile.empty_tuple_unit_patterns, 1);
     assert_eq!(
         audit.match_profile.pattern_roots.get("infix pattern"),
         Some(&1)
@@ -1369,7 +1372,9 @@ fn extractor_protocol_success(
     pattern: dotty_core::TreeId<Untyped>,
 ) -> Option<&'static str> {
     match arena.try_get(pattern).map(|node| &node.kind) {
-        Some(TreeKind::PhaseSpecific(UntypedNode::Tuple(_))) => Some("tuple extractor"),
+        Some(TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple))) if !tuple.elements.is_empty() => {
+            Some("tuple extractor")
+        }
         Some(TreeKind::Apply(application)) => {
             let dispatch = peel_type_applications(arena, application.function);
             let selected = matches!(
@@ -1890,6 +1895,9 @@ fn collect_pattern_features(
             }
             TreeKind::UnApply(unapply) => pending.extend(unapply.patterns.iter().copied()),
             TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+                if tuple.elements.is_empty() {
+                    profile.empty_tuple_unit_patterns += 1;
+                }
                 pending.extend(tuple.elements.iter().copied());
             }
             TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => pending.push(parens.inner),
@@ -2088,6 +2096,10 @@ fn print_match_profile(profile: &MatchProfile) {
     println!(
         "  named_pattern_arguments={}",
         profile.named_pattern_arguments
+    );
+    println!(
+        "  empty_tuple_unit_patterns={}",
+        profile.empty_tuple_unit_patterns
     );
     println!("  infix_pattern_forms={}", profile.infix_pattern_forms);
     println!(
