@@ -286,11 +286,33 @@ where
     }
 
     pub(super) fn consume_lambda_newlines(&mut self) {
+        // A valid scanner cannot produce more newline tokens than source bytes.
+        // Keep lookahead bounded even for a malformed TokenSource that repeats
+        // its current token at every offset.
+        let max_lookahead = self.source.as_str().len();
+        let mut next_offset = 0;
+        while next_offset < max_lookahead
+            && matches!(
+                self.cursor.lookahead(next_offset).kind,
+                TokenKind::Newline | TokenKind::Newlines
+            )
+        {
+            next_offset = next_offset.saturating_add(1);
+        }
+
+        if next_offset == 0 {
+            return;
+        }
+
+        let next_kind = self.cursor.lookahead(next_offset).kind;
+        if next_kind != TokenKind::Indent && !can_start_expr(next_kind) {
+            return;
+        }
+
         while matches!(
             self.current().kind,
             TokenKind::Newline | TokenKind::Newlines
-        ) && self.cursor.lookahead(1).kind == TokenKind::Indent
-        {
+        ) {
             let checkpoint = self.cursor.checkpoint();
             self.advance();
             if !self.cursor.progressed_since(checkpoint) {
@@ -418,6 +440,76 @@ mod tests {
             TokenKind::Punctuation(Punctuation::RightParen)
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_lambda_body_after_a_newline_without_an_indent_token() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x =>\n  y)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Newline, 4, 5),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
+        else {
+            panic!("expected a function literal");
+        };
+
+        assert!(matches!(
+            parser.ast().get(function.body).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Punctuation(Punctuation::RightParen)
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn does_not_consume_a_lambda_newline_before_a_closing_parenthesis() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x =>\n)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Newline, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Newline);
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("expected an expression after lambda arrow")
+        }));
     }
 
     #[test]
