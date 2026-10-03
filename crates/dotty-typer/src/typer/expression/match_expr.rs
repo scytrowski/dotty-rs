@@ -569,6 +569,65 @@ mod tests {
     }
 
     #[test]
+    fn match_result_uses_the_supertype_when_case_results_are_related() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class Parent; class Child extends Parent; class C { def choose(child: Child, parent: Parent): Any = child match { case _ => child; case _ => parent } }",
+        );
+        let symbol_named = |wanted: &str| {
+            parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == wanted =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let parent = symbol_named("Parent");
+        let child = symbol_named("Child");
+        let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        typer.complete_symbol(parent).unwrap();
+        typer.complete_symbol(child).unwrap();
+        let typed = typer.type_expression(match_tree, context).unwrap();
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(typed).ty),
+            Some(Type::TypeRef { target, .. }) if target.symbol() == Some(parent)
+        ));
+    }
+
+    #[test]
+    fn nothing_case_joins_with_the_ordinary_case_result() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { def choose(x: Int): Any = x match { case _ => return 1; case _ => false } }",
+        );
+        let (method, match_tree) = method_and_match(&parsed, &store, &index, source);
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer.type_expression(match_tree, context).unwrap();
+        assert_eq!(typer.typed_arena.get(typed).ty, definitions.boolean);
+    }
+
+    #[test]
     fn a_later_match_case_failure_rolls_back_the_entire_match() {
         let (parsed, mut store, packages, definitions, index, source) = setup(
             "class C { def choose(x: Int): Any = x match { case _ => 1; case _ if true => 2 } }",
