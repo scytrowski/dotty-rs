@@ -1129,11 +1129,6 @@ pub enum TyperError {
         tree_index: u32,
         actual_kind: &'static str,
     },
-    /// Guard typing is not part of the current wildcard case subset.
-    MatchGuardDeferred {
-        source: SourceId,
-        tree_index: u32,
-    },
     /// A source pattern binding is malformed or does not match the requested name.
     MalformedPatternBinding {
         source: SourceId,

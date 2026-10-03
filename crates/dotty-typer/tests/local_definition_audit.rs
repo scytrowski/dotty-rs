@@ -805,13 +805,13 @@ fn local_expression_audit_types_infix_calls_and_counts_them_structurally() {
 
 #[test]
 fn match_readiness_counts_case_shapes_for_match_first_blockers() {
-    let source = "object Audit { def outer(value: Int): Int = { def local: Int = value match { case 0 if true => 1; case _ => 2 }; local } }";
+    let source = "object Audit { def outer(value: Int): Int = { def local: Int = value match { case _: Int if true => 1; case _ => 2 }; local } }";
     let audit = audit_source(source, "Match.scala");
 
     assert_eq!(
         audit
             .failures
-            .get("MatchGuardDeferred")
+            .get("UnsupportedPattern")
             .map(|failure| failure.count),
         Some(1),
         "{audit:?}"
@@ -821,7 +821,7 @@ fn match_readiness_counts_case_shapes_for_match_first_blockers() {
     assert_eq!(audit.match_readiness.cases, 2);
     assert_eq!(audit.match_readiness.guarded_cases, 1);
     assert_eq!(
-        audit.match_readiness.pattern_shapes.get("literal"),
+        audit.match_readiness.pattern_shapes.get("typed pattern"),
         Some(&1)
     );
     assert_eq!(
@@ -1078,7 +1078,6 @@ fn audit_source_inner(
             if matches!(
                 error,
                 TyperError::UnsupportedPattern { .. }
-                    | TyperError::MatchGuardDeferred { .. }
                     | TyperError::MalformedCaseDef { .. }
                     | TyperError::EmptyMatchCases { .. }
                     | TyperError::MatchSelectorTypeCannotBeAdapted { .. }
@@ -1822,7 +1821,6 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::UnsupportedExpression { .. } => "UnsupportedExpression",
         TyperError::UnsupportedPattern { .. } => "UnsupportedPattern",
         TyperError::MalformedCaseDef { .. } => "MalformedCaseDef",
-        TyperError::MatchGuardDeferred { .. } => "MatchGuardDeferred",
         TyperError::MalformedPatternBinding { .. } => "MalformedPatternBinding",
         TyperError::WildcardPatternBindingRejected { .. } => "WildcardPatternBindingRejected",
         TyperError::PatternBindingOutsideCaseScope { .. } => "PatternBindingOutsideCaseScope",

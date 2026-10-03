@@ -113,7 +113,7 @@ Literal and stable-value pattern shapes are pinned in
 [`value-patterns`](../crates/dotty-typer/tests/fixtures/value-patterns).
 
 The dedicated `type_case_def` helper in `expression/match_expr.rs` types
-unguarded supported `CaseDef` nodes independently; `Match` expression typing
+supported `CaseDef` nodes independently; `Match` expression typing
 is supported for matches whose cases use wildcards, variable patterns, literal
 patterns, stable-value patterns, or explicit bindings over wildcard, literal,
 and stable-value patterns. An explicit binder's info is the selector
@@ -128,11 +128,15 @@ values use the current `Type::Or` fallback. This intentionally does not
 implement Scala 3.9's general `TypeComparer.lub`; unions are not normalized
 beyond the existing relation rules. Nested wildcard matches are supported.
 
-Guards return `MatchGuardDeferred`. Typed patterns, alternatives, tuple
-patterns, and extractor patterns remain deferred through focused pattern
-errors. Empty
-Match nodes and failed case typing return focused errors, and the enclosing
-expression transaction rolls back all case and selector state on failure. The normalized
+For supported patterns, guards are typed after pattern bindings are entered
+and before the body, in the same case-local scope. They use canonical Boolean
+as the expected type and retain their own typed expression type. Guard types do
+not participate in Match result joining. Pattern, guard, and body failures
+roll back the case and enclosing Match transaction. Unsupported patterns,
+including typed patterns, alternatives, tuple patterns, and extractors, fail
+before guard or body typing. Empty Match nodes and failed case typing return
+focused errors, and the enclosing expression transaction rolls back all case
+and selector state on failure. The normalized
 [`wildcard-case-def` fixture](../crates/dotty-typer/tests/fixtures/wildcard-case-def)
 records this typed shape. In pinned Scala 3.9.0,
 [`typedCase`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/typer/Typer.scala#L2383-L2412)
@@ -142,6 +146,9 @@ uses the typed body type for ordinary term cases.
 The related [`wildcard-match` fixture](../crates/dotty-typer/tests/fixtures/wildcard-match)
 records simple, multi-case, and nested Match shapes and calls out the bounded
 join divergence.
+The [`guarded-patterns` fixture](../crates/dotty-typer/tests/fixtures/guarded-patterns)
+records variable, explicit-bind, literal, stable-value, and wildcard guard
+shapes.
 
 ## Real-source local-definition audit
 
