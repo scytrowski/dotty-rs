@@ -649,9 +649,10 @@ mod tests {
         let mut arena = TypedAst::new();
         let mut types = TypeArena::new();
         let ty = types.alloc(Type::Constant(Constant::Int(0)));
-        let mut builder = TypedAstBuilder::new(&mut arena, &types);
-        let selector = builder.ident(Name::new(NameId::new(1), Namespace::Term), ty, None);
-        drop(builder);
+        let selector = {
+            let mut builder = TypedAstBuilder::new(&mut arena, &types);
+            builder.ident(Name::new(NameId::new(1), Namespace::Term), ty, None)
+        };
         let case = arena.alloc(Tree {
             kind: TreeKind::CaseDef(CaseDef {
                 pattern: selector,
