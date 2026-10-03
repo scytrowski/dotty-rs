@@ -4,6 +4,45 @@ use std::fmt;
 
 use super::*;
 
+/// Stable source-shape category for an unsupported pattern root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PatternKind {
+    Identifier,
+    StableSelection,
+    Literal,
+    Typed,
+    Alternative,
+    Application,
+    TypeApplication,
+    Binding,
+    Extractor,
+    Tuple,
+    Infix,
+    Parenthesized,
+    Other,
+}
+
+impl PatternKind {
+    /// Returns the stable diagnostic/audit label for this pattern shape.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Identifier => "identifier",
+            Self::StableSelection => "stable selection",
+            Self::Literal => "literal",
+            Self::Typed => "typed pattern",
+            Self::Alternative => "alternative",
+            Self::Application => "application pattern",
+            Self::TypeApplication => "type application pattern",
+            Self::Binding => "binding pattern",
+            Self::Extractor => "extractor pattern",
+            Self::Tuple => "tuple pattern",
+            Self::Infix => "infix pattern",
+            Self::Parenthesized => "parenthesized pattern",
+            Self::Other => "other pattern",
+        }
+    }
+}
+
 /// A recoverable failure while projecting or completing source semantics.
 #[derive(Debug)]
 pub enum TyperError {
@@ -1042,6 +1081,12 @@ pub enum TyperError {
         tree_index: u32,
         expression_kind: &'static str,
     },
+    /// The source pattern root is not supported by the current pattern subset.
+    UnsupportedPattern {
+        source: SourceId,
+        tree_index: u32,
+        pattern_kind: PatternKind,
+    },
     /// A block statement changes the local declaration or import environment.
     LocalBlockDeclarationDeferred {
         source: SourceId,
@@ -1129,3 +1174,18 @@ impl fmt::Display for TyperError {
 }
 
 impl std::error::Error for TyperError {}
+
+#[cfg(test)]
+mod tests {
+    use super::PatternKind;
+
+    #[test]
+    fn pattern_kind_labels_are_stable_and_descriptive() {
+        assert_eq!(PatternKind::Identifier.as_str(), "identifier");
+        assert_eq!(PatternKind::Literal.as_str(), "literal");
+        assert_eq!(PatternKind::Typed.as_str(), "typed pattern");
+        assert_eq!(PatternKind::Alternative.as_str(), "alternative");
+        assert_eq!(PatternKind::Application.as_str(), "application pattern");
+        assert_eq!(PatternKind::Other.as_str(), "other pattern");
+    }
+}
