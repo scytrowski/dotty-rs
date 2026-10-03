@@ -245,12 +245,17 @@ where
         }
 
         if self.context.location == Location::InBlock {
-            if let Some(end) = self.context.block_end {
-                return self.parse_lambda_block_body(end);
+            if self.context.case_body {
+                return self
+                    .parse_lambda_block_body(self.context.block_end.unwrap_or(TokenKind::Eof));
             }
 
-            if self.context.case_body {
-                return self.parse_lambda_block_body(TokenKind::Eof);
+            if self.context.block_end == Some(TokenKind::Outdent) {
+                return self.expr();
+            }
+
+            if let Some(end) = self.context.block_end {
+                return self.parse_lambda_block_body(end);
             }
 
             let mark = self.mark();
@@ -801,6 +806,43 @@ mod tests {
             parser.ast().get(function.body).kind,
             TreeKind::Block(_)
         ));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn lambda_inside_a_block_end_uses_only_its_expression_body() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x => x}",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(2, 4).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.with_block_end(Some(TokenKind::Outdent), |parser| {
+            parser.with_location(Location::InBlock, |parser| parser.expr())
+        });
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
+        else {
+            panic!("expected a function literal");
+        };
+        assert!(matches!(
+            parser.ast().get(function.body).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Punctuation(Punctuation::RightBrace)
+        );
         assert!(parser.diagnostics().is_empty());
     }
 
