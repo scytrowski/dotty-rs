@@ -1836,6 +1836,8 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::MatchCaseJoinUnsupported { .. } => "MatchCaseJoinUnsupported",
         TyperError::MalformedVariablePattern { .. } => "MalformedVariablePattern",
         TyperError::UnsupportedBindPatternBody { .. } => "UnsupportedBindPatternBody",
+        TyperError::PatternTypeMismatch { .. } => "PatternTypeMismatch",
+        TyperError::PatternTypeRelationDeferred { .. } => "PatternTypeRelationDeferred",
         TyperError::LocalBlockDeclarationDeferred { .. } => "LocalBlockDeclarationDeferred",
         TyperError::InvalidInferredLocalValueType { .. } => "InvalidInferredLocalValueType",
         TyperError::LocalValueRightHandSideMissing { .. } => "LocalValueRightHandSideMissing",

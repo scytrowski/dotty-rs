@@ -1097,6 +1097,21 @@ pub enum TyperError {
         source: SourceId,
         tree_index: u32,
     },
+    /// A literal or stable value pattern cannot match the selector prototype.
+    PatternTypeMismatch {
+        source: SourceId,
+        tree_index: u32,
+        actual: TypeId,
+        selector: TypeId,
+    },
+    /// The bounded type relation cannot decide pattern/selector compatibility.
+    PatternTypeRelationDeferred {
+        source: SourceId,
+        tree_index: u32,
+        actual: TypeId,
+        selector: TypeId,
+        error: Box<TypeRelationError>,
+    },
     /// A source case tree is missing or does not have the required `CaseDef` shape.
     MalformedCaseDef {
         source: SourceId,
