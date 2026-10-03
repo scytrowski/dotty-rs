@@ -419,6 +419,22 @@ impl SourceTyper<'_> {
             TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
                 self.pattern_binding_in(parens.inner)
             }
+            TreeKind::Apply(application) => application
+                .args
+                .iter()
+                .find_map(|argument| self.pattern_binding_in(*argument)),
+            TreeKind::UnApply(extractor) => extractor
+                .patterns
+                .iter()
+                .find_map(|argument| self.pattern_binding_in(*argument)),
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => tuple
+                .elements
+                .iter()
+                .find_map(|element| self.pattern_binding_in(*element)),
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => self
+                .pattern_binding_in(infix.left)
+                .or_else(|| self.pattern_binding_in(infix.right)),
+            TreeKind::NamedArg(argument) => self.pattern_binding_in(argument.arg),
             TreeKind::Alternative(alternative) => alternative
                 .alternatives
                 .iter()
@@ -1868,6 +1884,7 @@ mod tests {
         for source_text in [
             "class C { def choose(x: Int): Int = x match { case item | 1 => 0 } }",
             "class C { def choose(x: Int): Int = x match { case item @ _ | 1 => 0 } }",
+            "class C { def choose(x: Any): Int = x match { case Some(item) | 1 => 0 } }",
         ] {
             let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
             let method = method_symbol(&parsed, &store, &index, source);
