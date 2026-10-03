@@ -10,6 +10,7 @@ mod assignment;
 mod blocks;
 mod control_flow;
 mod new;
+mod patterns;
 mod references;
 pub(super) use blocks::LocalMethodIndex;
 
