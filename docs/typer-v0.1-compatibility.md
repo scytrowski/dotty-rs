@@ -137,6 +137,19 @@ patterns in any branch are rejected before they can enter the case scope. The
 literal and stable-value source shapes are pinned against Scala 3.9.0 in
 [`pattern-alternatives`](../crates/dotty-typer/tests/fixtures/pattern-alternatives).
 
+Extractor applications with a simple identifier qualifier now resolve that
+stable value, look up exactly one `unapply`, validate its plain unary method
+shape, and check `selector <: input` with the bounded relation. The internal
+`ExtractorPlan` retains the exact selected method, input and result types, the
+selector prototype, and untyped source arguments. `TypedAstBuilder::unapply`
+stores the caller-provided prototype without interpreting the result. The
+source `Apply` path reports a focused typing deferral after successful plan
+resolution: nested patterns and the result protocol are implemented by later
+increments. Selected qualifiers, overloads, generic methods, contextual,
+erased, repeated, and by-name parameters, `unapplySeq`, and pattern constraint
+inference remain unsupported. The pinned Scala 3.9.0 shape is recorded in
+[`extractor-foundation`](../crates/dotty-typer/tests/fixtures/extractor-foundation).
+
 The dedicated `type_case_def` helper in `expression/match_expr.rs` types
 supported `CaseDef` nodes independently; `Match` expression typing
 is supported for matches whose cases use wildcards, variable patterns, typed
@@ -160,7 +173,7 @@ and before the body, in the same case-local scope. They use canonical Boolean
 as the expected type and retain their own typed expression type. Guard types do
 not participate in Match result joining. Pattern, guard, and body failures
 roll back the case and enclosing Match transaction. Unsupported patterns,
-including tuple patterns and extractors, fail
+including tuple patterns, fail
 before guard or body typing. Empty Match nodes and failed case typing return
 focused errors, and the enclosing expression transaction rolls back all case
 and selector state on failure. The normalized

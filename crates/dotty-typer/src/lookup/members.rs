@@ -164,14 +164,12 @@ impl SourceTyper<'_> {
             let info = match self.class_info(pending.symbol, journal) {
                 Ok(info) => info,
                 Err(MemberLookupError::ClassInfoUnavailable { .. })
-                    if include_hidden_inherited
-                        && pending.symbol == self.definitions.object_class
-                        && !candidates.is_empty() =>
+                    if pending.symbol == self.definitions.object_class =>
                 {
                     // The bootstrapped Object symbol is the terminal fallback
                     // parent in this typer's model and has no classpath metadata.
-                    // Do not extend this boundary to other missing ancestors:
-                    // they may contain overloads that change applicability.
+                    // Its absent class info means it contributes no modeled
+                    // members, whether or not a nearer declaration matched.
                     processed.push(pending.symbol);
                     edges.insert(pending.symbol, Vec::new());
                     continue;

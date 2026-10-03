@@ -4,7 +4,7 @@
 use crate::ast::arena::AstArena;
 use crate::ast::common::{
     Alternative, Apply, ApplyKind, Assign, Bind, Block, CaseDef, Ident, If, Literal, Match, New,
-    Return, Select, This, TypeApply, TypeTree, TypedExpr, While,
+    Return, Select, This, TypeApply, TypeTree, TypedExpr, UnApply, While,
 };
 use crate::ast::phase::Typed;
 use crate::ast::tree::{Tree, TreeKind};
@@ -123,6 +123,36 @@ impl<'a> TypedAstBuilder<'a> {
             kind: TreeKind::Alternative(Alternative { alternatives }),
             position,
             ty,
+        })
+    }
+
+    /// Allocates a typed extractor pattern with its already-determined
+    /// selector prototype. This builder does not interpret the extractor
+    /// result or type nested patterns.
+    pub fn unapply(
+        &mut self,
+        function: TreeId<Typed>,
+        implicits: Vec<TreeId<Typed>>,
+        patterns: Vec<TreeId<Typed>>,
+        prototype: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        self.assert_real_typed_tree(function, "a typed extractor function");
+        for implicit in &implicits {
+            self.assert_real_typed_tree(*implicit, "each typed extractor implicit argument");
+        }
+        for pattern in &patterns {
+            self.assert_real_typed_tree(*pattern, "each typed extractor pattern");
+        }
+        self.assert_real_type(prototype, "a typed extractor pattern");
+        self.arena.alloc(Tree {
+            kind: TreeKind::UnApply(UnApply {
+                function,
+                implicits,
+                patterns,
+            }),
+            position,
+            ty: prototype,
         })
     }
 
@@ -457,6 +487,49 @@ mod tests {
         assert_eq!(apply.function, function);
         assert_eq!(apply.args, vec![arg]);
         assert_eq!(apply.kind, ApplyKind::Regular);
+    }
+
+    #[test]
+    fn unapply_uses_the_caller_prototype_and_preserves_all_children() {
+        let mut arena = TypedAst::new();
+        let mut types = TypeArena::new();
+        let prototype = types.alloc(Type::NoPrefix);
+        let function_type = types.alloc(Type::NoPrefix);
+        let pattern_type = types.alloc(Type::NoPrefix);
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
+        let function = builder.ident(
+            Name::new(NameId::new(1), Namespace::Term),
+            function_type,
+            None,
+        );
+        let implicit = builder.ident(
+            Name::new(NameId::new(2), Namespace::Term),
+            function_type,
+            None,
+        );
+        let pattern = builder.ident(
+            Name::new(NameId::new(3), Namespace::Term),
+            pattern_type,
+            None,
+        );
+        let position = position(2, 10);
+
+        let unapply = builder.unapply(
+            function,
+            vec![implicit],
+            vec![pattern],
+            prototype,
+            Some(position),
+        );
+
+        assert_eq!(arena.get(unapply).ty, prototype);
+        assert_eq!(arena.get(unapply).position, Some(position));
+        let TreeKind::UnApply(unapply) = &arena.get(unapply).kind else {
+            panic!("expected an UnApply node");
+        };
+        assert_eq!(unapply.function, function);
+        assert_eq!(unapply.implicits, vec![implicit]);
+        assert_eq!(unapply.patterns, vec![pattern]);
     }
 
     #[test]

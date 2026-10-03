@@ -885,7 +885,7 @@ fn match_readiness_counts_unsupported_case_shapes_for_match_first_blockers() {
     assert_eq!(
         audit
             .failures
-            .get("UnsupportedPattern")
+            .get("ExtractorQualifierNotFound")
             .map(|failure| failure.count),
         Some(1),
         "{audit:?}"
@@ -1396,6 +1396,18 @@ fn audit_source_inner(
                     | TyperError::PatternBindingOutsideCaseScope { .. }
                     | TyperError::PatternBindingScopeConflict { .. }
                     | TyperError::DuplicatePatternBinding { .. }
+                    | TyperError::ExtractorQualifierNotFound { .. }
+                    | TyperError::ExtractorQualifierShapeUnsupported { .. }
+                    | TyperError::ExtractorQualifierNotValueLike { .. }
+                    | TyperError::ExtractorQualifierNotStable { .. }
+                    | TyperError::ExtractorUnapplyNotFound { .. }
+                    | TyperError::ExtractorUnapplyOverloaded { .. }
+                    | TyperError::ExtractorUnapplyPolymorphic { .. }
+                    | TyperError::ExtractorUnapplyShapeUnsupported { .. }
+                    | TyperError::ExtractorPatternConstraintDeferred { .. }
+                    | TyperError::UnsupportedExtractorResultProtocol { .. }
+                    | TyperError::ExtractorPatternArgumentUnsupported { .. }
+                    | TyperError::ExtractorPatternTypingDeferred { .. }
             ) {
                 collect_match_readiness(
                     &parsed.ast,
@@ -2548,6 +2560,26 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::UnsupportedPattern { .. } => "UnsupportedPattern",
         TyperError::PatternBindingInAlternative { .. } => "PatternBindingInAlternative",
         TyperError::PatternAlternativeJoinUnsupported { .. } => "PatternAlternativeJoinUnsupported",
+        TyperError::ExtractorQualifierNotFound { .. } => "ExtractorQualifierNotFound",
+        TyperError::ExtractorQualifierShapeUnsupported { .. } => {
+            "ExtractorQualifierShapeUnsupported"
+        }
+        TyperError::ExtractorQualifierNotValueLike { .. } => "ExtractorQualifierNotValueLike",
+        TyperError::ExtractorQualifierNotStable { .. } => "ExtractorQualifierNotStable",
+        TyperError::ExtractorUnapplyNotFound { .. } => "ExtractorUnapplyNotFound",
+        TyperError::ExtractorUnapplyOverloaded { .. } => "ExtractorUnapplyOverloaded",
+        TyperError::ExtractorUnapplyPolymorphic { .. } => "ExtractorUnapplyPolymorphic",
+        TyperError::ExtractorUnapplyShapeUnsupported { .. } => "ExtractorUnapplyShapeUnsupported",
+        TyperError::ExtractorPatternConstraintDeferred { .. } => {
+            "ExtractorPatternConstraintDeferred"
+        }
+        TyperError::UnsupportedExtractorResultProtocol { .. } => {
+            "UnsupportedExtractorResultProtocol"
+        }
+        TyperError::ExtractorPatternArgumentUnsupported { .. } => {
+            "ExtractorPatternArgumentUnsupported"
+        }
+        TyperError::ExtractorPatternTypingDeferred { .. } => "ExtractorPatternTypingDeferred",
         TyperError::MalformedCaseDef { .. } => "MalformedCaseDef",
         TyperError::MalformedPatternBinding { .. } => "MalformedPatternBinding",
         TyperError::WildcardPatternBindingRejected { .. } => "WildcardPatternBindingRejected",
