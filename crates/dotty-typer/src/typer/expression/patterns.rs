@@ -283,17 +283,11 @@ impl SourceTyper<'_> {
             new_mappings,
         ) {
             Ok(typed) => typed,
-            Err(TyperError::TermNameNotFound { .. }) => {
-                if !selected_qualifier {
-                    return Err(TyperError::ExtractorQualifierNotFound {
-                        source: self.source,
-                        tree_index: pattern.index(),
-                        name: qualifier_name,
-                    });
-                }
-                return Err(TyperError::ExtractorQualifierShapeUnsupported {
+            Err(TyperError::TermNameNotFound { .. }) if !selected_qualifier => {
+                return Err(TyperError::ExtractorQualifierNotFound {
                     source: self.source,
                     tree_index: pattern.index(),
+                    name: qualifier_name,
                 });
             }
             Err(
@@ -2271,6 +2265,12 @@ mod tests {
 
     #[test]
     fn selected_extractor_qualifier_errors_are_focused_and_transaction_clean() {
+        let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(
+            "class C { def choose(value: Any): Int = value match { case unknown.Missing(_) => 1; case _ => 0 } }",
+        );
+        assert!(matches!(error, TyperError::TermNameNotFound { .. }));
+        assert!(store_rolled_back && typed_state_rolled_back);
+
         let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(
             "object extractors {}; class C { def choose(value: Any): Int = value match { case extractors.Missing(_) => 1; case _ => 0 } }",
         );

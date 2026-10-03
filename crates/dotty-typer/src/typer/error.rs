@@ -1147,7 +1147,7 @@ pub enum TyperError {
         tree_index: u32,
         name: Name,
     },
-    /// The extractor qualifier uses a selected or otherwise unsupported source form.
+    /// The extractor application function uses an unsupported source-tree shape.
     ExtractorQualifierShapeUnsupported {
         source: SourceId,
         tree_index: u32,
