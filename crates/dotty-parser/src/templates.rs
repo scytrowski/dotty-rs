@@ -413,7 +413,7 @@ where
         }
     }
 
-    fn source_line_indent_prefix(&self, offset: u32) -> String {
+    pub(crate) fn source_line_indent_prefix(&self, offset: u32) -> String {
         let source = self.source.as_str();
         let end = (offset as usize).min(source.len());
         let line_start = source[..end]
