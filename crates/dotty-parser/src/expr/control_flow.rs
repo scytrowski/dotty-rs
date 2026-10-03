@@ -71,7 +71,10 @@ where
             }
             let if_indent = self.source_line_indent_prefix(if_start);
             let else_indent = self.source_line_indent_prefix(token.span.start());
-            if else_indent.len() < if_indent.len() && if_indent.starts_with(&else_indent) {
+            if self.context.block_end != Some(TokenKind::Punctuation(Punctuation::RightBrace))
+                && else_indent.len() < if_indent.len()
+                && if_indent.starts_with(&else_indent)
+            {
                 return None;
             }
             break;
@@ -274,6 +277,14 @@ where
             } else {
                 self.parse_indented_block()
             };
+        }
+        if !can_start_expr(self.current().kind) {
+            let position = self.current_span();
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedExpression,
+                "expected an expression for the control-flow branch",
+            );
+            return self.error_expr(position);
         }
         self.expr()
     }

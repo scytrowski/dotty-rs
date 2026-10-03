@@ -240,6 +240,15 @@ where
 
     fn parse_lambda_body(&mut self) -> TreeId<Untyped> {
         self.consume_lambda_newlines();
+        if self.context.location == Location::InBlock && self.definition_after_newlines().is_some()
+        {
+            let position = self.current_span();
+            self.report(
+                ParseDiagnosticKind::ExpectedExpression,
+                "expected an expression after lambda arrow",
+            );
+            return self.error_expr(position);
+        }
         if self.current().kind == TokenKind::Indent {
             return self.parse_feedback_indented_block();
         }
