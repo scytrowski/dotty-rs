@@ -805,13 +805,13 @@ fn local_expression_audit_types_infix_calls_and_counts_them_structurally() {
 
 #[test]
 fn match_readiness_counts_case_shapes_for_match_first_blockers() {
-    let source = "object Audit { def outer(value: Int): Int = { def local: Int = value match { case 0 => 1; case _ => 2 }; local } }";
+    let source = "object Audit { def outer(value: Int): Int = { def local: Int = value match { case 0 if true => 1; case _ => 2 }; local } }";
     let audit = audit_source(source, "Match.scala");
 
     assert_eq!(
         audit
             .failures
-            .get("UnsupportedPattern")
+            .get("MatchGuardDeferred")
             .map(|failure| failure.count),
         Some(1),
         "{audit:?}"
@@ -819,7 +819,7 @@ fn match_readiness_counts_case_shapes_for_match_first_blockers() {
     assert_eq!(audit.match_readiness.first_blocker_methods, 1);
     assert_eq!(audit.match_readiness.matches, 1);
     assert_eq!(audit.match_readiness.cases, 2);
-    assert_eq!(audit.match_readiness.guarded_cases, 0);
+    assert_eq!(audit.match_readiness.guarded_cases, 1);
     assert_eq!(
         audit.match_readiness.pattern_shapes.get("literal"),
         Some(&1)
