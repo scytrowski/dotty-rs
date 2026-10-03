@@ -36,6 +36,8 @@ where
     pub(crate) wildcard_type_depth: u32,
     pub(crate) placeholder_params: Vec<TreeId<Untyped>>,
     pub(crate) last_advance_was_outdent: bool,
+    /// The scanner suppressed a physical newline after a malformed construct.
+    pub(crate) last_advance_consumed_statement_separator: bool,
     /// AST constructs already closed by an explicit Scala `end` marker.
     pub(crate) end_marked_trees: HashSet<TreeId<Untyped>>,
     /// Active quoted expression bodies; `$` followed by `{` is a splice only
@@ -85,6 +87,7 @@ where
             wildcard_type_depth: 0,
             placeholder_params: Vec::new(),
             last_advance_was_outdent: false,
+            last_advance_consumed_statement_separator: false,
             end_marked_trees: HashSet::new(),
             expression_quote_depth: 0,
             quote_pattern_depth: 0,
