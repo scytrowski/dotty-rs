@@ -208,8 +208,18 @@ where
 
     fn expr1_rest(&mut self, lhs: TreeId<Untyped>) -> TreeId<Untyped> {
         if self.current_is_bare_assignment() {
+            let feedback_indent = self.observe_definition_rhs_indentation();
             self.advance();
-            let rhs = self.expr();
+            self.consume_control_newlines();
+            let rhs = if self.current().kind == TokenKind::Indent {
+                if let Some(indent_offset) = feedback_indent {
+                    self.parse_region_feedback_indented_block(indent_offset)
+                } else {
+                    self.parse_indented_block()
+                }
+            } else {
+                self.expr()
+            };
             if !is_assignable_lhs(&self.ast.get(lhs).kind) {
                 self.report(
                     crate::ParseDiagnosticKind::UnexpectedToken,
