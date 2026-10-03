@@ -158,11 +158,13 @@ and [`binary-product-extractors`](../crates/dotty-typer/tests/fixtures/binary-pr
 Binary product extraction accepts exactly two source arguments and two ordered
 component selectors. A direct `unapply` result must conform to
 `scala.Product`; its parameterless `_1` and `_2` members are discovered through
-ordinary inherited member lookup. If the direct result does not satisfy that
-requirement, the Option-like path checks `isEmpty` and reads selectors from the
-type returned by `get`, without using selectors declared by the wrapper. The
-typer probes `_3` so a third valid parameterless value selector is rejected
-instead of truncated; a methodic or otherwise invalid `_3` is not a selector.
+ordinary inherited member lookup. If the direct result is not a product or its
+selectors do not match the source arity, the Option-like path checks `isEmpty`
+and reads selectors from the type returned by `get`, without using selectors
+declared by the wrapper. When that fallback is unavailable, the direct
+selector-arity error is preserved. The typer probes `_3` so a third valid
+parameterless value selector is rejected instead of truncated; a methodic or
+otherwise invalid `_3` is not a selector.
 Each component is passed to recursive pattern typing in source order and
 remains in the existing CaseDef-local binding scope. Missing, ambiguous, or
 otherwise unsupported required selectors return a focused extractor error.

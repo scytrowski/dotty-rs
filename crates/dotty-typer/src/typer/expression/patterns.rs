@@ -333,22 +333,29 @@ impl SourceTyper<'_> {
         unapply: SymbolId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<TypeId>, TyperError> {
-        if let Some(component_types) = self.product_extractor_component_types(
+        let direct_product = self.product_extractor_component_types(
             result_type,
             pattern_index,
             unapply,
             true,
             info_journal,
-        )? {
-            return Ok(component_types);
-        }
+        );
+        let direct_arity_error = match direct_product {
+            Ok(Some(component_types)) => return Ok(component_types),
+            Ok(None) => None,
+            Err(error @ TyperError::ExtractorProductSelectorCountMismatch { .. }) => Some(error),
+            Err(error) => return Err(error),
+        };
 
-        let get_type = self.option_like_extractor_component_type(
+        let get_type = match self.option_like_extractor_component_type(
             result_type,
             pattern_index,
             unapply,
             info_journal,
-        )?;
+        ) {
+            Ok(get_type) => get_type,
+            Err(error) => return Err(direct_arity_error.unwrap_or(error)),
+        };
         self.product_extractor_component_types(
             get_type,
             pattern_index,
@@ -2264,7 +2271,7 @@ mod tests {
 
     #[test]
     fn binary_product_extractors_type_ordered_components_for_direct_and_get_results() {
-        let source_text = "package scala { trait Product }; package app { class PairResult extends scala.Product { def _1: Int = 1; def _2: Boolean = true; def _3(index: Int): Int = index }; class MaybePair { def _1: Boolean = true; def _2: Int = 2; def isEmpty: Boolean = false; def get: PairResult = new PairResult }; object DirectPair { def unapply(value: Any): PairResult = new PairResult }; object GetPair { def unapply(value: Any): MaybePair = new MaybePair }; class C { def direct(value: Any): Boolean = value match { case DirectPair(a, b) if accepts(a, b) => b; case _ => false }; def throughGet(value: Any): Boolean = value match { case GetPair(_, b) => b; case _ => false }; def accepts(a: Int, b: Boolean): Boolean = true } }";
+        let source_text = "package scala { trait Product }; package app { class PairResult extends scala.Product { def _1: Int = 1; def _2: Boolean = true; def _3(index: Int): Int = index }; class MaybePair extends scala.Product { def _1: Boolean = true; def _2: Int = 2; def _3: Int = 3; def isEmpty: Boolean = false; def get: PairResult = new PairResult }; object DirectPair { def unapply(value: Any): PairResult = new PairResult }; object GetPair { def unapply(value: Any): MaybePair = new MaybePair }; class C { def direct(value: Any): Boolean = value match { case DirectPair(a, b) if accepts(a, b) => b; case _ => false }; def throughGet(value: Any): Boolean = value match { case GetPair(_, b) => b; case _ => false }; def accepts(a: Int, b: Boolean): Boolean = true } }";
         let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
 
         for (method_name, extractor_name, expected_component_types) in [
