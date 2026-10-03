@@ -326,3 +326,31 @@ Recreate it with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-599-scala3-3.9.0.json
 ```
+
+`parser-post-issue-619-scala3-3.9.0.json` reruns the same corpus after PR #618
+at parser revision `030f9765ce84d82b43ad6bfbfd4420fa9d6ea752`. It records
+1,168 clean parses, 68 recoverable files, and zero hard failures, process
+failures, panics, or hangs; the Scala oracle emitted all 1,236 files without
+failures. Its comparison with #597 is documented in
+[`parser-v0.1-compatibility.md`](../../docs/parser-v0.1-compatibility.md).
+Recreate it with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-619-scala3-3.9.0.json
+```
+
+`parser-post-issue-658-scala3-3.9.0.json` measures current `main` after PRs
+#653–#656 at parser revision `a2a09fe39b771088ddbc21090cd76011a6ffd8df`.
+It uses the same pinned Scala 3.9.0 source revision and sorted 1,236-file
+corpus as issue #619. Two runs produced byte-identical reports. It records
+1,176 clean parses (95.15%), 60 recoverable files, and zero hard failures,
+process failures, panics, or hangs; the Scala oracle emitted all 1,236 files
+with zero failures. The before/after analysis is in
+[`parser-v0.1-compatibility.md`](../../docs/parser-v0.1-compatibility.md).
+Recreate it with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-658-scala3-3.9.0.json
+```
