@@ -1,0 +1,223 @@
+{
+  "schema_version": 5,
+  "corpus_roots": [
+    "library/src",
+    "compiler/src"
+  ],
+  "source_version": "3.9.0",
+  "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "parser_revision": "4cadbf009c90a01ff3387e2fa35dcb785b919126",
+  "scala_oracle_files": 1236,
+  "scala_oracle_failures": 0,
+  "files_attempted": 1236,
+  "files_parsed_without_diagnostics": 1180,
+  "files_parsed_with_recoverable_diagnostics": 56,
+  "hard_parser_failures": 0,
+  "process_failures": 0,
+  "panics": 0,
+  "hangs": 0,
+  "scanner_diagnostics": 10,
+  "diagnostic_histogram": {
+    "ExpectedExpression": 290,
+    "ExpectedToken": 30,
+    "UnexpectedToken": 186,
+    "UnsupportedSyntax": 158
+  },
+  "first_failure_histogram": {
+    "ExpectedExpression": {
+      "count": 22,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala",
+        "compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala",
+        "compiler/src/dotty/tools/dotc/interactive/Completion.scala",
+        "compiler/src/dotty/tools/dotc/interactive/LogicalPackagesProvider.scala",
+        "compiler/src/dotty/tools/dotc/parsing/Parsers.scala"
+      ]
+    },
+    "ExpectedToken": {
+      "count": 8,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala",
+        "compiler/src/dotty/tools/dotc/cc/Setup.scala",
+        "compiler/src/dotty/tools/dotc/core/tasty/CommentPickler.scala",
+        "compiler/src/dotty/tools/dotc/inlines/Inliner.scala",
+        "compiler/src/dotty/tools/dotc/quoted/PickledQuotes.scala"
+      ]
+    },
+    "ScannerDiagnostics": {
+      "count": 2,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/reporting/WConf.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/Scala3.scala"
+      ]
+    },
+    "UnexpectedToken": {
+      "count": 22,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/ast/tpd.scala",
+        "compiler/src/dotty/tools/dotc/cc/SepCheck.scala",
+        "compiler/src/dotty/tools/dotc/core/ContextOps.scala",
+        "compiler/src/dotty/tools/dotc/core/NamerOps.scala",
+        "compiler/src/dotty/tools/dotc/core/SymUtils.scala"
+      ]
+    },
+    "UnsupportedSyntax: only methods and exports are allowed inside an extension": {
+      "count": 2,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/transform/init/Semantic.scala",
+        "compiler/src/dotty/tools/dotc/typer/Nullables.scala"
+      ]
+    }
+  },
+  "capture_checking_cohorts": {
+    "disabled": {
+      "files": 994,
+      "clean": 941,
+      "recoverable": 53,
+      "hard_failures": 0,
+      "scanner_diagnostics": 10,
+      "diagnostic_histogram": {
+        "ExpectedExpression": 239,
+        "ExpectedToken": 30,
+        "UnexpectedToken": 141,
+        "UnsupportedSyntax": 124
+      },
+      "first_failure_histogram": {
+        "ExpectedExpression": {
+          "count": 20,
+          "examples": [
+            "compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala",
+            "compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala",
+            "compiler/src/dotty/tools/dotc/interactive/Completion.scala",
+            "compiler/src/dotty/tools/dotc/interactive/LogicalPackagesProvider.scala",
+            "compiler/src/dotty/tools/dotc/parsing/Parsers.scala"
+          ]
+        },
+        "ExpectedToken": {
+          "count": 8,
+          "examples": [
+            "compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala",
+            "compiler/src/dotty/tools/dotc/cc/Setup.scala",
+            "compiler/src/dotty/tools/dotc/core/tasty/CommentPickler.scala",
+            "compiler/src/dotty/tools/dotc/inlines/Inliner.scala",
+            "compiler/src/dotty/tools/dotc/quoted/PickledQuotes.scala"
+          ]
+        },
+        "ScannerDiagnostics": {
+          "count": 2,
+          "examples": [
+            "compiler/src/dotty/tools/dotc/reporting/WConf.scala",
+            "compiler/src/dotty/tools/dotc/semanticdb/Scala3.scala"
+          ]
+        },
+        "UnexpectedToken": {
+          "count": 21,
+          "examples": [
+            "compiler/src/dotty/tools/dotc/ast/tpd.scala",
+            "compiler/src/dotty/tools/dotc/cc/SepCheck.scala",
+            "compiler/src/dotty/tools/dotc/core/ContextOps.scala",
+            "compiler/src/dotty/tools/dotc/core/NamerOps.scala",
+            "compiler/src/dotty/tools/dotc/core/SymUtils.scala"
+          ]
+        },
+        "UnsupportedSyntax: only methods and exports are allowed inside an extension": {
+          "count": 2,
+          "examples": [
+            "compiler/src/dotty/tools/dotc/transform/init/Semantic.scala",
+            "compiler/src/dotty/tools/dotc/typer/Nullables.scala"
+          ]
+        }
+      },
+      "files_with_raw_caret_character": 83,
+      "files_with_caret_operator_token": 21,
+      "files_with_parser_capture_syntax": 0,
+      "raw_caret_without_operator_examples": [
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/ScalaPrimitivesOps.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatureVisitor.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala",
+        "compiler/src/dotty/tools/backend/jvm/analysis/package.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/CopyProp.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/InlinerHeuristics.scala",
+        "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        "compiler/src/dotty/tools/dotc/cc/Capability.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureOps.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala",
+        "compiler/src/dotty/tools/dotc/cc/CapturingType.scala",
+        "compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala",
+        "compiler/src/dotty/tools/dotc/cc/Mutability.scala",
+        "compiler/src/dotty/tools/dotc/cc/RetainingAnnotation.scala",
+        "compiler/src/dotty/tools/dotc/cc/SepCheck.scala",
+        "compiler/src/dotty/tools/dotc/cc/Setup.scala",
+        "compiler/src/dotty/tools/dotc/cc/Synthetics.scala",
+        "compiler/src/dotty/tools/dotc/config/PathResolver.scala",
+        "compiler/src/dotty/tools/dotc/config/ScalaVersion.scala"
+      ],
+      "operator_without_capture_ast_examples": [
+        "compiler/src/dotty/tools/dotc/core/Flags.scala",
+        "compiler/src/dotty/tools/dotc/core/Periods.scala",
+        "compiler/src/dotty/tools/dotc/core/TypeEval.scala",
+        "compiler/src/dotty/tools/dotc/core/tasty/TastyPickler.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/internal/SemanticdbInputStream.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/internal/SemanticdbOutputStream.scala",
+        "compiler/src/dotty/tools/dotc/transform/sjs/JSSymUtils.scala",
+        "compiler/src/dotty/tools/dotc/typer/ConstFold.scala",
+        "compiler/src/dotty/tools/dotc/typer/Typer.scala",
+        "compiler/src/dotty/tools/dotc/util/HashMap.scala",
+        "compiler/src/dotty/tools/dotc/util/HashSet.scala",
+        "compiler/src/dotty/tools/dotc/util/PerfectHashing.scala",
+        "library/src/scala/Boolean.scala",
+        "library/src/scala/Byte.scala",
+        "library/src/scala/Char.scala",
+        "library/src/scala/Int.scala",
+        "library/src/scala/Long.scala",
+        "library/src/scala/Short.scala",
+        "library/src/scala/concurrent/duration/Duration.scala",
+        "library/src/scala/math/BigInt.scala"
+      ]
+    },
+    "enabled": {
+      "files": 242,
+      "clean": 239,
+      "recoverable": 3,
+      "hard_failures": 0,
+      "scanner_diagnostics": 0,
+      "diagnostic_histogram": {
+        "ExpectedExpression": 51,
+        "UnexpectedToken": 45,
+        "UnsupportedSyntax": 34
+      },
+      "first_failure_histogram": {
+        "ExpectedExpression": {
+          "count": 2,
+          "examples": [
+            "library/src/scala/quoted/Expr.scala",
+            "library/src/scala/quoted/ToExpr.scala"
+          ]
+        },
+        "UnexpectedToken": {
+          "count": 1,
+          "examples": [
+            "library/src/scala/NamedTuple.scala"
+          ]
+        }
+      },
+      "files_with_raw_caret_character": 113,
+      "files_with_caret_operator_token": 109,
+      "files_with_parser_capture_syntax": 104,
+      "raw_caret_without_operator_examples": [
+        "library/src/scala/annotation/retains.scala",
+        "library/src/scala/caps/package.scala",
+        "library/src/scala/quoted/Quotes.scala",
+        "library/src/scala/util/Either.scala"
+      ],
+      "operator_without_capture_ast_examples": [
+        "library/src/scala/collection/Hashing.scala",
+        "library/src/scala/collection/generic/BitOperations.scala",
+        "library/src/scala/compiletime/ops/boolean.scala",
+        "library/src/scala/compiletime/ops/int.scala",
+        "library/src/scala/compiletime/ops/long.scala"
+      ]
+    }
+  }
+}
