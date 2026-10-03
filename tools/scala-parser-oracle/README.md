@@ -11,6 +11,7 @@ it with the selected SDKMAN defaults:
 ./run path/to/input.scala
 ./run --mode pattern path/to/pattern.scala
 ./run --mode compilation path/to/source-unit.scala
+./run --mode compilation-capture path/to/capture-checking-source.scala
 ./run --mode block-erased path/to/erased-function-type.scala
 ./run --batch path/to/manifest.tsv
 ```
@@ -19,6 +20,11 @@ The batch manifest contains one tab-separated `mode` and absolute source path
 per line. `compare.sh` uses this mode automatically: Scala parses the whole
 corpus in one JVM, while the Rust dump tool is built and run once. This avoids
 restarting sbt, Scala, Cargo, and Python for every fixture.
+Fixtures named `capture-checking-*.scala` in `fixtures/compilation/` use the
+`compilation-capture` mode, which enables Scala 3.9's capture-checking language
+setting for the reference parser and the matching `ParserFeatures` policy for
+Rust. This is needed for syntax whose parser classification depends on that
+feature, such as the `update` definition modifier.
 Each Scala fixture is attached to a fresh `CompilationUnit`, so source-level
 language imports and other per-unit parser features cannot leak to later
 fixtures in the batch. The oracle initializes one Dotty compiler context with

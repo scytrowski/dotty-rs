@@ -264,6 +264,8 @@ where
             Some(Modifier::Open)
         } else if name == known.infix {
             Some(Modifier::Infix)
+        } else if name == known.update && self.features().capture_checking {
+            Some(Modifier::Update)
         } else if self.starts_opaque_type_definition() {
             Some(Modifier::Opaque)
         } else {
@@ -282,7 +284,7 @@ where
         name == known.erased
             || name == known.tracked
             || name == known.into
-            || name == known.update
+            || (name == known.update && !self.features().capture_checking)
             // `opaque` is a contextual modifier only for `opaque type`, but
             // it must remain deferred elsewhere so unsupported modifier
             // recovery preserves the following definition boundary.
@@ -598,6 +600,72 @@ mod tests {
             token(TokenKind::Eof, 6, 6),
         ];
         let mut parser = parser_for("inline", tokens, &mut names);
+        assert!(!parser.starts_definition_prefix());
+    }
+
+    #[test]
+    fn update_is_a_modifier_only_with_capture_checking_enabled() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "update def",
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Keyword(HardKeyword::Def), 7, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            capture_checking: true,
+            ..crate::ParserFeatures::default()
+        });
+
+        assert!(parser.starts_definition_prefix());
+        let prefix = parser.parse_definition_prefix();
+
+        assert_eq!(prefix.metadata.modifiers, vec![Modifier::Update]);
+        assert_eq!(parser.current().kind, TokenKind::Keyword(HardKeyword::Def));
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn update_remains_an_identifier_outside_a_definition_prefix() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "update",
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        assert!(!parser.starts_definition_prefix());
+        let expression = parser.expr();
+        let TreeKind::Ident(identifier) = parser.ast().get(expression).kind else {
+            panic!("expected ordinary `update` identifier");
+        };
+        assert_eq!(parser.names.resolve(identifier.name.text()), "update");
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn backquoted_update_is_not_a_capture_checking_modifier() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "`update` def",
+            vec![
+                token(TokenKind::BackquotedIdentifier, 0, 8),
+                token(TokenKind::Keyword(HardKeyword::Def), 9, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        )
+        .with_features(crate::ParserFeatures {
+            capture_checking: true,
+            ..crate::ParserFeatures::default()
+        });
+
         assert!(!parser.starts_definition_prefix());
     }
 

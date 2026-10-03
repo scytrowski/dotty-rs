@@ -26,12 +26,13 @@ object Main:
       case "--mode" :: "block" :: path :: Nil => ("expr", path)
       case "--mode" :: "block-erased" :: path :: Nil => ("expr", path)
       case "--mode" :: "compilation" :: path :: Nil => ("compilation", path)
+      case "--mode" :: "compilation-capture" :: path :: Nil => ("compilation-capture", path)
       case "--batch" :: manifest :: Nil =>
         runBatch(manifest)
         return
       case _ =>
         throw IllegalArgumentException(
-          "usage: scala-parser-oracle [--mode pattern|block|block-erased|compilation] <source-file> | --batch manifest"
+          "usage: scala-parser-oracle [--mode pattern|block|block-erased|compilation|compilation-capture] <source-file> | --batch manifest"
         )
 
     println(parseAndRender(mode, path))
@@ -54,16 +55,24 @@ object Main:
     val sourcePath = Paths.get(path)
     val source = Files.readString(sourcePath)
     val sourceFile = SourceFile.virtual(sourcePath.toString, source)
-    val context = initialContext
+    val baseContext = initialContext.fresh
+    val context =
+      if mode == "compilation-capture" then
+        baseContext.setSetting(
+          baseContext.settings.language,
+          List("experimental.captureChecking").asInstanceOf
+        )
+      else baseContext
     val unit = CompilationUnit(sourceFile, mustExist = false)(using context)
     val unitContext = context.fresh.setCompilationUnit(unit).withRootImports
     val parser = new Parsers.Parser(sourceFile)(using unitContext)
     val tree = mode match
       case "pattern" => parser.pattern()
-      case "compilation" | "oracle-only" => parser.compilationUnit()
+      case "compilation" | "compilation-capture" | "oracle-only" => parser.compilationUnit()
       case _ => parser.expr()
 
-    val isCompilation = mode == "compilation" || mode == "oracle-only"
+    val isCompilation =
+      mode == "compilation" || mode == "compilation-capture" || mode == "oracle-only"
     if isCompilation && tree.getClass.getSimpleName.stripSuffix("$") == "EmptyTree" then
       renderEmptyCompilation(source)
     else
@@ -329,6 +338,7 @@ object Main:
       "open" -> Open,
       "infix" -> Infix,
       "var" -> Mutable,
+      "update" -> Mutable,
       "given" -> Given
     ).collect {
       case (name, flag)
