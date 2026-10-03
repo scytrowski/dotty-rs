@@ -352,20 +352,9 @@ mod tests {
     #[test]
     fn pattern_selector_preserves_constant_types_and_widens_other_types() {
         let (parsed, mut store, packages, definitions, index, source) =
-            setup("class C { def choose(x: Int): Int = x }");
-        let method = parsed
-            .ast
-            .iter()
-            .find_map(|(tree, node)| match &node.kind {
-                TreeKind::DefDef(definition)
-                    if store.names.resolve(definition.name.as_name().text()) == "choose" =>
-                {
-                    index.symbol_at(source, tree)
-                }
-                _ => None,
-            })
-            .unwrap();
-        let (mut typer, _) = context_for(
+            setup("class C { def choose(x: Int): Int = x match { case _ => 1 } }");
+        let (method, pattern) = method_and_pattern(&parsed, &store, &index, source, "choose");
+        let (mut typer, context) = context_for(
             &parsed,
             &mut store,
             &packages,
@@ -391,6 +380,12 @@ mod tests {
                 .unwrap(),
             definitions.int
         );
+        let typed_pattern = typer
+            .run_expression_transaction(|typer, info_journal, mappings| {
+                typer.type_pattern(pattern, singleton, context, info_journal, mappings)
+            })
+            .unwrap();
+        assert_eq!(typer.typed_arena.get(typed_pattern).ty, singleton);
     }
 
     #[test]
