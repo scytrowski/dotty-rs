@@ -23,6 +23,7 @@ fn main() {
             if flag == "--mode"
                 && (mode == "pattern"
                     || mode == "compilation"
+                    || mode == "compilation-capture"
                     || mode == "block"
                     || mode == "block-erased") =>
         {
@@ -30,7 +31,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: dotty-parser-smoke-dump [--mode pattern|block|block-erased|compilation] <source-file> | --batch manifest"
+                "usage: dotty-parser-smoke-dump [--mode pattern|block|block-erased|compilation|compilation-capture] <source-file> | --batch manifest"
             );
             process::exit(2);
         }
@@ -38,7 +39,7 @@ fn main() {
 
     if path.is_empty() {
         eprintln!(
-            "usage: dotty-parser-smoke-dump [--mode pattern|block|block-erased|compilation] <source-file> | --batch manifest"
+            "usage: dotty-parser-smoke-dump [--mode pattern|block|block-erased|compilation|compilation-capture] <source-file> | --batch manifest"
         );
         process::exit(2);
     }
@@ -97,6 +98,13 @@ fn dump_fixture(mode: &str, path: &str) -> Result<String, String> {
     let mut names = NameInterner::new();
     let result = if mode == "pattern" {
         parse_pattern_fragment(source_text, SourceId::from_index(0), scanner, &mut names)
+    } else if mode == "compilation-capture" {
+        Parser::new(source_text, SourceId::from_index(0), scanner, &mut names)
+            .with_features(ParserFeatures {
+                capture_checking: true,
+                ..ParserFeatures::default()
+            })
+            .source_compilation_unit()
     } else if mode == "compilation" || mode == "oracle-only" {
         parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names)
     } else if mode == "block-erased" {
@@ -121,6 +129,7 @@ fn dump_fixture(mode: &str, path: &str) -> Result<String, String> {
         || mode == "block"
         || mode == "block-erased"
         || mode == "compilation"
+        || mode == "compilation-capture"
         || mode == "oracle-only"
     {
         result.root

@@ -34,6 +34,9 @@ for fixture in "${fixtures[@]}"; do
     fi
   elif [[ "$(basename "$(dirname "${fixture}")")" == "compilation" ]]; then
     mode=compilation
+    if [[ "$(basename "${fixture}")" == capture-checking-*.scala ]]; then
+      mode=compilation-capture
+    fi
   elif [[ "$(basename "$(dirname "${fixture}")")" == "oracle-only" ]]; then
     mode=oracle-only
   fi
