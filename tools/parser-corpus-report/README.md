@@ -354,3 +354,20 @@ Recreate it with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-658-scala3-3.9.0.json
 ```
+
+`parser-post-issue-684-scala3-3.9.0.json` measures `main` at merge revision
+`3511201cf3f49109e02be6b6d8f1a1224ddcb6d1`, after PRs #672, #673, #678, and
+#683. It uses the same pinned Scala 3.9.0 source revision and sorted 1,236-file
+corpus. It records 1,188 clean parses (96.12%), 48 recoverable files, and zero
+hard parser failures, process failures, panics, or hangs. The Scala oracle
+emitted all 1,236 files with zero failures. Two runs produced byte-identical
+JSON (SHA-256
+`2d432adc1d1c96cb50578e37ae67701f06fd5c3fa69682f098c702cab8c2bc24`). The
+comparison and interpretation are in
+[`parser-v0.1-compatibility.md`](../../docs/parser-v0.1-compatibility.md).
+Recreate it with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-684-scala3-3.9.0.json
+```
