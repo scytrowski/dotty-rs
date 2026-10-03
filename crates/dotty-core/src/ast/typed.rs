@@ -3,8 +3,8 @@
 
 use crate::ast::arena::AstArena;
 use crate::ast::common::{
-    Apply, ApplyKind, Assign, Block, CaseDef, Ident, If, Literal, Match, New, Return, Select, This,
-    TypeApply, TypeTree, TypedExpr, While,
+    Apply, ApplyKind, Assign, Bind, Block, CaseDef, Ident, If, Literal, Match, New, Return, Select,
+    This, TypeApply, TypeTree, TypedExpr, While,
 };
 use crate::ast::phase::Typed;
 use crate::ast::tree::{Tree, TreeKind};
@@ -61,6 +61,25 @@ impl<'a> TypedAstBuilder<'a> {
     ) -> TreeId<Typed> {
         self.arena.alloc(Tree {
             kind: TreeKind::Ident(Ident { name, backquoted }),
+            position,
+            ty,
+        })
+    }
+
+    /// Allocates a typed pattern binding whose type is the bound symbol's
+    /// canonical term reference.
+    pub fn bind(
+        &mut self,
+        name: Name,
+        body: TreeId<Typed>,
+        ty: TypeId,
+        given: bool,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        self.assert_real_typed_tree(body, "a typed pattern binding body");
+        self.assert_real_type(ty, "a typed pattern binding");
+        self.arena.alloc(Tree {
+            kind: TreeKind::Bind(Bind { name, body, given }),
             position,
             ty,
         })
@@ -547,6 +566,41 @@ mod tests {
         assert_eq!(case_def.guard, None);
         assert_eq!(case_def.body, body);
         assert_eq!(arena.get(case_def.body).ty, body_type);
+    }
+
+    #[test]
+    fn bind_keeps_its_body_name_and_exact_bound_symbol_reference() {
+        let mut arena = TypedAst::new();
+        let mut types = TypeArena::new();
+        let binding_type = types.alloc(Type::Constant(Constant::Int(1)));
+        let no_prefix = types.alloc(Type::NoPrefix);
+        let term_ref = types.alloc(Type::TermRef {
+            prefix: no_prefix,
+            target: crate::types::TermRefTarget::Symbol(crate::SymbolId::new(7)),
+        });
+        let name = Name::new(NameId::new(1), Namespace::Term);
+        let position = position(2, 8);
+        let mut builder = TypedAstBuilder::new(&mut arena, &types);
+        let body = builder.literal(Constant::Int(1), binding_type, Some(position));
+
+        let bind = builder.bind(name, body, term_ref, false, Some(position));
+
+        let node = arena.get(bind);
+        assert_eq!(node.ty, term_ref);
+        assert_eq!(node.position, Some(position));
+        let TreeKind::Bind(bind) = &node.kind else {
+            panic!("expected a typed Bind")
+        };
+        assert_eq!(bind.name, name);
+        assert_eq!(bind.body, body);
+        assert!(!bind.given);
+        assert!(matches!(
+            types.try_get(node.ty),
+            Some(Type::TermRef {
+                target: crate::types::TermRefTarget::Symbol(symbol),
+                ..
+            }) if *symbol == crate::SymbolId::new(7)
+        ));
     }
 
     #[test]
