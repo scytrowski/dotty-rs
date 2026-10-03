@@ -187,27 +187,11 @@ impl<'a> SourceTyper<'a> {
         context: ExpressionContext,
     ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
-            if let Some(symbol) = self.non_value_term_mapping_symbol(tree, typed) {
-                return Err(TyperError::UnsupportedTermReference {
-                    source: self.source,
-                    tree_index: tree.index(),
-                    symbol,
-                    kind: self.store.symbols.get(symbol).kind,
-                });
-            }
+            self.validate_value_expression(tree, typed)?;
             return Ok(typed);
         }
         self.run_expression_transaction(|typer, info_journal, new_mappings| {
-            let typed = typer.type_expression_inner(tree, context, info_journal, new_mappings)?;
-            if let Some(symbol) = typer.non_value_term_mapping_symbol(tree, typed) {
-                return Err(TyperError::UnsupportedTermReference {
-                    source: typer.source,
-                    tree_index: tree.index(),
-                    symbol,
-                    kind: typer.store.symbols.get(symbol).kind,
-                });
-            }
-            Ok(typed)
+            typer.type_value_expression_inner(tree, context, info_journal, new_mappings)
         })
     }
 
@@ -264,14 +248,7 @@ impl<'a> SourceTyper<'a> {
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
-            if let Some(symbol) = self.non_value_term_mapping_symbol(tree, typed) {
-                return Err(TyperError::UnsupportedTermReference {
-                    source: self.source,
-                    tree_index: tree.index(),
-                    symbol,
-                    kind: self.store.symbols.get(symbol).kind,
-                });
-            }
+            self.validate_value_expression(tree, typed)?;
             return Ok(typed);
         }
         let Some(source_tree) = self.arena.try_get(tree).cloned() else {

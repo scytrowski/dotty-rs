@@ -271,7 +271,8 @@ impl SourceTyper<'_> {
             self.store.scopes.get_mut(scope).enter(name, symbol);
             self.initializing_local_symbols.insert(symbol);
         }
-        let typed_rhs_result = self.type_expression_inner(rhs, context, info_journal, new_mappings);
+        let typed_rhs_result =
+            self.type_value_expression_inner(rhs, context, info_journal, new_mappings);
         if !inferred {
             self.initializing_local_symbols.remove(&symbol);
         }
@@ -788,7 +789,7 @@ impl SourceTyper<'_> {
                             kind,
                         });
                     }
-                    stats.push(self.type_expression_inner(
+                    stats.push(self.type_value_expression_inner(
                         stat,
                         block_context,
                         info_journal,
@@ -802,15 +803,19 @@ impl SourceTyper<'_> {
                     kind,
                 });
             }
-            stats.push(self.type_expression_inner(
+            stats.push(self.type_value_expression_inner(
                 stat,
                 block_context,
                 info_journal,
                 new_mappings,
             )?);
         }
-        let expr =
-            self.type_expression_inner(block.expr, block_context, info_journal, new_mappings)?;
+        let expr = self.type_value_expression_inner(
+            block.expr,
+            block_context,
+            info_journal,
+            new_mappings,
+        )?;
         let ty = self.typed_arena.get(expr).ty;
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .block(stats, expr, ty, position);
