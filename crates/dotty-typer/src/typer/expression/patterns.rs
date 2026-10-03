@@ -2,8 +2,8 @@
 
 use super::{ExpressionContext, SourceTyper, TyperError};
 use crate::typer::{
-    ExtractorMethodShapeIssue, ExtractorPatternArgumentIssue, ExtractorResultMemberIssue,
-    PatternKind,
+    ExtractorMethodShapeIssue, ExtractorPatternArgumentIssue, ExtractorProductIssue,
+    ExtractorResultMemberIssue, PatternKind,
 };
 use dotty_core::ast::{TreeKind, TypedAstBuilder, UntypedNode};
 use dotty_core::types::{MethodKind, MethodType, Type};
@@ -218,6 +218,158 @@ impl SourceTyper<'_> {
             unapply,
             info_journal,
         )
+    }
+
+    /// Reads the ordered `_1`, `_2` selector protocol without treating source
+    /// argument count as evidence that an arbitrary result is a product. The
+    /// `_3` probe makes products with more than two conventional selectors an
+    /// explicit arity error rather than silently truncating them.
+    fn product_extractor_component_types(
+        &mut self,
+        result_type: TypeId,
+        pattern_index: u32,
+        unapply: SymbolId,
+        require_product_subtype: bool,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Option<Vec<TypeId>>, TyperError> {
+        if require_product_subtype
+            && !self.is_product_subtype(result_type, pattern_index, unapply, info_journal)?
+        {
+            return Ok(None);
+        }
+
+        let mut selectors = Vec::new();
+        let mut component_types = Vec::new();
+        for index in 1..=3 {
+            let spelling = format!("_{index}");
+            let name = Name::new(self.store.names.intern(&spelling), Namespace::Term);
+            match self.extractor_result_member_type(
+                result_type,
+                name,
+                pattern_index,
+                unapply,
+                info_journal,
+            ) {
+                Ok(component_type) => {
+                    selectors.push(name);
+                    component_types.push((index, component_type));
+                }
+                Err(TyperError::ExtractorResultMemberNotFound { .. })
+                | Err(TyperError::UnsupportedExtractorResultProtocol { .. }) => {}
+                Err(TyperError::ExtractorResultMemberUnsupported {
+                    issue:
+                        ExtractorResultMemberIssue::NotParameterless
+                        | ExtractorResultMemberIssue::NotValueType,
+                    ..
+                }) if index == 3 => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if selectors.is_empty() {
+            return Ok(None);
+        }
+        if component_types.len() != 2 || component_types[0].0 != 1 || component_types[1].0 != 2 {
+            return Err(TyperError::ExtractorProductSelectorCountMismatch {
+                source: self.source,
+                tree_index: pattern_index,
+                unapply,
+                result: result_type,
+                selectors,
+            });
+        }
+        Ok(Some(
+            component_types
+                .into_iter()
+                .map(|(_, component_type)| component_type)
+                .collect(),
+        ))
+    }
+
+    fn is_product_subtype(
+        &mut self,
+        result_type: TypeId,
+        pattern_index: u32,
+        unapply: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<bool, TyperError> {
+        let Some(scala_package) = self.packages.symbol(&["scala"]) else {
+            return Ok(false);
+        };
+        let Some(scope) = self.packages.scope_of(scala_package) else {
+            return Ok(false);
+        };
+        let product_name = Name::new(self.store.names.intern("Product"), Namespace::Type);
+        let products = self.store.scopes.get(scope).lookup_all(&product_name);
+        let [product] = products else {
+            return Ok(false);
+        };
+        let product = *product;
+        if !matches!(
+            self.store.symbols.get(product).kind,
+            SymbolKind::Class | SymbolKind::Trait
+        ) {
+            return Ok(false);
+        }
+        let prefix = self.type_symbol_prefix(product);
+        let product_type = self.store.types.alloc(Type::type_ref(prefix, product));
+        self.complete_typed_pattern_relation_class(result_type, info_journal)?;
+        self.complete_typed_pattern_relation_class(product_type, info_journal)?;
+        let conforms = self.conforms(result_type, product_type).map_err(|_| {
+            TyperError::UnsupportedExtractorProductProtocol {
+                source: self.source,
+                tree_index: pattern_index,
+                unapply,
+                result: result_type,
+                issue: ExtractorProductIssue::ProductRelationUnsupported,
+            }
+        })?;
+        Ok(conforms)
+    }
+
+    fn binary_product_component_types(
+        &mut self,
+        result_type: TypeId,
+        pattern_index: u32,
+        unapply: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<Vec<TypeId>, TyperError> {
+        let direct_product = self.product_extractor_component_types(
+            result_type,
+            pattern_index,
+            unapply,
+            true,
+            info_journal,
+        );
+        let direct_arity_error = match direct_product {
+            Ok(Some(component_types)) => return Ok(component_types),
+            Ok(None) => None,
+            Err(error @ TyperError::ExtractorProductSelectorCountMismatch { .. }) => Some(error),
+            Err(error) => return Err(error),
+        };
+
+        let get_type = match self.option_like_extractor_component_type(
+            result_type,
+            pattern_index,
+            unapply,
+            info_journal,
+        ) {
+            Ok(get_type) => get_type,
+            Err(error) => return Err(direct_arity_error.unwrap_or(error)),
+        };
+        self.product_extractor_component_types(
+            get_type,
+            pattern_index,
+            unapply,
+            false,
+            info_journal,
+        )?
+        .ok_or(TyperError::UnsupportedExtractorProductProtocol {
+            source: self.source,
+            tree_index: pattern_index,
+            unapply,
+            result: get_type,
+            issue: ExtractorProductIssue::SelectorShape,
+        })
     }
 
     fn resolve_extractor_pattern_plan(
@@ -799,27 +951,86 @@ impl SourceTyper<'_> {
                     }
                     Vec::new()
                 } else {
-                    let [source_pattern] = plan.source_patterns.as_slice() else {
-                        return Err(TyperError::ExtractorPatternArityUnsupported {
-                            source: self.source,
-                            tree_index: pattern.index(),
-                            unapply: plan.symbol,
-                            actual: plan.source_patterns.len(),
-                        });
-                    };
-                    let component_type = self.option_like_extractor_component_type(
-                        plan.result_type,
-                        pattern.index(),
-                        plan.symbol,
-                        info_journal,
-                    )?;
-                    vec![self.type_pattern(
-                        *source_pattern,
-                        component_type,
-                        context,
-                        info_journal,
-                        new_mappings,
-                    )?]
+                    match plan.source_patterns.as_slice() {
+                        [source_pattern] => {
+                            if self
+                                .product_extractor_component_types(
+                                    plan.result_type,
+                                    pattern.index(),
+                                    plan.symbol,
+                                    true,
+                                    info_journal,
+                                )?
+                                .is_some()
+                            {
+                                return Err(TyperError::ExtractorPatternArityUnsupported {
+                                    source: self.source,
+                                    tree_index: pattern.index(),
+                                    unapply: plan.symbol,
+                                    actual: 1,
+                                });
+                            }
+                            let component_type = self.option_like_extractor_component_type(
+                                plan.result_type,
+                                pattern.index(),
+                                plan.symbol,
+                                info_journal,
+                            )?;
+                            vec![self.type_pattern(
+                                *source_pattern,
+                                component_type,
+                                context,
+                                info_journal,
+                                new_mappings,
+                            )?]
+                        }
+                        [_, _] => {
+                            let component_types = match self.binary_product_component_types(
+                                plan.result_type,
+                                pattern.index(),
+                                plan.symbol,
+                                info_journal,
+                            ) {
+                                Ok(component_types) => component_types,
+                                Err(
+                                    error @ TyperError::UnsupportedExtractorProductProtocol {
+                                        issue: ExtractorProductIssue::ProductRelationUnsupported,
+                                        ..
+                                    },
+                                ) => return Err(error),
+                                Err(TyperError::UnsupportedExtractorProductProtocol { .. }) => {
+                                    return Err(TyperError::ExtractorPatternArityUnsupported {
+                                        source: self.source,
+                                        tree_index: pattern.index(),
+                                        unapply: plan.symbol,
+                                        actual: 2,
+                                    });
+                                }
+                                Err(error) => return Err(error),
+                            };
+                            let mut patterns = Vec::with_capacity(2);
+                            for (source_pattern, component_type) in
+                                plan.source_patterns.iter().zip(component_types)
+                            {
+                                patterns.push(self.type_pattern(
+                                    *source_pattern,
+                                    component_type,
+                                    context,
+                                    info_journal,
+                                    new_mappings,
+                                )?);
+                            }
+                            patterns
+                        }
+                        _ => {
+                            return Err(TyperError::ExtractorPatternArityUnsupported {
+                                source: self.source,
+                                tree_index: pattern.index(),
+                                unapply: plan.symbol,
+                                actual: plan.source_patterns.len(),
+                            });
+                        }
+                    }
                 };
                 TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).unapply(
                     plan.function,
@@ -2056,6 +2267,222 @@ mod tests {
             typer.typed_arena.get(unapply.patterns[0]).ty,
             definitions.int
         );
+    }
+
+    #[test]
+    fn binary_product_extractors_type_ordered_components_for_direct_and_get_results() {
+        let source_text = "package scala { trait Product }; package app { class PairResult extends scala.Product { def _1: Int = 1; def _2: Boolean = true; def _3(index: Int): Int = index }; class MaybePair extends scala.Product { def _1: Boolean = true; def _2: Int = 2; def _3: Int = 3; def isEmpty: Boolean = false; def get: PairResult = new PairResult }; object DirectPair { def unapply(value: Any): PairResult = new PairResult }; object GetPair { def unapply(value: Any): MaybePair = new MaybePair }; class C { def direct(value: Any): Boolean = value match { case DirectPair(a, b) if accepts(a, b) => b; case _ => false }; def throughGet(value: Any): Boolean = value match { case GetPair(_, b) => b; case _ => false }; def accepts(a: Int, b: Boolean): Boolean = true } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+
+        for (method_name, extractor_name, expected_component_types) in [
+            (
+                "direct",
+                "DirectPair",
+                [definitions.int, definitions.boolean],
+            ),
+            (
+                "throughGet",
+                "GetPair",
+                [definitions.int, definitions.boolean],
+            ),
+        ] {
+            let (method, rhs) = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    let TreeKind::DefDef(definition) = &node.kind else {
+                        return None;
+                    };
+                    (store.names.resolve(definition.name.as_name().text()) == method_name).then(
+                        || {
+                            let match_tree = definition.rhs?;
+                            let TreeKind::Match(_) = &parsed.ast.get(match_tree).kind else {
+                                return None;
+                            };
+                            Some((index.symbol_at(source, tree)?, match_tree))
+                        },
+                    )?
+                })
+                .unwrap();
+            let (mut typer, context) = context_for(
+                &parsed,
+                &mut store,
+                &packages,
+                definitions,
+                &index,
+                source,
+                method,
+            );
+            let typed_match = typer
+                .type_expression(rhs, context)
+                .unwrap_or_else(|error| panic!("{method_name}: {error:?}"));
+            let TreeKind::Match(matching) = &typer.typed_arena.get(typed_match).kind else {
+                panic!("expected a Typed Match");
+            };
+            let TreeKind::CaseDef(case_def) = &typer.typed_arena.get(matching.cases[0]).kind else {
+                panic!("expected a Typed CaseDef");
+            };
+            let typed = case_def.pattern;
+            let TreeKind::UnApply(unapply) = &typer.typed_arena.get(typed).kind else {
+                panic!("expected a Typed UnApply node");
+            };
+            assert_eq!(unapply.patterns.len(), 2);
+            assert_eq!(unapply.implicits.len(), 0);
+            for (child, expected_type) in unapply.patterns.iter().zip(expected_component_types) {
+                let child_type = typer.typed_arena.get(*child).ty;
+                let actual_type = match typer.store.types.try_get(child_type) {
+                    Some(Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    }) => match *typer.store.symbols.info(*symbol) {
+                        SymbolInfo::Complete(binding_type) => binding_type,
+                        info => panic!("pattern binder has incomplete info: {info:?}"),
+                    },
+                    _ => child_type,
+                };
+                assert_eq!(
+                    typer.store.types.try_get(actual_type),
+                    typer.store.types.try_get(expected_type),
+                    "component type mismatch: actual {actual_type:?}, expected {expected_type:?}"
+                );
+            }
+            let Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) = typer
+                .store
+                .types
+                .try_get(typer.typed_arena.get(unapply.function).ty)
+            else {
+                panic!("expected exact unapply function reference");
+            };
+            assert_eq!(
+                typer
+                    .store
+                    .names
+                    .resolve(typer.store.symbols.get(*symbol).name.text()),
+                "unapply"
+            );
+            let owner = typer.store.symbols.get(*symbol).owner.unwrap();
+            let owner_name = typer
+                .store
+                .names
+                .resolve(typer.store.symbols.get(owner).name.text());
+            assert_eq!(
+                owner_name.strip_suffix('$').unwrap_or(owner_name),
+                extractor_name
+            );
+        }
+
+        let non_product = "package scala { trait Product }; package app { class PairResult { def _1: Int = 1; def _2: Boolean = true }; object Extractor { def unapply(value: Any): PairResult = new PairResult }; class C { def choose(value: Any): Int = value match { case Extractor(a, b) => a; case _ => 0 } } }";
+        let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(non_product);
+        assert!(matches!(
+            error,
+            TyperError::ExtractorResultMemberNotFound { .. }
+                | TyperError::UnsupportedExtractorResultProtocol { .. }
+        ));
+        assert!(store_rolled_back);
+        assert!(typed_state_rolled_back);
+    }
+
+    #[test]
+    fn binary_product_extractors_reject_wrong_selector_and_source_arities() {
+        for (product, expected_selectors) in [
+            (
+                "class ProductResult extends scala.Product { def _1: Int = 1 }",
+                1,
+            ),
+            (
+                "class ProductResult extends scala.Product { def _1: Int = 1; def _2: Int = 2; def _3: Int = 3 }",
+                3,
+            ),
+        ] {
+            let source_text = format!(
+                "package scala {{ trait Product }}; package app {{ {product}; object Extractor {{ def unapply(value: Any): ProductResult = new ProductResult }}; class C {{ def choose(value: Any): Int = value match {{ case Extractor(a, b) => 1; case _ => 0 }} }} }}"
+            );
+            let (error, store_rolled_back, typed_state_rolled_back) =
+                type_match_error(&source_text);
+            assert!(matches!(
+                error,
+                TyperError::ExtractorProductSelectorCountMismatch { selectors, .. }
+                    if selectors.len() == expected_selectors
+            ));
+            assert!(store_rolled_back);
+            assert!(typed_state_rolled_back);
+        }
+
+        for source_pattern in ["Extractor(a)", "Extractor(a, b, c)"] {
+            let source_text = format!(
+                "package scala {{ trait Product }}; package app {{ class ProductResult extends scala.Product {{ def _1: Int = 1; def _2: Int = 2 }}; object Extractor {{ def unapply(value: Any): ProductResult = new ProductResult }}; class C {{ def choose(value: Any): Int = value match {{ case {source_pattern} => 1; case _ => 0 }} }} }}"
+            );
+            let (error, store_rolled_back, typed_state_rolled_back) =
+                type_match_error(&source_text);
+            assert!(matches!(
+                error,
+                TyperError::ExtractorPatternArityUnsupported { actual: 1 | 3, .. }
+            ));
+            assert!(store_rolled_back);
+            assert!(typed_state_rolled_back);
+        }
+    }
+
+    #[test]
+    fn binary_product_patterns_recurse_and_rollback_when_the_second_component_fails() {
+        let nested = "package scala { trait Product }; package app { class PairResult extends scala.Product { def _1: Int = 1; def _2: Boolean = true }; class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Pair { def unapply(value: Any): PairResult = new PairResult }; object SomeInt { def unapply(value: Int): MaybeInt = new MaybeInt }; class C { def choose(value: Any): Int = value match { case Pair(SomeInt(x), _) => x; case _ => 0 } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(nested);
+        let method = method_symbol(&parsed, &store, &index, source);
+        let match_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Match(_)).then_some(tree))
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        assert!(typer.type_expression(match_tree, context).is_ok());
+
+        let failure = "package scala { trait Product }; package app { class PairResult extends scala.Product { def _1: Int = 1; def _2: Boolean = true }; object Pair { def unapply(value: Any): PairResult = new PairResult }; object Even { def unapply(value: Boolean): Boolean = true }; class C { def choose(value: Any): Int = value match { case Pair(first, Even(_)) => first; case _ => 0 } } }";
+        let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(failure);
+        assert!(matches!(
+            error,
+            TyperError::BooleanExtractorPatternArityUnsupported { actual: 1, .. }
+        ));
+        assert!(store_rolled_back);
+        assert!(typed_state_rolled_back);
+    }
+
+    #[test]
+    fn binary_product_patterns_accept_literals_and_reject_duplicate_bindings() {
+        let literal = "package scala { trait Product }; package app { class PairResult extends scala.Product { def _1: Int = 1; def _2: Boolean = true }; object Pair { def unapply(value: Any): PairResult = new PairResult }; class C { def choose(value: Any): Boolean = value match { case Pair(1, second) => second; case _ => false } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(literal);
+        let method = method_symbol(&parsed, &store, &index, source);
+        let match_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Match(_)).then_some(tree))
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        assert!(typer.type_expression(match_tree, context).is_ok());
+
+        let duplicate = "package scala { trait Product }; package app { class PairResult extends scala.Product { def _1: Int = 1; def _2: Boolean = true }; object Pair { def unapply(value: Any): PairResult = new PairResult }; class C { def choose(value: Any): Int = value match { case Pair(same, same) => 1; case _ => 0 } } }";
+        let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(duplicate);
+        assert!(matches!(error, TyperError::DuplicatePatternBinding { .. }));
+        assert!(store_rolled_back);
+        assert!(typed_state_rolled_back);
     }
 
     #[test]

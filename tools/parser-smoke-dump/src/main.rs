@@ -2107,4 +2107,280 @@ mod tests {
             assert_eq!(member_names, ["f", "next"]);
         }
     }
+
+    #[test]
+    fn mismatched_nested_template_end_marker_preserves_outer_members_and_marker() {
+        const SOURCE: &str = concat!(
+            "object Outer:\n",
+            "  class Inner:\n",
+            "    val x = 1\n",
+            "  end Wrong\n",
+            "  val after = 2\n",
+            "end Outer",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source scans");
+        let source_text = SourceText::new(SOURCE).expect("source text is valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert!(
+            result.diagnostics[0]
+                .message()
+                .contains("misaligned end marker")
+        );
+        assert_eq!(
+            result.diagnostics[0].span(),
+            dotty_core::TextRange::new(
+                SOURCE.find("end Wrong").unwrap() as u32,
+                (SOURCE.find("end Wrong").unwrap() + "end Wrong".len()) as u32,
+            )
+            .unwrap()
+        );
+
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let outer_id = package
+            .stats
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    &result.ast.get(*id).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module))
+                        if names.resolve(module.name.as_name().text()) == "Outer"
+                )
+            })
+            .expect("Outer object remains in the compilation unit");
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(outer)) = &result.ast.get(outer_id).kind
+        else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &result.ast.get(outer.template).kind else {
+            panic!("expected Outer template");
+        };
+        let inner = template
+            .body
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    &result.ast.get(*id).kind,
+                    TreeKind::TypeDef(definition)
+                        if names.resolve(definition.name.as_name().text()) == "Inner"
+                )
+            })
+            .expect("Inner class remains in Outer");
+        let after = template
+            .body
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    &result.ast.get(*id).kind,
+                    TreeKind::ValDef(definition)
+                        if names.resolve(definition.name.as_name().text()) == "after"
+                )
+            })
+            .expect("member after the malformed marker remains in Outer");
+        assert!(
+            result.ast.get(inner).position.unwrap().span().range().end()
+                < result
+                    .ast
+                    .get(after)
+                    .position
+                    .unwrap()
+                    .span()
+                    .range()
+                    .start()
+        );
+        assert_eq!(
+            result
+                .ast
+                .get(outer_id)
+                .position
+                .unwrap()
+                .span()
+                .range()
+                .end(),
+            SOURCE.len() as u32
+        );
+    }
+
+    #[test]
+    fn duplicate_nested_template_end_marker_preserves_outer_members_and_marker() {
+        const SOURCE: &str = concat!(
+            "object Outer:\n",
+            "  class Inner:\n",
+            "    val x = 1\n",
+            "  end Inner\n",
+            "  end Inner\n",
+            "  val after = 2\n",
+            "end Outer",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source scans");
+        let source_text = SourceText::new(SOURCE).expect("source text is valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert!(
+            result.diagnostics[0]
+                .message()
+                .contains("duplicate end marker")
+        );
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let outer_id = package
+            .stats
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    &result.ast.get(*id).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module))
+                        if names.resolve(module.name.as_name().text()) == "Outer"
+                )
+            })
+            .expect("Outer object remains in the compilation unit");
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(outer)) = &result.ast.get(outer_id).kind
+        else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &result.ast.get(outer.template).kind else {
+            panic!("expected Outer template");
+        };
+        assert!(template.body.iter().any(|id| matches!(
+            &result.ast.get(*id).kind,
+            TreeKind::ValDef(definition)
+                if names.resolve(definition.name.as_name().text()) == "after"
+        )));
+        assert_eq!(
+            result
+                .ast
+                .get(outer_id)
+                .position
+                .unwrap()
+                .span()
+                .range()
+                .end(),
+            SOURCE.len() as u32
+        );
+    }
+
+    #[test]
+    fn same_named_nested_end_marker_does_not_close_outer_template() {
+        const SOURCE: &str = concat!(
+            "object Outer:\n",
+            "  class Outer:\n",
+            "    val x = 1\n",
+            "  end Outer\n",
+            "  val after = 2\n",
+            "end Outer",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source scans");
+        let source_text = SourceText::new(SOURCE).expect("source text is valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let outer_id = package
+            .stats
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    &result.ast.get(*id).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module))
+                        if names.resolve(module.name.as_name().text()) == "Outer"
+                )
+            })
+            .expect("Outer object remains in the compilation unit");
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(outer)) = &result.ast.get(outer_id).kind
+        else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &result.ast.get(outer.template).kind else {
+            panic!("expected Outer template");
+        };
+        assert!(template.body.iter().any(|id| matches!(
+            &result.ast.get(*id).kind,
+            TreeKind::TypeDef(definition)
+                if names.resolve(definition.name.as_name().text()) == "Outer"
+        )));
+        assert!(template.body.iter().any(|id| matches!(
+            &result.ast.get(*id).kind,
+            TreeKind::ValDef(definition)
+                if names.resolve(definition.name.as_name().text()) == "after"
+        )));
+        assert_eq!(
+            result
+                .ast
+                .get(outer_id)
+                .position
+                .unwrap()
+                .span()
+                .range()
+                .end(),
+            SOURCE.len() as u32
+        );
+    }
+
+    #[test]
+    fn end_marker_at_outer_indentation_is_not_stolen_by_same_named_member() {
+        const SOURCE: &str = "object Outer:\n  class Outer {}\nend Outer";
+        let scanner = ContextualScanner::new(SOURCE).expect("source scans");
+        let source_text = SourceText::new(SOURCE).expect("source text is valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let outer_id = package
+            .stats
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    &result.ast.get(*id).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module))
+                        if names.resolve(module.name.as_name().text()) == "Outer"
+                )
+            })
+            .expect("Outer object remains at package scope");
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(outer)) = &result.ast.get(outer_id).kind
+        else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &result.ast.get(outer.template).kind else {
+            panic!("expected outer template");
+        };
+        assert!(template.body.iter().any(|id| matches!(
+            &result.ast.get(*id).kind,
+            TreeKind::TypeDef(definition)
+                if names.resolve(definition.name.as_name().text()) == "Outer"
+        )));
+        assert_eq!(
+            result
+                .ast
+                .get(outer_id)
+                .position
+                .unwrap()
+                .span()
+                .range()
+                .end(),
+            SOURCE.len() as u32
+        );
+    }
 }

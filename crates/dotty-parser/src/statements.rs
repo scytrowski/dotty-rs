@@ -378,7 +378,8 @@ where
                 self.last_advance_was_outdent = false;
             } else if self.last_advance_consumed_statement_separator {
                 self.last_advance_consumed_statement_separator = false;
-            } else if !self.sequence_ended(boundary) {
+            } else if !self.sequence_ended(boundary) && self.current().kind != TokenKind::EndMarker
+            {
                 self.report(
                     ParseDiagnosticKind::UnexpectedToken,
                     "expected a top-level statement separator",
@@ -620,6 +621,34 @@ where
         .is_some()
     }
 
+    pub(crate) fn end_marker_matches_after_outdent(
+        &mut self,
+        tree: Option<TreeId<Untyped>>,
+    ) -> bool {
+        let Some(tree) = tree else {
+            return false;
+        };
+        if self.current().kind != TokenKind::Outdent {
+            return false;
+        }
+
+        let mut offset = 1;
+        while matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Newline | TokenKind::Newlines | TokenKind::Outdent
+        ) {
+            offset += 1;
+        }
+        let marker = self.cursor.lookahead(offset).clone();
+        if marker.kind != TokenKind::EndMarker {
+            return false;
+        }
+        let target = self.cursor.lookahead(offset + 1).clone();
+        let target_text = self.marker_target_text(target.kind, target.span);
+        self.end_marker_owner(tree, target.kind, &target_text, marker.span.start(), false)
+            .is_some()
+    }
+
     /// Checks whether the statement itself owns an `end` marker. Dotty checks
     /// only the last direct statement in the active statement sequence; nested
     /// constructs have their own sequence and must not steal an enclosing
@@ -632,7 +661,20 @@ where
         marker_start: u32,
         include_marked: bool,
     ) -> Option<TreeId<Untyped>> {
-        if self.end_marker_matches(tree, target_kind, target_text) {
+        let indentation_allows_owner = self.ast.get(tree).position.is_some_and(|position| {
+            let owner_start = position.span().range().start();
+            let owner_indent = self.source_line_indent_prefix(owner_start);
+            let source_before_owner = &self.source.as_str()[..owner_start as usize];
+            let owner_line_start = source_before_owner
+                .rfind(['\n', '\r', '\u{000c}', '\u{001a}'])
+                .map_or(0, |index| index + 1);
+            let owner_starts_after_only_indentation =
+                owner_start as usize - owner_line_start == owner_indent.len();
+
+            !owner_starts_after_only_indentation
+                || owner_indent == self.source_line_indent_prefix(marker_start)
+        });
+        if indentation_allows_owner && self.end_marker_matches(tree, target_kind, target_text) {
             return self
                 .end_marker_is_eligible(
                     tree,
@@ -721,7 +763,7 @@ where
             && self.end_marker_matches(tree, target_kind, target_text)
     }
 
-    fn marker_target_text(&self, kind: TokenKind, span: TextRange) -> String {
+    pub(crate) fn marker_target_text(&self, kind: TokenKind, span: TextRange) -> String {
         let text = self.source.slice(span).unwrap_or_default();
         if kind == TokenKind::BackquotedIdentifier {
             text.strip_prefix('`')
