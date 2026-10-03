@@ -1702,6 +1702,92 @@ fn parses_if_with_then_and_else() {
 }
 
 #[test]
+fn parses_do_while_into_dotty_post_test_loop_shape_and_spans() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "do step() while ready",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::Do), 0, 2),
+            token(TokenKind::Identifier, 3, 7),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+            token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+            token(TokenKind::Keyword(HardKeyword::While), 10, 15),
+            token(TokenKind::Identifier, 16, 21),
+            token(TokenKind::Eof, 21, 21),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::While(loop_tree) = parser.ast().get(id).kind else {
+        panic!("expected normalized while tree");
+    };
+    let TreeKind::Block(condition_block) = &parser.ast().get(loop_tree.cond).kind else {
+        panic!("expected body-before-condition block");
+    };
+    assert_eq!(condition_block.stats.len(), 1);
+    assert!(matches!(
+        parser.ast().get(condition_block.stats[0]).kind,
+        TreeKind::Apply(_)
+    ));
+    assert!(matches!(
+        parser.ast().get(condition_block.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    assert!(matches!(
+        parser.ast().get(loop_tree.body).kind,
+        TreeKind::Literal(_)
+    ));
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(0, 21).unwrap()
+    );
+    assert_eq!(
+        parser
+            .ast()
+            .get(loop_tree.cond)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(3, 21).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn recovers_from_missing_do_while_body_or_condition() {
+    for (source, tokens) in [
+        (
+            "do while ready",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Do), 0, 2),
+                token(TokenKind::Keyword(HardKeyword::While), 3, 8),
+                token(TokenKind::Identifier, 9, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+        ),
+        (
+            "do step()",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Do), 0, 2),
+                token(TokenKind::Identifier, 3, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+        ),
+    ] {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(source, tokens, &mut names);
+        let id = parser.expr();
+        assert!(matches!(parser.ast().get(id).kind, TreeKind::While(_)));
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+}
+
+#[test]
 fn parses_if_with_parenthesized_condition() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

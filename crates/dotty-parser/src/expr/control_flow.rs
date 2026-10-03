@@ -102,6 +102,83 @@ where
         self.alloc_from(mark, TreeKind::While(While { cond, body }))
     }
 
+    pub(super) fn parse_do_while_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let body_feedback = self.observe_indented_body();
+        self.advance();
+
+        let body = if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::While)
+            || self.current().kind == TokenKind::Eof
+        {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedExpression,
+                "expected a body after `do`",
+            );
+            self.error_expr(self.current_span())
+        } else {
+            self.parse_control_body(body_feedback)
+        };
+
+        let mut newline_count = 0;
+        while matches!(
+            self.cursor.lookahead(newline_count).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            newline_count += 1;
+        }
+        if newline_count > 0
+            && self.cursor.lookahead(newline_count).kind
+                == TokenKind::Keyword(dotty_core::HardKeyword::While)
+        {
+            self.consume_control_newlines();
+        }
+
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::While) {
+            self.advance();
+        } else {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedToken,
+                "expected `while` after `do` body",
+            );
+        }
+
+        let condition = if crate::expr::can_start_expr(self.current().kind)
+            && !matches!(
+                self.current().kind,
+                TokenKind::Newline | TokenKind::Newlines | TokenKind::Outdent | TokenKind::Eof
+            ) {
+            self.expr()
+        } else {
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedExpression,
+                "expected a condition after `while`",
+            );
+            self.error_expr(self.current_span())
+        };
+
+        let body_start = self
+            .ast
+            .get(body)
+            .position
+            .map(|position| position.span().range().start())
+            .unwrap_or(mark.start());
+        let condition_block = self.alloc_from(
+            crate::Mark { start: body_start },
+            TreeKind::Block(Block {
+                stats: vec![body],
+                expr: condition,
+            }),
+        );
+        let unit_body = self.synthetic_unit_at(self.last_real_token_end);
+
+        self.alloc_from(
+            mark,
+            TreeKind::While(While {
+                cond: condition_block,
+                body: unit_body,
+            }),
+        )
+    }
+
     pub(super) fn parse_throw_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         self.advance();
         let expr = self.parse_layout_expression("expected an expression after `throw`");
