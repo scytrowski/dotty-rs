@@ -2258,7 +2258,8 @@ fn match_first_error_label(error: &TyperError, pattern_shapes: &BTreeMap<u32, St
         | TyperError::WildcardPatternBindingRejected { .. }
         | TyperError::PatternBindingOutsideCaseScope { .. }
         | TyperError::PatternBindingScopeConflict { .. }
-        | TyperError::DuplicatePatternBinding { .. } => {
+        | TyperError::DuplicatePatternBinding { .. }
+        | TyperError::PatternBindingInAlternative { .. } => {
             format!("pattern binding: {}", typer_error_name(error))
         }
         TyperError::PatternTypeMismatch { tree_index, .. }
@@ -2545,6 +2546,8 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::MemberLookup(..) => "MemberLookup",
         TyperError::UnsupportedExpression { .. } => "UnsupportedExpression",
         TyperError::UnsupportedPattern { .. } => "UnsupportedPattern",
+        TyperError::PatternBindingInAlternative { .. } => "PatternBindingInAlternative",
+        TyperError::PatternAlternativeJoinUnsupported { .. } => "PatternAlternativeJoinUnsupported",
         TyperError::MalformedCaseDef { .. } => "MalformedCaseDef",
         TyperError::MalformedPatternBinding { .. } => "MalformedPatternBinding",
         TyperError::WildcardPatternBindingRejected { .. } => "WildcardPatternBindingRejected",

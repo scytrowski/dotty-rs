@@ -312,6 +312,57 @@ impl SourceTyper<'_> {
                 info_journal,
                 new_mappings,
             )?,
+            TreeKind::Alternative(alternative) => {
+                if alternative.alternatives.is_empty() {
+                    return Err(TyperError::UnsupportedPattern {
+                        source: self.source,
+                        tree_index: pattern.index(),
+                        pattern_kind: PatternKind::Alternative,
+                    });
+                }
+                let mut typed_alternatives = Vec::with_capacity(alternative.alternatives.len());
+                let mut joined_type = None;
+                for branch in &alternative.alternatives {
+                    let branch = *branch;
+                    if let Some(binding) = self.pattern_binding_in(branch) {
+                        return Err(TyperError::PatternBindingInAlternative {
+                            source: self.source,
+                            tree_index: pattern.index(),
+                            branch_tree_index: branch.index(),
+                            binding_tree_index: binding.index(),
+                        });
+                    }
+                    let typed_branch = self.type_pattern(
+                        branch,
+                        selector_type,
+                        context,
+                        info_journal,
+                        new_mappings,
+                    )?;
+                    let branch_type = self.typed_arena.get(typed_branch).ty;
+                    let branch_type =
+                        self.widen_expression_type_journaled(branch_type, info_journal, 0)?;
+                    joined_type = Some(match joined_type {
+                        None => branch_type,
+                        Some(previous) => self
+                            .join_expression_types(previous, branch_type)
+                            .map_err(|error| TyperError::PatternAlternativeJoinUnsupported {
+                                source: self.source,
+                                tree_index: pattern.index(),
+                                left: previous,
+                                right: branch_type,
+                                error: Box::new(error),
+                            })?,
+                    });
+                    typed_alternatives.push(typed_branch);
+                }
+                let ty = joined_type.expect("a non-empty alternative has a joined type");
+                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).alternative(
+                    typed_alternatives,
+                    ty,
+                    source_tree.position,
+                )
+            }
             TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => self.type_pattern(
                 parens.inner,
                 selector_type,
@@ -348,6 +399,48 @@ impl SourceTyper<'_> {
             new_mappings.push((self.source, pattern));
         }
         Ok(typed)
+    }
+
+    /// Finds a binding form before typing an alternative branch. This keeps
+    /// rejected bindings out of the case scope and reports their source node.
+    fn pattern_binding_in(&self, pattern: TreeId<Untyped>) -> Option<TreeId<Untyped>> {
+        let tree = self.arena.try_get(pattern)?;
+        match &tree.kind {
+            TreeKind::Bind(_) => Some(pattern),
+            TreeKind::Ident(ident)
+                if !ident.backquoted
+                    && ident.name.is_term()
+                    && self.store.names.resolve(ident.name.text()) != "_"
+                    && is_variable_pattern_name(self.store, ident.name) =>
+            {
+                Some(pattern)
+            }
+            TreeKind::Typed(typed) => self.pattern_binding_in(typed.expr),
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                self.pattern_binding_in(parens.inner)
+            }
+            TreeKind::Apply(application) => application
+                .args
+                .iter()
+                .find_map(|argument| self.pattern_binding_in(*argument)),
+            TreeKind::UnApply(extractor) => extractor
+                .patterns
+                .iter()
+                .find_map(|argument| self.pattern_binding_in(*argument)),
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => tuple
+                .elements
+                .iter()
+                .find_map(|element| self.pattern_binding_in(*element)),
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => self
+                .pattern_binding_in(infix.left)
+                .or_else(|| self.pattern_binding_in(infix.right)),
+            TreeKind::NamedArg(argument) => self.pattern_binding_in(argument.arg),
+            TreeKind::Alternative(alternative) => alternative
+                .alternatives
+                .iter()
+                .find_map(|branch| self.pattern_binding_in(*branch)),
+            _ => None,
+        }
     }
 
     fn type_stable_pattern_expression(
@@ -1681,6 +1774,223 @@ mod tests {
             typer.store.types.try_get(typer.typed_arena.get(typed).ty),
             Some(Type::Constant(dotty_core::Constant::Boolean(true)))
         ));
+    }
+
+    #[test]
+    fn literal_alternatives_keep_order_join_their_types_and_reuse_identity() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case 1 | 2 => 0 } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Alternative(_)).then_some(tree))
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            })
+            .unwrap();
+        let TreeKind::Alternative(alternative) = &typer.typed_arena.get(typed).kind else {
+            panic!("expected typed alternative")
+        };
+        assert_eq!(alternative.alternatives.len(), 2);
+        assert!(matches!(
+            typer.typed_arena.get(alternative.alternatives[0]).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Int(1)
+            })
+        ));
+        assert!(matches!(
+            typer.typed_arena.get(alternative.alternatives[1]).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Int(2)
+            })
+        ));
+        assert_eq!(typer.typed_arena.get(typed).ty, definitions.int);
+        assert_eq!(typer.typed_index.get(source, pattern), Some(typed));
+        let TreeKind::Alternative(source_alternative) = &parsed.ast.get(pattern).kind else {
+            panic!("expected source alternative")
+        };
+        for (source_branch, typed_branch) in source_alternative
+            .alternatives
+            .iter()
+            .zip(alternative.alternatives.iter())
+        {
+            assert_eq!(
+                typer.typed_index.get(source, *source_branch),
+                Some(*typed_branch)
+            );
+        }
+
+        let repeated = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            })
+            .unwrap();
+        assert_eq!(repeated, typed);
+    }
+
+    #[test]
+    fn stable_value_alternatives_keep_the_source_branch_order() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { val First: Int = 1; val Second: Int = 2; def choose(x: Int): Int = x match { case First | Second => 0 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Alternative(_)).then_some(tree))
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            })
+            .unwrap();
+        let TreeKind::Alternative(alternative) = &typer.typed_arena.get(typed).kind else {
+            panic!("expected typed alternative")
+        };
+        assert!(matches!(
+            typer.typed_arena.get(alternative.alternatives[0]).kind,
+            TreeKind::Ident(Ident { name, .. }) if typer.store.names.resolve(name.text()) == "First"
+        ));
+        assert!(matches!(
+            typer.typed_arena.get(alternative.alternatives[1]).kind,
+            TreeKind::Ident(Ident { name, .. }) if typer.store.names.resolve(name.text()) == "Second"
+        ));
+        assert_eq!(typer.typed_arena.get(typed).ty, definitions.int);
+    }
+
+    #[test]
+    fn bindings_in_alternative_branches_are_rejected_without_partial_state() {
+        for source_text in [
+            "class C { def choose(x: Int): Int = x match { case item | 1 => 0 } }",
+            "class C { def choose(x: Int): Int = x match { case item @ _ | 1 => 0 } }",
+            "class C { def choose(x: Any): Int = x match { case Some(item) | 1 => 0 } }",
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+            let method = method_symbol(&parsed, &store, &index, source);
+            let pattern = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    matches!(node.kind, TreeKind::Alternative(_)).then_some(tree)
+                })
+                .unwrap();
+            let (mut typer, context) = context_for(
+                &parsed,
+                &mut store,
+                &packages,
+                definitions,
+                &index,
+                source,
+                method,
+            );
+            let error = typer
+                .run_expression_transaction(|typer, journal, mappings| {
+                    typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+                })
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    TyperError::PatternBindingInAlternative {
+                        tree_index,
+                        ..
+                    } if tree_index == pattern.index()
+                ),
+                "unexpected error: {error:?}"
+            );
+            assert!(typer.typed_arena.iter().next().is_none());
+            assert!(typer.typed_index.is_empty());
+            assert!(typer.pattern_bindings.by_tree.is_empty());
+        }
+    }
+
+    #[test]
+    fn failed_later_alternative_branch_rolls_back_earlier_branch_mapping() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case 1 | true => 0 } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Alternative(_)).then_some(tree))
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        assert!(matches!(
+            typer.run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            }),
+            Err(TyperError::PatternTypeMismatch { .. })
+        ));
+        assert!(typer.typed_arena.iter().next().is_none());
+        assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn parenthesized_alternatives_are_typed_transparently() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case (1 | 2) => 0 } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_tree, node)| match &node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let alternative = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Alternative(_)).then_some(tree))
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            })
+            .unwrap();
+        assert!(matches!(
+            typer.typed_arena.get(typed).kind,
+            TreeKind::Alternative(_)
+        ));
+        assert_eq!(typer.typed_index.get(source, alternative), Some(typed));
     }
 
     #[test]
