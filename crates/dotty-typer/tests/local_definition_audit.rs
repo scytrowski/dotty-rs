@@ -2752,6 +2752,8 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::UnsupportedExpression { .. } => "UnsupportedExpression",
         TyperError::UnsupportedPattern { .. } => "UnsupportedPattern",
         TyperError::TuplePatternResolutionDeferred { .. } => "TuplePatternResolutionDeferred",
+        TyperError::TuplePatternTypeMismatch { .. } => "TuplePatternTypeMismatch",
+        TyperError::TuplePatternRelationDeferred { .. } => "TuplePatternRelationDeferred",
         TyperError::InfixPatternDeferred { .. } => "InfixPatternDeferred",
         TyperError::PatternBindingInAlternative { .. } => "PatternBindingInAlternative",
         TyperError::PatternAlternativeJoinUnsupported { .. } => "PatternAlternativeJoinUnsupported",

@@ -548,6 +548,38 @@ impl SourceTyper<'_> {
         }
         let result_type = method.result;
         let tuple_type = method.params[0].ty;
+        let selector_conforms = self.conforms(selector_type, tuple_type);
+        if matches!(&selector_conforms, Ok(true)) {
+            // The selector already has a compatible tuple input type.
+        } else {
+            let tuple_conforms = self.conforms(tuple_type, selector_type);
+            if matches!(&tuple_conforms, Ok(true)) {
+                // A broad selector such as Any can still match this tuple.
+            } else if let Err(error) = selector_conforms {
+                return Err(TyperError::TuplePatternRelationDeferred {
+                    source: self.source,
+                    tree_index,
+                    selector: selector_type,
+                    tuple_type,
+                    error: Box::new(error),
+                });
+            } else if let Err(error) = tuple_conforms {
+                return Err(TyperError::TuplePatternRelationDeferred {
+                    source: self.source,
+                    tree_index,
+                    selector: selector_type,
+                    tuple_type,
+                    error: Box::new(error),
+                });
+            } else {
+                return Err(TyperError::TuplePatternTypeMismatch {
+                    source: self.source,
+                    tree_index,
+                    selector: selector_type,
+                    tuple_type,
+                });
+            }
+        }
         let component_types = self
             .product_component_types(
                 result_type,
@@ -2913,6 +2945,23 @@ mod tests {
                 ..
             }
         ));
+        assert!(store_rolled_back);
+        assert!(typed_state_rolled_back);
+    }
+
+    #[test]
+    fn tuple_patterns_reject_a_selector_disjoint_from_the_canonical_tuple_type() {
+        let source_text = "package scala { trait Product; class Tuple2[A, B](val _1: A, val _2: B) extends Product; class MaybeTuple2[A, B](val value: Tuple2[A, B]) { def isEmpty: Boolean = false; def get: Tuple2[A, B] = value }; object Tuple2 { def unapply[A, B](value: Tuple2[A, B]): MaybeTuple2[A, B] = new MaybeTuple2(value) } }; package app { class Unrelated {}; class C { def choose(value: Unrelated): Any = value match { case (first, second) => first; case _ => value } } }";
+        let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(source_text);
+
+        assert!(
+            matches!(
+                &error,
+                TyperError::TuplePatternTypeMismatch { .. }
+                    | TyperError::TuplePatternRelationDeferred { .. }
+            ),
+            "{error:?}"
+        );
         assert!(store_rolled_back);
         assert!(typed_state_rolled_back);
     }

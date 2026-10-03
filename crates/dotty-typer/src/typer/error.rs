@@ -1143,6 +1143,23 @@ pub enum TyperError {
         arity: usize,
         issue: TuplePatternResolutionIssue,
     },
+    /// The selector and canonical tuple input type are disjoint under the
+    /// supported bounded relation.
+    TuplePatternTypeMismatch {
+        source: SourceId,
+        tree_index: u32,
+        selector: TypeId,
+        tuple_type: TypeId,
+    },
+    /// The selector's relation to the canonical tuple input could not be
+    /// decided by the bounded type relation.
+    TuplePatternRelationDeferred {
+        source: SourceId,
+        tree_index: u32,
+        selector: TypeId,
+        tuple_type: TypeId,
+        error: Box<TypeRelationError>,
+    },
     /// General infix extractor lowering remains deferred.
     InfixPatternDeferred {
         source: SourceId,

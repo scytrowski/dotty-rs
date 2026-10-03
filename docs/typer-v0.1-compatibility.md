@@ -182,7 +182,9 @@ extractor identity and recursively typing each component. Empty tuple syntax
 is the Unit literal pattern; one-element parentheses remain transparent. A
 missing canonical tuple class, companion, or supported `unapply` shape is
 reported through `TuplePatternResolutionDeferred`, without synthesizing tuple
-symbols. Generic or overloaded extractor APIs beyond the canonical tuple
+symbols. The selector must be compatible with the instantiated tuple input;
+disjoint types fail, and relations outside the bounded checker are deferred.
+Generic or overloaded extractor APIs beyond the canonical tuple
 `unapply`, contextual, erased, repeated, or by-name parameters, `unapplySeq`,
 and pattern constraint inference remain unsupported. The
 foundation resolution shape is recorded in
