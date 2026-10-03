@@ -201,7 +201,7 @@ where
         })
     }
 
-    fn observe_definition_rhs_indentation(&mut self) -> Option<u32> {
+    pub(crate) fn observe_definition_rhs_indentation(&mut self) -> Option<u32> {
         let mut lookahead = 1;
         while matches!(
             self.cursor.lookahead(lookahead).kind,
