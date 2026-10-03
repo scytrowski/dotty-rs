@@ -411,6 +411,12 @@ where
         self.observe(ScannerEvent::ArrowIndented);
     }
 
+    pub(crate) fn observe_arrow_indented_body(&mut self) -> Option<u32> {
+        let existing_indent = self.next_indented_region_offset();
+        self.observe_arrow_indented();
+        existing_indent.or_else(|| self.next_indented_region_offset())
+    }
+
     /// Tells the scanner that a template self-type arrow was consumed.
     pub fn observe_self_arrow(&mut self) {
         self.observe(ScannerEvent::SelfArrow);
