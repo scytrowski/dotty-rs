@@ -63,6 +63,28 @@ Scala 3.9.0 `-Vprint:typer` fixture in
 pins nested `(x)` as `x` and `(1)` as `1`. Tuple syntax remains a separate
 `UntypedNode::Tuple` form.
 
+## Pattern typing foundation
+
+Pattern typing has its own recursive-ready entry point under
+`typer/expression/patterns.rs`; it consumes the selector prototype type and
+the current expression context, and records source-to-typed identity in
+`SourceTypedIndex`. The initial supported subset is deliberately narrow: an
+ordinary, unquoted term identifier whose spelling is `_`. It becomes a typed
+`Ident(_)` carrying the selector prototype unchanged. The handler does not
+perform name lookup, create a binding, or allocate symbols. Backquoted `_` and
+all other pattern roots return `UnsupportedPattern`; expression support does
+not imply pattern support.
+
+Pattern selector adaptation preserves an exact `ConstantType`. Other selector
+types use the existing expression type-widening rules. This follows the pinned
+Scala 3.9.0 typer: [`typedIdent`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/typer/Typer.scala#L622-L637)
+returns the wildcard tree with the pattern prototype, while
+[`typedMatch`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/typer/Typer.scala#L2210-L2225)
+keeps a constant selector type and widens other selector types before typing
+the cases. The fixture in
+[`wildcard-patterns`](../crates/dotty-typer/tests/fixtures/wildcard-patterns)
+records the source shape and the normalized expected wildcard tree.
+
 ## Real-source local-definition audit
 
 Run the pinned Scala 3.9.0 source audit with:
