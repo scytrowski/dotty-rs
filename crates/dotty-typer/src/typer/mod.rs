@@ -187,10 +187,11 @@ impl<'a> SourceTyper<'a> {
         context: ExpressionContext,
     ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
+            self.validate_value_expression(tree, typed)?;
             return Ok(typed);
         }
         self.run_expression_transaction(|typer, info_journal, new_mappings| {
-            typer.type_expression_inner(tree, context, info_journal, new_mappings)
+            typer.type_value_expression_inner(tree, context, info_journal, new_mappings)
         })
     }
 
@@ -247,6 +248,7 @@ impl<'a> SourceTyper<'a> {
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
+            self.validate_value_expression(tree, typed)?;
             return Ok(typed);
         }
         let Some(source_tree) = self.arena.try_get(tree).cloned() else {

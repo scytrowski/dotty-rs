@@ -1,0 +1,20 @@
+[[syntax trees at end of                     typer]] // crates/dotty-typer/tests/fixtures/boolean-extractors/BooleanExtractors.scala
+package <empty> {
+  final lazy module val Even: Even = new Even()
+  final module class Even() extends Object() { this: Even.type =>
+    def unapply(value: Int): Boolean = value % 2 == 0
+  }
+  final lazy module val BooleanExtractors: BooleanExtractors =
+    new BooleanExtractors()
+  final module class BooleanExtractors() extends Object() {
+    this: BooleanExtractors.type =>
+    def classify(value: Int): String =
+      value match
+        {
+          case Even() =>
+            "even"
+          case _ =>
+            "odd"
+        }
+  }
+}

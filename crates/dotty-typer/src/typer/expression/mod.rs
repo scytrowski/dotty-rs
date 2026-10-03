@@ -34,7 +34,8 @@ impl SourceTyper<'_> {
             });
         }
 
-        let left = self.type_expression_inner(infix.left, context, info_journal, new_mappings)?;
+        let left =
+            self.type_value_expression_inner(infix.left, context, info_journal, new_mappings)?;
         let receiver_type = self.typed_arena.get(left).ty;
         let resolved = self.resolve_infix_application_function(
             InfixApplicationRequest {
@@ -88,7 +89,7 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let typed = self.type_expression_inner(tree, context, info_journal, new_mappings)?;
+        let typed = self.type_value_expression_inner(tree, context, info_journal, new_mappings)?;
         let expression_type = self.typed_arena.get(typed).ty;
         let mut actual = self.widen_expression_type_journaled(expression_type, info_journal, 0)?;
         for (binder, parameters) in self.active_local_type_binders.iter().rev() {

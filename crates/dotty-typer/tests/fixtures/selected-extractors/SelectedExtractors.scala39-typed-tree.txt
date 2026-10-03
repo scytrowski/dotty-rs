@@ -1,0 +1,40 @@
+[[syntax trees at end of                     typer]] // crates/dotty-typer/tests/fixtures/selected-extractors/SelectedExtractors.scala
+package <empty> {
+  class MaybeInt() extends Object() {
+    def isEmpty: Boolean = false
+    def get: Int = 1
+  }
+  final lazy module val extractors: extractors = new extractors()
+  final module class extractors() extends Object() { this: extractors.type =>
+    final lazy module val SomeInt: extractors.SomeInt = new extractors.SomeInt()
+    final module class SomeInt() extends Object() {
+      this: extractors.SomeInt.type =>
+      def unapply(value: Any): MaybeInt = new MaybeInt()
+    }
+    final lazy module val Even: extractors.Even = new extractors.Even()
+    final module class Even() extends Object() { this: extractors.Even.type =>
+      def unapply(value: Int): Boolean = value % 2 == 0
+    }
+  }
+  final lazy module val SelectedExtractors: SelectedExtractors =
+    new SelectedExtractors()
+  final module class SelectedExtractors() extends Object() {
+    this: SelectedExtractors.type =>
+    def option(value: Any): Int =
+      value match
+        {
+          case extractors.SomeInt(x @ _) =>
+            x:Int
+          case _ =>
+            0
+        }
+    def boolean(value: Int): Int =
+      value match
+        {
+          case extractors.Even() =>
+            1
+          case _ =>
+            0
+        }
+  }
+}

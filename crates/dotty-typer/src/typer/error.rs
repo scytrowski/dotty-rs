@@ -1135,7 +1135,19 @@ pub enum TyperError {
         tree_index: u32,
         name: Name,
     },
-    /// The extractor qualifier uses a selected or otherwise unsupported source form.
+    /// A selected extractor qualifier member does not exist.
+    ExtractorQualifierMemberNotFound {
+        source: SourceId,
+        tree_index: u32,
+        name: Name,
+    },
+    /// A selected extractor qualifier resolves to multiple members.
+    ExtractorQualifierMemberAmbiguous {
+        source: SourceId,
+        tree_index: u32,
+        name: Name,
+    },
+    /// The extractor application function uses an unsupported source-tree shape.
     ExtractorQualifierShapeUnsupported {
         source: SourceId,
         tree_index: u32,
@@ -1197,6 +1209,13 @@ pub enum TyperError {
     },
     /// An extractor pattern has an unsupported number of nested patterns.
     ExtractorPatternArityUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        unapply: SymbolId,
+        actual: usize,
+    },
+    /// A Boolean-result extractor pattern must not bind nested patterns.
+    BooleanExtractorPatternArityUnsupported {
         source: SourceId,
         tree_index: u32,
         unapply: SymbolId,

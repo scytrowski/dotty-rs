@@ -7,6 +7,76 @@ use dotty_core::types::*;
 use dotty_core::*;
 
 impl SourceTyper<'_> {
+    pub(in crate::typer) fn non_value_term_mapping_symbol(
+        &self,
+        source_tree: TreeId<Untyped>,
+        typed_tree: TreeId<Typed>,
+    ) -> Option<SymbolId> {
+        let mut source_kind = &self.arena.try_get(source_tree)?.kind;
+        while let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = source_kind {
+            source_kind = &self.arena.try_get(parens.inner)?.kind;
+        }
+        if !matches!(source_kind, TreeKind::Ident(_) | TreeKind::Select(_)) {
+            return None;
+        }
+        let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }) = self
+            .store
+            .types
+            .try_get(self.typed_arena.get(typed_tree).ty)
+        else {
+            return None;
+        };
+        if !self.store.symbols.contains(*symbol) {
+            return None;
+        }
+        let kind = self.store.symbols.get(*symbol).kind;
+        let invalid_as_expression = match source_kind {
+            TreeKind::Ident(_) => kind == SymbolKind::Package,
+            TreeKind::Select(_) => matches!(
+                kind,
+                SymbolKind::Package
+                    | SymbolKind::Class
+                    | SymbolKind::Trait
+                    | SymbolKind::ModuleClass
+                    | SymbolKind::TypeParameter
+                    | SymbolKind::TypeAlias
+            ),
+            _ => false,
+        };
+        invalid_as_expression.then_some(*symbol)
+    }
+
+    pub(in crate::typer) fn validate_value_expression(
+        &self,
+        source_tree: TreeId<Untyped>,
+        typed_tree: TreeId<Typed>,
+    ) -> Result<(), TyperError> {
+        if let Some(symbol) = self.non_value_term_mapping_symbol(source_tree, typed_tree) {
+            return Err(TyperError::UnsupportedTermReference {
+                source: self.source,
+                tree_index: source_tree.index(),
+                symbol,
+                kind: self.store.symbols.get(symbol).kind,
+            });
+        }
+        Ok(())
+    }
+
+    pub(in crate::typer) fn type_value_expression_inner(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let typed = self.type_expression_inner(source_tree, context, info_journal, new_mappings)?;
+        self.validate_value_expression(source_tree, typed)?;
+        Ok(typed)
+    }
+
     pub(in crate::typer) fn enclosing_this_owner(
         &self,
         qualifier: Option<dotty_core::Name>,
@@ -67,10 +137,12 @@ impl SourceTyper<'_> {
                         | SymbolKind::Field
                         | SymbolKind::Value
                         | SymbolKind::Local
+                        | SymbolKind::Package
                         | SymbolKind::Object
                 ) && !declaration.flags.contains(SymbolFlags::MUTABLE)
                     && !by_name
-                    && (declaration.kind != SymbolKind::Object
+                    && (declaration.kind == SymbolKind::Package
+                        || declaration.kind != SymbolKind::Object
                         || self.source_module_class_of_object(*symbol).is_ok())
             }
             _ => false,
@@ -122,7 +194,7 @@ impl SourceTyper<'_> {
                 });
             }
         }
-        if kind != SymbolKind::Object {
+        if !matches!(kind, SymbolKind::Object | SymbolKind::Package) {
             if self.initializing_local_symbols.contains(&symbol) {
                 return Err(TyperError::RecursiveLocalValueInitializer {
                     source: self.source,
@@ -390,10 +462,51 @@ impl SourceTyper<'_> {
                 tree_index: tree.index(),
             });
         }
-        let qualifier =
-            self.type_expression_inner(selection.qualifier, context, info_journal, new_mappings)?;
+        let qualifier = if let Some(qualifier) = self.type_selection_qualifier(
+            selection.qualifier,
+            context,
+            tree.index(),
+            position,
+            info_journal,
+            new_mappings,
+        )? {
+            qualifier
+        } else {
+            self.type_expression_inner(selection.qualifier, context, info_journal, new_mappings)?
+        };
         let receiver_type = self.typed_arena.get(qualifier).ty;
         self.require_stable_selection_prefix(receiver_type, tree.index())?;
+        let package_receiver = matches!(
+            self.store.types.try_get(receiver_type),
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) if self.store.symbols.contains(*symbol)
+                && self.store.symbols.get(*symbol).kind == SymbolKind::Package
+        );
+        if package_receiver {
+            let candidate = self
+                .resolve_qualifier_symbol(tree, context.lexical, tree.index(), position)?
+                .ok_or(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    receiver: receiver_type,
+                    name: selection.name,
+                })?;
+            let ty = self.store.types.alloc(Type::TermRef {
+                prefix: receiver_type,
+                target: TermRefTarget::Symbol(candidate),
+            });
+            return Ok(
+                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).select(
+                    qualifier,
+                    selection.name,
+                    selection.backquoted,
+                    ty,
+                    position,
+                ),
+            );
+        }
         let receiver = self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
         let receiver = self.this_type_receiver_view(receiver)?;
         let candidates = self
@@ -430,5 +543,73 @@ impl SourceTyper<'_> {
                 position,
             ),
         )
+    }
+
+    /// Type a selection qualifier without treating a package path as a value.
+    /// The resulting source mappings still retain every node in the path.
+    fn type_selection_qualifier(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<Option<TreeId<Typed>>, TyperError> {
+        if let Some(typed) = self.typed_index.get(self.source, tree) {
+            return Ok(self
+                .non_value_term_mapping_symbol(tree, typed)
+                .is_some()
+                .then_some(typed));
+        }
+        let Some(node) = self.arena.try_get(tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            });
+        };
+        if let TreeKind::Select(_) = node.kind {
+            return self
+                .type_expression_inner(tree, context, info_journal, new_mappings)
+                .map(Some);
+        }
+        let TreeKind::Ident(ident) = &node.kind else {
+            return Ok(None);
+        };
+        let symbol =
+            match self.expression_term_candidates(ident.name, context, tree_index, position) {
+                Ok(candidates) if candidates.len() == 1 => candidates[0],
+                Ok(_) => return Ok(None),
+                Err(TyperError::TermNameNotFound { .. }) => {
+                    let Some(symbol) =
+                        self.resolve_qualifier_symbol(tree, context.lexical, tree_index, position)?
+                    else {
+                        return Ok(None);
+                    };
+                    symbol
+                }
+                Err(error) => return Err(error),
+            };
+        if !self.store.symbols.contains(symbol)
+            || self.store.symbols.get(symbol).kind != SymbolKind::Package
+        {
+            return Ok(None);
+        }
+        let ty = self.store.types.alloc(Type::TermRef {
+            prefix: self.definitions.no_prefix,
+            target: TermRefTarget::Symbol(symbol),
+        });
+        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .ident_with_backquoted(ident.name, ident.backquoted, ty, node.position);
+        self.typed_index
+            .insert(self.source, tree, typed)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, tree));
+        Ok(Some(typed))
     }
 }

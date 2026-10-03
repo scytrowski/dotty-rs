@@ -144,7 +144,7 @@ impl SourceTyper<'_> {
             let context = self.expression_context_for(method)?;
             let mut new_mappings = Vec::new();
             let typed_rhs =
-                self.type_expression_inner(rhs, context, info_journal, &mut new_mappings)?;
+                self.type_value_expression_inner(rhs, context, info_journal, &mut new_mappings)?;
             let rhs_type = self.typed_arena.get(typed_rhs).ty;
             let inferred = self.widen_expression_type_journaled(rhs_type, info_journal, 0)?;
             self.validate_inferred_method_result(method, method_tree_index, inferred)?;

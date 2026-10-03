@@ -311,7 +311,7 @@ impl SourceTyper<'_> {
             Some(Type::Poly(poly)) if raw_new => {
                 let mut arguments = Vec::with_capacity(argument_trees.len());
                 for argument_tree in argument_trees {
-                    let typed = self.type_expression_inner(
+                    let typed = self.type_value_expression_inner(
                         *argument_tree,
                         context,
                         info_journal,
@@ -591,8 +591,12 @@ impl SourceTyper<'_> {
         } = request;
         let mut arguments = Vec::with_capacity(argument_trees.len());
         for argument_tree in argument_trees {
-            let typed =
-                self.type_expression_inner(*argument_tree, context, info_journal, new_mappings)?;
+            let typed = self.type_value_expression_inner(
+                *argument_tree,
+                context,
+                info_journal,
+                new_mappings,
+            )?;
             let own_type = self.typed_arena.get(typed).ty;
             let widened_type = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
             arguments.push(TypedArgument {
@@ -984,8 +988,12 @@ impl SourceTyper<'_> {
             }
             let mut typed_arguments = Vec::with_capacity(clause.len());
             for argument_tree in clause {
-                let typed =
-                    self.type_expression_inner(argument_tree, context, info_journal, new_mappings)?;
+                let typed = self.type_value_expression_inner(
+                    argument_tree,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?;
                 let own_type = self.typed_arena.get(typed).ty;
                 let widened_type =
                     self.widen_expression_type_journaled(own_type, info_journal, 0)?;

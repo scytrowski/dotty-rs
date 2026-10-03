@@ -1397,6 +1397,8 @@ fn audit_source_inner(
                     | TyperError::PatternBindingScopeConflict { .. }
                     | TyperError::DuplicatePatternBinding { .. }
                     | TyperError::ExtractorQualifierNotFound { .. }
+                    | TyperError::ExtractorQualifierMemberNotFound { .. }
+                    | TyperError::ExtractorQualifierMemberAmbiguous { .. }
                     | TyperError::ExtractorQualifierShapeUnsupported { .. }
                     | TyperError::ExtractorQualifierNotValueLike { .. }
                     | TyperError::ExtractorQualifierNotStable { .. }
@@ -1407,6 +1409,7 @@ fn audit_source_inner(
                     | TyperError::ExtractorPatternConstraintDeferred { .. }
                     | TyperError::UnsupportedExtractorResultProtocol { .. }
                     | TyperError::ExtractorPatternArityUnsupported { .. }
+                    | TyperError::BooleanExtractorPatternArityUnsupported { .. }
                     | TyperError::ExtractorResultMemberNotFound { .. }
                     | TyperError::ExtractorResultMemberOverloaded { .. }
                     | TyperError::ExtractorResultMemberUnsupported { .. }
@@ -2564,6 +2567,8 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::PatternBindingInAlternative { .. } => "PatternBindingInAlternative",
         TyperError::PatternAlternativeJoinUnsupported { .. } => "PatternAlternativeJoinUnsupported",
         TyperError::ExtractorQualifierNotFound { .. } => "ExtractorQualifierNotFound",
+        TyperError::ExtractorQualifierMemberNotFound { .. } => "ExtractorQualifierMemberNotFound",
+        TyperError::ExtractorQualifierMemberAmbiguous { .. } => "ExtractorQualifierMemberAmbiguous",
         TyperError::ExtractorQualifierShapeUnsupported { .. } => {
             "ExtractorQualifierShapeUnsupported"
         }
@@ -2580,6 +2585,9 @@ fn typer_error_name(error: &TyperError) -> &'static str {
             "UnsupportedExtractorResultProtocol"
         }
         TyperError::ExtractorPatternArityUnsupported { .. } => "ExtractorPatternArityUnsupported",
+        TyperError::BooleanExtractorPatternArityUnsupported { .. } => {
+            "BooleanExtractorPatternArityUnsupported"
+        }
         TyperError::ExtractorResultMemberNotFound { .. } => "ExtractorResultMemberNotFound",
         TyperError::ExtractorResultMemberOverloaded { .. } => "ExtractorResultMemberOverloaded",
         TyperError::ExtractorResultMemberUnsupported { .. } => "ExtractorResultMemberUnsupported",
