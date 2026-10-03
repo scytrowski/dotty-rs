@@ -49,10 +49,10 @@ pub enum ExtractorResultMemberIssue {
     IsEmptyNotBoolean,
 }
 
-/// Product-selector metadata encountered while typing a binary extractor.
+/// Product-selector metadata encountered while typing an extractor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExtractorProductIssue {
-    /// The product does not expose the ordered `_1` and `_2` selectors.
+    /// The product does not expose the ordered selectors required by the pattern.
     SelectorShape,
     /// The result's relation to `scala.Product` cannot be checked.
     ProductRelationUnsupported,
@@ -1254,7 +1254,7 @@ pub enum TyperError {
         member_type: TypeId,
         issue: ExtractorResultMemberIssue,
     },
-    /// The product result does not expose exactly the supported `_1`, `_2` selectors.
+    /// The product result does not expose selectors matching the source arity.
     ExtractorProductSelectorCountMismatch {
         source: SourceId,
         tree_index: u32,

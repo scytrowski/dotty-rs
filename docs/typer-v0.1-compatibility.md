@@ -155,16 +155,16 @@ The pinned Scala 3.9.0 oracles and normalized shapes are recorded in
 [`selected-extractors`](../crates/dotty-typer/tests/fixtures/selected-extractors),
 and [`binary-product-extractors`](../crates/dotty-typer/tests/fixtures/binary-product-extractors).
 
-Binary product extraction accepts exactly two source arguments and two ordered
-component selectors. A direct `unapply` result must conform to
-`scala.Product`; its parameterless `_1` and `_2` members are discovered through
-ordinary inherited member lookup. If the direct result is not a product or its
-selectors do not match the source arity, the Option-like path checks `isEmpty`
-and reads selectors from the type returned by `get`, without using selectors
-declared by the wrapper. When that fallback is unavailable, the direct
-selector-arity error is preserved. The typer probes `_3` so a third valid
-parameterless value selector is rejected instead of truncated; a methodic or
-otherwise invalid `_3` is not a selector.
+Product extraction accepts N source arguments when it can discover the
+consecutive parameterless value selectors `_1` through `_N`. A direct
+`unapply` result must conform to `scala.Product`; selectors are discovered
+through ordinary inherited member lookup. If the direct result is not a
+product or its selectors do not match the source arity, the Option-like path
+checks `isEmpty` and reads selectors from the type returned by `get`, without
+using selectors declared by the wrapper. When that fallback is unavailable,
+the direct selector-arity error is preserved. The typer probes `_N+1` so a
+wider product is rejected instead of silently truncated; a methodic or
+otherwise invalid next selector is treated as absent.
 Each component is passed to recursive pattern typing in source order and
 remains in the existing CaseDef-local binding scope. Missing, ambiguous, or
 otherwise unsupported required selectors return a focused extractor error.
@@ -174,9 +174,9 @@ shapes.
 Zero or multiple nested patterns for scalar Option-like extractors, nonzero
 nested patterns for Boolean extractors, missing/ambiguous selected qualifier members,
 missing/overloaded Option-like protocol members, and non-Boolean `isEmpty`
-return focused extractor errors. Products with selector sets other than
-exactly `_1`, `_2`, source argument counts other than two for product results,
-and unsupported component member types are rejected explicitly. Generic or
+return focused extractor errors. Products with missing or nonconsecutive
+selectors and source argument counts that do not match the discovered product
+arity are rejected explicitly. Generic or
 overloaded `unapply`, contextual, erased, repeated, or by-name parameters,
 `unapplySeq`, tuple source patterns, and pattern constraint inference remain
 unsupported. The
@@ -187,7 +187,7 @@ The dedicated `type_case_def` helper in `expression/match_expr.rs` types
 supported `CaseDef` nodes independently; `Match` expression typing
 is supported for matches whose cases use wildcards, variable patterns, typed
 patterns in the bounded subset above, literal patterns, stable-value patterns,
-the unary Option-like and binary product extractors above, non-binding alternatives, or explicit
+the unary Option-like and N-ary product extractors above, non-binding alternatives, or explicit
 bindings over wildcard, literal, stable-value, and typed wildcard patterns. An explicit binder's info is normally the selector prototype; when
 its complete nested pattern is a typed wildcard, its info is narrowed to that
 pattern type. The nested pattern retains its own type. It types the

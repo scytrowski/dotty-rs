@@ -220,18 +220,21 @@ impl SourceTyper<'_> {
         )
     }
 
-    /// Reads the ordered `_1`, `_2` selector protocol without treating source
-    /// argument count as evidence that an arbitrary result is a product. The
-    /// `_3` probe makes products with more than two conventional selectors an
-    /// explicit arity error rather than silently truncating them.
+    /// Reads numbered product selectors in source order. The source arity
+    /// bounds traversal; probing the next selector detects wider products
+    /// without imposing a fixed maximum arity.
     fn product_extractor_component_types(
         &mut self,
         result_type: TypeId,
         pattern_index: u32,
         unapply: SymbolId,
+        expected_arity: usize,
         require_product_subtype: bool,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Option<Vec<TypeId>>, TyperError> {
+        if expected_arity == 0 {
+            return Ok(None);
+        }
         if require_product_subtype
             && !self.is_product_subtype(result_type, pattern_index, unapply, info_journal)?
         {
@@ -240,7 +243,7 @@ impl SourceTyper<'_> {
 
         let mut selectors = Vec::new();
         let mut component_types = Vec::new();
-        for index in 1..=3 {
+        for index in 1..=expected_arity.saturating_add(1) {
             let spelling = format!("_{index}");
             let name = Name::new(self.store.names.intern(&spelling), Namespace::Term);
             match self.extractor_result_member_type(
@@ -261,14 +264,19 @@ impl SourceTyper<'_> {
                         ExtractorResultMemberIssue::NotParameterless
                         | ExtractorResultMemberIssue::NotValueType,
                     ..
-                }) if index == 3 => {}
+                }) if index == expected_arity.saturating_add(1) => {}
                 Err(error) => return Err(error),
             }
         }
         if selectors.is_empty() {
             return Ok(None);
         }
-        if component_types.len() != 2 || component_types[0].0 != 1 || component_types[1].0 != 2 {
+        if component_types.len() != expected_arity
+            || component_types
+                .iter()
+                .enumerate()
+                .any(|(position, (index, _))| *index != position + 1)
+        {
             return Err(TyperError::ExtractorProductSelectorCountMismatch {
                 source: self.source,
                 tree_index: pattern_index,
@@ -326,17 +334,19 @@ impl SourceTyper<'_> {
         Ok(conforms)
     }
 
-    fn binary_product_component_types(
+    fn product_component_types(
         &mut self,
         result_type: TypeId,
         pattern_index: u32,
         unapply: SymbolId,
+        expected_arity: usize,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<TypeId>, TyperError> {
         let direct_product = self.product_extractor_component_types(
             result_type,
             pattern_index,
             unapply,
+            expected_arity,
             true,
             info_journal,
         );
@@ -360,6 +370,7 @@ impl SourceTyper<'_> {
             get_type,
             pattern_index,
             unapply,
+            expected_arity,
             false,
             info_journal,
         )?
@@ -958,6 +969,7 @@ impl SourceTyper<'_> {
                                     plan.result_type,
                                     pattern.index(),
                                     plan.symbol,
+                                    1,
                                     true,
                                     info_journal,
                                 )?
@@ -984,11 +996,13 @@ impl SourceTyper<'_> {
                                 new_mappings,
                             )?]
                         }
-                        [_, _] => {
-                            let component_types = match self.binary_product_component_types(
+                        _ if !plan.source_patterns.is_empty() => {
+                            let expected_arity = plan.source_patterns.len();
+                            let component_types = match self.product_component_types(
                                 plan.result_type,
                                 pattern.index(),
                                 plan.symbol,
+                                expected_arity,
                                 info_journal,
                             ) {
                                 Ok(component_types) => component_types,
@@ -1003,12 +1017,12 @@ impl SourceTyper<'_> {
                                         source: self.source,
                                         tree_index: pattern.index(),
                                         unapply: plan.symbol,
-                                        actual: 2,
+                                        actual: expected_arity,
                                     });
                                 }
                                 Err(error) => return Err(error),
                             };
-                            let mut patterns = Vec::with_capacity(2);
+                            let mut patterns = Vec::with_capacity(expected_arity);
                             for (source_pattern, component_type) in
                                 plan.source_patterns.iter().zip(component_types)
                             {
@@ -2419,10 +2433,64 @@ mod tests {
                 type_match_error(&source_text);
             assert!(matches!(
                 error,
-                TyperError::ExtractorPatternArityUnsupported { actual: 1 | 3, .. }
+                TyperError::ExtractorPatternArityUnsupported { actual: 1, .. }
+                    | TyperError::ExtractorProductSelectorCountMismatch { .. }
             ));
             assert!(store_rolled_back);
             assert!(typed_state_rolled_back);
+        }
+    }
+
+    #[test]
+    fn nary_product_extractors_type_components_recursively_in_order() {
+        let source_text = "package scala { trait Product }; package app { class PairResult extends scala.Product { def _1: Int = 1; def _2: Boolean = true }; class TripleResult extends scala.Product { def _1: PairResult = new PairResult; def _2: Boolean = true; def _3: Int = 3 }; object Pair { def unapply(value: Any): PairResult = new PairResult }; object Triple { def unapply(value: Any): TripleResult = new TripleResult }; class C { def choose(value: Any): Int = value match { case Triple(Pair(first, flag), enabled, last) if enabled => first; case _ => 0 } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let method = method_symbol(&parsed, &store, &index, source);
+        let match_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Match(_)).then_some(tree))
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed_match = typer.type_expression(match_tree, context).unwrap();
+        let TreeKind::Match(matching) = &typer.typed_arena.get(typed_match).kind else {
+            panic!("expected a Typed Match");
+        };
+        let TreeKind::CaseDef(case) = &typer.typed_arena.get(matching.cases[0]).kind else {
+            panic!("expected a Typed CaseDef");
+        };
+        let TreeKind::UnApply(triple) = &typer.typed_arena.get(case.pattern).kind else {
+            panic!("expected a Typed UnApply for Triple");
+        };
+        assert_eq!(triple.patterns.len(), 3);
+        assert!(matches!(
+            typer.typed_arena.get(triple.patterns[0]).kind,
+            TreeKind::UnApply(_)
+        ));
+        for (child, expected_type) in [
+            (triple.patterns[1], definitions.boolean),
+            (triple.patterns[2], definitions.int),
+        ] {
+            let child_type = typer.typed_arena.get(child).ty;
+            let actual_type = match typer.store.types.try_get(child_type) {
+                Some(Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                }) => match *typer.store.symbols.info(*symbol) {
+                    SymbolInfo::Complete(binding_type) => binding_type,
+                    info => panic!("pattern binder has incomplete info: {info:?}"),
+                },
+                _ => child_type,
+            };
+            assert_eq!(actual_type, expected_type);
         }
     }
 
