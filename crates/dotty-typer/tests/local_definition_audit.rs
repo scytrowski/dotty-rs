@@ -2760,6 +2760,8 @@ fn tree_kind_label(kind: &TreeKind<Untyped>) -> &'static str {
             UntypedNode::ContextBoundTypeTree(_) => "ContextBoundTypeTree",
             UntypedNode::Number(_) => "Number",
             UntypedNode::Throw(_) => "Throw",
+            UntypedNode::InlineIf(_) => "InlineIf",
+            UntypedNode::InlineMatch(_) => "InlineMatch",
             UntypedNode::ParsedTry(_) => "ParsedTry",
         },
     }
@@ -2791,6 +2793,8 @@ fn expression_form(kind: &TreeKind<Untyped>) -> Option<&'static str> {
         TreeKind::PhaseSpecific(UntypedNode::ForDo(_)) => Some("ForDo"),
         TreeKind::PhaseSpecific(UntypedNode::Throw(_)) => Some("Throw"),
         TreeKind::PhaseSpecific(UntypedNode::ParsedTry(_)) => Some("ParsedTry"),
+        TreeKind::PhaseSpecific(UntypedNode::InlineIf(_)) => Some("InlineIf"),
+        TreeKind::PhaseSpecific(UntypedNode::InlineMatch(_)) => Some("InlineMatch"),
         TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(_)) => Some("InterpolatedString"),
         _ => None,
     }
@@ -2925,6 +2929,13 @@ fn term_expression_children(kind: &TreeKind<Untyped>) -> Vec<dotty_core::TreeId<
             children.extend(node.parts.iter().copied());
         }
         TreeKind::PhaseSpecific(UntypedNode::Throw(node)) => children.push(node.expr),
+        TreeKind::PhaseSpecific(UntypedNode::InlineIf(node)) => {
+            children.extend([node.cond, node.then_branch, node.else_branch]);
+        }
+        TreeKind::PhaseSpecific(UntypedNode::InlineMatch(node)) => {
+            children.push(node.selector);
+            children.extend(node.cases.iter().copied());
+        }
         TreeKind::PhaseSpecific(UntypedNode::ParsedTry(node)) => {
             children.push(node.expr);
             children.extend(node.handler);
