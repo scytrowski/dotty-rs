@@ -158,6 +158,7 @@ impl SourceTyper<'_> {
         pattern: TreeId<Untyped>,
         selector_type: TypeId,
         context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, pattern) {
@@ -205,37 +206,76 @@ impl SourceTyper<'_> {
                         source_tree.position,
                     )
                 } else {
-                    return Err(TyperError::UnsupportedPattern {
-                        source: self.source,
-                        tree_index: pattern.index(),
-                        pattern_kind: pattern_kind(&source_tree.kind),
-                    });
+                    self.type_stable_pattern_expression(
+                        pattern,
+                        selector_type,
+                        context,
+                        info_journal,
+                        new_mappings,
+                    )?
                 }
             }
+            TreeKind::Select(selection) => {
+                if !selection.name.is_term() || self.arena.try_get(selection.qualifier).is_none() {
+                    return Err(TyperError::MalformedStablePatternTarget {
+                        source: self.source,
+                        tree_index: pattern.index(),
+                    });
+                }
+                self.type_stable_pattern_expression(
+                    pattern,
+                    selector_type,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?
+            }
+            TreeKind::Literal(literal) => {
+                let typed =
+                    self.type_literal_expression(pattern, literal.clone(), source_tree.position)?;
+                let actual = self.widen_expression_type_journaled(
+                    self.typed_arena.get(typed).ty,
+                    info_journal,
+                    0,
+                )?;
+                self.require_literal_pattern_compatible(
+                    self.typed_arena.get(typed).ty,
+                    actual,
+                    selector_type,
+                    pattern.index(),
+                )?;
+                typed
+            }
+            TreeKind::PhaseSpecific(UntypedNode::Number(number)) => {
+                let typed =
+                    self.type_number_literal_expression(pattern, *number, source_tree.position)?;
+                let actual = self.widen_expression_type_journaled(
+                    self.typed_arena.get(typed).ty,
+                    info_journal,
+                    0,
+                )?;
+                self.require_literal_pattern_compatible(
+                    self.typed_arena.get(typed).ty,
+                    actual,
+                    selector_type,
+                    pattern.index(),
+                )?;
+                typed
+            }
             TreeKind::Bind(binding) => {
-                if binding.given {
+                if binding.given || !self.bind_pattern_body_is_supported(binding.body) {
                     return Err(TyperError::UnsupportedBindPatternBody {
                         source: self.source,
                         tree_index: binding.body.index(),
                     });
                 }
-                let body_is_wildcard = self.arena.try_get(binding.body).is_some_and(|tree| {
-                    matches!(
-                        &tree.kind,
-                        TreeKind::Ident(body_ident)
-                            if !body_ident.backquoted
-                                && body_ident.name.is_term()
-                                && self.store.names.resolve(body_ident.name.text()) == "_"
-                    )
-                });
-                if !body_is_wildcard {
-                    return Err(TyperError::UnsupportedBindPatternBody {
-                        source: self.source,
-                        tree_index: binding.body.index(),
-                    });
-                }
-                let typed_body =
-                    self.type_pattern(binding.body, selector_type, context, new_mappings)?;
+                let typed_body = self.type_pattern(
+                    binding.body,
+                    selector_type,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?;
                 let (_symbol, binding_type) =
                     self.enter_pattern_binding(pattern, binding.name, selector_type, context)?;
                 TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).bind(
@@ -254,16 +294,149 @@ impl SourceTyper<'_> {
                 });
             }
         };
-        self.typed_index
-            .insert(self.source, pattern, typed)
-            .map_err(|conflict| TyperError::ConflictingTypedExpression {
-                source: conflict.source,
-                tree_index: conflict.untyped.index(),
-                existing: conflict.existing.index(),
-                attempted: conflict.attempted.index(),
-            })?;
-        new_mappings.push((self.source, pattern));
+        if let Some(existing) = self.typed_index.get(self.source, pattern) {
+            if existing != typed {
+                return Err(TyperError::ConflictingTypedExpression {
+                    source: self.source,
+                    tree_index: pattern.index(),
+                    existing: existing.index(),
+                    attempted: typed.index(),
+                });
+            }
+        } else {
+            self.typed_index
+                .insert(self.source, pattern, typed)
+                .map_err(|conflict| TyperError::ConflictingTypedExpression {
+                    source: conflict.source,
+                    tree_index: conflict.untyped.index(),
+                    existing: conflict.existing.index(),
+                    attempted: conflict.attempted.index(),
+                })?;
+            new_mappings.push((self.source, pattern));
+        }
         Ok(typed)
+    }
+
+    fn type_stable_pattern_expression(
+        &mut self,
+        pattern: TreeId<Untyped>,
+        selector_type: TypeId,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let typed = self.type_expression_inner(pattern, context, info_journal, new_mappings)?;
+        let reference_type = self.typed_arena.get(typed).ty;
+        let symbol = match self.store.types.try_get(reference_type) {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) if self.store.symbols.contains(*symbol) => *symbol,
+            _ => {
+                return Err(TyperError::MalformedStablePatternTarget {
+                    source: self.source,
+                    tree_index: pattern.index(),
+                });
+            }
+        };
+        if self
+            .require_stable_selection_prefix(reference_type, pattern.index())
+            .is_err()
+        {
+            return Err(TyperError::UnstablePatternValue {
+                source: self.source,
+                tree_index: pattern.index(),
+                symbol,
+            });
+        }
+        let actual = self.widen_expression_type_journaled(reference_type, info_journal, 0)?;
+        self.require_pattern_compatible(actual, selector_type, pattern.index())?;
+        Ok(typed)
+    }
+
+    fn bind_pattern_body_is_supported(&self, body: TreeId<Untyped>) -> bool {
+        let Some(tree) = self.arena.try_get(body) else {
+            return false;
+        };
+        match &tree.kind {
+            TreeKind::Ident(ident) if ident.name.is_term() => {
+                let spelling = self.store.names.resolve(ident.name.text());
+                if !ident.backquoted && spelling == "_" {
+                    true
+                } else {
+                    ident.backquoted || !is_variable_pattern_name(self.store, ident.name)
+                }
+            }
+            TreeKind::Literal(_) | TreeKind::PhaseSpecific(UntypedNode::Number(_)) => true,
+            TreeKind::Select(selection) => selection.name.is_term(),
+            _ => false,
+        }
+    }
+
+    fn require_pattern_compatible(
+        &mut self,
+        actual: TypeId,
+        selector: TypeId,
+        tree_index: u32,
+    ) -> Result<(), TyperError> {
+        let forward = self.conforms(actual, selector);
+        if matches!(forward, Ok(true)) {
+            return Ok(());
+        }
+        let reverse = self.conforms(selector, actual);
+        if matches!(reverse, Ok(true)) {
+            return Ok(());
+        }
+        if let Err(error) = forward {
+            return Err(TyperError::PatternTypeRelationDeferred {
+                source: self.source,
+                tree_index,
+                actual,
+                selector,
+                error: Box::new(error),
+            });
+        }
+        if let Err(error) = reverse {
+            return Err(TyperError::PatternTypeRelationDeferred {
+                source: self.source,
+                tree_index,
+                actual,
+                selector,
+                error: Box::new(error),
+            });
+        }
+        Err(TyperError::PatternTypeMismatch {
+            source: self.source,
+            tree_index,
+            actual,
+            selector,
+        })
+    }
+
+    fn require_literal_pattern_compatible(
+        &mut self,
+        literal_type: TypeId,
+        widened_type: TypeId,
+        selector_type: TypeId,
+        tree_index: u32,
+    ) -> Result<(), TyperError> {
+        if let Some(Type::Constant(selector_constant)) = self.store.types.try_get(selector_type) {
+            let matches_selector = matches!(
+                self.store.types.try_get(literal_type),
+                Some(Type::Constant(literal_constant)) if literal_constant == selector_constant
+            );
+            return if matches_selector {
+                Ok(())
+            } else {
+                Err(TyperError::PatternTypeMismatch {
+                    source: self.source,
+                    tree_index,
+                    actual: literal_type,
+                    selector: selector_type,
+                })
+            };
+        }
+        self.require_pattern_compatible(widened_type, selector_type, tree_index)
     }
 
     /// Computes the selector prototype used by patterns, preserving literal
@@ -364,6 +537,26 @@ mod tests {
         (method.unwrap(), pattern.unwrap())
     }
 
+    fn method_symbol(
+        parsed: &dotty_parser::ParseResult,
+        store: &SemanticStore,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+    ) -> dotty_core::SymbolId {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "choose" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap()
+    }
+
     fn context_for<'a>(
         parsed: &'a dotty_parser::ParseResult,
         store: &'a mut SemanticStore,
@@ -419,8 +612,9 @@ mod tests {
             method,
         );
         let first = typer
-            .run_expression_transaction(|typer, _journal, mappings| {
-                let typed = typer.type_pattern(pattern, definitions.int, context, mappings)?;
+            .run_expression_transaction(|typer, journal, mappings| {
+                let typed =
+                    typer.type_pattern(pattern, definitions.int, context, journal, mappings)?;
                 Ok(typed)
             })
             .unwrap();
@@ -430,9 +624,10 @@ mod tests {
         assert_eq!(typer.typed_index.get(source, pattern), Some(first));
 
         let repeated = typer
-            .run_expression_transaction(|typer, _journal, mappings| {
+            .run_expression_transaction(|typer, journal, mappings| {
                 let before = mappings.len();
-                let typed = typer.type_pattern(pattern, definitions.int, context, mappings)?;
+                let typed =
+                    typer.type_pattern(pattern, definitions.int, context, journal, mappings)?;
                 assert_eq!(mappings.len(), before);
                 Ok(typed)
             })
@@ -440,8 +635,14 @@ mod tests {
         assert_eq!(repeated, first);
 
         let reference_pattern = typer
-            .run_expression_transaction(|typer, _journal, mappings| {
-                typer.type_pattern(second_pattern, definitions.object_type, context, mappings)
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(
+                    second_pattern,
+                    definitions.object_type,
+                    context,
+                    journal,
+                    mappings,
+                )
             })
             .unwrap();
         assert_eq!(
@@ -451,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn uppercase_identifier_pattern_is_not_a_variable_binding() {
+    fn uppercase_identifier_pattern_uses_stable_value_resolution() {
         let (parsed, mut store, packages, definitions, index, source) =
             setup("class C { def choose(x: Int): Int = x match { case Value => 1 } }");
         let method = parsed
@@ -486,23 +687,17 @@ mod tests {
             method,
         );
         let error = typer
-            .run_expression_transaction(|typer, _journal, mappings| {
-                typer.type_pattern(pattern, definitions.int, context, mappings)
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
             })
             .unwrap_err();
-        assert!(matches!(
-            error,
-            TyperError::UnsupportedPattern {
-                pattern_kind: PatternKind::Identifier,
-                ..
-            }
-        ));
+        assert!(matches!(error, TyperError::TermNameNotFound { .. }));
         assert_eq!(typer.typed_arena.iter().count(), 0);
         assert!(typer.typed_index.is_empty());
     }
 
     #[test]
-    fn backquoted_lowercase_identifier_is_not_a_variable_binding() {
+    fn unresolved_backquoted_identifier_uses_stable_value_resolution() {
         let (parsed, mut store, packages, definitions, index, source) =
             setup("class C { def choose(x: Int): Int = x match { case `value` => 1 } }");
         let method = parsed
@@ -539,16 +734,515 @@ mod tests {
             method,
         );
         let error = typer
-            .run_expression_transaction(|typer, _journal, mappings| {
-                typer.type_pattern(pattern, definitions.int, context, mappings)
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
             })
             .unwrap_err();
+        assert!(matches!(error, TyperError::TermNameNotFound { .. }));
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+    }
+
+    #[test]
+    fn literal_patterns_keep_constant_types_and_check_selector_compatibility() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case 1 => 1 } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            })
+            .unwrap();
         assert!(matches!(
-            error,
-            TyperError::UnsupportedPattern {
-                pattern_kind: PatternKind::Identifier,
+            typer.store.types.try_get(typer.typed_arena.get(typed).ty),
+            Some(Type::Constant(dotty_core::Constant::Int(1)))
+        ));
+        assert!(matches!(
+            typer.typed_arena.get(typed).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Int(1)
+            })
+        ));
+
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case 1 => 1 } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        assert!(matches!(
+            typer.run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.boolean, context, journal, mappings)
+            }),
+            Err(TyperError::PatternTypeMismatch { actual, selector, .. })
+                if actual == definitions.int && selector == definitions.boolean
+        ));
+        assert!(typer.typed_arena.iter().next().is_none());
+        assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn boolean_literal_pattern_uses_boolean_selector_prototype() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Boolean): Int = x match { case true => 1 } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.boolean, context, journal, mappings)
+            })
+            .unwrap();
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(typed).ty),
+            Some(Type::Constant(dotty_core::Constant::Boolean(true)))
+        ));
+    }
+
+    #[test]
+    fn unsupported_pattern_selector_relation_is_deferred() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(x: Int): Int = x match { case 1 => 1 } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let unsupported_selector = typer.store.types.alloc(Type::And {
+            left: definitions.int,
+            right: definitions.object_type,
+        });
+        assert!(matches!(
+            typer.run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, unsupported_selector, context, journal, mappings)
+            }),
+            Err(TyperError::PatternTypeRelationDeferred { .. })
+        ));
+        assert_eq!(typer.typed_arena.iter().count(), 0);
+        assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn stable_identifier_pattern_preserves_its_term_reference_without_binding() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { val Stable: Int = 1; def choose(value: Int): Int = value match { case Stable => 1 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let expected_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Stable" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            })
+            .unwrap();
+        assert!(matches!(
+            typer.typed_arena.get(typed).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(typed).ty),
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
                 ..
-            }
+            }) if *symbol == expected_symbol
+        ));
+        assert_eq!(
+            typer.store.symbols.get(expected_symbol).kind,
+            SymbolKind::Field
+        );
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+    }
+
+    #[test]
+    fn object_identifier_pattern_resolves_the_stable_object_term() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "object Foo; class C { def choose(value: Any): Int = value match { case Foo => 1 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let object_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition))
+                    if store.names.resolve(definition.name.as_name().text()) == "Foo" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.any_type, context, journal, mappings)
+            })
+            .unwrap();
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(typed).ty),
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) if *symbol == object_symbol
+        ));
+        assert_eq!(
+            typer.store.symbols.get(object_symbol).kind,
+            SymbolKind::Object
+        );
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+    }
+
+    #[test]
+    fn stable_pattern_mismatch_rolls_back_reference_and_symbol_state() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { val Stable: Int = 1; def choose(value: Boolean): Int = value match { case Stable => 1 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let stable_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Stable" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let previous_info = store.symbols.get(stable_symbol).info;
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        assert!(matches!(
+            typer.run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.boolean, context, journal, mappings)
+            }),
+            Err(TyperError::PatternTypeMismatch {
+                actual, selector, ..
+            }) if actual == definitions.int && selector == definitions.boolean
+        ));
+        assert_eq!(typer.store.symbols.get(stable_symbol).info, previous_info);
+        assert!(typer.typed_index.is_empty());
+        assert_eq!(typer.typed_arena.iter().count(), 0);
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+    }
+
+    #[test]
+    fn mutable_stable_looking_pattern_is_rejected() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { var Stable: Int = 1; def choose(value: Int): Int = value match { case Stable => 1 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let expected_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Stable" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        assert!(matches!(
+            typer.run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            }),
+            Err(TyperError::UnstablePatternValue { symbol, .. })
+                if symbol == expected_symbol
+        ));
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+        assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn method_reference_is_not_a_stable_pattern_value() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { def Stable: Int = 1; def choose(value: Int): Int = value match { case Stable => 1 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let expected_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Stable" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        assert!(matches!(
+            typer.run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            }),
+            Err(TyperError::UnstablePatternValue { symbol, .. })
+                if symbol == expected_symbol
+        ));
+        assert!(typer.typed_index.is_empty());
+    }
+
+    #[test]
+    fn stable_selection_pattern_preserves_the_selected_symbol_and_prefix() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "object Values { val Stable: Int = 1 }; class C { def choose(value: Int): Int = value match { case Values.Stable => 1 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match node.kind {
+                TreeKind::CaseDef(case_def) => Some(case_def.pattern),
+                _ => None,
+            })
+            .unwrap();
+        let expected_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Stable" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            })
+            .unwrap();
+        assert!(matches!(
+            typer.typed_arena.get(typed).kind,
+            TreeKind::Select(_)
+        ));
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(typed).ty),
+            Some(Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(symbol),
+            }) if *symbol == expected_symbol && *prefix != definitions.no_prefix
+        ));
+        assert_eq!(
+            typer.store.symbols.get(expected_symbol).kind,
+            SymbolKind::Field
+        );
+    }
+
+    #[test]
+    fn backquoted_lowercase_stable_parameter_resolves_without_binding() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            setup("class C { def choose(stable: Int): Int = stable match { case `stable` => 1 } }");
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Ident(ident)
+                    if ident.backquoted && store.names.resolve(ident.name.text()) == "stable" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let expected_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "stable" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed = typer
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
+            })
+            .unwrap();
+        assert!(matches!(
+            typer.typed_arena.get(typed).kind,
+            TreeKind::Ident(ident) if ident.backquoted
+        ));
+        assert!(matches!(
+            typer.store.types.try_get(typer.typed_arena.get(typed).ty),
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) if *symbol == expected_symbol
         ));
         assert!(typer.pattern_bindings.by_tree.is_empty());
     }
@@ -590,11 +1284,16 @@ mod tests {
                 method,
             );
             let error = typer
-                .run_expression_transaction(|typer, _journal, mappings| {
-                    typer.type_pattern(pattern, definitions.int, context, mappings)
+                .run_expression_transaction(|typer, journal, mappings| {
+                    typer.type_pattern(pattern, definitions.int, context, journal, mappings)
                 })
                 .unwrap_err();
-            assert!(matches!(error, TyperError::UnsupportedPattern { .. }));
+            assert!(matches!(
+                error,
+                TyperError::UnsupportedPattern { .. }
+                    | TyperError::PatternTypeMismatch { .. }
+                    | TyperError::NullLiteralTypingDeferred { .. }
+            ));
             assert!(typer.pattern_bindings.by_tree.is_empty());
             assert_eq!(typer.typed_arena.iter().count(), 0);
         }
@@ -620,17 +1319,11 @@ mod tests {
             method,
         );
         let error = typer
-            .run_expression_transaction(|typer, _journal, mappings| {
-                typer.type_pattern(pattern, definitions.int, context, mappings)
+            .run_expression_transaction(|typer, journal, mappings| {
+                typer.type_pattern(pattern, definitions.int, context, journal, mappings)
             })
             .unwrap_err();
-        assert!(matches!(
-            error,
-            TyperError::UnsupportedPattern {
-                pattern_kind: PatternKind::Identifier,
-                ..
-            }
-        ));
+        assert!(matches!(error, TyperError::TermNameNotFound { .. }));
         assert_eq!(typer.typed_arena.iter().count(), 0);
         assert!(typer.typed_index.is_empty());
     }
@@ -667,8 +1360,8 @@ mod tests {
             definitions.int
         );
         let typed_pattern = typer
-            .run_expression_transaction(|typer, _info_journal, mappings| {
-                typer.type_pattern(pattern, singleton, context, mappings)
+            .run_expression_transaction(|typer, info_journal, mappings| {
+                typer.type_pattern(pattern, singleton, context, info_journal, mappings)
             })
             .unwrap();
         assert_eq!(typer.typed_arena.get(typed_pattern).ty, singleton);
