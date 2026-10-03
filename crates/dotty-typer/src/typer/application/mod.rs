@@ -344,13 +344,15 @@ impl SourceTyper<'_> {
             }
             arguments.push(argument);
         }
-        Ok(TypedAstBuilder::new(&mut self.typed_arena).apply_with_kind(
-            function,
-            arguments,
-            application_kind,
-            method.result,
-            position,
-        ))
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
+                function,
+                arguments,
+                application_kind,
+                method.result,
+                position,
+            ),
+        )
     }
 
     pub(in crate::typer) fn type_type_application(
@@ -431,11 +433,13 @@ impl SourceTyper<'_> {
                 new_mappings,
             )?);
         }
-        Ok(TypedAstBuilder::new(&mut self.typed_arena).type_apply(
-            function,
-            typed_type_arguments,
-            instantiated.result,
-            position,
-        ))
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).type_apply(
+                function,
+                typed_type_arguments,
+                instantiated.result,
+                position,
+            ),
+        )
     }
 }

@@ -495,8 +495,10 @@ impl SourceTyper<'_> {
             info_journal,
         )?;
         let typed = match source_node.kind {
-            TreeKind::Ident(ident) => TypedAstBuilder::new(&mut self.typed_arena)
-                .ident_with_backquoted(ident.name, ident.backquoted, ty, source_node.position),
+            TreeKind::Ident(ident) => {
+                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                    .ident_with_backquoted(ident.name, ident.backquoted, ty, source_node.position)
+            }
             TreeKind::Select(selection) => {
                 let qualifier = self.type_import_qualifier(
                     selection.qualifier,
@@ -505,7 +507,7 @@ impl SourceTyper<'_> {
                     info_journal,
                     new_mappings,
                 )?;
-                TypedAstBuilder::new(&mut self.typed_arena).select(
+                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).select(
                     qualifier,
                     selection.name,
                     selection.backquoted,
@@ -600,8 +602,10 @@ impl SourceTyper<'_> {
                 })?;
         let ty = self.store.types.alloc(Type::NoType);
         let typed = match source_node.kind {
-            TreeKind::Ident(ident) => TypedAstBuilder::new(&mut self.typed_arena)
-                .ident_with_backquoted(ident.name, ident.backquoted, ty, source_node.position),
+            TreeKind::Ident(ident) => {
+                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                    .ident_with_backquoted(ident.name, ident.backquoted, ty, source_node.position)
+            }
             TreeKind::TypeTree(_) => {
                 let ty = self.type_of_tpt_inner(tree, context)?;
                 self.typed_arena.alloc(Tree {

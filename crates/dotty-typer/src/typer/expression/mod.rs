@@ -263,7 +263,8 @@ impl SourceTyper<'_> {
                 tree_kind: tree_kind_name(&source_node.kind),
             });
         }
-        let typed = TypedAstBuilder::new(&mut self.typed_arena).type_tree(ty, source_node.position);
+        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .type_tree(ty, source_node.position);
         self.typed_index
             .insert(self.source, source_tree, typed)
             .map_err(|error| TyperError::ConflictingTypedExpression {
@@ -316,7 +317,8 @@ impl SourceTyper<'_> {
                 tree_kind: tree_kind_name(&source_node.kind),
             });
         }
-        let typed = TypedAstBuilder::new(&mut self.typed_arena).type_tree(ty, source_node.position);
+        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .type_tree(ty, source_node.position);
         self.typed_index
             .insert(self.source, source_tree, typed)
             .map_err(|error| TyperError::ConflictingTypedExpression {
@@ -347,6 +349,9 @@ impl SourceTyper<'_> {
             new_mappings,
         )?;
         let tpt = self.reify_type_ascription_tree(ascription.tpt, expected, new_mappings)?;
-        Ok(TypedAstBuilder::new(&mut self.typed_arena).typed_expr(expr, tpt, expected, position))
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .typed_expr(expr, tpt, expected, position),
+        )
     }
 }

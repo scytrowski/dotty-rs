@@ -316,7 +316,13 @@ impl SourceTyper<'_> {
             .store
             .types
             .alloc(Type::Constant(literal.value.clone()));
-        Ok(TypedAstBuilder::new(&mut self.typed_arena).literal(literal.value, ty, position))
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).literal(
+                literal.value,
+                ty,
+                position,
+            ),
+        )
     }
 
     pub(in crate::typer) fn type_number_literal_expression(
@@ -327,7 +333,10 @@ impl SourceTyper<'_> {
     ) -> Result<TreeId<Typed>, TyperError> {
         let value = self.type_number_literal(number, tree.index())?;
         let ty = self.store.types.alloc(Type::Constant(value.clone()));
-        Ok(TypedAstBuilder::new(&mut self.typed_arena).literal(value, ty, position))
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .literal(value, ty, position),
+        )
     }
 
     pub(in crate::typer) fn type_this_expression(
@@ -339,7 +348,10 @@ impl SourceTyper<'_> {
     ) -> Result<TreeId<Typed>, TyperError> {
         let class = self.enclosing_this_owner(this.qual, context.owner, tree.index())?;
         let ty = self.store.types.alloc(Type::ThisType { class });
-        Ok(TypedAstBuilder::new(&mut self.typed_arena).this(this.qual, ty, position))
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .this(this.qual, ty, position),
+        )
     }
 
     pub(in crate::typer) fn type_identifier_expression(
@@ -354,7 +366,7 @@ impl SourceTyper<'_> {
         let ty =
             self.expression_type_of_symbol(symbol, context.owner, tree.index(), info_journal)?;
         Ok(
-            TypedAstBuilder::new(&mut self.typed_arena).ident_with_backquoted(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).ident_with_backquoted(
                 ident.name,
                 ident.backquoted,
                 ty,
@@ -409,12 +421,14 @@ impl SourceTyper<'_> {
             prefix: receiver_type,
             target: TermRefTarget::Symbol(candidate.symbol),
         });
-        Ok(TypedAstBuilder::new(&mut self.typed_arena).select(
-            qualifier,
-            selection.name,
-            selection.backquoted,
-            ty,
-            position,
-        ))
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).select(
+                qualifier,
+                selection.name,
+                selection.backquoted,
+                ty,
+                position,
+            ),
+        )
     }
 }

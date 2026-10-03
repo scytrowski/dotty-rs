@@ -283,13 +283,15 @@ impl SourceTyper<'_> {
                 right: else_type,
                 error: Box::new(error),
             })?;
-        Ok(TypedAstBuilder::new(&mut self.typed_arena).if_expr(
-            cond,
-            then_branch,
-            else_branch,
-            ty,
-            position,
-        ))
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).if_expr(
+                cond,
+                then_branch,
+                else_branch,
+                ty,
+                position,
+            ),
+        )
     }
 
     pub(in crate::typer) fn type_while_expression(
@@ -333,12 +335,14 @@ impl SourceTyper<'_> {
             })?;
         let body =
             self.type_expression_inner(while_expr.body, context, info_journal, new_mappings)?;
-        Ok(TypedAstBuilder::new(&mut self.typed_arena).while_expr(
-            cond,
-            body,
-            self.definitions.unit,
-            position,
-        ))
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).while_expr(
+                cond,
+                body,
+                self.definitions.unit,
+                position,
+            ),
+        )
     }
 
     pub(in crate::typer) fn type_return_expression(
@@ -411,17 +415,21 @@ impl SourceTyper<'_> {
             let actual =
                 self.widen_expression_type_journaled(unit_literal_type, info_journal, 0)?;
             self.check_return_expression_type(tree.index(), actual, expected)?;
-            Some(TypedAstBuilder::new(&mut self.typed_arena).literal(
-                dotty_core::Constant::Unit,
-                unit_literal_type,
-                position,
-            ))
+            Some(
+                TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).literal(
+                    dotty_core::Constant::Unit,
+                    unit_literal_type,
+                    position,
+                ),
+            )
         };
-        Ok(TypedAstBuilder::new(&mut self.typed_arena).return_expr(
-            expr,
-            None,
-            self.definitions.nothing_type,
-            position,
-        ))
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).return_expr(
+                expr,
+                None,
+                self.definitions.nothing_type,
+                position,
+            ),
+        )
     }
 }
