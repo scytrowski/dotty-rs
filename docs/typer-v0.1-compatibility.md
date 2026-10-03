@@ -72,7 +72,7 @@ the current expression context, and records source-to-typed identity in
 lowercase variable identifiers, literal constants, stable term identifiers and
 selections, explicit bindings over wildcard, literal, or stable-value
 patterns, plus a bounded subset of typed patterns (`_: T`, `x: T`, and
-`x @ (_: T)`).
+`x @ (_: T)`), and non-binding alternatives of supported patterns.
 Wildcards become typed `Ident(_)` nodes carrying the selector prototype.
 Variable identifiers lower to typed `Bind(name, _)` nodes and introduce one
 typer-owned local symbol in the case scope. Explicit `name @ _` uses the same
@@ -130,13 +130,19 @@ The normalized variable and explicit Bind shapes are pinned in
 [`variable-patterns`](../crates/dotty-typer/tests/fixtures/variable-patterns).
 Literal and stable-value pattern shapes are pinned in
 [`value-patterns`](../crates/dotty-typer/tests/fixtures/value-patterns).
+Alternative branches use the same selector prototype and retain source order.
+Their widened pattern types are folded through the existing bounded branch
+join; unsupported relations produce a focused alternative-join error. Binding
+patterns in any branch are rejected before they can enter the case scope. The
+literal and stable-value source shapes are pinned against Scala 3.9.0 in
+[`pattern-alternatives`](../crates/dotty-typer/tests/fixtures/pattern-alternatives).
 
 The dedicated `type_case_def` helper in `expression/match_expr.rs` types
 supported `CaseDef` nodes independently; `Match` expression typing
 is supported for matches whose cases use wildcards, variable patterns, typed
 patterns in the bounded subset above, literal patterns, stable-value patterns,
-or explicit bindings over wildcard, literal, stable-value, and typed wildcard
-patterns. An explicit binder's info is normally the selector prototype; when
+non-binding alternatives, or explicit bindings over wildcard, literal,
+stable-value, and typed wildcard patterns. An explicit binder's info is normally the selector prototype; when
 its complete nested pattern is a typed wildcard, its info is narrowed to that
 pattern type. The nested pattern retains its own type. It types the
 selector once, preserves the selector's own type, and computes the shared
@@ -154,7 +160,7 @@ and before the body, in the same case-local scope. They use canonical Boolean
 as the expected type and retain their own typed expression type. Guard types do
 not participate in Match result joining. Pattern, guard, and body failures
 roll back the case and enclosing Match transaction. Unsupported patterns,
-including alternatives, tuple patterns, and extractors, fail
+including tuple patterns and extractors, fail
 before guard or body typing. Empty Match nodes and failed case typing return
 focused errors, and the enclosing expression transaction rolls back all case
 and selector state on failure. The normalized

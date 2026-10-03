@@ -1087,6 +1087,21 @@ pub enum TyperError {
         tree_index: u32,
         pattern_kind: PatternKind,
     },
+    /// Pattern alternatives cannot introduce bindings in any branch.
+    PatternBindingInAlternative {
+        source: SourceId,
+        tree_index: u32,
+        branch_tree_index: u32,
+        binding_tree_index: u32,
+    },
+    /// The bounded relation could not compute a common type for alternative branches.
+    PatternAlternativeJoinUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        left: TypeId,
+        right: TypeId,
+        error: Box<TypeRelationError>,
+    },
     /// An identifier pattern is not a well-formed term-name pattern.
     MalformedVariablePattern {
         source: SourceId,

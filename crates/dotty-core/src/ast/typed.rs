@@ -3,8 +3,8 @@
 
 use crate::ast::arena::AstArena;
 use crate::ast::common::{
-    Apply, ApplyKind, Assign, Bind, Block, CaseDef, Ident, If, Literal, Match, New, Return, Select,
-    This, TypeApply, TypeTree, TypedExpr, While,
+    Alternative, Apply, ApplyKind, Assign, Bind, Block, CaseDef, Ident, If, Literal, Match, New,
+    Return, Select, This, TypeApply, TypeTree, TypedExpr, While,
 };
 use crate::ast::phase::Typed;
 use crate::ast::tree::{Tree, TreeKind};
@@ -98,6 +98,29 @@ impl<'a> TypedAstBuilder<'a> {
     ) -> TreeId<Typed> {
         self.arena.alloc(Tree {
             kind: TreeKind::Literal(Literal { value }),
+            position,
+            ty,
+        })
+    }
+
+    /// Allocates a typed pattern alternative with its already-computed type.
+    /// The alternatives are kept in source order.
+    pub fn alternative(
+        &mut self,
+        alternatives: Vec<TreeId<Typed>>,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        assert!(
+            !alternatives.is_empty(),
+            "a typed alternative must have a branch"
+        );
+        for alternative in &alternatives {
+            self.assert_real_typed_tree(*alternative, "each typed alternative branch");
+        }
+        self.assert_real_type(ty, "a typed alternative");
+        self.arena.alloc(Tree {
+            kind: TreeKind::Alternative(Alternative { alternatives }),
             position,
             ty,
         })
