@@ -635,7 +635,17 @@ impl<'source> RawLexer<'source> {
 
         let span = self.span(start)?;
         let text = self.source.slice(span)?;
-        if allow_interpolation && self.cursor.peek() == Some('"') {
+        let kind = if !allow_interpolation {
+            RawTokenKind::Identifier
+        } else {
+            classify_keyword(text)
+                .map(RawTokenKind::Keyword)
+                .unwrap_or(RawTokenKind::Identifier)
+        };
+        if allow_interpolation
+            && kind == RawTokenKind::Identifier
+            && self.cursor.peek() == Some('"')
+        {
             let multiline =
                 self.cursor.peek_nth(1) == Some('"') && self.cursor.peek_nth(2) == Some('"');
             self.modes.push(LexMode::InterpolatedString(StringState {
@@ -648,14 +658,6 @@ impl<'source> RawLexer<'source> {
                 span,
             });
         }
-        let kind = if !allow_interpolation {
-            RawTokenKind::Identifier
-        } else {
-            classify_keyword(text)
-                .map(RawTokenKind::Keyword)
-                .unwrap_or(RawTokenKind::Identifier)
-        };
-
         Ok(RawToken { kind, span })
     }
 
@@ -1973,6 +1975,27 @@ mod tests {
                 trivia(TriviaKind::Spaces, 5, 6),
                 token(RawTokenKind::Identifier, 6, 9),
                 token(RawTokenKind::Eof, 9, 9),
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn hard_keywords_before_quotes_are_not_interpolator_prefixes() {
+        let (items, diagnostics) = scan("then\"\" else\"other\" do\"body\"");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Keyword(HardKeyword::Then), 0, 4),
+                token(RawTokenKind::StringLiteral, 4, 6),
+                trivia(TriviaKind::Spaces, 6, 7),
+                token(RawTokenKind::Keyword(HardKeyword::Else), 7, 11),
+                token(RawTokenKind::StringLiteral, 11, 18),
+                trivia(TriviaKind::Spaces, 18, 19),
+                token(RawTokenKind::Keyword(HardKeyword::Do), 19, 21),
+                token(RawTokenKind::StringLiteral, 21, 27),
+                token(RawTokenKind::Eof, 27, 27),
             ]
         );
         assert!(diagnostics.is_empty());

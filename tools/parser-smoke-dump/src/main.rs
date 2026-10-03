@@ -1443,6 +1443,33 @@ fn quote(value: impl AsRef<str>) -> String {
 mod tests {
     use super::*;
     use dotty_core::ast::UntypedNode;
+    use dotty_core::{HardKeyword, TokenSource};
+
+    #[test]
+    fn keeps_control_keywords_before_adjacent_literals_in_the_token_stream() {
+        let source = concat!(
+            "def thenString(x: Boolean) = if x then\"\" else \"result\"\n",
+            "def elseInt(x: Boolean) = if x then 1 else\"other\"\n",
+            "def doString(x: Boolean) = while x do\"body\"\n",
+        );
+        let mut scanner = ContextualScanner::new(source).expect("source should scan cleanly");
+        let mut kinds = Vec::new();
+        while scanner.current().kind != dotty_core::TokenKind::Eof {
+            kinds.push(scanner.current().kind);
+            scanner.advance();
+        }
+
+        assert!(kinds.contains(&dotty_core::TokenKind::Keyword(HardKeyword::Then)));
+        assert!(kinds.contains(&dotty_core::TokenKind::Keyword(HardKeyword::Else)));
+        assert!(kinds.contains(&dotty_core::TokenKind::Keyword(HardKeyword::Do)));
+
+        let scanner = ContextualScanner::new(source).expect("source should scan cleanly");
+        let source_text = SourceText::new(source).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
 
     #[test]
     fn parses_a_multiline_lambda_body_inside_a_nested_call_argument() {
