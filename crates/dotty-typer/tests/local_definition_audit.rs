@@ -6,7 +6,7 @@ use dotty_classloader::classloader::{
     ClassPathEntry, ClasspathSymbolResolver, CompositeClassPath, JarClassPath, JdkClassPath,
     LoadingSession,
 };
-use dotty_core::ast::{TreeKind, Untyped, UntypedNode};
+use dotty_core::ast::{Match, Tree, TreeKind, Untyped, UntypedNode};
 use dotty_core::{
     Definitions, MemberRequest, Packages, ResolutionError, ResolverCheckpoint, SemanticStore,
     SourceId, SourceText, SymbolId, SymbolResolver, TextRange,
@@ -235,6 +235,7 @@ struct Audit {
     expression_forms: BTreeMap<String, usize>,
     parser_diagnostics: BTreeMap<String, usize>,
     match_readiness: MatchReadiness,
+    match_profile: MatchProfile,
 }
 
 impl Default for Audit {
@@ -254,6 +255,7 @@ impl Default for Audit {
             expression_forms: empty_expression_histogram(),
             parser_diagnostics: BTreeMap::new(),
             match_readiness: MatchReadiness::default(),
+            match_profile: MatchProfile::default(),
         }
     }
 }
@@ -264,8 +266,30 @@ struct MatchReadiness {
     matches: usize,
     cases: usize,
     guarded_cases: usize,
+    first_blocker_errors: BTreeMap<String, usize>,
+    first_blocker_error_files: BTreeMap<String, BTreeSet<String>>,
     pattern_shapes: BTreeMap<String, usize>,
     pattern_shape_files: BTreeMap<String, BTreeSet<String>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MatchProfile {
+    matches: usize,
+    cases: usize,
+    guarded_cases: usize,
+    pattern_roots: BTreeMap<String, usize>,
+    pattern_root_files: BTreeMap<String, BTreeSet<String>>,
+    typed_case_successes: BTreeMap<String, usize>,
+    typed_pattern_boundaries: BTreeMap<String, usize>,
+    extractor_roots: BTreeMap<String, usize>,
+    extractor_dispatch: BTreeMap<String, usize>,
+    extractor_type_applied: usize,
+    extractor_argument_counts: BTreeMap<usize, usize>,
+    extractor_nested_roots: BTreeMap<String, usize>,
+    sequence_wildcards: usize,
+    named_pattern_arguments: usize,
+    infix_pattern_forms: usize,
+    extractor_files: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -295,6 +319,7 @@ impl Audit {
             *self.parser_diagnostics.entry(name).or_default() += count;
         }
         self.match_readiness.merge(other.match_readiness);
+        self.match_profile.merge(other.match_profile);
         for (name, count) in other.buckets {
             *self.buckets.entry(name).or_default() += count;
         }
@@ -315,6 +340,13 @@ impl MatchReadiness {
         self.matches += other.matches;
         self.cases += other.cases;
         self.guarded_cases += other.guarded_cases;
+        merge_counts(&mut self.first_blocker_errors, other.first_blocker_errors);
+        for (error, files) in other.first_blocker_error_files {
+            self.first_blocker_error_files
+                .entry(error)
+                .or_default()
+                .extend(files);
+        }
         for (shape, count) in other.pattern_shapes {
             *self.pattern_shapes.entry(shape).or_default() += count;
         }
@@ -324,6 +356,47 @@ impl MatchReadiness {
                 .or_default()
                 .extend(files);
         }
+    }
+}
+
+impl MatchProfile {
+    fn merge(&mut self, other: Self) {
+        self.matches += other.matches;
+        self.cases += other.cases;
+        self.guarded_cases += other.guarded_cases;
+        self.sequence_wildcards += other.sequence_wildcards;
+        self.named_pattern_arguments += other.named_pattern_arguments;
+        self.infix_pattern_forms += other.infix_pattern_forms;
+        self.extractor_type_applied += other.extractor_type_applied;
+        self.extractor_files.extend(other.extractor_files);
+        merge_counts(&mut self.pattern_roots, other.pattern_roots);
+        merge_counts(&mut self.typed_case_successes, other.typed_case_successes);
+        merge_counts(
+            &mut self.typed_pattern_boundaries,
+            other.typed_pattern_boundaries,
+        );
+        merge_counts(&mut self.extractor_roots, other.extractor_roots);
+        merge_counts(&mut self.extractor_dispatch, other.extractor_dispatch);
+        merge_counts(
+            &mut self.extractor_argument_counts,
+            other.extractor_argument_counts,
+        );
+        merge_counts(
+            &mut self.extractor_nested_roots,
+            other.extractor_nested_roots,
+        );
+        for (shape, files) in other.pattern_root_files {
+            self.pattern_root_files
+                .entry(shape)
+                .or_default()
+                .extend(files);
+        }
+    }
+}
+
+fn merge_counts<K: Ord>(target: &mut BTreeMap<K, usize>, source: BTreeMap<K, usize>) {
+    for (key, count) in source {
+        *target.entry(key).or_default() += count;
     }
 }
 
@@ -472,6 +545,7 @@ fn pinned_scala39_local_definition_audit() {
     }
     print_ranked_gaps(&audit.failures);
     print_match_readiness(&audit.match_readiness);
+    print_match_profile(&audit.match_profile);
     print_resolver_metrics(&resolver_metrics.borrow());
     println!("AUDIT_REPORT_END");
 }
@@ -595,7 +669,7 @@ fn print_ranked_gaps(failures: &BTreeMap<String, FailureBucket>) {
         );
     }
     println!("top_gap_implementation_scope_notes:");
-    for (name, bucket) in ranked.iter().take(5) {
+    for (name, bucket) in ranked.iter().take(10) {
         let (slice, owner, prerequisites, non_goals) = scope_note_for_bucket(name);
         println!(
             "  {name} ({} occurrences, {} files): first_slice={slice}; owner={owner}; prerequisites={prerequisites}; non_goals={non_goals}",
@@ -988,6 +1062,203 @@ fn audit_source_with_classpath(
     audit_source_inner(text, path, Some((classpath, metrics)))
 }
 
+fn probe_supported_match_cases(
+    text: &str,
+    path: &str,
+    classpath: SharedClassPath,
+    typed_pattern_boundaries: &mut BTreeMap<String, usize>,
+) -> BTreeMap<String, usize> {
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let Ok(scanner) = ContextualScanner::new(text) else {
+        return BTreeMap::new();
+    };
+    let mut parsed = parse_compilation_unit(
+        SourceText::new(text).expect("source text should be valid"),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    let mut namer_packages = Packages::new();
+    let Ok(index) = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        path,
+        &mut store,
+        &mut namer_packages,
+    ) else {
+        return BTreeMap::new();
+    };
+    let method_ranges = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            let method = index.symbol_at(source, tree)?;
+            let rhs = definition.rhs?;
+            let range = parsed.ast.get(rhs).position?.span().range();
+            Some((method, range))
+        })
+        .collect::<Vec<_>>();
+    let mut probe_specs = Vec::new();
+    for (_, node) in parsed.ast.iter() {
+        let TreeKind::Match(matched) = &node.kind else {
+            continue;
+        };
+        let Some(match_range) = node.position.map(|position| position.span().range()) else {
+            continue;
+        };
+        let Some((method, _)) = method_ranges
+            .iter()
+            .filter(|(_, range)| {
+                range.start() <= match_range.start() && match_range.end() <= range.end()
+            })
+            .min_by_key(|(_, range)| range.end().saturating_sub(range.start()))
+        else {
+            continue;
+        };
+        for case_tree in &matched.cases {
+            let Some(case_node) = parsed.ast.try_get(*case_tree) else {
+                continue;
+            };
+            let TreeKind::CaseDef(case) = &case_node.kind else {
+                continue;
+            };
+            let family = pattern_root_shape(&parsed.ast, &store.names, case.pattern);
+            if !is_supported_case_family(&family) {
+                continue;
+            }
+            probe_specs.push((
+                *method,
+                matched.selector,
+                *case_tree,
+                node.position,
+                family,
+                case.guard.is_some(),
+            ));
+        }
+    }
+    let probes = probe_specs
+        .into_iter()
+        .map(|(method, selector, case, position, family, guarded)| {
+            let synthetic_match = parsed.ast.alloc(Tree {
+                kind: TreeKind::Match(Match {
+                    selector,
+                    cases: vec![case],
+                }),
+                position,
+                ty: (),
+            });
+            (method, synthetic_match, family, guarded)
+        })
+        .collect::<Vec<_>>();
+
+    let packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer = typer.with_resolver(Box::new(AuditResolver {
+        inner: ClasspathSymbolResolver::new(
+            classpath,
+            definitions,
+            LoadingSession::with_packages(Packages::new()),
+        ),
+        metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
+    }));
+
+    let mut successes = [
+        "wildcard",
+        "variable/bind",
+        "literal",
+        "stable identifier/selection",
+        "guarded supported case",
+        "typed wildcard",
+        "typed variable",
+        "typed explicit Bind",
+    ]
+    .into_iter()
+    .map(|family| (family.to_owned(), 0))
+    .collect::<BTreeMap<_, _>>();
+    for (method, match_tree, family, guarded) in probes {
+        let outcome = typer
+            .expression_context_for(method)
+            .and_then(|context| typer.type_expression(match_tree, context));
+        match outcome {
+            Ok(_) => {
+                *successes
+                    .entry(family_success_bucket(&family).to_owned())
+                    .or_default() += 1;
+                if guarded {
+                    *successes
+                        .entry("guarded supported case".to_owned())
+                        .or_default() += 1;
+                }
+            }
+            Err(error) if family.starts_with("typed") => {
+                let boundary = match error {
+                    TyperError::TypedPatternRuntimeTestDeferred { .. } => {
+                        Some("generic/erased or unsupported runtime test")
+                    }
+                    TyperError::TypedPatternRelationDeferred { .. } => {
+                        Some("unsupported typed-pattern relation")
+                    }
+                    TyperError::TypedPatternTypeMismatch { .. } => {
+                        Some("typed-pattern type mismatch")
+                    }
+                    TyperError::UnsupportedTypeTree { .. } => {
+                        Some("unsupported type-tree projection")
+                    }
+                    _ => None,
+                };
+                if let Some(boundary) = boundary {
+                    *typed_pattern_boundaries
+                        .entry(boundary.to_owned())
+                        .or_default() += 1;
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    successes
+}
+
+fn is_supported_case_family(family: &str) -> bool {
+    matches!(
+        family,
+        "wildcard"
+            | "variable identifier"
+            | "wildcard/identifier/bind"
+            | "literal"
+            | "stable identifier"
+            | "stable selection"
+            | "typed wildcard"
+            | "typed variable"
+            | "typed explicit Bind"
+    )
+}
+
+fn family_success_bucket(family: &str) -> &'static str {
+    match family {
+        "wildcard" => "wildcard",
+        "variable identifier" | "wildcard/identifier/bind" => "variable/bind",
+        "literal" => "literal",
+        "stable identifier" | "stable selection" => "stable identifier/selection",
+        "typed wildcard" => "typed wildcard",
+        "typed variable" => "typed variable",
+        "typed explicit Bind" => "typed explicit Bind",
+        _ => "other",
+    }
+}
+
 fn audit_source_inner(
     text: &str,
     path: &str,
@@ -1016,6 +1287,7 @@ fn audit_source_inner(
     audit.files_attempted = 1;
     audit.expression_forms = collect_expression_histogram(&parsed.ast);
     audit.recovered_parser_files = usize::from(!parsed.diagnostics.is_empty());
+    collect_match_profile(&parsed.ast, path, &store, &mut audit.match_profile);
     for diagnostic in &parsed.diagnostics {
         let failure = classify_parse_diagnostic(diagnostic.kind());
         *audit.parser_diagnostics.entry(failure.bucket).or_default() += 1;
@@ -1044,6 +1316,7 @@ fn audit_source_inner(
     if audit.local_defdefs == 0 {
         return audit;
     }
+    let probe_classpath = classpath.as_ref().map(|(classpath, _)| classpath.clone());
 
     let root_methods = parsed
         .ast
@@ -1060,6 +1333,19 @@ fn audit_source_inner(
         .collect::<Vec<_>>();
 
     let local_method_trees = local_method_trees(&parsed.ast);
+    let match_pattern_shapes = parsed
+        .ast
+        .iter()
+        .filter_map(|(_, node)| {
+            let TreeKind::CaseDef(case) = &node.kind else {
+                return None;
+            };
+            Some((
+                case.pattern.index(),
+                pattern_root_shape(&parsed.ast, &store.names, case.pattern),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let typer_packages = Packages::new();
     let mut typer = SourceTyper::new(
@@ -1096,8 +1382,28 @@ fn audit_source_inner(
                     | TyperError::MatchSelectorTypeCannotBeAdapted { .. }
                     | TyperError::MatchCaseResultTypeCannotBeWidened { .. }
                     | TyperError::MatchCaseJoinUnsupported { .. }
+                    | TyperError::MalformedVariablePattern { .. }
+                    | TyperError::UnsupportedBindPatternBody { .. }
+                    | TyperError::PatternTypeMismatch { .. }
+                    | TyperError::PatternTypeRelationDeferred { .. }
+                    | TyperError::TypedPatternTypeMismatch { .. }
+                    | TyperError::TypedPatternRelationDeferred { .. }
+                    | TyperError::TypedPatternRuntimeTestDeferred { .. }
+                    | TyperError::MalformedStablePatternTarget { .. }
+                    | TyperError::UnstablePatternValue { .. }
+                    | TyperError::MalformedPatternBinding { .. }
+                    | TyperError::WildcardPatternBindingRejected { .. }
+                    | TyperError::PatternBindingOutsideCaseScope { .. }
+                    | TyperError::PatternBindingScopeConflict { .. }
+                    | TyperError::DuplicatePatternBinding { .. }
             ) {
-                collect_match_readiness(&parsed.ast, rhs, path, &mut audit.match_readiness);
+                collect_match_readiness(
+                    &parsed.ast,
+                    rhs,
+                    path,
+                    match_first_error_label(&error, &match_pattern_shapes),
+                    &mut audit.match_readiness,
+                );
             }
             root_failures.push((range, failure));
         }
@@ -1121,6 +1427,14 @@ fn audit_source_inner(
             record_failure(&mut audit, kind, path);
         }
     }
+    if let Some(classpath) = probe_classpath {
+        audit.match_profile.typed_case_successes = probe_supported_match_cases(
+            text,
+            path,
+            classpath,
+            &mut audit.match_profile.typed_pattern_boundaries,
+        );
+    }
     audit
 }
 
@@ -1140,6 +1454,18 @@ fn print_match_readiness(readiness: &MatchReadiness) {
         "  unguarded_cases={}",
         readiness.cases - readiness.guarded_cases
     );
+    println!("  first_blocker_errors:");
+    for (error, count) in &readiness.first_blocker_errors {
+        let files = readiness
+            .first_blocker_error_files
+            .get(error)
+            .into_iter()
+            .flatten()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>();
+        println!("    {error}={count} files=[{}]", files.join(", "));
+    }
     println!("  pattern_root_shapes:");
     for (shape, count) in &readiness.pattern_shapes {
         let files = readiness
@@ -1158,9 +1484,19 @@ fn collect_match_readiness(
     arena: &dotty_core::AstArena<Untyped>,
     root: dotty_core::TreeId<Untyped>,
     path: &str,
+    first_error: String,
     readiness: &mut MatchReadiness,
 ) {
     readiness.first_blocker_methods += 1;
+    *readiness
+        .first_blocker_errors
+        .entry(first_error.clone())
+        .or_default() += 1;
+    readiness
+        .first_blocker_error_files
+        .entry(first_error)
+        .or_default()
+        .insert(path.to_owned());
     let nodes = arena
         .iter()
         .map(|(tree, node)| (tree.index(), node))
@@ -1220,6 +1556,349 @@ fn collect_match_readiness(
             pending.extend(definition.rhs);
         }
     }
+}
+
+fn collect_match_profile(
+    arena: &dotty_core::AstArena<Untyped>,
+    path: &str,
+    store: &SemanticStore,
+    profile: &mut MatchProfile,
+) {
+    for (_, node) in arena.iter() {
+        let TreeKind::Match(matched) = &node.kind else {
+            continue;
+        };
+        profile.matches += 1;
+        for case_tree in &matched.cases {
+            let Some(case_node) = arena.try_get(*case_tree) else {
+                continue;
+            };
+            let TreeKind::CaseDef(case) = &case_node.kind else {
+                continue;
+            };
+            profile.cases += 1;
+            profile.guarded_cases += usize::from(case.guard.is_some());
+            let shape = pattern_root_shape(arena, &store.names, case.pattern);
+            *profile.pattern_roots.entry(shape.clone()).or_default() += 1;
+            profile
+                .pattern_root_files
+                .entry(shape)
+                .or_default()
+                .insert(path.to_owned());
+            if matches!(
+                arena.try_get(case.pattern).map(|pattern| &pattern.kind),
+                Some(TreeKind::Apply(_)) | Some(TreeKind::TypeApply(_))
+            ) {
+                profile.extractor_files.insert(path.to_owned());
+            }
+            collect_pattern_features(arena, &store.names, case.pattern, profile);
+        }
+    }
+}
+
+fn pattern_root_shape(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::NameInterner,
+    tree: dotty_core::TreeId<Untyped>,
+) -> String {
+    let Some(node) = arena.try_get(tree) else {
+        return "other".to_owned();
+    };
+    match &node.kind {
+        TreeKind::Ident(ident) if names.resolve(ident.name.text()) == "_" && !ident.backquoted => {
+            "wildcard".to_owned()
+        }
+        TreeKind::Ident(ident) if is_variable_pattern_ident(names, ident.name, ident.backquoted) => {
+            "variable identifier".to_owned()
+        }
+        TreeKind::Ident(_) => "stable identifier".to_owned(),
+        TreeKind::Select(_) => "stable selection".to_owned(),
+        TreeKind::Bind(binding)
+            if arena.try_get(binding.body).is_some_and(|body| {
+                matches!(&body.kind, TreeKind::Typed(typed) if is_wildcard_or_variable_pattern(arena, names, typed.expr))
+            }) =>
+        {
+            "typed explicit Bind".to_owned()
+        }
+        TreeKind::Bind(_) => "wildcard/identifier/bind".to_owned(),
+        TreeKind::Literal(_) | TreeKind::PhaseSpecific(UntypedNode::Number(_)) => {
+            "literal".to_owned()
+        }
+        TreeKind::Typed(typed) => {
+            let Some(expr) = arena.try_get(typed.expr) else {
+                return "typed pattern".to_owned();
+            };
+            match &expr.kind {
+                TreeKind::Ident(ident)
+                    if names.resolve(ident.name.text()) == "_" && !ident.backquoted =>
+                {
+                    "typed wildcard".to_owned()
+                }
+                TreeKind::Ident(ident)
+                    if is_variable_pattern_ident(names, ident.name, ident.backquoted) =>
+                {
+                    "typed variable".to_owned()
+                }
+                _ => "typed pattern".to_owned(),
+            }
+        }
+        TreeKind::Alternative(_) => "alternative".to_owned(),
+        TreeKind::PhaseSpecific(UntypedNode::Tuple(_)) => "tuple".to_owned(),
+        TreeKind::Apply(_) => "extractor-looking Apply".to_owned(),
+        TreeKind::TypeApply(_) => "extractor-looking TypeApply".to_owned(),
+        TreeKind::UnApply(_) => "UnApply".to_owned(),
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => "infix pattern".to_owned(),
+        _ => "other".to_owned(),
+    }
+}
+
+fn is_variable_pattern_ident(
+    names: &dotty_core::NameInterner,
+    name: dotty_core::Name,
+    backquoted: bool,
+) -> bool {
+    if backquoted || !name.is_term() {
+        return false;
+    }
+    let spelling = names.resolve(name.text());
+    if matches!(spelling, "_" | "true" | "false" | "null") {
+        return false;
+    }
+    spelling
+        .chars()
+        .next()
+        .is_some_and(|first| first == '_' || (first.is_alphabetic() && first.is_lowercase()))
+}
+
+fn is_wildcard_or_variable_pattern(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::NameInterner,
+    tree: dotty_core::TreeId<Untyped>,
+) -> bool {
+    arena.try_get(tree).is_some_and(|node| match &node.kind {
+        TreeKind::Ident(ident) => {
+            !ident.backquoted
+                && (names.resolve(ident.name.text()) == "_"
+                    || is_variable_pattern_ident(names, ident.name, false))
+        }
+        _ => false,
+    })
+}
+
+fn collect_pattern_features(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::NameInterner,
+    root: dotty_core::TreeId<Untyped>,
+    profile: &mut MatchProfile,
+) {
+    if matches!(
+        arena.try_get(root).map(|node| &node.kind),
+        Some(TreeKind::TypeApply(_))
+    ) {
+        collect_extractor_profile(arena, names, root, profile);
+    }
+    let mut visited = HashSet::new();
+    let mut pending = vec![root];
+    while let Some(tree) = pending.pop() {
+        if !visited.insert(tree) {
+            continue;
+        }
+        let Some(node) = arena.try_get(tree) else {
+            continue;
+        };
+        match &node.kind {
+            TreeKind::NamedArg(named) => {
+                profile.named_pattern_arguments += 1;
+                pending.push(named.arg);
+            }
+            TreeKind::Apply(application) => {
+                collect_extractor_profile(arena, names, tree, profile);
+                pending.extend(application.args.iter().copied());
+            }
+            TreeKind::TypeApply(application) => pending.push(application.function),
+            TreeKind::Typed(typed) => pending.push(typed.expr),
+            TreeKind::Bind(binding) => pending.push(binding.body),
+            TreeKind::Alternative(alternative) => {
+                pending.extend(alternative.alternatives.iter().copied());
+            }
+            TreeKind::UnApply(unapply) => pending.extend(unapply.patterns.iter().copied()),
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+                pending.extend(tuple.elements.iter().copied());
+            }
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => pending.push(parens.inner),
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
+                profile.infix_pattern_forms += 1;
+                pending.extend([infix.left, infix.right]);
+            }
+            TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) => {
+                if names.resolve(postfix.op.text()) == "*" {
+                    profile.sequence_wildcards += 1;
+                }
+                pending.push(postfix.operand);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_extractor_profile(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::NameInterner,
+    root: dotty_core::TreeId<Untyped>,
+    profile: &mut MatchProfile,
+) {
+    let root_is_type_apply = matches!(
+        arena.try_get(root).map(|node| &node.kind),
+        Some(TreeKind::TypeApply(_))
+    );
+    *profile
+        .extractor_roots
+        .entry(
+            if root_is_type_apply {
+                "TypeApply root"
+            } else {
+                "Apply root"
+            }
+            .to_owned(),
+        )
+        .or_default() += 1;
+    let mut cursor = root;
+    let mut type_applied = false;
+    while let Some(node) = arena.try_get(cursor) {
+        match &node.kind {
+            TreeKind::TypeApply(application) => {
+                type_applied = true;
+                cursor = application.function;
+            }
+            TreeKind::Apply(application) => {
+                type_applied |= count_type_applications(arena, application.function) > 0;
+                *profile
+                    .extractor_argument_counts
+                    .entry(application.args.len())
+                    .or_default() += 1;
+                for argument in &application.args {
+                    let shape = pattern_root_shape(arena, names, *argument);
+                    *profile.extractor_nested_roots.entry(shape).or_default() += 1;
+                }
+                let function = peel_type_applications(arena, application.function);
+                let dispatch = match arena.try_get(function).map(|node| &node.kind) {
+                    Some(TreeKind::Ident(_)) => "simple extractor identifier",
+                    Some(TreeKind::Select(_)) => "selected extractor",
+                    _ => "other extractor function shape",
+                };
+                *profile
+                    .extractor_dispatch
+                    .entry(dispatch.to_owned())
+                    .or_default() += 1;
+                if type_applied {
+                    profile.extractor_type_applied += 1;
+                }
+                return;
+            }
+            _ => return,
+        }
+    }
+    if type_applied {
+        profile.extractor_type_applied += 1;
+    }
+}
+
+fn count_type_applications(
+    arena: &dotty_core::AstArena<Untyped>,
+    mut tree: dotty_core::TreeId<Untyped>,
+) -> usize {
+    let mut count = 0;
+    while let Some(node) = arena.try_get(tree) {
+        let TreeKind::TypeApply(application) = &node.kind else {
+            break;
+        };
+        count += 1;
+        tree = application.function;
+    }
+    count
+}
+
+fn peel_type_applications(
+    arena: &dotty_core::AstArena<Untyped>,
+    mut tree: dotty_core::TreeId<Untyped>,
+) -> dotty_core::TreeId<Untyped> {
+    while let Some(node) = arena.try_get(tree) {
+        let TreeKind::TypeApply(application) = &node.kind else {
+            break;
+        };
+        tree = application.function;
+    }
+    tree
+}
+
+fn print_match_profile(profile: &MatchProfile) {
+    println!("match_corpus_profile:");
+    println!("  matches={}", profile.matches);
+    println!("  cases={}", profile.cases);
+    println!("  guarded_cases={}", profile.guarded_cases);
+    println!(
+        "  unguarded_cases={}",
+        profile.cases - profile.guarded_cases
+    );
+    println!("  pattern_root_shapes:");
+    for (shape, count) in &profile.pattern_roots {
+        let files = profile
+            .pattern_root_files
+            .get(shape)
+            .into_iter()
+            .flatten()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>();
+        println!("    {shape}={count} files=[{}]", files.join(", "));
+    }
+    println!("  typed_case_successes:");
+    for (family, count) in &profile.typed_case_successes {
+        println!("    {family}={count}");
+    }
+    println!("  typed_pattern_boundaries:");
+    for (boundary, count) in &profile.typed_pattern_boundaries {
+        println!("    {boundary}={count}");
+    }
+    println!("  extractor_root_shapes:");
+    for (shape, count) in &profile.extractor_roots {
+        println!("    {shape}={count}");
+    }
+    println!("  extractor_dispatch:");
+    for (shape, count) in &profile.extractor_dispatch {
+        println!("    {shape}={count}");
+    }
+    println!(
+        "  extractor_type_applied={}",
+        profile.extractor_type_applied
+    );
+    println!("  extractor_argument_counts:");
+    for (count, occurrences) in &profile.extractor_argument_counts {
+        println!("    {count}={occurrences}");
+    }
+    println!("  extractor_nested_argument_roots:");
+    for (shape, count) in &profile.extractor_nested_roots {
+        println!("    {shape}={count}");
+    }
+    println!(
+        "  sequence_wildcard_occurrences={}",
+        profile.sequence_wildcards
+    );
+    println!(
+        "  named_pattern_arguments={}",
+        profile.named_pattern_arguments
+    );
+    println!("  infix_pattern_forms={}", profile.infix_pattern_forms);
+    println!(
+        "  extractor_representative_files=[{}]",
+        profile
+            .extractor_files
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 }
 
 fn audit_classpath_from_environment() -> SharedClassPath {
@@ -1563,6 +2242,39 @@ fn classify_namer_error(error: &NamerError) -> FailureClassification {
     FailureClassification {
         bucket: bucket.to_owned(),
         family: FailureFamily::ParserNamer,
+    }
+}
+
+fn match_first_error_label(error: &TyperError, pattern_shapes: &BTreeMap<u32, String>) -> String {
+    match error {
+        TyperError::UnsupportedPattern { pattern_kind, .. } => {
+            format!("UnsupportedPattern::{}", pattern_kind.as_str())
+        }
+        TyperError::UnsupportedBindPatternBody { .. } => {
+            "UnsupportedPattern::binding body".to_owned()
+        }
+        TyperError::MalformedVariablePattern { .. }
+        | TyperError::MalformedPatternBinding { .. }
+        | TyperError::WildcardPatternBindingRejected { .. }
+        | TyperError::PatternBindingOutsideCaseScope { .. }
+        | TyperError::PatternBindingScopeConflict { .. }
+        | TyperError::DuplicatePatternBinding { .. } => {
+            format!("pattern binding: {}", typer_error_name(error))
+        }
+        TyperError::PatternTypeMismatch { tree_index, .. }
+        | TyperError::PatternTypeRelationDeferred { tree_index, .. } => {
+            let shape = pattern_shapes
+                .get(tree_index)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_owned());
+            format!("{shape}: {}", typer_error_name(error))
+        }
+        TyperError::TypedPatternTypeMismatch { .. }
+        | TyperError::TypedPatternRelationDeferred { .. }
+        | TyperError::TypedPatternRuntimeTestDeferred { .. } => {
+            format!("typed pattern: {}", typer_error_name(error))
+        }
+        _ => typer_error_name(error).to_owned(),
     }
 }
 
