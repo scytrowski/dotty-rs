@@ -1814,6 +1814,12 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::UnsupportedPattern { .. } => "UnsupportedPattern",
         TyperError::MalformedCaseDef { .. } => "MalformedCaseDef",
         TyperError::MatchGuardDeferred { .. } => "MatchGuardDeferred",
+        TyperError::EmptyMatchCases { .. } => "EmptyMatchCases",
+        TyperError::MatchSelectorTypeCannotBeAdapted { .. } => "MatchSelectorTypeCannotBeAdapted",
+        TyperError::MatchCaseResultTypeCannotBeWidened { .. } => {
+            "MatchCaseResultTypeCannotBeWidened"
+        }
+        TyperError::MatchCaseJoinUnsupported { .. } => "MatchCaseJoinUnsupported",
         TyperError::LocalBlockDeclarationDeferred { .. } => "LocalBlockDeclarationDeferred",
         TyperError::InvalidInferredLocalValueType { .. } => "InvalidInferredLocalValueType",
         TyperError::LocalValueRightHandSideMissing { .. } => "LocalValueRightHandSideMissing",

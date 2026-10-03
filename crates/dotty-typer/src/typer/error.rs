@@ -1098,6 +1098,32 @@ pub enum TyperError {
         source: SourceId,
         tree_index: u32,
     },
+    /// A source Match has no cases, so no result type can be derived.
+    EmptyMatchCases {
+        source: SourceId,
+        tree_index: u32,
+    },
+    /// The selector type could not be adapted to a pattern prototype.
+    MatchSelectorTypeCannotBeAdapted {
+        source: SourceId,
+        tree_index: u32,
+        error: Box<TyperError>,
+    },
+    /// A case body's type could not be widened for the bounded result join.
+    MatchCaseResultTypeCannotBeWidened {
+        source: SourceId,
+        tree_index: u32,
+        case_tree_index: u32,
+        error: Box<TyperError>,
+    },
+    /// The bounded result join cannot decide a relation between two cases.
+    MatchCaseJoinUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        left: TypeId,
+        right: TypeId,
+        error: Box<TypeRelationError>,
+    },
     /// A block statement changes the local declaration or import environment.
     LocalBlockDeclarationDeferred {
         source: SourceId,
