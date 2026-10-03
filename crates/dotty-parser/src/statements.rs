@@ -541,7 +541,9 @@ where
         });
         if let Some(tree) = matching_tree {
             self.end_marked_trees.insert(tree);
-            self.extend_tree_end(tree, target_end);
+            if let Some(last) = last {
+                self.extend_end_marker_owner_path(last, tree, target_end);
+            }
         } else if last.is_some_and(|tree| {
             self.end_marker_owner(tree, target_kind, &target_text, marker.start(), true)
                 .is_some()
@@ -596,8 +598,77 @@ where
         marker_start: u32,
         include_marked: bool,
     ) -> Option<TreeId<Untyped>> {
-        self.end_marker_is_eligible(tree, target_kind, target_text, marker_start, include_marked)
-            .then_some(tree)
+        if self.end_marker_matches(tree, target_kind, target_text) {
+            return self
+                .end_marker_is_eligible(
+                    tree,
+                    target_kind,
+                    target_text,
+                    marker_start,
+                    include_marked,
+                )
+                .then_some(tree);
+        }
+
+        let precedes_marker = self
+            .ast
+            .get(tree)
+            .position
+            .is_some_and(|position| position.span().range().end() <= marker_start);
+        if !precedes_marker {
+            return None;
+        }
+
+        // A scanner outdent can surface an end marker in the enclosing
+        // statement sequence after the template parser has returned. In that
+        // case the target may still name the last nested template member, not
+        // the enclosing object/package tree that is now the sequence's last
+        // direct statement.
+        self.last_nested_end_marker_owner(tree).and_then(|nested| {
+            self.end_marker_owner(
+                nested,
+                target_kind,
+                target_text,
+                marker_start,
+                include_marked,
+            )
+        })
+    }
+
+    fn last_nested_end_marker_owner(&self, tree: TreeId<Untyped>) -> Option<TreeId<Untyped>> {
+        use dotty_core::ast::UntypedNode;
+
+        match &self.ast.get(tree).kind {
+            TreeKind::PackageDef(package) => package.stats.last().copied(),
+            TreeKind::TypeDef(definition) => Some(definition.rhs),
+            TreeKind::Template(template) => template.body.last().copied(),
+            TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)) => {
+                Some(definition.template)
+            }
+            _ => None,
+        }
+    }
+
+    fn extend_end_marker_owner_path(
+        &mut self,
+        root: TreeId<Untyped>,
+        owner: TreeId<Untyped>,
+        end: u32,
+    ) -> bool {
+        if root == owner {
+            self.extend_tree_end(root, end);
+            return true;
+        }
+
+        let Some(nested) = self.last_nested_end_marker_owner(root) else {
+            return false;
+        };
+        if !self.extend_end_marker_owner_path(nested, owner, end) {
+            return false;
+        }
+
+        self.extend_tree_end(root, end);
+        true
     }
 
     fn end_marker_is_eligible(
