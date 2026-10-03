@@ -278,6 +278,14 @@ where
                 self.parse_indented_block()
             };
         }
+        if !can_start_expr(self.current().kind) {
+            let position = self.current_span();
+            self.report(
+                crate::ParseDiagnosticKind::ExpectedExpression,
+                "expected an expression for the control-flow branch",
+            );
+            return self.error_expr(position);
+        }
         self.expr()
     }
 

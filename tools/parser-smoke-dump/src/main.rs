@@ -1645,7 +1645,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_else_body_reports_diagnostic_without_hanging_the_source_parser() {
+    fn missing_else_body_diagnoses_without_consuming_the_next_template_member() {
         const SOURCE: &str = concat!(
             "object O {\n",
             "  def choose(flag: Boolean, value: Int): Int = {\n",
@@ -1684,7 +1684,7 @@ mod tests {
         assert!(template.body.iter().any(|id| matches!(
             &result.ast.get(*id).kind,
             TreeKind::DefDef(definition)
-                if names.resolve(definition.name.as_name().text()) == "choose"
+                if names.resolve(definition.name.as_name().text()) == "after"
         )));
     }
 
