@@ -73,6 +73,13 @@ where
     }
 
     fn expr1(&mut self) -> TreeId<Untyped> {
+        if self.current().kind == TokenKind::Identifier
+            && self.current_text_is("inline")
+            && (self.starts_inline_if() || self.starts_inline_match())
+        {
+            let mark = self.mark();
+            return self.parse_inline_expr(mark);
+        }
         if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::If) {
             let mark = self.mark();
             return self.parse_if_expr(mark);
@@ -100,6 +107,99 @@ where
 
         let tree = self.postfix_expr();
         self.expr1_rest(tree)
+    }
+
+    fn starts_inline_if(&mut self) -> bool {
+        self.cursor.lookahead(1).kind == TokenKind::Keyword(dotty_core::HardKeyword::If)
+    }
+
+    fn starts_inline_match(&mut self) -> bool {
+        let mut nesting = [0u32; 3];
+        let mut offset = 1;
+        loop {
+            let token = self.cursor.lookahead(offset);
+            match token.kind {
+                TokenKind::Keyword(dotty_core::HardKeyword::Match) if nesting == [0, 0, 0] => {
+                    return true;
+                }
+                TokenKind::Eof
+                | TokenKind::Newline
+                | TokenKind::Newlines
+                | TokenKind::Indent
+                | TokenKind::Outdent
+                | TokenKind::Punctuation(Punctuation::Semicolon | Punctuation::Comma)
+                    if nesting == [0, 0, 0] =>
+                {
+                    return false;
+                }
+                TokenKind::Punctuation(Punctuation::LeftParen) => nesting[0] += 1,
+                TokenKind::Punctuation(Punctuation::RightParen) => {
+                    if nesting[0] == 0 {
+                        return false;
+                    }
+                    nesting[0] -= 1;
+                }
+                TokenKind::Punctuation(Punctuation::LeftBracket) => nesting[1] += 1,
+                TokenKind::Punctuation(Punctuation::RightBracket) => {
+                    if nesting[1] == 0 {
+                        return false;
+                    }
+                    nesting[1] -= 1;
+                }
+                TokenKind::Punctuation(Punctuation::LeftBrace) => nesting[2] += 1,
+                TokenKind::Punctuation(Punctuation::RightBrace) => {
+                    if nesting[2] == 0 {
+                        return false;
+                    }
+                    nesting[2] -= 1;
+                }
+                _ => {}
+            }
+            offset += 1;
+        }
+    }
+
+    fn parse_inline_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        self.advance();
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::If) {
+            let parsed = self.parse_if_expr(mark);
+            if let TreeKind::If(if_expr) = &self.ast.get(parsed).kind {
+                return self.alloc_from(
+                    mark,
+                    TreeKind::PhaseSpecific(UntypedNode::InlineIf(dotty_core::ast::InlineIf {
+                        cond: if_expr.cond,
+                        then_branch: if_expr.then_branch,
+                        else_branch: if_expr.else_branch,
+                    })),
+                );
+            }
+            return parsed;
+        }
+
+        let parsed = self.expr();
+        if let TreeKind::Match(match_expr) = &self.ast.get(parsed).kind {
+            let selector_start = self
+                .ast
+                .get(match_expr.selector)
+                .position
+                .map(|position| position.span().range().start())
+                .unwrap_or(mark.start());
+            return self.alloc_from(
+                crate::Mark {
+                    start: selector_start,
+                },
+                TreeKind::PhaseSpecific(UntypedNode::InlineMatch(dotty_core::ast::InlineMatch {
+                    selector: match_expr.selector,
+                    cases: match_expr.cases.clone(),
+                })),
+            );
+        }
+
+        self.report(
+            crate::ParseDiagnosticKind::ExpectedExpression,
+            "expected `if` or a `match` expression after `inline`",
+        );
+        parsed
     }
 
     fn expr1_rest(&mut self, lhs: TreeId<Untyped>) -> TreeId<Untyped> {

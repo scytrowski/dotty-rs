@@ -1702,6 +1702,112 @@ fn parses_if_with_then_and_else() {
 }
 
 #[test]
+fn parses_inline_if_and_preserves_its_marker_and_span() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "inline if c then 1 else 2",
+        vec![
+            token(TokenKind::Identifier, 0, 6),
+            token(TokenKind::Keyword(HardKeyword::If), 7, 9),
+            token(TokenKind::Identifier, 10, 11),
+            token(TokenKind::Keyword(HardKeyword::Then), 12, 16),
+            token(TokenKind::IntegerLiteral, 17, 18),
+            token(TokenKind::Keyword(HardKeyword::Else), 19, 23),
+            token(TokenKind::IntegerLiteral, 24, 25),
+            token(TokenKind::Eof, 25, 25),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::PhaseSpecific(UntypedNode::InlineIf(inline_if)) = parser.ast().get(id).kind
+    else {
+        panic!("expected inline-if tree");
+    };
+    assert!(matches!(
+        parser.ast().get(inline_if.cond).kind,
+        TreeKind::Ident(_)
+    ));
+    assert!(matches!(
+        parser.ast().get(inline_if.then_branch).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Number(_))
+    ));
+    assert!(matches!(
+        parser.ast().get(inline_if.else_branch).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Number(_))
+    ));
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(0, 25).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn parses_inline_match_and_preserves_its_marker_and_cases() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "inline x match { case _ => 1 }",
+        vec![
+            token(TokenKind::Identifier, 0, 6),
+            token(TokenKind::Identifier, 7, 8),
+            token(TokenKind::Keyword(HardKeyword::Match), 9, 14),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 15, 16),
+            token(TokenKind::Keyword(HardKeyword::Case), 17, 21),
+            token(TokenKind::Identifier, 22, 23),
+            token(TokenKind::Operator, 24, 26),
+            token(TokenKind::IntegerLiteral, 27, 28),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 29, 30),
+            token(TokenKind::Eof, 30, 30),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::PhaseSpecific(UntypedNode::InlineMatch(inline_match)) =
+        &parser.ast().get(id).kind
+    else {
+        panic!("expected inline-match tree");
+    };
+    assert!(matches!(
+        parser.ast().get(inline_match.selector).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(inline_match.cases.len(), 1);
+    assert!(matches!(
+        parser.ast().get(inline_match.cases[0]).kind,
+        TreeKind::CaseDef(_)
+    ));
+    assert_eq!(
+        parser.ast().get(id).position.unwrap().span().range(),
+        TextRange::new(7, 30).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn keeps_inline_as_an_identifier_without_an_inline_expression_form() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "inline",
+        vec![
+            token(TokenKind::Identifier, 0, 6),
+            token(TokenKind::Eof, 6, 6),
+        ],
+        &mut names,
+    );
+
+    let id = parser.expr();
+    let TreeKind::Ident(identifier) = parser.ast().get(id).kind else {
+        panic!("expected `inline` identifier");
+    };
+    let name = identifier.name;
+    assert!(parser.diagnostics().is_empty());
+    drop(parser);
+    assert_eq!(names.resolve(name.text()), "inline");
+}
+
+#[test]
 fn parses_if_with_parenthesized_condition() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(

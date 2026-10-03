@@ -7,10 +7,10 @@ use crate::source::SourceSpan;
 /// The kind of a [`Tree`] node.
 ///
 /// Deliberately not exhaustive relative to Dotty: `Labeled` (desugared
-/// gotos), `Hole` (quote-pickling only), `SeqLiteral`/`JavaSeqLiteral`
-/// (desugared varargs), and the `InlineIf`/`InlineMatch`/`SubMatch`
-/// boolean-flagged subclasses of `If`/`Match` are staged for when inline
-/// handling and pattern desugaring are in scope — see
+/// gotos), `Hole` (quote-pickling only), and `SeqLiteral`/`JavaSeqLiteral`
+/// (desugared varargs) are not modeled here. Inline-marked `If` and `Match`
+/// source forms live in `UntypedNode`; the typed `If`/`Match` contracts remain
+/// unchanged. `SubMatch` is staged for pattern desugaring — see
 /// `docs/dotty-core-design.md` §7.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TreeKind<P: AstPhase> {

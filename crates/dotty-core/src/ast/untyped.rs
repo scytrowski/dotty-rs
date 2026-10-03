@@ -250,6 +250,27 @@ pub struct ParsedTry {
     pub finalizer: Option<TreeId<Untyped>>,
 }
 
+/// `inline if cond then thenBranch else elseBranch`.
+///
+/// Dotty represents this as an inline-marked `If` subclass. Keep the marker
+/// in the untyped tree without widening the shared typed `If` contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InlineIf {
+    pub cond: TreeId<Untyped>,
+    pub then_branch: TreeId<Untyped>,
+    pub else_branch: TreeId<Untyped>,
+}
+
+/// `inline selector match cases`.
+///
+/// Dotty represents this as an inline-marked `Match` subclass. The marker is
+/// source syntax for later inline handling and is therefore untyped-only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlineMatch {
+    pub selector: TreeId<Untyped>,
+    pub cases: Vec<TreeId<Untyped>>,
+}
+
 /// Surface-syntax-only constructs. This set mirrors Dotty's actual
 /// `untpd`-only node types; it is not arbitrary.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -288,6 +309,9 @@ pub enum UntypedNode {
     Number(NumberLiteral),
 
     Throw(Throw),
+
+    InlineIf(InlineIf),
+    InlineMatch(InlineMatch),
 
     ParsedTry(ParsedTry),
 }

@@ -977,6 +977,8 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::GenFrom(_)) => "GenFrom",
         TreeKind::PhaseSpecific(UntypedNode::GenAlias(_)) => "GenAlias",
         TreeKind::PhaseSpecific(UntypedNode::Throw(_)) => "Throw",
+        TreeKind::PhaseSpecific(UntypedNode::InlineIf(_)) => "InlineIf",
+        TreeKind::PhaseSpecific(UntypedNode::InlineMatch(_)) => "InlineMatch",
         TreeKind::PhaseSpecific(UntypedNode::ParsedTry(_)) => "ParsedTry",
         TreeKind::Return(_) => "Return",
         TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) if tuple.elements.is_empty() => {
@@ -1301,6 +1303,18 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
         }
         TreeKind::PhaseSpecific(UntypedNode::GenAlias(alias)) => vec![alias.pattern, alias.expr],
         TreeKind::PhaseSpecific(UntypedNode::Throw(throw)) => vec![throw.expr],
+        TreeKind::PhaseSpecific(UntypedNode::InlineIf(inline_if)) => {
+            let mut children = vec![inline_if.cond, inline_if.then_branch];
+            if has_non_empty_span(arena, inline_if.else_branch) {
+                children.push(inline_if.else_branch);
+            }
+            children
+        }
+        TreeKind::PhaseSpecific(UntypedNode::InlineMatch(inline_match)) => {
+            let mut children = vec![inline_match.selector];
+            children.extend(inline_match.cases.iter().copied());
+            children
+        }
         TreeKind::PhaseSpecific(UntypedNode::ParsedTry(parsed_try)) => {
             let mut children = vec![parsed_try.expr];
             if let Some(handler) = parsed_try.handler {
