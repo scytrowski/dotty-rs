@@ -315,6 +315,8 @@ braced scopes. In legacy
 parenthesized `if`/`while` conditions, only the condition is consumed before
 parsing the following branch/body, so expressions beginning with parentheses
 or prefix operators are not mistaken for condition suffixes
+inline `if` and inline `match` source forms, retained as untyped-only AST
+markers; inline expansion and typing remain deferred
 `throw`, bare/value `return`, and source-level `try`/`catch`/`finally`
 including indented `try` bodies with local definitions represented in a shared
 expression `Block`, including scanner-feedback regions nested in braces, with

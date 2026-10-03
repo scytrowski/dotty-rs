@@ -500,7 +500,7 @@ impl<'source> RawLexer<'source> {
             })));
         }
 
-        let token = self.scan_identifier_token(start, false)?;
+        let token = self.scan_identifier_token(start, false, true)?;
         let _ = self.modes.pop();
         self.resume_string_after_expression();
         Ok(Some(RawItem::Token(token)))
@@ -602,7 +602,7 @@ impl<'source> RawLexer<'source> {
     }
 
     fn scan_identifier(&mut self, start: u32) -> Result<RawToken, RawLexerError> {
-        let token = self.scan_identifier_token(start, true)?;
+        let token = self.scan_identifier_token(start, true, false)?;
         self.update_xml_token(token.kind, token.span)?;
         Ok(token)
     }
@@ -611,9 +611,14 @@ impl<'source> RawLexer<'source> {
         &mut self,
         start: u32,
         allow_interpolation: bool,
+        stop_before_braced_splice: bool,
     ) -> Result<RawToken, RawLexerError> {
         let _ = self.cursor.bump();
         while let Some(character) = self.cursor.peek() {
+            if stop_before_braced_splice && character == '$' && self.cursor.peek_nth(1) == Some('{')
+            {
+                break;
+            }
             if character == '_' && self.cursor.peek_nth(1).is_some_and(is_operator_character) {
                 let _ = self.cursor.bump();
                 while self.cursor.peek().is_some_and(is_operator_character) {
@@ -4494,6 +4499,36 @@ mod tests {
     #[test]
     fn supports_nested_interpolation_inside_a_braced_expression() {
         let (items, diagnostics) = scan("s\"${s\"$x\"}\"");
+        let interpolation_count = items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RawItem::Token(RawToken {
+                        kind: RawTokenKind::InterpolationId,
+                        ..
+                    })
+                )
+            })
+            .count();
+
+        assert_eq!(interpolation_count, 2);
+        assert!(items.iter().any(|item| {
+            matches!(
+                item,
+                RawItem::Token(RawToken {
+                    kind: RawTokenKind::Punctuation(Punctuation::RightBrace),
+                    ..
+                })
+            )
+        }));
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn separates_adjacent_simple_and_braced_interpolation_splices() {
+        let source = "s\"$name${if description.isEmpty then \"\" else s\" :\\n\\t${description.replace(\"\\n\", \"\\n\\t\")}\"}\"";
+        let (items, diagnostics) = scan(source);
         let interpolation_count = items
             .iter()
             .filter(|item| {

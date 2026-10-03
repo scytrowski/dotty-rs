@@ -647,15 +647,13 @@ pub enum TreeKind<P: AstPhase> {
 }
 ```
 
-Deliberately **not** included yet, matching Dotty's real classification of
-these as internal/derived rather than primary surface or typed-output nodes:
-`Labeled` (used only for desugared `while`/pattern-matching gotos), `Hole`
-(quote-pickling only, "will never be in a TASTy file" per Dotty's own doc
-comment), `SeqLiteral`/`JavaSeqLiteral` (desugared varargs), and the
-`InlineIf`/`InlineMatch`/`SubMatch` boolean-flagged subclasses of
-`If`/`Match` (modeled later as a flag on `If`/`Match` if needed, not as
-separate variants). These can be added incrementally without touching
-`AstPhase` once inline handling and pattern desugaring are in scope.
+Deliberately **not** included yet are `Labeled` (used only for desugared
+`while`/pattern-matching gotos), `Hole` (quote-pickling only, "will never be in
+a TASTy file" per Dotty's own doc comment), and `SeqLiteral`/`JavaSeqLiteral`
+(desugared varargs). The parser preserves Dotty's inline-marked `If` and
+`Match` source forms as untyped-only `UntypedNode::InlineIf` and
+`UntypedNode::InlineMatch`; typed `If`/`Match` payloads remain unchanged.
+`SubMatch` remains staged for pattern desugaring.
 
 Shared node payload definitions (`ast/common.rs`, `ast/typed.rs`):
 
