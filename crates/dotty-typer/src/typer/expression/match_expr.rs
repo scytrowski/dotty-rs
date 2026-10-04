@@ -498,7 +498,7 @@ mod tests {
         );
         assert!(matches!(
             type_one_case(&mut typer, case_tree, definitions.int, context),
-            Err(TyperError::UnsupportedPattern { .. })
+            Err(TyperError::TuplePatternResolutionDeferred { .. })
         ));
         assert_eq!(typer.typed_arena.iter().count(), 0);
         assert!(typer.typed_index.is_empty());

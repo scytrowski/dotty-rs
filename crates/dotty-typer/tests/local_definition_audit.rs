@@ -280,7 +280,11 @@ struct MatchProfile {
     pattern_roots: BTreeMap<String, usize>,
     pattern_root_files: BTreeMap<String, BTreeSet<String>>,
     typed_case_successes: BTreeMap<String, usize>,
+    typed_case_success_files: BTreeMap<String, BTreeSet<String>>,
     typed_pattern_boundaries: BTreeMap<String, usize>,
+    typed_case_failures: BTreeMap<String, usize>,
+    typed_case_failure_files: BTreeMap<String, BTreeSet<String>>,
+    extractor_protocol_successes: BTreeMap<String, usize>,
     extractor_roots: BTreeMap<String, usize>,
     extractor_dispatch: BTreeMap<String, usize>,
     extractor_type_applied: usize,
@@ -288,6 +292,7 @@ struct MatchProfile {
     extractor_nested_roots: BTreeMap<String, usize>,
     sequence_wildcards: usize,
     named_pattern_arguments: usize,
+    empty_tuple_unit_patterns: usize,
     infix_pattern_forms: usize,
     extractor_files: BTreeSet<String>,
 }
@@ -366,14 +371,28 @@ impl MatchProfile {
         self.guarded_cases += other.guarded_cases;
         self.sequence_wildcards += other.sequence_wildcards;
         self.named_pattern_arguments += other.named_pattern_arguments;
+        self.empty_tuple_unit_patterns += other.empty_tuple_unit_patterns;
         self.infix_pattern_forms += other.infix_pattern_forms;
         self.extractor_type_applied += other.extractor_type_applied;
         self.extractor_files.extend(other.extractor_files);
         merge_counts(&mut self.pattern_roots, other.pattern_roots);
         merge_counts(&mut self.typed_case_successes, other.typed_case_successes);
+        merge_file_sets(
+            &mut self.typed_case_success_files,
+            other.typed_case_success_files,
+        );
         merge_counts(
             &mut self.typed_pattern_boundaries,
             other.typed_pattern_boundaries,
+        );
+        merge_counts(&mut self.typed_case_failures, other.typed_case_failures);
+        merge_file_sets(
+            &mut self.typed_case_failure_files,
+            other.typed_case_failure_files,
+        );
+        merge_counts(
+            &mut self.extractor_protocol_successes,
+            other.extractor_protocol_successes,
         );
         merge_counts(&mut self.extractor_roots, other.extractor_roots);
         merge_counts(&mut self.extractor_dispatch, other.extractor_dispatch);
@@ -391,6 +410,15 @@ impl MatchProfile {
                 .or_default()
                 .extend(files);
         }
+    }
+}
+
+fn merge_file_sets<K: Ord>(
+    target: &mut BTreeMap<K, BTreeSet<String>>,
+    source: BTreeMap<K, BTreeSet<String>>,
+) {
+    for (key, files) in source {
+        target.entry(key).or_default().extend(files);
     }
 }
 
@@ -677,6 +705,13 @@ fn print_ranked_gaps(failures: &BTreeMap<String, FailureBucket>) {
             bucket.files.len()
         );
     }
+    if let Some((name, bucket)) = ranked.first() {
+        println!(
+            "next_typer_increment_recommendation: implement a focused slice for {name} ({} occurrences in {} files); keep classpath materialization as a separate gate because the pinned audit resolved no external members",
+            bucket.count,
+            bucket.files.len()
+        );
+    }
 }
 
 fn scope_note_for_bucket(bucket: &str) -> (&'static str, &'static str, &'static str, &'static str) {
@@ -911,6 +946,39 @@ fn match_readiness_counts_unsupported_case_shapes_for_match_first_blockers() {
 }
 
 #[test]
+fn match_profile_counts_tuple_infix_and_nested_nary_extractor_shapes() {
+    let source = "object Audit { def outer(value: Any): Any = value match { case Extractor(first, left | right, Nested(a, b, c)) => first; case (first, second) => first; case () => value; case left op right => left; case _ => value } }";
+    let audit = audit_source(source, "PatternProfile.scala");
+
+    assert_eq!(audit.match_profile.matches, 1);
+    assert_eq!(
+        audit
+            .match_profile
+            .pattern_roots
+            .get("extractor-looking Apply"),
+        Some(&1)
+    );
+    assert_eq!(audit.match_profile.pattern_roots.get("tuple"), Some(&2));
+    assert_eq!(audit.match_profile.empty_tuple_unit_patterns, 1);
+    assert_eq!(
+        audit.match_profile.pattern_roots.get("infix pattern"),
+        Some(&1)
+    );
+    assert_eq!(
+        audit.match_profile.extractor_argument_counts.get(&3),
+        Some(&2)
+    );
+    assert_eq!(
+        audit
+            .match_profile
+            .extractor_nested_roots
+            .get("alternative"),
+        Some(&1)
+    );
+    assert_eq!(audit.match_profile.infix_pattern_forms, 1);
+}
+
+#[test]
 fn local_expression_audit_types_supported_typed_patterns() {
     let source = "object Audit { def outer(value: Any): Int = { def local: Int = value match { case item: Int if true => item }; local } }";
     let audit = audit_source(source, "TypedPattern.scala");
@@ -1066,7 +1134,7 @@ fn probe_supported_match_cases(
     text: &str,
     path: &str,
     classpath: SharedClassPath,
-    typed_pattern_boundaries: &mut BTreeMap<String, usize>,
+    profile: &mut MatchProfile,
 ) -> BTreeMap<String, usize> {
     let source = SourceId::from_index(0);
     let mut store = SemanticStore::new();
@@ -1139,22 +1207,25 @@ fn probe_supported_match_cases(
                 node.position,
                 family,
                 case.guard.is_some(),
+                extractor_protocol_success(&parsed.ast, case.pattern),
             ));
         }
     }
     let probes = probe_specs
         .into_iter()
-        .map(|(method, selector, case, position, family, guarded)| {
-            let synthetic_match = parsed.ast.alloc(Tree {
-                kind: TreeKind::Match(Match {
-                    selector,
-                    cases: vec![case],
-                }),
-                position,
-                ty: (),
-            });
-            (method, synthetic_match, family, guarded)
-        })
+        .map(
+            |(method, selector, case, position, family, guarded, protocol)| {
+                let synthetic_match = parsed.ast.alloc(Tree {
+                    kind: TreeKind::Match(Match {
+                        selector,
+                        cases: vec![case],
+                    }),
+                    position,
+                    ty: (),
+                });
+                (method, synthetic_match, family, guarded, protocol)
+            },
+        )
         .collect::<Vec<_>>();
 
     let packages = Packages::new();
@@ -1184,27 +1255,52 @@ fn probe_supported_match_cases(
         "typed wildcard",
         "typed variable",
         "typed explicit Bind",
+        "tuple",
+        "alternative",
+        "extractor-looking Apply",
+        "extractor-looking TypeApply",
+        "infix pattern",
     ]
     .into_iter()
     .map(|family| (family.to_owned(), 0))
     .collect::<BTreeMap<_, _>>();
-    for (method, match_tree, family, guarded) in probes {
+    for (method, match_tree, family, guarded, protocol) in probes {
         let outcome = typer
             .expression_context_for(method)
             .and_then(|context| typer.type_expression(match_tree, context));
         match outcome {
             Ok(_) => {
-                *successes
-                    .entry(family_success_bucket(&family).to_owned())
-                    .or_default() += 1;
+                let bucket = family_success_bucket(&family).to_owned();
+                *successes.entry(bucket.clone()).or_default() += 1;
+                profile
+                    .typed_case_success_files
+                    .entry(bucket)
+                    .or_default()
+                    .insert(path.to_owned());
+                if let Some(protocol) = protocol {
+                    *profile
+                        .extractor_protocol_successes
+                        .entry(protocol.to_owned())
+                        .or_default() += 1;
+                }
                 if guarded {
                     *successes
                         .entry("guarded supported case".to_owned())
                         .or_default() += 1;
                 }
             }
-            Err(error) if family.starts_with("typed") => {
-                let boundary = match error {
+            Err(error) => {
+                let error_name = typed_case_failure_label(&error);
+                *profile
+                    .typed_case_failures
+                    .entry(error_name.clone())
+                    .or_default() += 1;
+                profile
+                    .typed_case_failure_files
+                    .entry(error_name)
+                    .or_default()
+                    .insert(path.to_owned());
+                let boundary = match &error {
                     TyperError::TypedPatternRuntimeTestDeferred { .. } => {
                         Some("generic/erased or unsupported runtime test")
                     }
@@ -1219,13 +1315,15 @@ fn probe_supported_match_cases(
                     }
                     _ => None,
                 };
-                if let Some(boundary) = boundary {
-                    *typed_pattern_boundaries
+                if family.starts_with("typed")
+                    && let Some(boundary) = boundary
+                {
+                    *profile
+                        .typed_pattern_boundaries
                         .entry(boundary.to_owned())
                         .or_default() += 1;
                 }
             }
-            Err(_) => {}
         }
     }
     successes
@@ -1243,6 +1341,11 @@ fn is_supported_case_family(family: &str) -> bool {
             | "typed wildcard"
             | "typed variable"
             | "typed explicit Bind"
+            | "tuple"
+            | "alternative"
+            | "extractor-looking Apply"
+            | "extractor-looking TypeApply"
+            | "infix pattern"
     )
 }
 
@@ -1255,7 +1358,59 @@ fn family_success_bucket(family: &str) -> &'static str {
         "typed wildcard" => "typed wildcard",
         "typed variable" => "typed variable",
         "typed explicit Bind" => "typed explicit Bind",
+        "tuple" => "tuple",
+        "alternative" => "alternative",
+        "extractor-looking Apply" => "extractor-looking Apply",
+        "extractor-looking TypeApply" => "extractor-looking TypeApply",
+        "infix pattern" => "infix pattern",
         _ => "other",
+    }
+}
+
+fn extractor_protocol_success(
+    arena: &dotty_core::AstArena<Untyped>,
+    pattern: dotty_core::TreeId<Untyped>,
+) -> Option<&'static str> {
+    match arena.try_get(pattern).map(|node| &node.kind) {
+        Some(TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple))) if !tuple.elements.is_empty() => {
+            Some("tuple extractor")
+        }
+        Some(TreeKind::Apply(application)) => {
+            let dispatch = peel_type_applications(arena, application.function);
+            let selected = matches!(
+                arena.try_get(dispatch).map(|node| &node.kind),
+                Some(TreeKind::Select(_))
+            );
+            match application.args.len() {
+                0 => Some("Boolean extractor"),
+                1 if selected => Some("selected unary extractor"),
+                1 => Some("unary Option-like extractor"),
+                2 => Some("binary product extractor"),
+                _ => Some("N-ary product extractor"),
+            }
+        }
+        Some(TreeKind::TypeApply(_)) => {
+            let function = peel_type_applications(arena, pattern);
+            match arena.try_get(function).map(|node| &node.kind) {
+                Some(TreeKind::Ident(_)) | Some(TreeKind::Select(_)) => {
+                    Some("type-applied extractor (unsupported by design)")
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn typed_case_failure_label(error: &TyperError) -> String {
+    match error {
+        TyperError::TuplePatternResolutionDeferred { issue, .. } => {
+            format!("tuple::{issue:?}")
+        }
+        TyperError::ExtractorPatternArgumentUnsupported { issue, .. } => {
+            format!("extractor argument::{issue:?}")
+        }
+        _ => typer_error_name(error).to_owned(),
     }
 }
 
@@ -1448,12 +1603,9 @@ fn audit_source_inner(
         }
     }
     if let Some(classpath) = probe_classpath {
-        audit.match_profile.typed_case_successes = probe_supported_match_cases(
-            text,
-            path,
-            classpath,
-            &mut audit.match_profile.typed_pattern_boundaries,
-        );
+        let successes =
+            probe_supported_match_cases(text, path, classpath, &mut audit.match_profile);
+        audit.match_profile.typed_case_successes = successes;
     }
     audit
 }
@@ -1743,6 +1895,9 @@ fn collect_pattern_features(
             }
             TreeKind::UnApply(unapply) => pending.extend(unapply.patterns.iter().copied()),
             TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+                if tuple.elements.is_empty() {
+                    profile.empty_tuple_unit_patterns += 1;
+                }
                 pending.extend(tuple.elements.iter().copied());
             }
             TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => pending.push(parens.inner),
@@ -1874,11 +2029,45 @@ fn print_match_profile(profile: &MatchProfile) {
     }
     println!("  typed_case_successes:");
     for (family, count) in &profile.typed_case_successes {
-        println!("    {family}={count}");
+        let files = profile
+            .typed_case_success_files
+            .get(family)
+            .into_iter()
+            .flatten()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>();
+        println!("    {family}={count} files=[{}]", files.join(", "));
+    }
+    println!("  successful_extractor_protocols:");
+    for (protocol, count) in &profile.extractor_protocol_successes {
+        println!("    {protocol}={count}");
     }
     println!("  typed_pattern_boundaries:");
     for (boundary, count) in &profile.typed_pattern_boundaries {
         println!("    {boundary}={count}");
+    }
+    println!("  typed_case_first_failures:");
+    for (failure, count) in &profile.typed_case_failures {
+        let files = profile
+            .typed_case_failure_files
+            .get(failure)
+            .into_iter()
+            .flatten()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>();
+        println!("    {failure}={count} files=[{}]", files.join(", "));
+    }
+    let mut ranked = profile
+        .typed_case_failures
+        .iter()
+        .map(|(failure, count)| (failure.as_str(), *count))
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+    println!("  typed_case_first_failure_top_10:");
+    for (failure, count) in ranked.into_iter().take(10) {
+        println!("    {failure}={count}");
     }
     println!("  extractor_root_shapes:");
     for (shape, count) in &profile.extractor_roots {
@@ -1907,6 +2096,10 @@ fn print_match_profile(profile: &MatchProfile) {
     println!(
         "  named_pattern_arguments={}",
         profile.named_pattern_arguments
+    );
+    println!(
+        "  empty_tuple_unit_patterns={}",
+        profile.empty_tuple_unit_patterns
     );
     println!("  infix_pattern_forms={}", profile.infix_pattern_forms);
     println!(
@@ -2566,6 +2759,10 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::MemberLookup(..) => "MemberLookup",
         TyperError::UnsupportedExpression { .. } => "UnsupportedExpression",
         TyperError::UnsupportedPattern { .. } => "UnsupportedPattern",
+        TyperError::TuplePatternResolutionDeferred { .. } => "TuplePatternResolutionDeferred",
+        TyperError::TuplePatternTypeMismatch { .. } => "TuplePatternTypeMismatch",
+        TyperError::TuplePatternRelationDeferred { .. } => "TuplePatternRelationDeferred",
+        TyperError::InfixPatternDeferred { .. } => "InfixPatternDeferred",
         TyperError::PatternBindingInAlternative { .. } => "PatternBindingInAlternative",
         TyperError::PatternAlternativeJoinUnsupported { .. } => "PatternAlternativeJoinUnsupported",
         TyperError::ExtractorQualifierNotFound { .. } => "ExtractorQualifierNotFound",

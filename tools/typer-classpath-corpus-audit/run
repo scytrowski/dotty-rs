@@ -75,7 +75,7 @@ fi
 mkdir -p "$(dirname -- "$output_path")"
 {
     printf '# Typer classpath corpus audit: Scala 3.9.0\n\n'
-    printf 'This normalized result was produced by two identical runs. It measures local-method typing reachability; `NoSuccessfulEnclosingMethodTyping` is a downstream count and is excluded from the ranked semantic gaps. Parser recovery, parser/namer failures, classpath misses, and unsupported Typer semantics remain separate buckets. The deltas are historical measurements, not a claim that moving a failure to a later bucket is a semantic improvement.\n\n'
+    printf 'This normalized result was produced by two identical runs. It measures local-method typing reachability and isolated Match-case typing against pinned Scala 3.9.0; `NoSuccessfulEnclosingMethodTyping` is a downstream count and is excluded from the ranked semantic gaps. Parser recovery, parser/namer failures, classpath misses, and unsupported Typer semantics remain separate buckets. Match probes include alternatives, tuple patterns, infix patterns, and extractor-looking roots; outcomes report first errors and source files, while successes are grouped by supported extractor protocol. The deltas are historical measurements, not a claim that moving a failure to a later bucket is a semantic improvement.\n\n'
     printf 'Run `tools/typer-classpath-corpus-audit/run` with the environment documented in `docs/typer-v0.1-compatibility.md` to regenerate this report.\n\n'
     printf '```text\n'
     cat "$tmp_dir/first.report"

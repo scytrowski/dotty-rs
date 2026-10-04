@@ -49,13 +49,25 @@ pub enum ExtractorResultMemberIssue {
     IsEmptyNotBoolean,
 }
 
-/// Product-selector metadata encountered while typing a binary extractor.
+/// Product-selector metadata encountered while typing an extractor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExtractorProductIssue {
-    /// The product does not expose the ordered `_1` and `_2` selectors.
+    /// The product does not expose the ordered selectors required by the pattern.
     SelectorShape,
     /// The result's relation to `scala.Product` cannot be checked.
     ProductRelationUnsupported,
+}
+
+/// Why a tuple pattern could not be lowered through its canonical Scala tuple
+/// extractor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TuplePatternResolutionIssue {
+    TupleClassNotFound,
+    CompanionNotFound,
+    CompanionModuleClassUnavailable,
+    UnapplyNotFound,
+    UnapplyShapeUnsupported,
+    TupleTypeUnsupported,
 }
 
 impl PatternKind {
@@ -1123,6 +1135,36 @@ pub enum TyperError {
         tree_index: u32,
         pattern_kind: PatternKind,
     },
+    /// The tuple pattern's canonical TupleN class, companion, or extractor
+    /// could not be resolved or instantiated soundly.
+    TuplePatternResolutionDeferred {
+        source: SourceId,
+        tree_index: u32,
+        arity: usize,
+        issue: TuplePatternResolutionIssue,
+    },
+    /// The selector and canonical tuple input type are disjoint under the
+    /// supported bounded relation.
+    TuplePatternTypeMismatch {
+        source: SourceId,
+        tree_index: u32,
+        selector: TypeId,
+        tuple_type: TypeId,
+    },
+    /// The selector's relation to the canonical tuple input could not be
+    /// decided by the bounded type relation.
+    TuplePatternRelationDeferred {
+        source: SourceId,
+        tree_index: u32,
+        selector: TypeId,
+        tuple_type: TypeId,
+        error: Box<TypeRelationError>,
+    },
+    /// General infix extractor lowering remains deferred.
+    InfixPatternDeferred {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// Pattern alternatives cannot introduce bindings in any branch.
     PatternBindingInAlternative {
         source: SourceId,
@@ -1254,7 +1296,7 @@ pub enum TyperError {
         member_type: TypeId,
         issue: ExtractorResultMemberIssue,
     },
-    /// The product result does not expose exactly the supported `_1`, `_2` selectors.
+    /// The product result does not expose selectors matching the source arity.
     ExtractorProductSelectorCountMismatch {
         source: SourceId,
         tree_index: u32,

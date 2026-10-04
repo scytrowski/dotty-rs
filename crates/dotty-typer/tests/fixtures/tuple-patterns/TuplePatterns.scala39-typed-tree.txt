@@ -1,0 +1,44 @@
+[[syntax trees at end of                     typer]] // crates/dotty-typer/tests/fixtures/tuple-patterns/TuplePatterns.scala
+[33mpackage [0m<empty> {
+  [33mfinal[0m [33mlazy[0m [33mmodule[0m [33mval[0m [36mTuplePatterns[0m: [32mTuplePatterns[0m = [33mnew [0m[32mTuplePatterns[0m()
+  [33mfinal[0m [33mmodule[0m [33mclass[0m [32mTuplePatterns[0m()[33m extends[0m [32mObject[0m() {
+    [33mthis[0m: TuplePatterns.[33mtype[0m =>
+    [33mdef[0m [36many[0m([36mvalue[0m: [32mAny[0m): [32mAny[0m =
+      value[33m match [0m
+        {
+          [33mcase [0mTuple2.unapply[[32mAny[0m, [32mAny[0m](first @ _, second @ _):[32m(Any, Any)[0m =>
+            first:[32mAny[0m
+          [33mcase [0m_ =>
+            value
+        }
+    [33mdef[0m [36mnested[0m([36mvalue[0m: [32mAny[0m): [32mAny[0m =
+      value[33m match [0m
+        {
+          [33mcase [0m
+            Tuple3.unapply[[32mAny[0m, [32mAny[0m, [32mAny[0m]([32m1[0m,
+              Tuple2.unapply[[32mAny[0m, [32mAny[0m](first @ _, second @ _):[32m(Any, Any)[0m,
+              third @ _):[32m(Any, Any, Any)[0m
+           =>
+            second:[32mAny[0m
+          [33mcase [0m_ =>
+            value
+        }
+    [33mdef[0m [36mtransparent[0m([36mvalue[0m: [32mAny[0m): [32mAny[0m =
+      value[33m match [0m
+        {
+          [33mcase [0msingle @ _ =>
+            single:[32mAny[0m
+          [33mcase [0m_ =>
+            value
+        }
+    [33mdef[0m [36munit[0m([36mvalue[0m: [32mAny[0m): [32mInt[0m =
+      value[33m match [0m
+        {
+          [33mcase [0m[32m()[0m =>
+            [32m1[0m
+          [33mcase [0m_ =>
+            [32m0[0m
+        }
+  }
+}
+

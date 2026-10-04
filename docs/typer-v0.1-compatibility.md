@@ -155,16 +155,16 @@ The pinned Scala 3.9.0 oracles and normalized shapes are recorded in
 [`selected-extractors`](../crates/dotty-typer/tests/fixtures/selected-extractors),
 and [`binary-product-extractors`](../crates/dotty-typer/tests/fixtures/binary-product-extractors).
 
-Binary product extraction accepts exactly two source arguments and two ordered
-component selectors. A direct `unapply` result must conform to
-`scala.Product`; its parameterless `_1` and `_2` members are discovered through
-ordinary inherited member lookup. If the direct result is not a product or its
-selectors do not match the source arity, the Option-like path checks `isEmpty`
-and reads selectors from the type returned by `get`, without using selectors
-declared by the wrapper. When that fallback is unavailable, the direct
-selector-arity error is preserved. The typer probes `_3` so a third valid
-parameterless value selector is rejected instead of truncated; a methodic or
-otherwise invalid `_3` is not a selector.
+Product extraction accepts N source arguments when it can discover the
+consecutive parameterless value selectors `_1` through `_N`. A direct
+`unapply` result must conform to `scala.Product`; selectors are discovered
+through ordinary inherited member lookup. If the direct result is not a
+product or its selectors do not match the source arity, the Option-like path
+checks `isEmpty` and reads selectors from the type returned by `get`, without
+using selectors declared by the wrapper. When that fallback is unavailable,
+the direct selector-arity error is preserved. The typer probes `_N+1` so a
+wider product is rejected instead of silently truncated; a methodic or
+otherwise invalid next selector is treated as absent.
 Each component is passed to recursive pattern typing in source order and
 remains in the existing CaseDef-local binding scope. Missing, ambiguous, or
 otherwise unsupported required selectors return a focused extractor error.
@@ -174,20 +174,30 @@ shapes.
 Zero or multiple nested patterns for scalar Option-like extractors, nonzero
 nested patterns for Boolean extractors, missing/ambiguous selected qualifier members,
 missing/overloaded Option-like protocol members, and non-Boolean `isEmpty`
-return focused extractor errors. Products with selector sets other than
-exactly `_1`, `_2`, source argument counts other than two for product results,
-and unsupported component member types are rejected explicitly. Generic or
-overloaded `unapply`, contextual, erased, repeated, or by-name parameters,
-`unapplySeq`, tuple source patterns, and pattern constraint inference remain
-unsupported. The
+return focused extractor errors. Products with missing or nonconsecutive
+selectors and source argument counts that do not match the discovered product
+arity are rejected explicitly. Tuple source patterns lower through the
+canonical `scala.TupleN` companion's generic `unapply`, retaining the selected
+extractor identity and recursively typing each component. Empty tuple syntax
+is the Unit literal pattern; one-element parentheses remain transparent. A
+missing canonical tuple class, companion, or supported `unapply` shape is
+reported through `TuplePatternResolutionDeferred`, without synthesizing tuple
+symbols. The selector must be compatible with the instantiated tuple input;
+disjoint types fail, and relations outside the bounded checker are deferred.
+Generic or overloaded extractor APIs beyond the canonical tuple
+`unapply`, contextual, erased, repeated, or by-name parameters, `unapplySeq`,
+and pattern constraint inference remain unsupported. The
 foundation resolution shape is recorded in
 [`extractor-foundation`](../crates/dotty-typer/tests/fixtures/extractor-foundation).
+Infix pattern syntax remains a separate deferred form and returns
+`InfixPatternDeferred`; it is counted independently from ordinary extractor
+applications in the pinned corpus audit.
 
 The dedicated `type_case_def` helper in `expression/match_expr.rs` types
 supported `CaseDef` nodes independently; `Match` expression typing
 is supported for matches whose cases use wildcards, variable patterns, typed
 patterns in the bounded subset above, literal patterns, stable-value patterns,
-the unary Option-like and binary product extractors above, non-binding alternatives, or explicit
+the unary Option-like and N-ary product extractors above, tuple patterns, non-binding alternatives, or explicit
 bindings over wildcard, literal, stable-value, and typed wildcard patterns. An explicit binder's info is normally the selector prototype; when
 its complete nested pattern is a typed wildcard, its info is narrowed to that
 pattern type. The nested pattern retains its own type. It types the
@@ -206,7 +216,7 @@ and before the body, in the same case-local scope. They use canonical Boolean
 as the expected type and retain their own typed expression type. Guard types do
 not participate in Match result joining. Pattern, guard, and body failures
 roll back the case and enclosing Match transaction. Unsupported patterns,
-including tuple patterns and unsupported extractor protocols, fail
+including unsupported tuple resolution and extractor protocols, fail
 before guard or body typing. Empty Match nodes and failed case typing return
 focused errors, and the enclosing expression transaction rolls back all case
 and selector state on failure. The normalized
@@ -612,26 +622,25 @@ For the #610 feature comparison against #581, first-blocker counts moved from
 first errors are recorded in the linked report. These are reachability and
 first-error movements, not by themselves proof of semantic completion. Two
 `RightAssociativeInfixDeferred` sites remain; ordinary left-associative infix
-blockers are gone. The latest audit after the Match pattern increments records 7,434 structural
-Match nodes and 21,787 cases (2,113 guarded). Its root histogram distinguishes
-wildcards (4,661), variable identifiers (1,142), stable identifiers (1,737),
-stable selections (623), literals (1,365), typed variables (5,392), typed
-wildcards (381), alternatives (443), tuples (479), and extractor-looking
-Apply roots (4,308). These are counts over the pinned source corpus, not counts
-of expressions that the Typer supports.
+blockers are gone. The latest pinned audit after #682 records 7,437 structural
+Match nodes and 21,736 cases (2,111 guarded). Its root histogram includes
+4,648 wildcards, 1,145 variable identifiers, 1,735 stable identifiers, 623
+stable selections, 1,365 literals, 5,384 typed variables, 380 typed
+wildcards, 443 alternatives, 479 tuples, 4,282 extractor-looking Apply
+roots, and 468 infix roots. These are source-corpus counts, not counts of
+expressions that the Typer supports.
 
-The current supported-case probes successfully type 214 wildcard and 30
-variable/bind cases. The other probed families currently have zero successful
-cases under the audit's classpath and enclosing-method context. This is
-consistent with the audit's external-member materialization gate remaining
-blocked; it should not be read as evidence that the focused unit fixtures for
-literal, stable, guarded, or typed patterns fail. Among first Match/pattern
-errors, 65 methods stop at application/extractor patterns, 6 at binding bodies,
-5 at alternatives, 9 at literal/stable pattern relations, 31 at typed-pattern
-relations, 155 at typed-pattern runtime-test support, and 13 at selector
-adaptation. No Match-case result join or guard-specific error was observed.
-The detailed per-error examples and the refreshed top-ten ranking are in the
-[normalized audit report](typer-classpath-corpus-audit-3.9.0.md).
+The expanded isolated case probes type 212 wildcard and 30 variable/bind
+cases. No other case family or extractor protocol succeeds under this
+classpath and enclosing-method context; the audit still materializes zero
+external class/member symbols. This is an environment/coverage limit, not
+evidence against the focused extractor, alternative, and tuple tests. The
+probes record first error variants, tuple-resolution subcategories,
+successful protocols, and representative files. Infix patterns are counted
+as explicitly deferred. The report keeps method-level Match blockers separate
+from isolated-case failures and the global semantic-gap ranking. See the
+[normalized audit report](typer-classpath-corpus-audit-3.9.0.md) for current
+counts and the next-increment recommendation.
 
 The previous wildcard-only report recorded 1,666 Match first-blocker methods,
 2,151 Match nodes, and 6,615 cases. It stopped at `Match`, so downstream
@@ -660,15 +669,15 @@ unsupported variable identifier patterns have ceased to appear as first
 blockers; the remaining errors point to concrete pattern families and
 selector adaptation.
 
-### Extractor-pattern sprint scope
+### Extractor-pattern support and remaining audit scope
 
-The normalized extractor profile contains 4,308 extractor-looking root
-patterns across the corpus. The AST walk sees 6,000 `Apply` nodes within
-extractor patterns: 5,561 simple identifiers and 439 selected extractors.
-Argument arities are concentrated at one (2,418) and two (2,838), followed by
-three (473). The audit found no type-applied extractor, sequence wildcard, or
-named pattern argument. It found 469 infix root patterns and 781 infix pattern
-forms including nested ones. Representative files include
+The normalized extractor profile contains 4,282 extractor-looking root
+patterns. It sees 5,970 extractor roots: 5,534 simple identifiers and 436
+selected extractors. Argument arities remain concentrated at one (2,409) and
+two (2,823), followed by three (467); the profile also sees arities through
+22. It found no type-applied extractor, sequence wildcard, or named pattern
+argument. There are 468 infix roots and 780 infix forms including nested
+ones. Representative files include
 `compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala`,
 `compiler/src/dotty/tools/dotc/ast/Trees.scala`, and
 `compiler/src/dotty/tools/dotc/cc/SepCheck.scala`.
@@ -684,17 +693,17 @@ function. Overloaded resolution, aliases, and trailing type parameters need
 their own constraints; Scala rejects `unapply` signatures with type parameters
 after the last explicit term clause because `UnApply` cannot encode them.
 
-Most measured source shapes have one or two pattern arguments, while explicit
-type-applied calls and sequence wildcards are absent. The smallest useful
-first extractor increment is therefore a non-overloaded, non-generic `unapply`
-with one selector parameter and an `Option`-like result exposing `get`, first
-for one nested pattern. The binary increment extracts ordered `_1` and `_2`
-component types from direct product results and from product values returned
-by `get`. Defer `unapplySeq`, overloads, explicit extractor
-type arguments, contextual extractor clauses, and named arguments. The
-structural audit cannot establish prevalence of implicit/contextual extractor
-parameters: the classpath-backed run still materializes no external members,
-and the inspected representative trees have none.
+The typer now supports Boolean, unary Option-like, and N-ary direct/product-
+inside-`get` extractors, plus tuple syntax lowered through canonical
+`scala.TupleN.unapply`. Components are recursively typed in source order, so
+alternatives inside product components use the existing branch checks. The
+classpath-backed corpus probes report no successful extractor protocols
+because external members still do not materialize; focused tests and the
+pinned tuple fixture cover the supported semantics independently. Remain
+deferred: `unapplySeq`, arbitrary generic or overloaded extractors, explicit
+extractor type applications, contextual clauses, named pattern arguments,
+and general pattern-constraint inference. Structural counts cannot establish
+the prevalence of implicit/contextual extractor parameters.
 
 Pinned Scala 3.9.0 `Applications.typedUnApply` checks the selector against the
 extractor's first parameter. If the selector conforms, that selector type is
@@ -712,13 +721,14 @@ explicit binder entry, and recursive pattern typing can be reused for each
 extracted component; component types should be passed as child prototypes and
 all bindings should remain inside the current case scope.
 
-The same audit counts 443 alternative roots and 479 tuple roots. Alternatives
-can be a small, independent Match increment before extractor support: type
-each branch under the same selector prototype and validate that all branches
-introduce compatible bindings. Tuple patterns should be included with product
-extractors rather than a separate sprint. The pinned typed tree for
-`case (left, right)` is `Tuple2.unapply[Int, String](left @ _, right @ _)`, so
-tuple support depends on the same `UnApply` and product-selector lowering.
+The audit counts 443 alternative roots and 479 tuple roots. Alternatives
+remain supported when branches introduce no bindings; incompatible branch
+joins are explicit errors. Tuple patterns use the same `UnApply` and
+product-selector lowering as extractors. The pinned fixture confirms that
+`case (left, right)` becomes `Tuple2.unapply[Any, Any]`, nested tuple
+components lower recursively, `(single)` remains one binder, and `()` is the
+Unit literal pattern. Of the 479 tuple-shaped source patterns in the corpus,
+8 are empty `()` patterns and lower as Unit literals.
 
 The post-sprint typed-pattern inventory has 155 first-blocker runtime-test
 deferrals, 31 unsupported type-relation deferrals, and 258 type-tree projection

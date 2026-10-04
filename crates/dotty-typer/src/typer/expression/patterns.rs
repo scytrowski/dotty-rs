@@ -3,7 +3,7 @@
 use super::{ExpressionContext, SourceTyper, TyperError};
 use crate::typer::{
     ExtractorMethodShapeIssue, ExtractorPatternArgumentIssue, ExtractorProductIssue,
-    ExtractorResultMemberIssue, PatternKind,
+    ExtractorResultMemberIssue, PatternKind, TuplePatternResolutionIssue,
 };
 use dotty_core::ast::{TreeKind, TypedAstBuilder, UntypedNode};
 use dotty_core::types::{MethodKind, MethodType, Type};
@@ -48,6 +48,27 @@ pub(super) fn pattern_kind(kind: &TreeKind<Untyped>) -> PatternKind {
 }
 
 impl SourceTyper<'_> {
+    fn tuple_companion_receiver(
+        &mut self,
+        companion_type: TypeId,
+        pattern: TreeId<Untyped>,
+        arity: usize,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let receiver = self
+            .widen_expression_type_journaled(companion_type, info_journal, 0)
+            .map_err(|error| match error {
+                TyperError::ObjectModuleClassUnavailable { .. } => self
+                    .tuple_pattern_resolution_error(
+                        pattern,
+                        arity,
+                        TuplePatternResolutionIssue::CompanionModuleClassUnavailable,
+                    ),
+                error => error,
+            })?;
+        self.this_type_receiver_view(receiver)
+    }
+
     fn extractor_result_member_type(
         &mut self,
         result_type: TypeId,
@@ -220,18 +241,21 @@ impl SourceTyper<'_> {
         )
     }
 
-    /// Reads the ordered `_1`, `_2` selector protocol without treating source
-    /// argument count as evidence that an arbitrary result is a product. The
-    /// `_3` probe makes products with more than two conventional selectors an
-    /// explicit arity error rather than silently truncating them.
+    /// Reads numbered product selectors in source order. The source arity
+    /// bounds traversal; probing the next selector detects wider products
+    /// without imposing a fixed maximum arity.
     fn product_extractor_component_types(
         &mut self,
         result_type: TypeId,
         pattern_index: u32,
         unapply: SymbolId,
+        expected_arity: usize,
         require_product_subtype: bool,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Option<Vec<TypeId>>, TyperError> {
+        if expected_arity == 0 {
+            return Ok(None);
+        }
         if require_product_subtype
             && !self.is_product_subtype(result_type, pattern_index, unapply, info_journal)?
         {
@@ -240,7 +264,7 @@ impl SourceTyper<'_> {
 
         let mut selectors = Vec::new();
         let mut component_types = Vec::new();
-        for index in 1..=3 {
+        for index in 1..=expected_arity.saturating_add(1) {
             let spelling = format!("_{index}");
             let name = Name::new(self.store.names.intern(&spelling), Namespace::Term);
             match self.extractor_result_member_type(
@@ -261,14 +285,19 @@ impl SourceTyper<'_> {
                         ExtractorResultMemberIssue::NotParameterless
                         | ExtractorResultMemberIssue::NotValueType,
                     ..
-                }) if index == 3 => {}
+                }) if index == expected_arity.saturating_add(1) => {}
                 Err(error) => return Err(error),
             }
         }
         if selectors.is_empty() {
             return Ok(None);
         }
-        if component_types.len() != 2 || component_types[0].0 != 1 || component_types[1].0 != 2 {
+        if component_types.len() != expected_arity
+            || component_types
+                .iter()
+                .enumerate()
+                .any(|(position, (index, _))| *index != position + 1)
+        {
             return Err(TyperError::ExtractorProductSelectorCountMismatch {
                 source: self.source,
                 tree_index: pattern_index,
@@ -283,6 +312,360 @@ impl SourceTyper<'_> {
                 .map(|(_, component_type)| component_type)
                 .collect(),
         ))
+    }
+
+    fn tuple_pattern_resolution_error(
+        &self,
+        pattern: TreeId<Untyped>,
+        arity: usize,
+        issue: TuplePatternResolutionIssue,
+    ) -> TyperError {
+        TyperError::TuplePatternResolutionDeferred {
+            source: self.source,
+            tree_index: pattern.index(),
+            arity,
+            issue,
+        }
+    }
+
+    fn type_tuple_pattern(
+        &mut self,
+        pattern: TreeId<Untyped>,
+        tuple: &dotty_core::ast::Tuple,
+        selector_type: TypeId,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let arity = tuple.elements.len();
+        if arity == 0 {
+            let literal = self.type_literal_expression(
+                pattern,
+                dotty_core::ast::Literal {
+                    value: dotty_core::Constant::Unit,
+                },
+                self.arena.get(pattern).position,
+            )?;
+            let literal_type = self.typed_arena.get(literal).ty;
+            let widened_type =
+                self.widen_expression_type_journaled(literal_type, info_journal, 0)?;
+            self.require_literal_pattern_compatible(
+                literal_type,
+                widened_type,
+                selector_type,
+                pattern.index(),
+            )?;
+            return Ok(literal);
+        }
+
+        let tree_index = pattern.index();
+        let tuple_name_text = format!("Tuple{arity}");
+        let tuple_type_name = Name::new(self.store.names.intern(&tuple_name_text), Namespace::Type);
+        let tuple_term_name = Name::new(tuple_type_name.text(), Namespace::Term);
+        let scala_package = match self.packages.symbol(&["scala"]) {
+            Some(package) => Some(package),
+            None => self.resolve_external_package(&["scala".to_owned()], tree_index)?,
+        }
+        .ok_or_else(|| {
+            self.tuple_pattern_resolution_error(
+                pattern,
+                arity,
+                TuplePatternResolutionIssue::TupleClassNotFound,
+            )
+        })?;
+        let package_prefix = self.package_type_prefix(scala_package);
+
+        let local_type_candidates = self
+            .packages
+            .scope_of(scala_package)
+            .map(|scope| {
+                self.store
+                    .scopes
+                    .get(scope)
+                    .lookup_all(&tuple_type_name)
+                    .iter()
+                    .copied()
+                    .filter(|symbol| self.store.symbols.get(*symbol).kind == SymbolKind::Class)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let tuple_class = match local_type_candidates.as_slice() {
+            [class] => *class,
+            [] => {
+                let request = dotty_core::MemberRequest {
+                    prefix: package_prefix,
+                    name: tuple_type_name,
+                    selector: dotty_core::MemberSelector::Unique,
+                    space: dotty_core::MemberSpace::Prefix,
+                };
+                self.resolver
+                    .resolve_member(self.store, &request)
+                    .map_err(|error| TyperError::SymbolResolution {
+                        source: self.source,
+                        tree_index,
+                        error,
+                    })?
+                    .filter(|symbol| {
+                        self.store.symbols.contains(*symbol)
+                            && self.store.symbols.get(*symbol).kind == SymbolKind::Class
+                    })
+                    .ok_or_else(|| {
+                        self.tuple_pattern_resolution_error(
+                            pattern,
+                            arity,
+                            TuplePatternResolutionIssue::TupleClassNotFound,
+                        )
+                    })?
+            }
+            _ => {
+                return Err(self.tuple_pattern_resolution_error(
+                    pattern,
+                    arity,
+                    TuplePatternResolutionIssue::TupleClassNotFound,
+                ));
+            }
+        };
+
+        let linked_companion = self.store.symbols.get(tuple_class).links.companion;
+        let scoped_companion = linked_companion
+            .filter(|symbol| {
+                self.store.symbols.contains(*symbol)
+                    && self.store.symbols.get(*symbol).kind == SymbolKind::Object
+            })
+            .or_else(|| {
+                self.packages.scope_of(scala_package).and_then(|scope| {
+                    let objects = self
+                        .store
+                        .scopes
+                        .get(scope)
+                        .lookup_all(&tuple_term_name)
+                        .iter()
+                        .copied()
+                        .filter(|symbol| self.store.symbols.get(*symbol).kind == SymbolKind::Object)
+                        .collect::<Vec<_>>();
+                    match objects.as_slice() {
+                        [object] => Some(*object),
+                        _ => None,
+                    }
+                })
+            });
+        let tuple_object = match scoped_companion {
+            Some(object) => object,
+            None => {
+                let request = dotty_core::MemberRequest {
+                    prefix: package_prefix,
+                    name: tuple_term_name,
+                    selector: dotty_core::MemberSelector::Unique,
+                    space: dotty_core::MemberSpace::Prefix,
+                };
+                self.resolver
+                    .resolve_member(self.store, &request)
+                    .map_err(|error| TyperError::SymbolResolution {
+                        source: self.source,
+                        tree_index,
+                        error,
+                    })?
+                    .filter(|symbol| {
+                        self.store.symbols.contains(*symbol)
+                            && self.store.symbols.get(*symbol).kind == SymbolKind::Object
+                    })
+                    .ok_or_else(|| {
+                        self.tuple_pattern_resolution_error(
+                            pattern,
+                            arity,
+                            TuplePatternResolutionIssue::CompanionNotFound,
+                        )
+                    })?
+            }
+        };
+
+        let type_arguments = match self.store.types.try_get(selector_type) {
+            Some(Type::Applied { tycon, args }) => {
+                let tycon_symbol = match self.store.types.try_get(*tycon) {
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(symbol),
+                        ..
+                    }) => Some(*symbol),
+                    _ => None,
+                };
+                if tycon_symbol == Some(tuple_class) && args.len() == arity {
+                    args.clone()
+                } else {
+                    vec![self.definitions.any_type; arity]
+                }
+            }
+            _ => vec![self.definitions.any_type; arity],
+        };
+
+        let companion_prefix = self.type_symbol_prefix(tuple_object);
+        let companion_type = self.store.types.alloc(Type::TermRef {
+            prefix: companion_prefix,
+            target: TermRefTarget::Symbol(tuple_object),
+        });
+        let unapply_name = Name::new(self.store.names.intern("unapply"), Namespace::Term);
+        let receiver =
+            self.tuple_companion_receiver(companion_type, pattern, arity, info_journal)?;
+        self.complete_relation_type(
+            receiver,
+            info_journal,
+            &mut std::collections::HashSet::new(),
+            0,
+        )?;
+        let members = self
+            .lookup_overload_members_journaled(receiver, unapply_name, info_journal)
+            .map_err(|_| {
+                self.tuple_pattern_resolution_error(
+                    pattern,
+                    arity,
+                    TuplePatternResolutionIssue::UnapplyNotFound,
+                )
+            })?;
+        let mut candidates = members
+            .into_iter()
+            .map(|member| {
+                let callable = self.member_type_on_journaled(&member, info_journal)?;
+                Ok(crate::typer::application::ApplicationCandidate {
+                    symbol: member.symbol,
+                    callable,
+                    member: Some(member),
+                    rejection: None,
+                })
+            })
+            .collect::<Result<Vec<_>, TyperError>>()?;
+        self.remove_overridden_overload_candidates(&mut candidates, tree_index)?;
+        let [candidate] = candidates.as_slice() else {
+            return Err(self.tuple_pattern_resolution_error(
+                pattern,
+                arity,
+                TuplePatternResolutionIssue::UnapplyNotFound,
+            ));
+        };
+        let callable = candidate.callable;
+        let Some(Type::Poly(poly)) = self.store.types.try_get(callable) else {
+            return Err(self.tuple_pattern_resolution_error(
+                pattern,
+                arity,
+                TuplePatternResolutionIssue::UnapplyShapeUnsupported,
+            ));
+        };
+        if poly.params.len() != arity {
+            return Err(self.tuple_pattern_resolution_error(
+                pattern,
+                arity,
+                TuplePatternResolutionIssue::UnapplyShapeUnsupported,
+            ));
+        }
+        let instantiated =
+            dotty_core::types::instantiate_poly(self.store, callable, &type_arguments).map_err(
+                |_| {
+                    self.tuple_pattern_resolution_error(
+                        pattern,
+                        arity,
+                        TuplePatternResolutionIssue::UnapplyShapeUnsupported,
+                    )
+                },
+            )?;
+        let Some(Type::Method(method)) = self.store.types.try_get(instantiated.result) else {
+            return Err(self.tuple_pattern_resolution_error(
+                pattern,
+                arity,
+                TuplePatternResolutionIssue::UnapplyShapeUnsupported,
+            ));
+        };
+        if self.extractor_method_shape_issue(method).is_some() {
+            return Err(self.tuple_pattern_resolution_error(
+                pattern,
+                arity,
+                TuplePatternResolutionIssue::UnapplyShapeUnsupported,
+            ));
+        }
+        let result_type = method.result;
+        let tuple_type = method.params[0].ty;
+        let selector_conforms = self.conforms(selector_type, tuple_type);
+        if matches!(&selector_conforms, Ok(true)) {
+            // The selector already has a compatible tuple input type.
+        } else {
+            let tuple_conforms = self.conforms(tuple_type, selector_type);
+            if matches!(&tuple_conforms, Ok(true)) {
+                // A broad selector such as Any can still match this tuple.
+            } else if let Err(error) = selector_conforms {
+                return Err(TyperError::TuplePatternRelationDeferred {
+                    source: self.source,
+                    tree_index,
+                    selector: selector_type,
+                    tuple_type,
+                    error: Box::new(error),
+                });
+            } else if let Err(error) = tuple_conforms {
+                return Err(TyperError::TuplePatternRelationDeferred {
+                    source: self.source,
+                    tree_index,
+                    selector: selector_type,
+                    tuple_type,
+                    error: Box::new(error),
+                });
+            } else {
+                return Err(TyperError::TuplePatternTypeMismatch {
+                    source: self.source,
+                    tree_index,
+                    selector: selector_type,
+                    tuple_type,
+                });
+            }
+        }
+        let component_types = self
+            .product_component_types(
+                result_type,
+                tree_index,
+                candidate.symbol,
+                arity,
+                info_journal,
+            )
+            .map_err(|_| {
+                self.tuple_pattern_resolution_error(
+                    pattern,
+                    arity,
+                    TuplePatternResolutionIssue::TupleTypeUnsupported,
+                )
+            })?;
+        let unapply_type = self.store.types.alloc(Type::TermRef {
+            prefix: companion_type,
+            target: TermRefTarget::Symbol(candidate.symbol),
+        });
+        let position = self.arena.get(pattern).position;
+        let function = {
+            let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
+            let qualifier = builder.ident(
+                self.store.symbols.get(tuple_object).name,
+                companion_type,
+                position,
+            );
+            let selected = builder.select(qualifier, unapply_name, false, unapply_type, position);
+            let arguments = type_arguments
+                .iter()
+                .map(|argument| builder.type_tree(*argument, position))
+                .collect();
+            builder.type_apply(selected, arguments, instantiated.result, position)
+        };
+        let mut patterns = Vec::with_capacity(arity);
+        for (element, component_type) in tuple.elements.iter().zip(component_types) {
+            patterns.push(self.type_pattern(
+                *element,
+                component_type,
+                context,
+                info_journal,
+                new_mappings,
+            )?);
+        }
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).unapply(
+                function,
+                Vec::new(),
+                patterns,
+                tuple_type,
+                position,
+            ),
+        )
     }
 
     fn is_product_subtype(
@@ -312,7 +695,11 @@ impl SourceTyper<'_> {
         }
         let prefix = self.type_symbol_prefix(product);
         let product_type = self.store.types.alloc(Type::type_ref(prefix, product));
-        self.complete_typed_pattern_relation_class(result_type, info_journal)?;
+        let result_tycon = match self.store.types.try_get(result_type) {
+            Some(Type::Applied { tycon, .. }) => *tycon,
+            _ => result_type,
+        };
+        self.complete_typed_pattern_relation_class(result_tycon, info_journal)?;
         self.complete_typed_pattern_relation_class(product_type, info_journal)?;
         let conforms = self.conforms(result_type, product_type).map_err(|_| {
             TyperError::UnsupportedExtractorProductProtocol {
@@ -326,17 +713,19 @@ impl SourceTyper<'_> {
         Ok(conforms)
     }
 
-    fn binary_product_component_types(
+    fn product_component_types(
         &mut self,
         result_type: TypeId,
         pattern_index: u32,
         unapply: SymbolId,
+        expected_arity: usize,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<Vec<TypeId>, TyperError> {
         let direct_product = self.product_extractor_component_types(
             result_type,
             pattern_index,
             unapply,
+            expected_arity,
             true,
             info_journal,
         );
@@ -360,6 +749,7 @@ impl SourceTyper<'_> {
             get_type,
             pattern_index,
             unapply,
+            expected_arity,
             false,
             info_journal,
         )?
@@ -370,6 +760,39 @@ impl SourceTyper<'_> {
             result: get_type,
             issue: ExtractorProductIssue::SelectorShape,
         })
+    }
+
+    fn unary_extractor_component_type(
+        &mut self,
+        result_type: TypeId,
+        pattern_index: u32,
+        unapply: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let direct_product = self.product_extractor_component_types(
+            result_type,
+            pattern_index,
+            unapply,
+            1,
+            true,
+            info_journal,
+        );
+        let direct_arity_error = match direct_product {
+            Ok(Some(mut component_types)) => return Ok(component_types.remove(0)),
+            Ok(None) => None,
+            Err(error @ TyperError::ExtractorProductSelectorCountMismatch { .. }) => Some(error),
+            Err(error) => return Err(error),
+        };
+
+        match self.option_like_extractor_component_type(
+            result_type,
+            pattern_index,
+            unapply,
+            info_journal,
+        ) {
+            Ok(component_type) => Ok(component_type),
+            Err(error) => Err(direct_arity_error.unwrap_or(error)),
+        }
     }
 
     fn resolve_extractor_pattern_plan(
@@ -953,24 +1376,7 @@ impl SourceTyper<'_> {
                 } else {
                     match plan.source_patterns.as_slice() {
                         [source_pattern] => {
-                            if self
-                                .product_extractor_component_types(
-                                    plan.result_type,
-                                    pattern.index(),
-                                    plan.symbol,
-                                    true,
-                                    info_journal,
-                                )?
-                                .is_some()
-                            {
-                                return Err(TyperError::ExtractorPatternArityUnsupported {
-                                    source: self.source,
-                                    tree_index: pattern.index(),
-                                    unapply: plan.symbol,
-                                    actual: 1,
-                                });
-                            }
-                            let component_type = self.option_like_extractor_component_type(
+                            let component_type = self.unary_extractor_component_type(
                                 plan.result_type,
                                 pattern.index(),
                                 plan.symbol,
@@ -984,11 +1390,13 @@ impl SourceTyper<'_> {
                                 new_mappings,
                             )?]
                         }
-                        [_, _] => {
-                            let component_types = match self.binary_product_component_types(
+                        _ if !plan.source_patterns.is_empty() => {
+                            let expected_arity = plan.source_patterns.len();
+                            let component_types = match self.product_component_types(
                                 plan.result_type,
                                 pattern.index(),
                                 plan.symbol,
+                                expected_arity,
                                 info_journal,
                             ) {
                                 Ok(component_types) => component_types,
@@ -1003,12 +1411,12 @@ impl SourceTyper<'_> {
                                         source: self.source,
                                         tree_index: pattern.index(),
                                         unapply: plan.symbol,
-                                        actual: 2,
+                                        actual: expected_arity,
                                     });
                                 }
                                 Err(error) => return Err(error),
                             };
-                            let mut patterns = Vec::with_capacity(2);
+                            let mut patterns = Vec::with_capacity(expected_arity);
                             for (source_pattern, component_type) in
                                 plan.source_patterns.iter().zip(component_types)
                             {
@@ -1153,6 +1561,20 @@ impl SourceTyper<'_> {
                 info_journal,
                 new_mappings,
             )?,
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => self.type_tuple_pattern(
+                pattern,
+                tuple,
+                selector_type,
+                context,
+                info_journal,
+                new_mappings,
+            )?,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => {
+                return Err(TyperError::InfixPatternDeferred {
+                    source: self.source,
+                    tree_index: pattern.index(),
+                });
+            }
             _ => {
                 return Err(TyperError::UnsupportedPattern {
                     source: self.source,
@@ -2419,11 +2841,358 @@ mod tests {
                 type_match_error(&source_text);
             assert!(matches!(
                 error,
-                TyperError::ExtractorPatternArityUnsupported { actual: 1 | 3, .. }
+                TyperError::ExtractorPatternArityUnsupported { actual: 1, .. }
+                    | TyperError::ExtractorProductSelectorCountMismatch { .. }
             ));
             assert!(store_rolled_back);
             assert!(typed_state_rolled_back);
         }
+    }
+
+    #[test]
+    fn unary_product_extractor_types_its_single_component() {
+        let source_text = "package scala { trait Product }; package app { class ProductResult extends scala.Product { def _1: Int = 1 }; object Extractor { def unapply(value: Any): ProductResult = new ProductResult }; class C { def choose(value: Any): Int = value match { case Extractor(number) => number; case _ => 0 } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let method = method_symbol(&parsed, &store, &index, source);
+        let match_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Match(_)).then_some(tree))
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+
+        let typed_match = typer.type_expression(match_tree, context).unwrap();
+        let TreeKind::Match(matching) = &typer.typed_arena.get(typed_match).kind else {
+            panic!("expected a Typed Match");
+        };
+        let TreeKind::CaseDef(case) = &typer.typed_arena.get(matching.cases[0]).kind else {
+            panic!("expected a Typed CaseDef");
+        };
+        let TreeKind::UnApply(unapply) = &typer.typed_arena.get(case.pattern).kind else {
+            panic!("expected a Typed UnApply");
+        };
+        assert_eq!(unapply.patterns.len(), 1);
+        let child = unapply.patterns[0];
+        let typed_binding = typer.typed_arena.get(child);
+        let actual_type = match typer.store.types.try_get(typed_binding.ty) {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) => match *typer.store.symbols.info(*symbol) {
+                SymbolInfo::Complete(binding_type) => binding_type,
+                info => panic!("pattern binder has incomplete info: {info:?}"),
+            },
+            _ => typed_binding.ty,
+        };
+        assert_eq!(actual_type, definitions.int);
+    }
+
+    #[test]
+    fn unary_extractor_falls_back_to_get_after_product_arity_mismatch() {
+        let source_text = "package scala { trait Product }; package app { class ProductResult extends scala.Product { def _1: Boolean = true; def _2: Boolean = false; def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): ProductResult = new ProductResult }; class C { def choose(value: Any): Int = value match { case Extractor(number) => number; case _ => 0 } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let method = method_symbol(&parsed, &store, &index, source);
+        let match_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Match(_)).then_some(tree))
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+
+        let typed_match = typer.type_expression(match_tree, context).unwrap();
+        let TreeKind::Match(matching) = &typer.typed_arena.get(typed_match).kind else {
+            panic!("expected a Typed Match");
+        };
+        let TreeKind::CaseDef(case) = &typer.typed_arena.get(matching.cases[0]).kind else {
+            panic!("expected a Typed CaseDef");
+        };
+        let TreeKind::UnApply(unapply) = &typer.typed_arena.get(case.pattern).kind else {
+            panic!("expected a Typed UnApply");
+        };
+        assert_eq!(unapply.patterns.len(), 1);
+        let child_type = typer.typed_arena.get(unapply.patterns[0]).ty;
+        let actual_type = match typer.store.types.try_get(child_type) {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) => match *typer.store.symbols.info(*symbol) {
+                SymbolInfo::Complete(binding_type) => binding_type,
+                info => panic!("pattern binder has incomplete info: {info:?}"),
+            },
+            _ => child_type,
+        };
+        assert_eq!(
+            typer.store.types.try_get(actual_type),
+            typer.store.types.try_get(definitions.int)
+        );
+    }
+
+    #[test]
+    fn nary_product_extractors_type_components_recursively_in_order() {
+        let source_text = "package scala { trait Product }; package app { class PairResult extends scala.Product { def _1: Int = 1; def _2: Boolean = true }; class TripleResult extends scala.Product { def _1: PairResult = new PairResult; def _2: Boolean = true; def _3: Int = 3 }; object Pair { def unapply(value: Any): PairResult = new PairResult }; object Triple { def unapply(value: Any): TripleResult = new TripleResult }; class C { def choose(value: Any): Int = value match { case Triple(Pair(first, flag), enabled, last) if enabled => first; case _ => 0 } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let method = method_symbol(&parsed, &store, &index, source);
+        let match_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Match(_)).then_some(tree))
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+        let typed_match = typer.type_expression(match_tree, context).unwrap();
+        let TreeKind::Match(matching) = &typer.typed_arena.get(typed_match).kind else {
+            panic!("expected a Typed Match");
+        };
+        let TreeKind::CaseDef(case) = &typer.typed_arena.get(matching.cases[0]).kind else {
+            panic!("expected a Typed CaseDef");
+        };
+        let TreeKind::UnApply(triple) = &typer.typed_arena.get(case.pattern).kind else {
+            panic!("expected a Typed UnApply for Triple");
+        };
+        assert_eq!(triple.patterns.len(), 3);
+        assert!(matches!(
+            typer.typed_arena.get(triple.patterns[0]).kind,
+            TreeKind::UnApply(_)
+        ));
+        for (child, expected_type) in [
+            (triple.patterns[1], definitions.boolean),
+            (triple.patterns[2], definitions.int),
+        ] {
+            let child_type = typer.typed_arena.get(child).ty;
+            let actual_type = match typer.store.types.try_get(child_type) {
+                Some(Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                }) => match *typer.store.symbols.info(*symbol) {
+                    SymbolInfo::Complete(binding_type) => binding_type,
+                    info => panic!("pattern binder has incomplete info: {info:?}"),
+                },
+                _ => child_type,
+            };
+            assert_eq!(actual_type, expected_type);
+        }
+    }
+
+    #[test]
+    fn tuple_patterns_lower_through_canonical_source_tuple_extractors() {
+        let source_text = "package scala { trait Product; class Tuple2[A, B](val _1: A, val _2: B) extends Product; class MaybeTuple2[A, B](val value: Tuple2[A, B]) { def isEmpty: Boolean = false; def get: Tuple2[A, B] = value }; object Tuple2 { def unapply[A, B](value: Tuple2[A, B]): MaybeTuple2[A, B] = new MaybeTuple2(value) }; class Tuple3[A, B, C](val _1: A, val _2: B, val _3: C) extends Product; class MaybeTuple3[A, B, C](val value: Tuple3[A, B, C]) { def isEmpty: Boolean = false; def get: Tuple3[A, B, C] = value }; object Tuple3 { def unapply[A, B, C](value: Tuple3[A, B, C]): MaybeTuple3[A, B, C] = new MaybeTuple3(value) } }; package app { class PairResult extends scala.Product { def _1: Int = 1; def _2: Boolean = true }; object Pair { def unapply(value: Any): PairResult = new PairResult }; class C { def choose2(value: scala.Tuple2[Int, Boolean]): Any = value match { case (first, second) => first; case _ => 0 }; def choose3(value: scala.Tuple3[PairResult, Int, Boolean]): Any = value match { case (Pair(nested, _), 2 | 3, last) => nested; case _ => 0 } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+
+        for (method_name, arity, expected_extractor) in
+            [("choose2", 2, "Tuple2"), ("choose3", 3, "Tuple3")]
+        {
+            let (method, match_tree) = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    let TreeKind::DefDef(definition) = &node.kind else {
+                        return None;
+                    };
+                    if store.names.resolve(definition.name.as_name().text()) != method_name {
+                        return None;
+                    }
+                    let match_tree = definition.rhs?;
+                    if !matches!(parsed.ast.get(match_tree).kind, TreeKind::Match(_)) {
+                        return None;
+                    }
+                    Some((index.symbol_at(source, tree)?, match_tree))
+                })
+                .unwrap();
+            let (mut typer, context) = context_for(
+                &parsed,
+                &mut store,
+                &packages,
+                definitions,
+                &index,
+                source,
+                method,
+            );
+            let typed_match = typer
+                .type_expression(match_tree, context)
+                .unwrap_or_else(|error| panic!("{method_name}: {error:?}"));
+            let TreeKind::Match(matching) = &typer.typed_arena.get(typed_match).kind else {
+                panic!("expected a Typed Match");
+            };
+            let TreeKind::CaseDef(case) = &typer.typed_arena.get(matching.cases[0]).kind else {
+                panic!("expected a Typed CaseDef");
+            };
+            let TreeKind::UnApply(tuple_unapply) = &typer.typed_arena.get(case.pattern).kind else {
+                panic!("tuple patterns lower to Typed UnApply");
+            };
+            assert_eq!(tuple_unapply.patterns.len(), arity);
+            let TreeKind::TypeApply(type_apply) =
+                &typer.typed_arena.get(tuple_unapply.function).kind
+            else {
+                panic!("tuple extractor retains its inferred type arguments");
+            };
+            assert_eq!(type_apply.args.len(), arity);
+            let TreeKind::Select(extractor) = &typer.typed_arena.get(type_apply.function).kind
+            else {
+                panic!("tuple extractor function is selected from its companion");
+            };
+            assert_eq!(typer.store.names.resolve(extractor.name.text()), "unapply");
+            let TreeKind::Ident(companion) = &typer.typed_arena.get(extractor.qualifier).kind
+            else {
+                panic!("tuple companion is an identifier");
+            };
+            assert_eq!(
+                typer.store.names.resolve(companion.name.text()),
+                expected_extractor
+            );
+            if arity == 3 {
+                assert!(matches!(
+                    typer.typed_arena.get(tuple_unapply.patterns[0]).kind,
+                    TreeKind::UnApply(_)
+                ));
+                assert!(matches!(
+                    typer.typed_arena.get(tuple_unapply.patterns[1]).kind,
+                    TreeKind::Alternative(_)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn tuple_patterns_defer_when_the_canonical_tuple_class_is_unresolved() {
+        let source_text = "package scala { trait Product }; package app { class C { def choose(value: Any): Int = value match { case (first, second) => first; case _ => 0 } } }";
+        let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(source_text);
+        assert!(matches!(
+            error,
+            TyperError::TuplePatternResolutionDeferred {
+                arity: 2,
+                issue: TuplePatternResolutionIssue::TupleClassNotFound,
+                ..
+            }
+        ));
+        assert!(store_rolled_back);
+        assert!(typed_state_rolled_back);
+    }
+
+    #[test]
+    fn classpath_tuple_companions_without_module_classes_defer_resolution() {
+        let source_text = "package scala { trait Product }; package app { class C { def choose(value: Any): Int = value match { case (first, second) => first; case _ => 0 } } }";
+        let (parsed, mut store, packages, definitions, index, source) = setup(source_text);
+        let method = method_symbol(&parsed, &store, &index, source);
+        let pattern = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                matches!(node.kind, TreeKind::PhaseSpecific(UntypedNode::Tuple(_))).then_some(tree)
+            })
+            .unwrap();
+        let object = store.symbols.alloc(Symbol {
+            name: Name::new(store.names.intern("Tuple2"), Namespace::Term),
+            owner: None,
+            kind: SymbolKind::Object,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Classfile(store.origins.register_classfile()),
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let companion_type = store.types.alloc(Type::TermRef {
+            prefix: definitions.no_prefix,
+            target: TermRefTarget::Symbol(object),
+        });
+        let (mut typer, _) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+
+        let error = typer
+            .tuple_companion_receiver(companion_type, pattern, 2, &mut Vec::new())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            TyperError::TuplePatternResolutionDeferred {
+                arity: 2,
+                issue: TuplePatternResolutionIssue::CompanionModuleClassUnavailable,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn tuple_patterns_reject_a_selector_disjoint_from_the_canonical_tuple_type() {
+        let source_text = "package scala { trait Product; class Tuple2[A, B](val _1: A, val _2: B) extends Product; class MaybeTuple2[A, B](val value: Tuple2[A, B]) { def isEmpty: Boolean = false; def get: Tuple2[A, B] = value }; object Tuple2 { def unapply[A, B](value: Tuple2[A, B]): MaybeTuple2[A, B] = new MaybeTuple2(value) } }; package app { class Unrelated {}; class C { def choose(value: Unrelated): Any = value match { case (first, second) => first; case _ => value } } }";
+        let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(source_text);
+
+        assert!(
+            matches!(
+                &error,
+                TyperError::TuplePatternTypeMismatch { .. }
+                    | TyperError::TuplePatternRelationDeferred { .. }
+            ),
+            "{error:?}"
+        );
+        assert!(store_rolled_back);
+        assert!(typed_state_rolled_back);
+    }
+
+    #[test]
+    fn unit_pattern_is_typed_as_a_literal_without_tuple_resolution() {
+        let (parsed, mut store, packages, definitions, index, source) = setup(
+            "class C { def choose(value: Any): Int = value match { case () => 1; case _ => 0 } }",
+        );
+        let method = method_symbol(&parsed, &store, &index, source);
+        let match_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| matches!(node.kind, TreeKind::Match(_)).then_some(tree))
+            .unwrap();
+        let (mut typer, context) = context_for(
+            &parsed,
+            &mut store,
+            &packages,
+            definitions,
+            &index,
+            source,
+            method,
+        );
+
+        typer
+            .type_expression(match_tree, context)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+    }
+
+    #[test]
+    fn infix_patterns_return_a_focused_deferred_error() {
+        let source_text = "class C { def choose(value: Any): Any = value match { case left op right => left; case _ => value } }";
+        let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(source_text);
+
+        assert!(matches!(error, TyperError::InfixPatternDeferred { .. }));
+        assert!(store_rolled_back);
+        assert!(typed_state_rolled_back);
     }
 
     #[test]
@@ -3258,13 +4027,13 @@ mod tests {
     }
 
     #[test]
-    fn failed_nested_extractor_pattern_rolls_back_the_whole_match() {
+    fn unresolved_nested_tuple_pattern_rolls_back_the_whole_match() {
         let source_text = "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object SomeInt { def unapply(value: Any): MaybeInt = value }; class C { def choose(value: Any): Int = value match { case SomeInt((left, right)) => 1; case _ => 0 } }";
         let (error, store_rolled_back, typed_state_rolled_back) = type_match_error(source_text);
         assert!(matches!(
             error,
-            TyperError::UnsupportedPattern {
-                pattern_kind: PatternKind::Tuple,
+            TyperError::TuplePatternResolutionDeferred {
+                issue: TuplePatternResolutionIssue::TupleClassNotFound,
                 ..
             }
         ));
