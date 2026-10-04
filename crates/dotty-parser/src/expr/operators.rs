@@ -411,7 +411,7 @@ where
         self.intern_current_term_name().ok()
     }
 
-    pub(super) fn has_physical_line_break(&self, start: u32, end: u32) -> bool {
+    pub(crate) fn has_physical_line_break(&self, start: u32, end: u32) -> bool {
         self.source
             .as_str()
             .get(start as usize..end as usize)
