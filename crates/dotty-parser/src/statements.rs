@@ -670,9 +670,9 @@ where
                 .map_or(0, |index| index + 1);
             let owner_starts_after_only_indentation =
                 owner_start as usize - owner_line_start == owner_indent.len();
+            let marker_indent = self.source_line_indent_prefix(marker_start);
 
-            !owner_starts_after_only_indentation
-                || owner_indent == self.source_line_indent_prefix(marker_start)
+            !owner_starts_after_only_indentation || marker_indent.starts_with(owner_indent.as_str())
         });
         if indentation_allows_owner && self.end_marker_matches(tree, target_kind, target_text) {
             return self

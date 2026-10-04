@@ -40,9 +40,10 @@ where
     pub(crate) last_advance_consumed_statement_separator: bool,
     /// AST constructs already closed by an explicit Scala `end` marker.
     pub(crate) end_marked_trees: HashSet<TreeId<Untyped>>,
-    /// End-marker owners for nested template bodies, from outermost to
-    /// innermost. A marker for an ancestor must be returned to that parser.
-    pub(crate) template_end_owners: Vec<Option<dotty_core::Name>>,
+    /// Active enclosing constructs that can own Scala `end` markers, from
+    /// outermost to innermost. Nested templates return matching markers to
+    /// these owners.
+    pub(crate) end_marker_owners: Vec<Option<dotty_core::Name>>,
     /// Active quoted expression bodies; `$` followed by `{` is a splice only
     /// while this depth is nonzero.
     pub(crate) expression_quote_depth: u32,
@@ -92,7 +93,7 @@ where
             last_advance_was_outdent: false,
             last_advance_consumed_statement_separator: false,
             end_marked_trees: HashSet::new(),
-            template_end_owners: Vec::new(),
+            end_marker_owners: Vec::new(),
             expression_quote_depth: 0,
             quote_pattern_depth: 0,
             type_quote_depth: 0,

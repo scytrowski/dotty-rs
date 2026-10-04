@@ -27,11 +27,24 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    pub(crate) fn with_end_marker_owner<R>(
+        &mut self,
+        owner: Name,
+        parse: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.end_marker_owners.push(Some(owner));
+        let result = parse(self);
+        let popped_owner = self.end_marker_owners.pop();
+        debug_assert_eq!(popped_owner, Some(Some(owner)));
+        result
+    }
+
     /// Parses a template body and preserves all statements in source order.
     ///
     /// The opening and closing delimiter belong to this helper.  In the
     /// indented form the scanner has already classified the layout and the
     /// parser only consumes the resulting `Indent`/`Outdent` tokens.
+    #[cfg(test)]
     pub(crate) fn parse_template_body(&mut self, body: TemplateBody) -> TemplateBodyResult {
         self.parse_template_body_with_feedback_and_owner(body, None, None)
     }
@@ -58,7 +71,7 @@ where
         }
 
         let body_indent = self.source_line_indent_prefix(self.current().span.start());
-        self.template_end_owners.push(expected_end_marker);
+        self.end_marker_owners.push(expected_end_marker);
         let result = self.with_placeholder_scope(|parser| {
             parser.with_location(Location::InBlock, |parser| {
                 parser.with_block_end(Some(closing), |parser| {
@@ -66,7 +79,7 @@ where
                 })
             })
         });
-        let popped_owner = self.template_end_owners.pop();
+        let popped_owner = self.end_marker_owners.pop();
         debug_assert_eq!(popped_owner, Some(expected_end_marker));
         // A marker owned by this template or an ancestor can be the effective
         // end of an indented body even when the scanner emitted no Outdent.
@@ -108,9 +121,9 @@ where
 
     fn current_end_marker_matches_ancestor(&mut self) -> bool {
         let owners: Vec<_> = self
-            .template_end_owners
+            .end_marker_owners
             .iter()
-            .take(self.template_end_owners.len().saturating_sub(1))
+            .take(self.end_marker_owners.len().saturating_sub(1))
             .filter_map(|owner| *owner)
             .collect();
         owners
@@ -908,7 +921,7 @@ mod tests {
             &mut names,
         );
         parser
-            .template_end_owners
+            .end_marker_owners
             .push(Some(Name::new(outer, dotty_core::Namespace::Term)));
 
         let result = parser.parse_template_body_with_feedback_and_owner(
