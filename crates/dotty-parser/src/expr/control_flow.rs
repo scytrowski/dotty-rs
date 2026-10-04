@@ -613,10 +613,13 @@ where
         &mut self,
         feedback_indent: Option<u32>,
     ) -> TreeId<Untyped> {
+        let region_indent = (self.current().kind == TokenKind::Indent)
+            .then(|| self.current().span.start())
+            .or(feedback_indent);
         self.advance();
         if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Case) {
             let case_mark = self.mark();
-            let cases = self.case_clauses();
+            let cases = self.case_clauses_in_region(region_indent);
             let closed_by_delimiter = feedback_indent.is_some()
                 && matches!(
                     self.current().kind,
