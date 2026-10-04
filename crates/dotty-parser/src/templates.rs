@@ -58,6 +58,7 @@ where
         }
 
         let body_indent = self.source_line_indent_prefix(self.current().span.start());
+        self.template_end_owners.push(expected_end_marker);
         let result = self.with_placeholder_scope(|parser| {
             parser.with_location(Location::InBlock, |parser| {
                 parser.with_block_end(Some(closing), |parser| {
@@ -65,8 +66,12 @@ where
                 })
             })
         });
+        let popped_owner = self.template_end_owners.pop();
+        debug_assert_eq!(popped_owner, Some(expected_end_marker));
+        // A marker owned by this template or an ancestor can be the effective
+        // end of an indented body even when the scanner emitted no Outdent.
         let closes_at_end_marker =
-            expected_end_marker.is_some_and(|owner| self.current_end_marker_matches_name(owner));
+            body == TemplateBody::Indented && self.current().kind == TokenKind::EndMarker;
 
         if body == TemplateBody::Indented {
             if let Some(indent_offset) = feedback_indent {
@@ -101,6 +106,18 @@ where
         self.names.resolve(expected.text()) == self.marker_target_text(target.kind, target.span)
     }
 
+    fn current_end_marker_matches_ancestor(&mut self) -> bool {
+        let owners: Vec<_> = self
+            .template_end_owners
+            .iter()
+            .take(self.template_end_owners.len().saturating_sub(1))
+            .filter_map(|owner| *owner)
+            .collect();
+        owners
+            .into_iter()
+            .any(|owner| self.current_end_marker_matches_name(owner))
+    }
+
     fn parse_template_members(
         &mut self,
         closing: TokenKind,
@@ -124,6 +141,9 @@ where
                 if expected_end_marker
                     .is_some_and(|owner| self.current_end_marker_matches_name(owner))
                 {
+                    break;
+                }
+                if self.current_end_marker_matches_ancestor() {
                     break;
                 }
                 if !self.consume_end_marker(members.last().copied()) {
@@ -215,10 +235,20 @@ where
                 {
                     break;
                 }
-                if !self.consume_end_marker(members.last().copied()) {
-                    return TemplateBodyResult { self_val, members };
+                if self.end_marker_matches_next(members.last().copied()) {
+                    if !self.consume_end_marker(members.last().copied()) {
+                        return TemplateBodyResult { self_val, members };
+                    }
+                    self.consume_template_separators(closing);
+                } else if self.current_end_marker_matches_ancestor() {
+                    // Leave enclosing markers to the template that owns them.
+                    break;
+                } else {
+                    if !self.consume_end_marker(members.last().copied()) {
+                        return TemplateBodyResult { self_val, members };
+                    }
+                    self.consume_template_separators(closing);
                 }
-                self.consume_template_separators(closing);
             }
         }
 
@@ -854,6 +884,44 @@ mod tests {
         assert!(
             parser.diagnostics().is_empty(),
             "unexpected diagnostics: {:?}",
+            parser.diagnostics()
+        );
+    }
+
+    #[test]
+    fn indented_template_hands_an_enclosing_end_marker_to_its_caller() {
+        let source = "  member\nend Outer";
+        let marker = source.find("end").unwrap() as u32;
+        let mut names = NameInterner::new();
+        let inner = names.intern("Inner");
+        let outer = names.intern("Outer");
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Indent, 0, 0),
+                token(TokenKind::Identifier, 2, 8),
+                token(TokenKind::Newline, 8, 9),
+                token(TokenKind::EndMarker, marker, marker + 3),
+                token(TokenKind::Identifier, marker + 4, marker + 9),
+                token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+            ],
+            &mut names,
+        );
+        parser
+            .template_end_owners
+            .push(Some(Name::new(outer, dotty_core::Namespace::Term)));
+
+        let result = parser.parse_template_body_with_feedback_and_owner(
+            TemplateBody::Indented,
+            None,
+            Some(Name::new(inner, dotty_core::Namespace::Term)),
+        );
+
+        assert_eq!(result.members.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::EndMarker);
+        assert!(
+            parser.diagnostics().is_empty(),
+            "the outer marker must not be diagnosed by the nested template: {:?}",
             parser.diagnostics()
         );
     }

@@ -1472,6 +1472,20 @@ mod tests {
     }
 
     #[test]
+    fn if_branch_can_start_with_a_quote() {
+        const SOURCE: &str = "def quoted(x: Boolean) = if x then 1 else '{ 2 }";
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let rendered = render_tree(result.root, &result.ast, &names, SOURCE);
+        assert!(rendered.contains("\"kind\":\"Quote\""), "{rendered}");
+    }
+
+    #[test]
     fn braced_template_dedented_else_remains_attached_to_its_if() {
         const SOURCE: &str = "object O {\n    val x = if true then 1\nelse 2\n}";
         let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");

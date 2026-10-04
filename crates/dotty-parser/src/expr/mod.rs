@@ -502,6 +502,7 @@ pub(crate) const fn can_start_prefix_expr(kind: TokenKind) -> bool {
             | TokenKind::DoubleLiteral
             | TokenKind::StringLiteral
             | TokenKind::InterpolationId
+            | TokenKind::Quote
             | TokenKind::Punctuation(Punctuation::LeftParen | Punctuation::LeftBrace)
     )
 }
