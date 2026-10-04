@@ -234,6 +234,7 @@ struct Audit {
     failures: BTreeMap<String, FailureBucket>,
     expression_forms: BTreeMap<String, usize>,
     type_tree_forms: BTreeMap<String, usize>,
+    type_tree_form_files: BTreeMap<String, BTreeSet<String>>,
     parser_diagnostics: BTreeMap<String, usize>,
     match_readiness: MatchReadiness,
     match_profile: MatchProfile,
@@ -255,6 +256,7 @@ impl Default for Audit {
             failures: BTreeMap::new(),
             expression_forms: empty_expression_histogram(),
             type_tree_forms: empty_type_tree_histogram(),
+            type_tree_form_files: empty_type_tree_form_files(),
             parser_diagnostics: BTreeMap::new(),
             match_readiness: MatchReadiness::default(),
             match_profile: MatchProfile::default(),
@@ -324,6 +326,12 @@ impl Audit {
         }
         for (name, count) in other.type_tree_forms {
             *self.type_tree_forms.entry(name).or_default() += count;
+        }
+        for (name, files) in other.type_tree_form_files {
+            self.type_tree_form_files
+                .entry(name)
+                .or_default()
+                .extend(files);
         }
         for (name, count) in other.parser_diagnostics {
             *self.parser_diagnostics.entry(name).or_default() += count;
@@ -509,6 +517,14 @@ fn pinned_scala39_local_definition_audit() {
     for (form, count) in &audit.type_tree_forms {
         println!("  {form}={count}");
     }
+    println!("type_tree_form_files:");
+    for (form, files) in &audit.type_tree_form_files {
+        println!(
+            "  {form}={} [{}]",
+            files.len(),
+            files.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
     println!("parser_diagnostics:");
     let mut parser_diagnostics = audit.parser_diagnostics.iter().collect::<Vec<_>>();
     parser_diagnostics.sort_by(|(name_a, count_a), (name_b, count_b)| {
@@ -523,9 +539,16 @@ fn pinned_scala39_local_definition_audit() {
         "unsupported_expression_total={}",
         sum_buckets_with_prefix(&audit.failures, "UnsupportedExpression::")
     );
+    let unsupported_type_tree_files = audit
+        .failures
+        .iter()
+        .filter(|(name, _)| name.starts_with("UnsupportedTypeTree::"))
+        .flat_map(|(_, bucket)| bucket.files.iter().cloned())
+        .collect::<BTreeSet<_>>();
     println!(
-        "UnsupportedTypeTree={}",
-        sum_buckets_with_prefix(&audit.failures, "UnsupportedTypeTree::")
+        "UnsupportedTypeTree={} files={}",
+        sum_buckets_with_prefix(&audit.failures, "UnsupportedTypeTree::"),
+        unsupported_type_tree_files.len()
     );
     println!("unsupported_type_tree_failures:");
     for (name, bucket) in ordered_type_tree_failures(&audit) {
@@ -1181,7 +1204,11 @@ fn declared_type_tree_histogram_is_structural_and_deterministic() {
 
     let first = collect_declared_type_tree_histogram(&parsed.ast, &store.names);
     let second = collect_declared_type_tree_histogram(&parsed.ast, &store.names);
+    let (inventory, forms) = collect_declared_type_tree_inventory(&parsed.ast, &store.names);
     assert_eq!(first, second);
+    assert_eq!(first, inventory);
+    assert!(forms.contains("InfixOp::|"));
+    assert!(forms.contains("RefinedTypeTree"));
     assert_eq!(first.get("InfixOp::|"), Some(&1));
     assert_eq!(first.get("InfixOp::&"), Some(&1));
     assert_eq!(first.get("InfixOp::<other>"), Some(&0));
@@ -1242,6 +1269,8 @@ fn local_expression_audit_schema_keeps_zero_count_forms_without_an_ast() {
     assert!(audit.expression_forms.values().all(|count| *count == 0));
     assert_eq!(audit.type_tree_forms.len(), TYPE_TREE_FORMS.len());
     assert!(audit.type_tree_forms.values().all(|count| *count == 0));
+    assert_eq!(audit.type_tree_form_files.len(), TYPE_TREE_FORMS.len());
+    assert!(audit.type_tree_form_files.values().all(BTreeSet::is_empty));
 }
 
 #[test]
@@ -1673,7 +1702,18 @@ fn audit_source_inner(
     let mut audit = collect_local_nodes(&parsed.ast);
     audit.files_attempted = 1;
     audit.expression_forms = collect_expression_histogram(&parsed.ast);
-    audit.type_tree_forms = collect_declared_type_tree_histogram(&parsed.ast, &store.names);
+    let (type_tree_forms, type_tree_form_names) =
+        collect_declared_type_tree_inventory(&parsed.ast, &store.names);
+    audit.type_tree_forms = type_tree_forms;
+    if !type_tree_form_names.is_empty() {
+        for form in type_tree_form_names {
+            audit
+                .type_tree_form_files
+                .entry(form)
+                .or_default()
+                .insert(path.to_owned());
+        }
+    }
     audit.recovered_parser_files = usize::from(!parsed.diagnostics.is_empty());
     collect_match_profile(&parsed.ast, path, &store, &mut audit.match_profile);
     for diagnostic in &parsed.diagnostics {
@@ -3497,10 +3537,24 @@ fn empty_type_tree_histogram() -> BTreeMap<String, usize> {
         .collect()
 }
 
+fn empty_type_tree_form_files() -> BTreeMap<String, BTreeSet<String>> {
+    TYPE_TREE_FORMS
+        .iter()
+        .map(|form| ((*form).to_owned(), BTreeSet::new()))
+        .collect()
+}
+
 fn collect_declared_type_tree_histogram(
     arena: &dotty_core::AstArena<Untyped>,
     names: &dotty_core::names::NameInterner,
 ) -> BTreeMap<String, usize> {
+    collect_declared_type_tree_inventory(arena, names).0
+}
+
+fn collect_declared_type_tree_inventory(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::names::NameInterner,
+) -> (BTreeMap<String, usize>, BTreeSet<String>) {
     let operators = source_operator_spellings(arena, names);
     let local_stats = local_stat_trees(arena);
     let mut roots = Vec::new();
@@ -3540,6 +3594,7 @@ fn collect_declared_type_tree_histogram(
         .map(|(tree, node)| (tree.index(), node))
         .collect::<BTreeMap<_, _>>();
     let mut histogram = empty_type_tree_histogram();
+    let mut forms = BTreeSet::new();
     let mut visited = HashSet::new();
     let mut pending = roots;
     while let Some(tree) = pending.pop() {
@@ -3558,10 +3613,11 @@ fn collect_declared_type_tree_histogram(
         }
         if let Some(form) = type_tree_form(&node.kind, tree.index(), &operators) {
             *histogram.entry(form.to_owned()).or_default() += 1;
+            forms.insert(form.to_owned());
         }
         pending.extend(type_tree_children(&node.kind));
     }
-    histogram
+    (histogram, forms)
 }
 
 fn type_tree_form(
