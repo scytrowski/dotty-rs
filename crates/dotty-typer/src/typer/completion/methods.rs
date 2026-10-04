@@ -322,7 +322,7 @@ impl SourceTyper<'_> {
     ) -> Result<(Vec<MethodParamSpec>, MethodKind), TyperError> {
         let mut parameters = Vec::with_capacity(trees.len());
         let mut clause_kind = None;
-        for tree in trees {
+        for (parameter_index, tree) in trees.iter().enumerate() {
             let Some(node) = self.arena.try_get(*tree) else {
                 return Err(TyperError::TreeOutsideArena {
                     source: self.source,
@@ -374,6 +374,23 @@ impl SourceTyper<'_> {
                 Some(TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)))
                     if self.store.names.resolve(postfix.op.text()) == "*"
             );
+            if repeated_parameter && parameter_kind != MethodKind::Plain {
+                return Err(TyperError::RepeatedParameterClauseUnsupported {
+                    method,
+                    method_tree_index,
+                    clause_index,
+                    parameter_index,
+                    kind: parameter_kind,
+                });
+            }
+            if repeated_parameter && parameter_index + 1 != trees.len() {
+                return Err(TyperError::RepeatedParameterNotFinal {
+                    method,
+                    method_tree_index,
+                    clause_index,
+                    parameter_index,
+                });
+            }
             let completed_parameter_type =
                 self.complete_signature_parameter(symbol, info_journal)?;
             let ty = if repeated_parameter {
