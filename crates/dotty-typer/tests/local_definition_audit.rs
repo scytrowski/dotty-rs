@@ -1052,6 +1052,65 @@ fn local_expression_audit_keeps_parser_and_namer_failures_distinct() {
 }
 
 #[test]
+fn unsupported_type_tree_failures_keep_exact_source_shapes() {
+    let fixtures = [
+        ("class C { def f(x: List[?]): Unit = () }", "TypeBoundsTree"),
+        ("class C { def f(x: A | B): Unit = () }", "InfixOp::|"),
+        ("class C { def f(x: A & B): Unit = () }", "InfixOp::&"),
+        (
+            "class C { def f(x: Any, y: x.type): Unit = () }",
+            "SingletonTypeTree",
+        ),
+        ("class C { def f(xs: T*): Unit = () }", "PostfixOp::*"),
+        (
+            "class C { def f(x: A { type X = B }): Unit = () }",
+            "RefinedTypeTree",
+        ),
+        ("object C { type F = [X] =>> X }", "LambdaTypeTree"),
+    ];
+
+    for (source_text, expected_shape) in fixtures {
+        let mut store = SemanticStore::new();
+        let source = SourceId::from_index(0);
+        let scanner = ContextualScanner::new(source_text).unwrap();
+        let parsed = parse_compilation_unit(
+            SourceText::new(source_text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source_text}: {:?}",
+            parsed.diagnostics
+        );
+        let operators = source_operator_spellings(&parsed.ast, &store.names);
+        let (tree, node) = parsed
+            .ast
+            .iter()
+            .find(|(tree, node)| {
+                type_tree_shape_label(&node.kind, tree.index(), &operators) == expected_shape
+            })
+            .unwrap_or_else(|| panic!("{source_text} did not produce {expected_shape}"));
+        let failure = classify_typer_error(
+            &TyperError::UnsupportedTypeTree {
+                source,
+                tree_index: tree.index(),
+                tree_kind: tree_kind_label(&node.kind),
+            },
+            &parsed.ast,
+            &operators,
+        );
+
+        assert_eq!(
+            failure.bucket,
+            format!("UnsupportedTypeTree::{expected_shape}")
+        );
+        assert_eq!(failure.family, FailureFamily::Other);
+    }
+}
+
+#[test]
 fn local_expression_histogram_excludes_parameters_and_type_trees() {
     let audit = audit_source("object Audit { def outer(x: Int): Int = x }", "Types.scala");
 
@@ -1503,6 +1562,7 @@ fn audit_source_inner(
         .collect::<BTreeMap<_, _>>();
 
     let typer_packages = Packages::new();
+    let type_operator_spellings = source_operator_spellings(&parsed.ast, &store.names);
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -1528,7 +1588,7 @@ fn audit_source_inner(
             .expression_context_for(method)
             .and_then(|context| typer.type_expression(rhs, context));
         if let Err(error) = outcome {
-            let failure = classify_typer_error(&error, &parsed.ast);
+            let failure = classify_typer_error(&error, &parsed.ast, &type_operator_spellings);
             if matches!(
                 error,
                 TyperError::UnsupportedPattern { .. }
@@ -2371,6 +2431,7 @@ fn record_failure(audit: &mut Audit, failure: FailureClassification, path: &str)
 fn classify_typer_error(
     error: &TyperError,
     arena: &dotty_core::AstArena<Untyped>,
+    operator_spellings: &BTreeMap<u32, String>,
 ) -> FailureClassification {
     match error {
         TyperError::UnsupportedExpression { tree_index, .. } => {
@@ -2394,6 +2455,19 @@ fn classify_typer_error(
             bucket: format!("LocalBlockDeclarationDeferred::{kind}"),
             family: FailureFamily::LocalDeclarationDeferral,
         },
+        TyperError::UnsupportedTypeTree { tree_index, .. } => {
+            let kind = arena
+                .iter()
+                .find(|(tree, _)| tree.index() == *tree_index)
+                .map(|(_, node)| &node.kind);
+            let shape = kind.map_or("<other>", |kind| {
+                type_tree_shape_label(kind, *tree_index, operator_spellings)
+            });
+            FailureClassification {
+                bucket: format!("UnsupportedTypeTree::{shape}"),
+                family: FailureFamily::Other,
+            }
+        }
         TyperError::ImportQualifierNotFound { .. }
         | TyperError::TypeNameNotFound { .. }
         | TyperError::TermNameNotFound { .. }
@@ -2415,6 +2489,46 @@ fn classify_typer_error(
                 family,
             }
         }
+    }
+}
+
+fn source_operator_spellings(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::names::NameInterner,
+) -> BTreeMap<u32, String> {
+    arena
+        .iter()
+        .filter_map(|(tree, node)| {
+            let operator = match &node.kind {
+                TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => Some(infix.op),
+                TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) => Some(postfix.op),
+                _ => None,
+            }?;
+            Some((tree.index(), names.resolve(operator.text()).to_owned()))
+        })
+        .collect()
+}
+
+fn type_tree_shape_label(
+    kind: &TreeKind<Untyped>,
+    tree_index: u32,
+    operator_spellings: &BTreeMap<u32, String>,
+) -> &'static str {
+    match kind {
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => {
+            match operator_spellings.get(&tree_index).map(String::as_str) {
+                Some("|") => "InfixOp::|",
+                Some("&") => "InfixOp::&",
+                _ => "InfixOp::<other>",
+            }
+        }
+        TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_)) => {
+            match operator_spellings.get(&tree_index).map(String::as_str) {
+                Some("*") => "PostfixOp::*",
+                _ => "PostfixOp::<other>",
+            }
+        }
+        _ => tree_kind_label(kind),
     }
 }
 
