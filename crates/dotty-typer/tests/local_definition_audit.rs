@@ -3171,6 +3171,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::TermReferenceCannotBeWidened { .. } => "TermReferenceCannotBeWidened",
         TyperError::TermReferencePrefixMismatch { .. } => "TermReferencePrefixMismatch",
         TyperError::UnstableSelectionPrefix { .. } => "UnstableSelectionPrefix",
+        TyperError::UnsupportedSingletonReference { .. } => "UnsupportedSingletonReference",
     }
 }
 

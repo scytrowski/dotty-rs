@@ -63,6 +63,17 @@ Scala 3.9.0 `-Vprint:typer` fixture in
 pins nested `(x)` as `x` and `(1)` as `1`. Tuple syntax remains a separate
 `UntypedNode::Tuple` form.
 
+## Singleton source types
+
+Source singleton type trees (`x.type`, stable selections, and `this.type`) are
+projected to the exact stable `TermRef` or `ThisType` represented by their
+reference path. Stable identifier and selection resolution preserves the
+resolved symbol and selection prefix. Mutable values, methods, overloaded
+selections, and references outside identifier, selection, parenthesized, and
+`this` paths remain errors; arbitrary expressions are not typed as a side
+effect of projecting a type. Failed projection uses the enclosing type
+projection transaction so symbol completion and type-cache mutations roll back.
+
 ## Pattern typing foundation
 
 Pattern typing has its own recursive-ready entry point under

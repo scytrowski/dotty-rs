@@ -1,0 +1,15 @@
+[[syntax trees at end of                     typer]] // crates/dotty-typer/tests/fixtures/singleton-types/SingletonTypes.scala
+package <empty> {
+  class SingletonOuter() extends Object() {
+    val value: Int = 1
+    val same: this.value.type = this.value
+    val self: this.type = this
+    class Inner() extends Object() {
+      val nested: Int = 2
+      val outer: SingletonOuter.this.type = SingletonOuter.this
+    }
+    val inner: SingletonOuter.this.Inner = new SingletonOuter.this.Inner()
+    val selected: this.inner.nested.type = this.inner.nested
+  }
+}
+

@@ -1512,6 +1512,12 @@ pub enum TyperError {
         tree_index: u32,
         qualifier_type: TypeId,
     },
+    /// A singleton type's reference is outside the supported stable path forms.
+    UnsupportedSingletonReference {
+        source: SourceId,
+        tree_index: u32,
+        reference_kind: &'static str,
+    },
 }
 
 /// Which side of an ordinary type-parameter bound an explicit argument broke.
