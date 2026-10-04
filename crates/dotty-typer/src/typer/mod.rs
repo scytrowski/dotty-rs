@@ -5435,14 +5435,18 @@ mod tests {
         let TreeKind::AppliedTypeTree(nested_applied) = &parsed.ast.get(nested_bound).kind else {
             panic!("expected an applied nested bound");
         };
-        assert!(typer
-            .source_type_index()
-            .type_at(source, nested_applied.tpt)
-            .is_some());
-        assert!(typer
-            .source_type_index()
-            .type_at(source, nested_applied.args[0])
-            .is_some());
+        assert!(
+            typer
+                .source_type_index()
+                .type_at(source, nested_applied.tpt)
+                .is_some()
+        );
+        assert!(
+            typer
+                .source_type_index()
+                .type_at(source, nested_applied.args[0])
+                .is_some()
+        );
     }
 
     #[test]
