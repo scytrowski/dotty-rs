@@ -154,6 +154,36 @@ impl SourceTyper<'_> {
             }
             return Ok(ty);
         }
+        if let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = &source_tree.kind {
+            let operator = self.store.names.resolve(infix.op.text());
+            let is_union = match operator {
+                "|" => true,
+                "&" => false,
+                _ => {
+                    return Err(TyperError::UnsupportedTypeTree {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        tree_kind: "infix type operator",
+                    });
+                }
+            };
+            let left = self.type_of_tpt_inner(infix.left, context)?;
+            let right = self.type_of_tpt_inner(infix.right, context)?;
+            let ty = if is_union {
+                self.store.types.alloc(Type::Or { left, right })
+            } else {
+                self.store.types.alloc(Type::And { left, right })
+            };
+            if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
+                return Err(TyperError::DuplicateSourceTypeCacheEntry {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    existing,
+                    attempted: ty,
+                });
+            }
+            return Ok(ty);
+        }
         if let TreeKind::Select(select) = &source_tree.kind {
             let ty = SourceNameResolver { typer: self }.resolve_type_member(
                 select.qualifier,

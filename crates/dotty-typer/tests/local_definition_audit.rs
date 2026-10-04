@@ -1094,6 +1094,7 @@ fn unsupported_type_tree_failures_keep_exact_source_shapes() {
         ("class C { def f(x: List[?]): Unit = () }", "TypeBoundsTree"),
         ("class C { def f(x: A | B): Unit = () }", "InfixOp::|"),
         ("class C { def f(x: A & B): Unit = () }", "InfixOp::&"),
+        ("class C { def f(x: A + B): Unit = () }", "InfixOp::<other>"),
         (
             "class C { def f(x: Any, y: x.type): Unit = () }",
             "SingletonTypeTree",
