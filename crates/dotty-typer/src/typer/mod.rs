@@ -5702,6 +5702,35 @@ mod tests {
     }
 
     #[test]
+    fn deeply_nested_singleton_path_returns_projection_depth_error() {
+        let path = format!("a{}", ".missing".repeat(300));
+        let source_text = format!("class C {{ val a: C = this; val deep: {path}.type = a }}");
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(&source_text);
+        let (a, _) = val_symbol(&parsed, &store, &index, source, "a");
+        let (deep, tpt) = val_symbol(&parsed, &store, &index, source, "deep");
+        let context = index.declaration_context_of(deep).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_of_tpt(tpt, context),
+            Err(TyperError::SourceTypeProjectionDepthExceeded {
+                max_depth,
+                ..
+            }) if max_depth == type_projection::MAX_SOURCE_TYPE_PROJECTION_DEPTH
+        ));
+        assert_eq!(typer.store().symbols.info(a), &SymbolInfo::Missing);
+        assert_eq!(typer.source_type_index().type_at(source, tpt), None);
+    }
+
+    #[test]
     fn source_union_types_compose_with_applied_qualified_and_alias_types() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class F[A]; class A; class B; object Outer { class Nested }; type Alias = Outer.Nested & A; val value: F[A | B] = null",

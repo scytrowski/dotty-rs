@@ -350,6 +350,27 @@ impl SourceTyper<'_> {
         type_tree_index: u32,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        if self.source_type_projection_depth >= MAX_SOURCE_TYPE_PROJECTION_DEPTH {
+            return Err(TyperError::SourceTypeProjectionDepthExceeded {
+                source: self.source,
+                tree_index: tree.index(),
+                max_depth: MAX_SOURCE_TYPE_PROJECTION_DEPTH,
+            });
+        }
+        self.source_type_projection_depth += 1;
+        let result =
+            self.project_stable_term_reference_inner(tree, context, type_tree_index, info_journal);
+        self.source_type_projection_depth -= 1;
+        result
+    }
+
+    fn project_stable_term_reference_inner(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: SourceContextId,
+        type_tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
         let source_tree = self
             .arena
             .try_get(tree)
