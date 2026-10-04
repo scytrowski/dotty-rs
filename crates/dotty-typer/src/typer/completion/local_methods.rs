@@ -146,14 +146,8 @@ impl SourceTyper<'_> {
                             source: self.source,
                             tree_index: parameter.tpt.index(),
                         })?;
-                if matches!(parameter_type.kind, TreeKind::ByNameTypeTree(_))
-                    || matches!(
-                        &parameter_type.kind,
-                        TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix))
-                            if self.store.names.resolve(postfix.op.text()) == "*"
-                    )
-                {
-                    return Err(deferred("by-name or repeated parameters"));
+                if matches!(parameter_type.kind, TreeKind::ByNameTypeTree(_)) {
+                    return Err(deferred("by-name parameters"));
                 }
                 if self
                     .local_methods

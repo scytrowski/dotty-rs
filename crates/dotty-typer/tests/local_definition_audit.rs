@@ -2941,6 +2941,13 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::MethodTypeParameterSymbolMissing { .. } => "MethodTypeParameterSymbolMissing",
         TyperError::ExtensionPrefixClausesMissing { .. } => "ExtensionPrefixClausesMissing",
         TyperError::MalformedMethodClause { .. } => "MalformedMethodClause",
+        TyperError::RepeatedParameterClauseUnsupported { .. } => {
+            "RepeatedParameterClauseUnsupported"
+        }
+        TyperError::RepeatedParameterNotFinal { .. } => "RepeatedParameterNotFinal",
+        TyperError::RepeatedParameterSignatureContextMissing { .. } => {
+            "RepeatedParameterSignatureContextMissing"
+        }
         TyperError::ConstructorOwnerNotClassLike { .. } => "ConstructorOwnerNotClassLike",
         TyperError::MalformedConstructorOwnerInfo { .. } => "MalformedConstructorOwnerInfo",
         TyperError::MalformedConstructorOwner { .. } => "MalformedConstructorOwner",

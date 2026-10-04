@@ -103,6 +103,7 @@ pub struct SourceTyper<'a> {
     resolver: Box<dyn SymbolResolver + 'a>,
     type_index: SourceTypeIndex,
     source_type_projection_depth: usize,
+    signature_parameter_in_progress: Option<SymbolId>,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     pattern_bindings: PatternBindingIndex,
     local_methods: LocalMethodIndex,
@@ -156,6 +157,7 @@ impl<'a> SourceTyper<'a> {
             resolver: Box::new(NoResolver),
             type_index: SourceTypeIndex::default(),
             source_type_projection_depth: 0,
+            signature_parameter_in_progress: None,
             local_symbols: HashMap::new(),
             pattern_bindings: PatternBindingIndex::default(),
             local_methods: LocalMethodIndex::default(),
@@ -11909,16 +11911,10 @@ mod tests {
 
     #[test]
     fn local_methods_defer_inferred_and_unsupported_signature_shapes() {
-        let cases = [
-            (
-                "def local(value: => Int): Int = value",
-                "by-name or repeated parameters",
-            ),
-            (
-                "def local(value: Int*): Int = 1",
-                "by-name or repeated parameters",
-            ),
-        ];
+        let cases = [(
+            "def local(value: => Int): Int = value",
+            "by-name parameters",
+        )];
         for (declaration, _) in cases {
             let source_code = format!("class C {{ def outer: Int = {{ {declaration}; 0 }} }}");
             let (parsed, mut store, packages, definitions, index, source) =
@@ -11968,6 +11964,51 @@ mod tests {
                 (_, other) => panic!("unexpected local signature error: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn local_method_repeated_parameter_uses_repeated_and_varargs_signature() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def outer: Int = { def inner(xs: Int*): Int = 1; 0 } }");
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let method_tree = block.stats[0];
+        let parameter_tree = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+            _ => panic!("local declaration should be a DefDef"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+
+        let method_type = typer.complete_symbol(method).unwrap();
+        let Type::Method(method_type) = typer.store().types.get(method_type) else {
+            panic!("local method should complete to MethodType");
+        };
+        assert_eq!(method_type.params.len(), 1);
+        assert_eq!(method_type.params[0].ty, definitions.int);
+        assert!(method_type.params[0].varargs);
+        let parameter = typer
+            .local_method_parameter_symbol_at(source, parameter_tree)
+            .unwrap();
+        let SymbolInfo::Complete(parameter_type) = *typer.store().symbols.info(parameter) else {
+            panic!("local parameter should retain its repeated type");
+        };
+        assert!(matches!(
+            typer.store().types.get(parameter_type),
+            Type::Repeated { element } if *element == definitions.int
+        ));
     }
 
     #[test]
@@ -20532,6 +20573,10 @@ mod tests {
         };
         let parameter_tree = definition.value_param_clauses[0][0];
         let parameter = index.symbol_at(source, parameter_tree).unwrap();
+        let TreeKind::ValDef(parameter_definition) = &parsed.ast.get(parameter_tree).kind else {
+            panic!("method parameter should be a ValDef");
+        };
+        let parameter_tpt = parameter_definition.tpt;
         let context = ExpressionContext {
             lexical: index.declaration_context_of(parameter).unwrap(),
             owner: method,
@@ -20545,6 +20590,17 @@ mod tests {
             definitions,
             &packages,
         );
+
+        let before = typer.store().checkpoint();
+        assert!(matches!(
+            typer.complete_symbol(parameter),
+            Err(TyperError::RepeatedParameterSignatureContextMissing {
+                parameter: found_parameter,
+                parameter_tree_index,
+            }) if found_parameter == parameter && parameter_tree_index == parameter_tree.index()
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(*typer.store().symbols.info(parameter), SymbolInfo::Missing);
 
         typer.complete_symbol(method).unwrap();
         let method_type = typer.store().symbols.info(method);
@@ -20565,6 +20621,18 @@ mod tests {
             typer.store().types.get(parameter_value_type),
             Type::Repeated { element } if *element == definitions.int
         ));
+        assert_eq!(
+            typer.source_type_index().type_at(source, parameter_tpt),
+            Some(parameter_value_type)
+        );
+        assert_eq!(
+            typer.complete_symbol(parameter).unwrap(),
+            parameter_value_type
+        );
+        assert_eq!(
+            typer.source_type_index().type_at(source, parameter_tpt),
+            Some(parameter_value_type)
+        );
         assert!(matches!(
             typer.type_expression(rhs, context),
             Err(TyperError::VarargsParameterReferenceDeferred {
@@ -20577,6 +20645,224 @@ mod tests {
             typer.widen_expression_type(parameter_value_type),
             Err(TyperError::ExpressionTypeCannotBeWidened { ty }) if ty == parameter_value_type
         ));
+    }
+
+    #[test]
+    fn repeated_applied_parameter_caches_the_marker_and_keeps_its_element_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Box[A]; class C { def f(xs: Box[Int]*): Int = 1 }");
+        let box_class = class_symbol(&parsed, &store, &index, source, "Box");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "f");
+        let method_tree = match index.definition_of(method).unwrap() {
+            SourceDefinition::Canonical { tree, .. } => tree,
+            _ => panic!("canonical method definition expected"),
+        };
+        let TreeKind::DefDef(definition) = &parsed.ast.get(method_tree).kind else {
+            panic!("method symbol should point to a DefDef");
+        };
+        let parameter_tree = definition.value_param_clauses[0][0];
+        let parameter = index.symbol_at(source, parameter_tree).unwrap();
+        let TreeKind::ValDef(parameter_definition) = &parsed.ast.get(parameter_tree).kind else {
+            panic!("method parameter should be a ValDef");
+        };
+        let parameter_tpt = parameter_definition.tpt;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.complete_symbol(method).unwrap();
+        let SymbolInfo::Complete(parameter_info) = *typer.store().symbols.info(parameter) else {
+            panic!("parameter symbol should be complete");
+        };
+        let Type::Repeated { element } = typer.store().types.get(parameter_info) else {
+            panic!("parameter symbol should retain Repeated");
+        };
+        let element = *element;
+        let Type::Applied { tycon, args } = typer.store().types.get(element) else {
+            panic!("repeated element type should preserve its application");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), box_class);
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0], definitions.int);
+        assert_eq!(
+            typer.source_type_index().type_at(source, parameter_tpt),
+            Some(parameter_info)
+        );
+    }
+
+    #[test]
+    fn postfix_star_outside_parameter_type_position_stays_unsupported() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def f(xs: Int*): Int = 1 }");
+        let parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "xs" =>
+                {
+                    index
+                        .symbol_at(source, tree)
+                        .map(|symbol| (symbol, definition.tpt))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (symbol, tpt) = parameter;
+        let context = index.declaration_context_of(symbol).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_of_tpt(tpt, context),
+            Err(TyperError::UnsupportedTypeTree { .. })
+        ));
+        assert_eq!(typer.source_type_index().type_at(source, tpt), None);
+    }
+
+    #[test]
+    fn repeated_parameter_element_failure_rolls_back_the_marker_and_cache() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def f(xs: Missing*): Int = 1 }");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "f");
+        let method_tree = match index.definition_of(method).unwrap() {
+            SourceDefinition::Canonical { tree, .. } => tree,
+            _ => panic!("canonical method definition expected"),
+        };
+        let TreeKind::DefDef(definition) = &parsed.ast.get(method_tree).kind else {
+            panic!("method symbol should point to a DefDef");
+        };
+        let parameter_tree = definition.value_param_clauses[0][0];
+        let parameter = index.symbol_at(source, parameter_tree).unwrap();
+        let TreeKind::ValDef(parameter_definition) = &parsed.ast.get(parameter_tree).kind else {
+            panic!("method parameter should be a ValDef");
+        };
+        let parameter_tpt = parameter_definition.tpt;
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(method),
+            Err(TyperError::TypeNameNotFound { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(typer.store().symbols.info(parameter), &SymbolInfo::Missing);
+        assert_eq!(
+            typer.source_type_index().type_at(source, parameter_tpt),
+            None
+        );
+    }
+
+    #[test]
+    fn repeated_parameter_that_is_not_final_is_rejected_with_position_error() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def f(xs: Int*): Int = 1; def g(y: Int): Int = 1 }");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "f");
+        let (other_method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "g");
+        let method_tree = match index.definition_of(method).unwrap() {
+            SourceDefinition::Canonical { tree, .. } => tree,
+            _ => panic!("canonical method definition expected"),
+        };
+        let other_method_tree = match index.definition_of(other_method).unwrap() {
+            SourceDefinition::Canonical { tree, .. } => tree,
+            _ => panic!("canonical method definition expected"),
+        };
+        let other_parameter_tree = match &parsed.ast.get(other_method_tree).kind {
+            TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+            _ => panic!("method symbol should point to a DefDef"),
+        };
+        if let TreeKind::DefDef(definition) = &mut parsed.ast.get_mut(method_tree).kind {
+            definition.value_param_clauses[0].push(other_parameter_tree);
+        } else {
+            panic!("method symbol should point to a DefDef");
+        }
+        let repeated_parameter_tree = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+            _ => panic!("method symbol should point to a DefDef"),
+        };
+        let repeated_parameter = index.symbol_at(source, repeated_parameter_tree).unwrap();
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(method),
+            Err(TyperError::RepeatedParameterNotFinal {
+                method: error_method,
+                method_tree_index,
+                clause_index: 0,
+                parameter_index: 0,
+            }) if error_method == method && method_tree_index == method_tree.index()
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(
+            *typer.store().symbols.info(repeated_parameter),
+            SymbolInfo::Missing
+        );
+    }
+
+    #[test]
+    fn repeated_parameter_in_contextual_clause_is_rejected_with_clause_error() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def f(xs: Int*): Int = 1 }");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "f");
+        let method_tree = match index.definition_of(method).unwrap() {
+            SourceDefinition::Canonical { tree, .. } => tree,
+            _ => panic!("canonical method definition expected"),
+        };
+        let parameter_tree = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+            _ => panic!("method symbol should point to a DefDef"),
+        };
+        let parameter = index.symbol_at(source, parameter_tree).unwrap();
+        let flags = store.symbols.get(parameter).flags;
+        store.symbols.get_mut(parameter).flags = flags | SymbolFlags::GIVEN;
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(method),
+            Err(TyperError::RepeatedParameterClauseUnsupported {
+                method: error_method,
+                method_tree_index,
+                clause_index: 0,
+                parameter_index: 0,
+                kind: MethodKind::Contextual,
+            }) if error_method == method && method_tree_index == method_tree.index()
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(*typer.store().symbols.info(parameter), SymbolInfo::Missing);
     }
 
     #[test]

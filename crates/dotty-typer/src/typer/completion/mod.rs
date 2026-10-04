@@ -119,28 +119,26 @@ impl SourceTyper<'_> {
                         kind,
                     });
                 };
-                let (tpt, repeated_parameter) = if kind == SymbolKind::Parameter {
-                    match self.arena.try_get(tpt).map(|node| &node.kind) {
+                if kind == SymbolKind::Parameter
+                    && matches!(
+                        self.arena.try_get(tpt).map(|node| &node.kind),
                         Some(TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)))
-                            if self.store.names.resolve(postfix.op.text()) == "*" =>
-                        {
-                            (postfix.operand, true)
-                        }
-                        _ => (tpt, false),
-                    }
-                } else {
-                    (tpt, false)
-                };
+                            if self.store.names.resolve(postfix.op.text()) == "*"
+                    )
+                    && self.signature_parameter_in_progress != Some(symbol)
+                {
+                    return Err(TyperError::RepeatedParameterSignatureContextMissing {
+                        parameter: symbol,
+                        parameter_tree_index: tree.index(),
+                    });
+                }
                 let context = self
                     .parameter_source_context(symbol)
                     .ok_or(TyperError::DeclarationContextMissing { symbol })?;
-                let element_type = self.type_of_tpt_inner_journaled(tpt, context, info_journal)?;
-                let ty = if repeated_parameter {
-                    self.store.types.alloc(Type::Repeated {
-                        element: element_type,
-                    })
+                let ty = if kind == SymbolKind::Parameter {
+                    self.type_of_parameter_tpt_inner_journaled(tpt, context, info_journal)?
                 } else {
-                    element_type
+                    self.type_of_tpt_inner_journaled(tpt, context, info_journal)?
                 };
                 let previous = *self.store.symbols.info(symbol);
                 info_journal.push((symbol, previous));
@@ -240,6 +238,17 @@ impl SourceTyper<'_> {
             SymbolInfo::Deferred(_) => Err(TyperError::DeferredSymbolCompletion { symbol }),
             SymbolInfo::Error => Err(TyperError::SymbolAlreadyErrored { symbol }),
         }
+    }
+
+    pub(super) fn complete_method_parameter_for_signature(
+        &mut self,
+        symbol: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let previous = self.signature_parameter_in_progress.replace(symbol);
+        let result = self.complete_signature_parameter(symbol, info_journal);
+        self.signature_parameter_in_progress = previous;
+        result
     }
 
     pub(super) fn source_tree_for_symbol(

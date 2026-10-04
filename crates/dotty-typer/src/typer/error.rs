@@ -482,6 +482,26 @@ pub enum TyperError {
         method_tree_index: u32,
         clause_index: usize,
     },
+    /// A repeated parameter appears in an implicit or contextual clause.
+    RepeatedParameterClauseUnsupported {
+        method: SymbolId,
+        method_tree_index: u32,
+        clause_index: usize,
+        parameter_index: usize,
+        kind: MethodKind,
+    },
+    /// A repeated parameter is not the final parameter in its clause.
+    RepeatedParameterNotFinal {
+        method: SymbolId,
+        method_tree_index: u32,
+        clause_index: usize,
+        parameter_index: usize,
+    },
+    /// A repeated parameter can only be projected while validating its method signature.
+    RepeatedParameterSignatureContextMissing {
+        parameter: SymbolId,
+        parameter_tree_index: u32,
+    },
     /// A constructor is not owned by a class, trait, or module class.
     ConstructorOwnerNotClassLike {
         constructor: SymbolId,
