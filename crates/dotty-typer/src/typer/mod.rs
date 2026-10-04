@@ -102,6 +102,7 @@ pub struct SourceTyper<'a> {
     packages: &'a Packages,
     resolver: Box<dyn SymbolResolver + 'a>,
     type_index: SourceTypeIndex,
+    source_type_projection_depth: usize,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     pattern_bindings: PatternBindingIndex,
     local_methods: LocalMethodIndex,
@@ -154,6 +155,7 @@ impl<'a> SourceTyper<'a> {
             packages,
             resolver: Box::new(NoResolver),
             type_index: SourceTypeIndex::default(),
+            source_type_projection_depth: 0,
             local_symbols: HashMap::new(),
             pattern_bindings: PatternBindingIndex::default(),
             local_methods: LocalMethodIndex::default(),
@@ -5667,6 +5669,42 @@ mod tests {
         assert_eq!(typer.store().checkpoint(), before);
         assert_eq!(typer.source_type_index().type_at(source, tree), None);
         assert_eq!(typer.source_type_index().type_at(source, left), None);
+    }
+
+    #[test]
+    fn long_source_infix_type_projection_returns_a_bounded_error_and_rolls_back() {
+        let operands = vec!["A"; type_projection::MAX_SOURCE_TYPE_PROJECTION_DEPTH * 4].join(" | ");
+        let source_text = format!("class A; val value: {operands} = null");
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(&source_text);
+        let (value, tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let context = index.declaration_context_of(value).unwrap();
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for _ in 0..2 {
+            assert!(matches!(
+                typer.type_of_tpt(tree, context),
+                Err(TyperError::SourceTypeProjectionDepthExceeded {
+                    max_depth: type_projection::MAX_SOURCE_TYPE_PROJECTION_DEPTH,
+                    ..
+                })
+            ));
+            assert_eq!(typer.store().checkpoint(), before);
+            assert_eq!(typer.source_type_index().type_at(source, tree), None);
+            for (nested, node) in parsed.ast.iter() {
+                if matches!(node.kind, TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))) {
+                    assert_eq!(typer.source_type_index().type_at(source, nested), None);
+                }
+            }
+        }
     }
 
     #[test]

@@ -2,6 +2,8 @@
 
 use super::*;
 
+pub(super) const MAX_SOURCE_TYPE_PROJECTION_DEPTH: usize = 256;
+
 /// Resolves source-written type names without making the type-tree dispatcher
 /// depend on the details of lexical scopes, imports, or semantic lookups.
 struct SourceNameResolver<'typer, 'store> {
@@ -83,6 +85,27 @@ impl SourceTyper<'_> {
     }
 
     pub(super) fn type_of_tpt_inner(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: SourceContextId,
+    ) -> Result<TypeId, TyperError> {
+        if let Some(ty) = self.type_index.type_at(self.source, tree) {
+            return Ok(ty);
+        }
+        if self.source_type_projection_depth >= MAX_SOURCE_TYPE_PROJECTION_DEPTH {
+            return Err(TyperError::SourceTypeProjectionDepthExceeded {
+                source: self.source,
+                tree_index: tree.index(),
+                max_depth: MAX_SOURCE_TYPE_PROJECTION_DEPTH,
+            });
+        }
+        self.source_type_projection_depth += 1;
+        let result = self.type_of_tpt_uncached(tree, context);
+        self.source_type_projection_depth -= 1;
+        result
+    }
+
+    fn type_of_tpt_uncached(
         &mut self,
         tree: TreeId<Untyped>,
         context: SourceContextId,

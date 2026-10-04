@@ -2950,6 +2950,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::DeferredSymbolCompletion { .. } => "DeferredSymbolCompletion",
         TyperError::SymbolAlreadyErrored { .. } => "SymbolAlreadyErrored",
         TyperError::UnsupportedTypeTree { .. } => "UnsupportedTypeTree",
+        TyperError::SourceTypeProjectionDepthExceeded { .. } => "SourceTypeProjectionDepthExceeded",
         TyperError::MissingDeclaredType { .. } => "MissingDeclaredType",
         TyperError::MalformedSourceAst { .. } => "MalformedSourceAst",
         TyperError::SymbolSourceKindMismatch { .. } => "SymbolSourceKindMismatch",

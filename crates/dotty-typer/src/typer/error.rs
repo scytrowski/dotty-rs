@@ -517,6 +517,12 @@ pub enum TyperError {
         tree_index: u32,
         tree_kind: &'static str,
     },
+    /// Recursive source type-tree projection exceeded its bounded depth.
+    SourceTypeProjectionDepthExceeded {
+        source: SourceId,
+        tree_index: u32,
+        max_depth: usize,
+    },
     /// A declaration has no source-written type and must not be inferred here.
     MissingDeclaredType {
         source: SourceId,

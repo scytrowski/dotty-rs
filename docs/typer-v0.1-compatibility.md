@@ -326,7 +326,9 @@ For the tested subset, source Typer completion currently supports:
   `Type::Or` and `Type::And` while preserving parser grouping. The pinned
   Scala 3.9.0 fixture is
   [`union-intersection-types`](../crates/dotty-typer/tests/fixtures/union-intersection-types).
-  Arbitrary infix type operators remain explicitly unsupported;
+  Projection is bounded to 256 recursive source type trees; excess depth
+  returns a typed error. Arbitrary infix type operators remain explicitly
+  unsupported;
 - wildcard arguments in applied source types, projected as
   `Type::Wildcard { bounds }` with canonical `Nothing`/`Any` defaults;
   wildcard capture, variance checks, and inference through wildcard bounds
