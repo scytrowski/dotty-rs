@@ -1129,21 +1129,22 @@ fn unsupported_type_tree_failures_keep_exact_source_shapes() {
                 type_tree_shape_label(&node.kind, tree.index(), &operators) == expected_shape
             })
             .unwrap_or_else(|| panic!("{source_text} did not produce {expected_shape}"));
-        let failure = classify_typer_error(
-            &TyperError::UnsupportedTypeTree {
-                source,
-                tree_index: tree.index(),
-                tree_kind: tree_kind_label(&node.kind),
-            },
-            &parsed.ast,
-            &operators,
-        );
+        let error = TyperError::UnsupportedTypeTree {
+            source,
+            tree_index: tree.index(),
+            tree_kind: tree_kind_label(&node.kind),
+        };
+        let failure = classify_typer_error(&error, &parsed.ast, &operators);
 
         assert_eq!(
             failure.bucket,
             format!("UnsupportedTypeTree::{expected_shape}")
         );
         assert_eq!(failure.family, FailureFamily::Other);
+        assert_eq!(
+            typed_case_failure_label(&error, &parsed.ast, &operators),
+            format!("UnsupportedTypeTree::{expected_shape}")
+        );
     }
 }
 
@@ -1331,6 +1332,7 @@ fn probe_supported_match_cases(
         scanner,
         &mut store.names,
     );
+    let type_operator_spellings = source_operator_spellings(&parsed.ast, &store.names);
     let mut namer_packages = Packages::new();
     let Ok(index) = name_compilation_unit(
         &parsed.ast,
@@ -1473,7 +1475,8 @@ fn probe_supported_match_cases(
                 }
             }
             Err(error) => {
-                let error_name = typed_case_failure_label(&error);
+                let error_name =
+                    typed_case_failure_label(&error, &parsed.ast, &type_operator_spellings);
                 *profile
                     .typed_case_failures
                     .entry(error_name.clone())
@@ -1585,13 +1588,20 @@ fn extractor_protocol_success(
     }
 }
 
-fn typed_case_failure_label(error: &TyperError) -> String {
+fn typed_case_failure_label(
+    error: &TyperError,
+    arena: &dotty_core::AstArena<Untyped>,
+    operator_spellings: &BTreeMap<u32, String>,
+) -> String {
     match error {
         TyperError::TuplePatternResolutionDeferred { issue, .. } => {
             format!("tuple::{issue:?}")
         }
         TyperError::ExtractorPatternArgumentUnsupported { issue, .. } => {
             format!("extractor argument::{issue:?}")
+        }
+        TyperError::UnsupportedTypeTree { .. } => {
+            classify_typer_error(error, arena, operator_spellings).bucket
         }
         _ => typer_error_name(error).to_owned(),
     }
@@ -2233,6 +2243,13 @@ fn print_match_profile(profile: &MatchProfile) {
         println!("    {boundary}={count}");
     }
     println!("  typed_case_first_failures:");
+    let unsupported_type_tree_total = profile
+        .typed_case_failures
+        .iter()
+        .filter(|(failure, _)| failure.starts_with("UnsupportedTypeTree::"))
+        .map(|(_, count)| *count)
+        .sum::<usize>();
+    println!("    UnsupportedTypeTree={unsupported_type_tree_total}");
     for (failure, count) in &profile.typed_case_failures {
         let files = profile
             .typed_case_failure_files
