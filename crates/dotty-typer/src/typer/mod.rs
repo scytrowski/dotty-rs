@@ -5494,11 +5494,24 @@ mod tests {
             panic!("expected parser's union root");
         };
         assert_eq!(type_symbol(typer.store(), *left), a);
+        let precedence_intersection = *right;
         let Type::And { left, right } = typer.store().types.get(*right) else {
             panic!("expected parser's nested intersection");
         };
         assert_eq!(type_symbol(typer.store(), *left), b);
         assert_eq!(type_symbol(typer.store(), *right), c);
+        let (_, precedence_tree) = val_symbol(&parsed, typer.store(), &index, source, "precedence");
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(precedence_infix)) =
+            &parsed.ast.get(precedence_tree).kind
+        else {
+            panic!("expected source precedence infix tree");
+        };
+        assert_eq!(
+            typer
+                .source_type_index()
+                .type_at(source, precedence_infix.right),
+            Some(precedence_intersection)
+        );
         let Type::And {
             left,
             right: intersection_right,
@@ -5506,12 +5519,26 @@ mod tests {
         else {
             panic!("expected parenthesized intersection root");
         };
+        let parenthesized_union = *left;
         let Type::Or { left, right } = typer.store().types.get(*left) else {
             panic!("expected parenthesized union child");
         };
         assert_eq!(type_symbol(typer.store(), *left), a);
         assert_eq!(type_symbol(typer.store(), *right), b);
         assert_eq!(type_symbol(typer.store(), *intersection_right), c);
+        let (_, parenthesized_tree) =
+            val_symbol(&parsed, typer.store(), &index, source, "parenthesized");
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(parenthesized_infix)) =
+            &parsed.ast.get(parenthesized_tree).kind
+        else {
+            panic!("expected parenthesized source infix tree");
+        };
+        assert_eq!(
+            typer
+                .source_type_index()
+                .type_at(source, parenthesized_infix.left),
+            Some(parenthesized_union)
+        );
     }
 
     #[test]
