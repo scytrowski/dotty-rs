@@ -170,3 +170,58 @@ fn empty_final_case_body_keeps_following_definition_in_its_template() {
         TextRange::new(54, 67).unwrap()
     );
 }
+
+#[test]
+fn empty_nested_match_case_preserves_the_enclosing_match_case() {
+    let source = "outer match\n  case A =>\n    inner match\n      case B =>\n  case C => 1\n";
+    let scanner = ContextualScanner::new(source).expect("source scans");
+    let mut names = NameInterner::new();
+    let result = parse_expression_fragment(
+        SourceText::new(source).expect("source text is valid"),
+        SourceId::from_index(0),
+        scanner,
+        &mut names,
+    );
+
+    assert!(
+        result.diagnostics.is_empty(),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let TreeKind::Match(Match { ref cases, .. }) = result.ast.get(result.root).kind else {
+        panic!("expected an outer match expression");
+    };
+    let [first, second] = cases.as_slice() else {
+        panic!("expected the outer match to retain both cases");
+    };
+    let TreeKind::CaseDef(CaseDef { body, .. }) = result.ast.get(*first).kind else {
+        panic!("expected the first outer case");
+    };
+    let TreeKind::Block(Block { expr, .. }) = result.ast.get(body).kind else {
+        panic!("expected the first case body block");
+    };
+    let TreeKind::Match(Match { ref cases, .. }) = result.ast.get(expr).kind else {
+        panic!("expected a nested match in the first case body");
+    };
+    let [nested_case] = cases.as_slice() else {
+        panic!("expected one nested case");
+    };
+    let TreeKind::CaseDef(CaseDef { body, .. }) = result.ast.get(*nested_case).kind else {
+        panic!("expected a nested case definition");
+    };
+    let TreeKind::Block(Block { ref stats, expr }) = result.ast.get(body).kind else {
+        panic!("expected the nested empty body block");
+    };
+    assert!(stats.is_empty());
+    assert!(matches!(
+        result.ast.get(expr).kind,
+        TreeKind::Literal(Literal {
+            value: Constant::Unit
+        })
+    ));
+    assert!(matches!(result.ast.get(*second).kind, TreeKind::CaseDef(_)));
+    assert_eq!(
+        result.ast.get(*second).position.unwrap().span().range(),
+        TextRange::new(58, 69).unwrap()
+    );
+}
