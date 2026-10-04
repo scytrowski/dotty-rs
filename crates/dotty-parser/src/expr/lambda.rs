@@ -260,19 +260,13 @@ where
             }
 
             if self.context.block_end == Some(TokenKind::Outdent) {
-                // In an indented block, Dotty keeps an inline lambda body as
-                // a one-expression Block. Parse only the expression here so
-                // the enclosing Outdent and following sibling statements
-                // remain owned by their block.
-                let mark = self.mark();
-                let expr = self.expr();
-                return self.alloc_from(
-                    mark,
-                    TreeKind::Block(dotty_core::ast::Block {
-                        stats: Vec::new(),
-                        expr,
-                    }),
-                );
+                // An inline lambda in an indented statement sequence owns
+                // the rest of that sequence as its body, through (but not
+                // including) the enclosing Outdent.
+                if let Some(indent_offset) = self.feedback_block_indent {
+                    return self.parse_lambda_feedback_block_body(indent_offset);
+                }
+                return self.parse_lambda_block_body(TokenKind::Outdent);
             }
 
             if let Some(end) = self.context.block_end {
@@ -305,6 +299,15 @@ where
     fn parse_lambda_block_body(&mut self, end: TokenKind) -> TreeId<Untyped> {
         let mark = self.mark();
         let (stats, expr) = self.parse_expression_block_body(end);
+        self.alloc_from(
+            mark,
+            TreeKind::Block(dotty_core::ast::Block { stats, expr }),
+        )
+    }
+
+    fn parse_lambda_feedback_block_body(&mut self, indent_offset: u32) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let (stats, expr) = self.parse_region_feedback_expression_block_body(indent_offset);
         self.alloc_from(
             mark,
             TreeKind::Block(dotty_core::ast::Block { stats, expr }),
@@ -831,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn lambda_inside_a_block_end_keeps_its_block_without_consuming_delimiter() {
+    fn lambda_inside_a_braced_block_keeps_its_block_without_consuming_delimiter() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "x => x}",
@@ -849,9 +852,10 @@ mod tests {
             &mut names,
         );
 
-        let tree = parser.with_block_end(Some(TokenKind::Outdent), |parser| {
-            parser.with_location(Location::InBlock, |parser| parser.expr())
-        });
+        let tree = parser.with_block_end(
+            Some(TokenKind::Punctuation(Punctuation::RightBrace)),
+            |parser| parser.with_location(Location::InBlock, |parser| parser.expr()),
+        );
         let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
         else {
             panic!("expected a function literal");

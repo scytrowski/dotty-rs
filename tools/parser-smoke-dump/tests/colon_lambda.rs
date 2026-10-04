@@ -1,7 +1,7 @@
-use dotty_core::ast::{Block, Function, UntypedNode};
+use dotty_core::ast::{Block, Function, Template, UntypedNode, ValDef};
 use dotty_core::{NameInterner, SourceId, SourceText, TreeKind};
 use dotty_lexer::ContextualScanner;
-use dotty_parser::parse_expression_fragment;
+use dotty_parser::{parse_compilation_unit, parse_expression_fragment};
 
 #[test]
 fn lambda_in_an_indented_colon_argument_keeps_its_block_body() {
@@ -67,4 +67,80 @@ fn top_level_indented_lambda_body_remains_an_expression() {
         result.ast.get(*body).kind,
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
     ));
+}
+
+#[test]
+fn lambda_block_stops_before_the_next_template_member() {
+    let source = include_str!(
+        "../../scala-parser-oracle/fixtures/compilation/colon-lambda-block-body.scala"
+    );
+    let scanner = ContextualScanner::new(source).expect("source scans");
+    let mut names = NameInterner::new();
+    let result = parse_compilation_unit(
+        SourceText::new(source).expect("source text is valid"),
+        SourceId::from_index(0),
+        scanner,
+        &mut names,
+    );
+
+    assert!(
+        result.diagnostics.is_empty(),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+        panic!("expected a package root");
+    };
+    let [object] = package.stats.as_slice() else {
+        panic!("expected one object definition");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) = &result.ast.get(*object).kind
+    else {
+        panic!("expected an object definition");
+    };
+    let TreeKind::Template(Template { body: members, .. }) = &result.ast.get(module.template).kind
+    else {
+        panic!("expected an object template");
+    };
+    assert_eq!(
+        members.len(),
+        2,
+        "val g must remain outside the lambda block"
+    );
+    let TreeKind::ValDef(ValDef { rhs: Some(rhs), .. }) = result.ast.get(members[0]).kind else {
+        panic!("expected val f to have a right-hand side");
+    };
+    let TreeKind::Apply(application) = &result.ast.get(rhs).kind else {
+        panic!("expected val f's right-hand side to be an application");
+    };
+    let [argument] = application.args.as_slice() else {
+        panic!("expected one colon argument");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::Function(Function { body, .. })) =
+        &result.ast.get(*argument).kind
+    else {
+        panic!("expected the colon argument to remain a lambda");
+    };
+    let TreeKind::Block(Block { stats, expr }) = &result.ast.get(*body).kind else {
+        panic!("expected the lambda body to own a block");
+    };
+    let [first, value] = stats.as_slice() else {
+        panic!("expected expression and val y inside the lambda body: {stats:?}");
+    };
+    assert!(matches!(
+        result.ast.get(*first).kind,
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+    ));
+    let TreeKind::ValDef(ValDef { name, .. }) = &result.ast.get(*value).kind else {
+        panic!("expected val y inside the lambda body");
+    };
+    assert_eq!(names.resolve(name.as_name().text()), "y");
+    let TreeKind::Ident(identifier) = &result.ast.get(*expr).kind else {
+        panic!("expected y as the lambda body's final expression");
+    };
+    assert_eq!(names.resolve(identifier.name.text()), "y");
+    let TreeKind::ValDef(ValDef { name, .. }) = &result.ast.get(members[1]).kind else {
+        panic!("expected val g after the colon argument");
+    };
+    assert_eq!(names.resolve(name.as_name().text()), "g");
 }
