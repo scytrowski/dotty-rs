@@ -461,10 +461,15 @@ struct PendingOperator {
     offset: u32,
 }
 
+// A nested layout body can leave one or more outdents before its enclosing
+// `else`. The caller consumes these only when lookahead finds that `else`.
 const fn is_else_separator(kind: TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::Newline | TokenKind::Newlines | TokenKind::Punctuation(Punctuation::Semicolon)
+        TokenKind::Newline
+            | TokenKind::Newlines
+            | TokenKind::Outdent
+            | TokenKind::Punctuation(Punctuation::Semicolon)
     )
 }
 
