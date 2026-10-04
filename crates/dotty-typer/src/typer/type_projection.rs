@@ -108,6 +108,53 @@ impl SourceTyper<'_> {
         result
     }
 
+    /// Projects a parameter's declared type, recognizing only its source
+    /// repeated-parameter marker. Arbitrary postfix type trees continue through
+    /// the ordinary type-tree dispatcher and remain unsupported.
+    pub(super) fn type_of_parameter_tpt_inner_journaled(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: SourceContextId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        if let Some(ty) = self.type_index.type_at(self.source, tree) {
+            return Ok(ty);
+        }
+        let Some(source_tree) = self.arena.try_get(tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            });
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) = &source_tree.kind else {
+            return self.type_of_tpt_inner_journaled(tree, context, info_journal);
+        };
+        if self.store.names.resolve(postfix.op.text()) != "*" {
+            return self.type_of_tpt_inner_journaled(tree, context, info_journal);
+        }
+        if self.source_type_projection_depth >= MAX_SOURCE_TYPE_PROJECTION_DEPTH {
+            return Err(TyperError::SourceTypeProjectionDepthExceeded {
+                source: self.source,
+                tree_index: tree.index(),
+                max_depth: MAX_SOURCE_TYPE_PROJECTION_DEPTH,
+            });
+        }
+        self.source_type_projection_depth += 1;
+        let element = self.type_of_tpt_inner_journaled(postfix.operand, context, info_journal);
+        self.source_type_projection_depth -= 1;
+        let element = element?;
+        let repeated = self.store.types.alloc(Type::Repeated { element });
+        if let Err(existing) = self.type_index.insert(self.source, tree, repeated) {
+            return Err(TyperError::DuplicateSourceTypeCacheEntry {
+                source: self.source,
+                tree_index: tree.index(),
+                existing,
+                attempted: repeated,
+            });
+        }
+        Ok(repeated)
+    }
+
     fn type_of_tpt_uncached(
         &mut self,
         tree: TreeId<Untyped>,

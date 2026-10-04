@@ -33,6 +33,8 @@ const METHODS_SOURCE: &str =
     include_str!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Methods.scala");
 const METHODS_TASTY: &[u8] =
     include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Methods.tasty");
+const SCALA_SEQ_TASTY: &[u8] = include_bytes!("fixtures/repeated-parameters/ScalaSeq.tasty");
+const REPEATED_TASTY: &[u8] = include_bytes!("fixtures/repeated-parameters/Repeated.tasty");
 const CONSTRUCTORS_SOURCE: &str =
     include_str!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Constructors.scala");
 const CTOR_PLAIN_TASTY: &[u8] =
@@ -133,6 +135,43 @@ fn is_builtin_prefix_normalization_target(target: &str) -> bool {
             | "Package:scala/Type:Short:Class"
             | "Package:scala/Type:Unit:Class"
     )
+}
+
+fn tasty_repeated_element(store: &SemanticStore, ty: TypeId) -> Option<TypeId> {
+    let Type::Annotated {
+        underlying,
+        annotation,
+    } = store.types.get(ty)
+    else {
+        return None;
+    };
+    let annotation_type = store.annotations.get(*annotation).ty;
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(annotation_symbol),
+        ..
+    } = store.types.get(annotation_type)
+    else {
+        return None;
+    };
+    if symbol_key(store, *annotation_symbol)
+        != "Package:scala/Package:annotation/Package:internal/Type:Repeated:Class"
+    {
+        return None;
+    }
+    let Type::Applied { tycon, args } = store.types.get(*underlying) else {
+        return None;
+    };
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(seq_symbol),
+        ..
+    } = store.types.get(*tycon)
+    else {
+        return None;
+    };
+    (symbol_key(store, *seq_symbol)
+        == "Package:scala/Package:collection/Package:immutable/Type:Seq:Trait"
+        && args.len() == 1)
+        .then_some(args[0])
 }
 
 fn render_type(
@@ -271,12 +310,16 @@ fn render_type(
                 .params
                 .iter()
                 .map(|param| {
+                    let repeated_element = tasty_repeated_element(store, param.ty);
+                    let (param_type, varargs) = repeated_element
+                        .map(|element| (element, true))
+                        .unwrap_or((param.ty, param.varargs));
                     format!(
                         "{}:{}:erased={}:varargs={}",
                         store.names.resolve(param.name.as_name().text()),
-                        render_type(store, param.ty, binders, active),
+                        render_type(store, param_type, binders, active),
                         param.erased,
-                        param.varargs
+                        varargs
                     )
                 })
                 .collect::<Vec<_>>()
@@ -327,12 +370,16 @@ fn render_type(
             underlying,
             annotation,
         } => {
-            let annotation_type = store.annotations.get(*annotation).ty;
-            format!(
-                "Annotated({}, {})",
-                render_type(store, *underlying, binders, active),
-                render_type(store, annotation_type, binders, active)
-            )
+            if let Some(element) = tasty_repeated_element(store, ty) {
+                format!("Repeated({})", render_type(store, element, binders, active))
+            } else {
+                let annotation_type = store.annotations.get(*annotation).ty;
+                format!(
+                    "Annotated({}, {})",
+                    render_type(store, *underlying, binders, active),
+                    render_type(store, annotation_type, binders, active)
+                )
+            }
         }
         Type::Wildcard { bounds } => {
             format!("Wildcard({})", render_type(store, *bounds, binders, active))
@@ -803,14 +850,24 @@ mod tests {
     }
 
     fn assert_source_and_tasty_method_parity(name: &str, source_text: &str, method_name: &str) {
+        assert_source_and_tasty_method_parity_with_units(
+            name,
+            source_text,
+            method_name,
+            &[METHODS_TASTY],
+        );
+    }
+
+    fn assert_source_and_tasty_method_parity_with_units(
+        name: &str,
+        source_text: &str,
+        method_name: &str,
+        tasty_units: &[&'static [u8]],
+    ) {
         let (source_store, source_info) =
             source_type_info_from_source(source_text, "Methods", SymbolKind::Class, &[method_name]);
-        let (tasty_store, tasty_info) = tasty_type_info_with_units(
-            "Methods",
-            &[METHODS_TASTY],
-            SymbolKind::Class,
-            &[method_name],
-        );
+        let (tasty_store, tasty_info) =
+            tasty_type_info_with_units("Methods", tasty_units, SymbolKind::Class, &[method_name]);
         let source_members = normalized_member_infos(
             &source_store,
             match source_store.types.get(source_info) {
@@ -984,6 +1041,20 @@ mod tests {
             methods_fixture_method("curried")
         );
         assert_source_and_tasty_method_parity("curried", &source_text, "curried");
+    }
+
+    #[test]
+    fn source_and_scala_390_tasty_repeated_method_signature_matches() {
+        let source_text = format!(
+            "package me.cytrowski.tastyfixtures.semantic\nclass Methods:\n  {}",
+            methods_fixture_method("repeated")
+        );
+        assert_source_and_tasty_method_parity_with_units(
+            "repeated",
+            &source_text,
+            "repeated",
+            &[SCALA_SEQ_TASTY, REPEATED_TASTY, METHODS_TASTY],
+        );
     }
 
     #[test]

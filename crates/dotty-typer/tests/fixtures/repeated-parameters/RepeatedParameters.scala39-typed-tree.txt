@@ -1,0 +1,11 @@
+[[syntax trees at end of                     typer]] // crates/dotty-typer/tests/fixtures/repeated-parameters/RepeatedParameters.scala
+package <empty> {
+  class Box[A >: Nothing <: Any]() extends Object() {
+    A
+  }
+  class RepeatedParameters() extends Object() {
+    def strings(xs: Seq[String] @Repeated): Unit = ()
+    def boxes(xs: Seq[Box[Int]] @Repeated): Unit = ()
+  }
+}
+

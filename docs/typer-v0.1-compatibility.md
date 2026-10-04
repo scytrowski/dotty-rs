@@ -797,7 +797,15 @@ the first clause, including after generic inference. Automatic contextual or
 implicit argument insertion and implicit search remain deferred. Erased and
 by-name parameters remain unsupported for explicit application. The Scala
 grammar rejects repeated parameters in contextual clauses; ordinary repeated
-parameter application remains deferred.
+parameter application remains deferred. Source method parameter types ending
+in `*` project to `Type::Repeated { element }`; the parameter symbol retains
+that marker while the owning `MethodType` stores the element type with its
+existing `varargs` flag. Projection is restricted to parameter declarations,
+and malformed non-final or implicit/contextual repeated parameters return
+focused errors. Scala 3.9 TASTy spells this signature as `Seq[T] @Repeated`,
+which the semantic parity test normalizes to the source `Repeated` plus
+`varargs` contract. References to repeated parameters inside method bodies
+remain deferred because their runtime `Seq[T]` type is not modeled here.
 
 `SourceTyper::expression_context_for` builds a method or constructor body
 context from its indexed source declaration context and owned scope. Term
