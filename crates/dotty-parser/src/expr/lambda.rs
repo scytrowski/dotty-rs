@@ -260,7 +260,19 @@ where
             }
 
             if self.context.block_end == Some(TokenKind::Outdent) {
-                return self.expr();
+                // In an indented block, Dotty keeps an inline lambda body as
+                // a one-expression Block. Parse only the expression here so
+                // the enclosing Outdent and following sibling statements
+                // remain owned by their block.
+                let mark = self.mark();
+                let expr = self.expr();
+                return self.alloc_from(
+                    mark,
+                    TreeKind::Block(dotty_core::ast::Block {
+                        stats: Vec::new(),
+                        expr,
+                    }),
+                );
             }
 
             if let Some(end) = self.context.block_end {
@@ -819,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn lambda_inside_a_block_end_uses_only_its_expression_body() {
+    fn lambda_inside_a_block_end_keeps_its_block_without_consuming_delimiter() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "x => x}",
@@ -844,10 +856,13 @@ mod tests {
         else {
             panic!("expected a function literal");
         };
-        assert!(matches!(
-            parser.ast().get(function.body).kind,
-            TreeKind::Ident(_)
-        ));
+        let TreeKind::Block(dotty_core::ast::Block { stats, expr }) =
+            &parser.ast().get(function.body).kind
+        else {
+            panic!("expected a one-expression block body");
+        };
+        assert!(stats.is_empty());
+        assert!(matches!(parser.ast().get(*expr).kind, TreeKind::Ident(_)));
         assert_eq!(
             parser.current().kind,
             TokenKind::Punctuation(Punctuation::RightBrace)
