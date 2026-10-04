@@ -81,13 +81,16 @@ impl SourceTyper<'_> {
         tree: TreeId<Untyped>,
         context: SourceContextId,
     ) -> Result<TypeId, TyperError> {
-        self.run_atomic(|typer, _| typer.type_of_tpt_inner(tree, context))
+        self.run_atomic(|typer, info_journal| {
+            typer.type_of_tpt_inner_journaled(tree, context, info_journal)
+        })
     }
 
-    pub(super) fn type_of_tpt_inner(
+    pub(super) fn type_of_tpt_inner_journaled(
         &mut self,
         tree: TreeId<Untyped>,
         context: SourceContextId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
         if let Some(ty) = self.type_index.type_at(self.source, tree) {
             return Ok(ty);
@@ -100,7 +103,7 @@ impl SourceTyper<'_> {
             });
         }
         self.source_type_projection_depth += 1;
-        let result = self.type_of_tpt_uncached(tree, context);
+        let result = self.type_of_tpt_uncached(tree, context, info_journal);
         self.source_type_projection_depth -= 1;
         result
     }
@@ -109,6 +112,7 @@ impl SourceTyper<'_> {
         &mut self,
         tree: TreeId<Untyped>,
         context: SourceContextId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
         if let Some(ty) = self.type_index.type_at(self.source, tree) {
             return Ok(ty);
@@ -127,7 +131,7 @@ impl SourceTyper<'_> {
             });
         }
         if let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &source_tree.kind {
-            let ty = self.type_of_tpt_inner(parens.inner, context)?;
+            let ty = self.type_of_tpt_inner_journaled(parens.inner, context, info_journal)?;
             if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
                 return Err(TyperError::DuplicateSourceTypeCacheEntry {
                     source: self.source,
@@ -139,7 +143,7 @@ impl SourceTyper<'_> {
             return Ok(ty);
         }
         if let TreeKind::ByNameTypeTree(by_name) = &source_tree.kind {
-            let result = self.type_of_tpt_inner(by_name.result, context)?;
+            let result = self.type_of_tpt_inner_journaled(by_name.result, context, info_journal)?;
             let ty = self.store.types.alloc(Type::ByName { result });
             if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
                 return Err(TyperError::DuplicateSourceTypeCacheEntry {
@@ -151,8 +155,26 @@ impl SourceTyper<'_> {
             }
             return Ok(ty);
         }
+        if let TreeKind::SingletonTypeTree(singleton) = &source_tree.kind {
+            let ty = self.project_stable_term_reference(
+                singleton.reference,
+                context,
+                tree.index(),
+                info_journal,
+            )?;
+            self.require_stable_selection_prefix(ty, tree.index())?;
+            if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
+                return Err(TyperError::DuplicateSourceTypeCacheEntry {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    existing,
+                    attempted: ty,
+                });
+            }
+            return Ok(ty);
+        }
         if let TreeKind::AppliedTypeTree(applied) = &source_tree.kind {
-            let tycon = self.type_of_tpt_inner(applied.tpt, context)?;
+            let tycon = self.type_of_tpt_inner_journaled(applied.tpt, context, info_journal)?;
             let mut args = Vec::with_capacity(applied.args.len());
             for argument in &applied.args {
                 let is_wildcard = self
@@ -160,9 +182,9 @@ impl SourceTyper<'_> {
                     .try_get(*argument)
                     .is_some_and(|argument| matches!(argument.kind, TreeKind::TypeBoundsTree(_)));
                 let projected = if is_wildcard {
-                    self.type_of_wildcard_bounds(*argument, context)?
+                    self.type_of_wildcard_bounds(*argument, context, info_journal)?
                 } else {
-                    self.type_of_tpt_inner(*argument, context)?
+                    self.type_of_tpt_inner_journaled(*argument, context, info_journal)?
                 };
                 args.push(projected);
             }
@@ -190,8 +212,8 @@ impl SourceTyper<'_> {
                     });
                 }
             };
-            let left = self.type_of_tpt_inner(infix.left, context)?;
-            let right = self.type_of_tpt_inner(infix.right, context)?;
+            let left = self.type_of_tpt_inner_journaled(infix.left, context, info_journal)?;
+            let right = self.type_of_tpt_inner_journaled(infix.right, context, info_journal)?;
             let ty = if is_union {
                 self.store.types.alloc(Type::Or { left, right })
             } else {
@@ -272,6 +294,7 @@ impl SourceTyper<'_> {
         &mut self,
         tree: TreeId<Untyped>,
         context: SourceContextId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
         if let Some(ty) = self.type_index.type_at(self.source, tree) {
             return Ok(ty);
@@ -296,7 +319,7 @@ impl SourceTyper<'_> {
                 tree_kind: "aliased wildcard bounds",
             });
         }
-        let projected_bounds = self.project_type_bounds(bounds, context)?;
+        let projected_bounds = self.project_type_bounds(bounds, context, info_journal)?;
         let wildcard = self.store.types.alloc(Type::Wildcard {
             bounds: projected_bounds,
         });
@@ -309,6 +332,154 @@ impl SourceTyper<'_> {
             });
         }
         Ok(wildcard)
+    }
+
+    fn project_stable_term_reference(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: SourceContextId,
+        type_tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        if self.source_type_projection_depth >= MAX_SOURCE_TYPE_PROJECTION_DEPTH {
+            return Err(TyperError::SourceTypeProjectionDepthExceeded {
+                source: self.source,
+                tree_index: tree.index(),
+                max_depth: MAX_SOURCE_TYPE_PROJECTION_DEPTH,
+            });
+        }
+        self.source_type_projection_depth += 1;
+        let result =
+            self.project_stable_term_reference_inner(tree, context, type_tree_index, info_journal);
+        self.source_type_projection_depth -= 1;
+        result
+    }
+
+    fn project_stable_term_reference_inner(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: SourceContextId,
+        type_tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let source_tree = self
+            .arena
+            .try_get(tree)
+            .ok_or(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            })?;
+        match source_tree.kind {
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => self
+                .project_stable_term_reference(
+                    parens.inner,
+                    context,
+                    type_tree_index,
+                    info_journal,
+                ),
+            TreeKind::This(this) => {
+                let owner = self
+                    .index
+                    .try_source_context(context)
+                    .ok_or(TyperError::SourceContextMissing {
+                        source: self.source,
+                        tree_index: type_tree_index,
+                        context_index: context.index(),
+                    })?
+                    .owner;
+                let class = self.enclosing_this_owner(this.qual, owner, tree.index())?;
+                Ok(self.store.types.alloc(Type::ThisType { class }))
+            }
+            TreeKind::Ident(ident) if ident.name.is_term() => {
+                let source_context = self.index.try_source_context(context).ok_or(
+                    TyperError::SourceContextMissing {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        context_index: context.index(),
+                    },
+                )?;
+                let local_scopes = self
+                    .active_local_import_scopes
+                    .iter()
+                    .rev()
+                    .find(|(active_context, _)| *active_context == context)
+                    .and_then(|(_, scopes)| *scopes);
+                let expression = ExpressionContext {
+                    lexical: context,
+                    owner: source_context.owner,
+                    local_scopes,
+                };
+                let symbol = self.resolve_expression_term(
+                    ident.name,
+                    expression,
+                    tree.index(),
+                    source_tree.position,
+                )?;
+                self.expression_type_of_symbol(symbol, expression.owner, tree.index(), info_journal)
+            }
+            TreeKind::Select(selection) if selection.name.is_term() => {
+                let qualifier = self.project_stable_term_reference(
+                    selection.qualifier,
+                    context,
+                    type_tree_index,
+                    info_journal,
+                )?;
+                self.require_stable_selection_prefix(qualifier, tree.index())?;
+                let receiver = self.widen_expression_type_journaled(qualifier, info_journal, 0)?;
+                let receiver = self.this_type_receiver_view(receiver)?;
+                let candidates = self
+                    .lookup_members_journaled(receiver, selection.name, info_journal)
+                    .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+                let candidate = match candidates.as_slice() {
+                    [] => {
+                        return Err(TyperError::MemberNotFound {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            receiver,
+                            name: selection.name,
+                        });
+                    }
+                    [candidate] => candidate,
+                    _ => {
+                        return Err(TyperError::OverloadedSelectionDeferred {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            name: selection.name,
+                        });
+                    }
+                };
+                if !matches!(
+                    self.store.symbols.get(candidate.symbol).kind,
+                    SymbolKind::Parameter
+                        | SymbolKind::Field
+                        | SymbolKind::Value
+                        | SymbolKind::Local
+                        | SymbolKind::Object
+                ) || self
+                    .store
+                    .symbols
+                    .get(candidate.symbol)
+                    .flags
+                    .contains(SymbolFlags::MUTABLE)
+                {
+                    return Err(TyperError::UnstableSelectionPrefix {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        qualifier_type: qualifier,
+                    });
+                }
+                let _ = self.completed_expression_symbol_info(candidate.symbol, info_journal)?;
+                Ok(self.store.types.alloc(Type::TermRef {
+                    prefix: qualifier,
+                    target: TermRefTarget::Symbol(candidate.symbol),
+                }))
+            }
+            _ => Err(TyperError::UnsupportedSingletonReference {
+                source: self.source,
+                tree_index: tree.index(),
+                reference_kind: tree_kind_name(&source_tree.kind),
+            }),
+        }
     }
 
     pub(super) fn type_symbol_prefix(&mut self, symbol: SymbolId) -> TypeId {

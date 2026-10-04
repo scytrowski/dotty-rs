@@ -55,7 +55,8 @@ impl SourceTyper<'_> {
             });
         }
         let type_context = self.expression_type_context(context)?;
-        let instance_type = self.type_of_tpt_inner(new.tpt, type_context)?;
+        let instance_type =
+            self.type_of_tpt_inner_journaled(new.tpt, type_context, info_journal)?;
         let class = self.instantiable_class_of_type(instance_type, info_journal)?;
         self.ensure_constructor_class_info(class, info_journal)?;
         let typed_tpt = self.reify_constructor_type_tree(new.tpt, instance_type, new_mappings)?;

@@ -881,7 +881,7 @@ impl SourceTyper<'_> {
             });
         };
         let type_context = self.expression_type_context(context)?;
-        let raw_type = self.type_of_tpt_inner(new.tpt, type_context)?;
+        let raw_type = self.type_of_tpt_inner_journaled(new.tpt, type_context, info_journal)?;
         let (class, arguments) =
             self.constructor_instance_type_arguments(raw_type, info_journal)?;
         if !arguments.is_empty() {

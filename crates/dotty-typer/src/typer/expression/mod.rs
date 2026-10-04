@@ -343,7 +343,8 @@ impl SourceTyper<'_> {
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         let type_context = self.expression_type_context(context)?;
-        let expected = self.type_of_tpt_inner(ascription.tpt, type_context)?;
+        let expected =
+            self.type_of_tpt_inner_journaled(ascription.tpt, type_context, info_journal)?;
         let expr = self.type_expression_expected_inner(
             ascription.expr,
             context,

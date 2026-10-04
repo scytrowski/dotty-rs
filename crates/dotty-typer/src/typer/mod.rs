@@ -2576,7 +2576,9 @@ mod tests {
             &packages,
         );
 
-        let projected = typer.project_parent_type(outer, context, 0).unwrap();
+        let projected = typer
+            .project_parent_type(outer, context, 0, &mut Vec::new())
+            .unwrap();
 
         let Type::Applied { tycon, args } = typer.store().types.get(projected) else {
             panic!("the outer TypeApply must be preserved");
@@ -2677,7 +2679,9 @@ mod tests {
             &packages,
         );
 
-        let projected = typer.project_parent_type(parent, context, 0).unwrap();
+        let projected = typer
+            .project_parent_type(parent, context, 0, &mut Vec::new())
+            .unwrap();
 
         let Type::Applied { tycon, args } = typer.store().types.get(projected) else {
             panic!("expected one application from the New type tree");
@@ -3345,6 +3349,57 @@ mod tests {
         ));
         assert_eq!(typer.store().checkpoint(), before);
         assert_eq!(*typer.store().symbols.info(parameter), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn failed_alias_bounds_roll_back_singleton_completion_in_outer_journal() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val x: Int = 1; type T >: x.type <: Missing }");
+        let x = val_symbol(&parsed, &store, &index, source, "x").0;
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "T");
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(alias),
+            Err(TyperError::TypeNameNotFound { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(typer.store().symbols.info(x), &SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn failed_alias_bounds_roll_back_nested_stable_field_completions() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { val x: Int = 1; val y: x.type = x; type T >: y.type <: Missing }",
+        );
+        let x = val_symbol(&parsed, &store, &index, source, "x").0;
+        let y = val_symbol(&parsed, &store, &index, source, "y").0;
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "T");
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(alias),
+            Err(TyperError::TypeNameNotFound { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(typer.store().symbols.info(x), &SymbolInfo::Missing);
+        assert_eq!(typer.store().symbols.info(y), &SymbolInfo::Missing);
     }
 
     #[test]
@@ -5541,6 +5596,193 @@ mod tests {
                 .type_at(source, parenthesized_infix.left),
             Some(parenthesized_union)
         );
+    }
+
+    #[test]
+    fn singleton_type_preserves_stable_field_symbol_and_prefix() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value: Int = 1; val alias: value.type = value }");
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "value");
+        let (alias, tree) = val_symbol(&parsed, &store, &index, source, "alias");
+        let context = index.declaration_context_of(alias).unwrap();
+        let singleton_tree = tree;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.type_of_tpt(singleton_tree, context).unwrap();
+        let Type::TermRef { prefix, target } = typer.store().types.get(projected) else {
+            panic!("singleton type must retain a term reference");
+        };
+        assert_eq!(*target, TermRefTarget::Symbol(value));
+        assert!(matches!(
+            typer.store().types.get(*prefix),
+            Type::ThisType { .. }
+        ));
+        assert_eq!(
+            typer.type_of_tpt(singleton_tree, context).unwrap(),
+            projected
+        );
+        assert!(
+            typer
+                .source_type_index()
+                .type_at(source, singleton_tree)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn singleton_type_rejects_mutable_and_method_references() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { var mutable: Int = 1; def method: Int = 1; val bad1: mutable.type = mutable; val bad2: method.type = 1 }",
+        );
+        let bad1 = val_symbol(&parsed, &store, &index, source, "bad1").0;
+        let bad2 = val_symbol(&parsed, &store, &index, source, "bad2").0;
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "method");
+        let bad1_tpt = val_symbol(&parsed, &store, &index, source, "bad1").1;
+        let bad2_tpt = val_symbol(&parsed, &store, &index, source, "bad2").1;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        for (symbol, tree) in [(bad1, bad1_tpt), (bad2, bad2_tpt)] {
+            let context = index.declaration_context_of(symbol).unwrap();
+            assert!(matches!(
+                typer.type_of_tpt(tree, context),
+                Err(TyperError::UnstableSelectionPrefix { .. })
+                    | Err(TyperError::UnsupportedTermReference { .. })
+                    | Err(TyperError::UnsupportedSingletonReference { .. })
+            ));
+        }
+        assert_eq!(typer.store().symbols.info(method), &SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn singleton_type_supports_this_and_stable_field_paths() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Inner { val value: Int = 1 }; class Outer { class Nested { val outer: Outer.this.type = Outer.this } }; class C { val inner: Inner = new Inner; val self: this.type = this; val selected: inner.value.type = inner.value }",
+        );
+        let (self_symbol, self_tpt) = val_symbol(&parsed, &store, &index, source, "self");
+        let (outer_symbol, outer_tpt) = val_symbol(&parsed, &store, &index, source, "outer");
+        let (selected_symbol, selected_tpt) =
+            val_symbol(&parsed, &store, &index, source, "selected");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let self_type = typer
+            .type_of_tpt(self_tpt, index.declaration_context_of(self_symbol).unwrap())
+            .unwrap();
+        assert!(matches!(
+            typer.store().types.get(self_type),
+            Type::ThisType { class: actual } if *actual == class
+        ));
+
+        let outer_type = typer
+            .type_of_tpt(
+                outer_tpt,
+                index.declaration_context_of(outer_symbol).unwrap(),
+            )
+            .unwrap();
+        let outer_class = class_symbol(&parsed, typer.store(), &index, source, "Outer");
+        assert!(matches!(
+            typer.store().types.get(outer_type),
+            Type::ThisType { class: actual } if *actual == outer_class
+        ));
+
+        let selected_type = typer
+            .type_of_tpt(
+                selected_tpt,
+                index.declaration_context_of(selected_symbol).unwrap(),
+            )
+            .unwrap();
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(value),
+            prefix,
+        } = typer.store().types.get(selected_type)
+        else {
+            panic!("selected singleton must retain its field reference");
+        };
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(*value).name.text()),
+            "value"
+        );
+        assert!(matches!(
+            typer.store().types.get(*prefix),
+            Type::TermRef { .. }
+        ));
+    }
+
+    #[test]
+    fn failed_singleton_selection_rolls_back_completed_prefix_and_type_cache() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class Inner; class C { val inner: Inner = new Inner; val missing: inner.absent.type = inner }",
+        );
+        let (inner, _) = val_symbol(&parsed, &store, &index, source, "inner");
+        let (missing, tpt) = val_symbol(&parsed, &store, &index, source, "missing");
+        let context = index.declaration_context_of(missing).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_of_tpt(tpt, context),
+            Err(TyperError::MemberNotFound { .. })
+        ));
+        assert_eq!(typer.store().symbols.info(inner), &SymbolInfo::Missing);
+        assert_eq!(typer.source_type_index().type_at(source, tpt), None);
+    }
+
+    #[test]
+    fn deeply_nested_singleton_path_returns_projection_depth_error() {
+        let path = format!("a{}", ".missing".repeat(300));
+        let source_text = format!("class C {{ val a: C = this; val deep: {path}.type = a }}");
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(&source_text);
+        let (a, _) = val_symbol(&parsed, &store, &index, source, "a");
+        let (deep, tpt) = val_symbol(&parsed, &store, &index, source, "deep");
+        let context = index.declaration_context_of(deep).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_of_tpt(tpt, context),
+            Err(TyperError::SourceTypeProjectionDepthExceeded {
+                max_depth,
+                ..
+            }) if max_depth == type_projection::MAX_SOURCE_TYPE_PROJECTION_DEPTH
+        ));
+        assert_eq!(typer.store().symbols.info(a), &SymbolInfo::Missing);
+        assert_eq!(typer.source_type_index().type_at(source, tpt), None);
     }
 
     #[test]

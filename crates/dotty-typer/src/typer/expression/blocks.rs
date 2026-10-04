@@ -239,7 +239,8 @@ impl SourceTyper<'_> {
         } else {
             self.active_local_import_scopes
                 .push((context.lexical, context.local_scopes));
-            let projected = self.type_of_tpt_inner(definition.tpt, context.lexical);
+            let projected =
+                self.type_of_tpt_inner_journaled(definition.tpt, context.lexical, info_journal);
             self.active_local_import_scopes.pop();
             Some(projected?)
         };

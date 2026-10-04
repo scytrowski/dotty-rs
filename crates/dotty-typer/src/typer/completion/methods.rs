@@ -157,7 +157,11 @@ impl SourceTyper<'_> {
                     position: result_node.position,
                 });
             }
-            self.type_of_tpt_inner(definition.tpt, signature_parameter_context)?
+            self.type_of_tpt_inner_journaled(
+                definition.tpt,
+                signature_parameter_context,
+                info_journal,
+            )?
         };
         let mut signature = result_type;
         for clause in clauses.into_iter().rev() {

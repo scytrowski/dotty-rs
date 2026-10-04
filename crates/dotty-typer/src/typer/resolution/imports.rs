@@ -607,7 +607,7 @@ impl SourceTyper<'_> {
                     .ident_with_backquoted(ident.name, ident.backquoted, ty, source_node.position)
             }
             TreeKind::TypeTree(_) => {
-                let ty = self.type_of_tpt_inner(tree, context)?;
+                let ty = self.type_of_tpt_inner_journaled(tree, context, info_journal)?;
                 self.typed_arena.alloc(Tree {
                     kind: TreeKind::TypeTree(dotty_core::ast::TypeTree),
                     position: source_node.position,
