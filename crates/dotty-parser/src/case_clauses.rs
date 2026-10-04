@@ -70,6 +70,15 @@ where
                     } else {
                         body
                     }
+                } else if parser.expr_only_case_body_is_empty(mark.start, body_mark.start) {
+                    let expr = parser.synthetic_unit_at(parser.last_real_token_end);
+                    parser.alloc_from(
+                        body_mark,
+                        TreeKind::Block(Block {
+                            stats: Vec::new(),
+                            expr,
+                        }),
+                    )
                 } else {
                     parser.with_location(Location::InBlock, |parser| parser.expr())
                 }
@@ -87,6 +96,30 @@ where
                 body,
             }),
         )
+    }
+
+    fn expr_only_case_body_is_empty(&self, case_start: u32, arrow_start: u32) -> bool {
+        if matches!(
+            self.current().kind,
+            TokenKind::Outdent | TokenKind::Eof | TokenKind::Keyword(HardKeyword::Case)
+        ) {
+            return false;
+        }
+
+        let body_start = self.current().span.start();
+        if crate::expr::can_start_expr(self.current().kind)
+            || !self.has_physical_line_break(arrow_start, body_start)
+        {
+            return false;
+        }
+
+        // In a braced region the scanner may not expose an Outdent for a
+        // dedented sibling statement. Treat only that physical layout shape
+        // as an empty expression-only case body; EOF and adjacent case/brace
+        // boundaries remain malformed-body recovery cases.
+        let case_indent = self.source_line_indent_prefix(case_start);
+        let body_indent = self.source_line_indent_prefix(body_start);
+        body_indent.len() < case_indent.len() && case_indent.starts_with(&body_indent)
     }
 
     /// Parses a consecutive case list, leaving its enclosing `}`/`Outdent` untouched.

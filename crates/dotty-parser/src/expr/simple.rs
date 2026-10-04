@@ -485,7 +485,7 @@ where
         self.synthetic_unit_at(self.current().span.start())
     }
 
-    pub(super) fn synthetic_unit_at(&mut self, start: u32) -> TreeId<Untyped> {
+    pub(crate) fn synthetic_unit_at(&mut self, start: u32) -> TreeId<Untyped> {
         let range = TextRange::new(start, start).expect("zero-width synthetic unit range");
         self.alloc(
             TreeKind::Literal(dotty_core::ast::Literal {
