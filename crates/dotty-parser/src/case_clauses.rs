@@ -101,10 +101,7 @@ where
     fn expr_only_case_body_is_empty(&self, case_start: u32, arrow_start: u32) -> bool {
         if matches!(
             self.current().kind,
-            TokenKind::Outdent
-                | TokenKind::Eof
-                | TokenKind::Punctuation(Punctuation::RightBrace)
-                | TokenKind::Keyword(HardKeyword::Case)
+            TokenKind::Outdent | TokenKind::Eof | TokenKind::Keyword(HardKeyword::Case)
         ) {
             return false;
         }

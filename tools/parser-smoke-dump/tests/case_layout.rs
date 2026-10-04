@@ -273,6 +273,111 @@ fn empty_catch_case_body_preserves_the_enclosing_local_definition() {
 }
 
 #[test]
+fn empty_catch_case_body_can_end_at_a_dedented_closing_brace() {
+    let source = include_str!(
+        "../../scala-parser-oracle/fixtures/compilation/catch-empty-case-before-brace.scala"
+    );
+    let scanner = ContextualScanner::new(source).expect("source scans");
+    let mut names = NameInterner::new();
+    let result = parse_compilation_unit(
+        SourceText::new(source).expect("source text is valid"),
+        SourceId::from_index(0),
+        scanner,
+        &mut names,
+    );
+
+    assert!(
+        result.diagnostics.is_empty(),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+        panic!("expected a package root");
+    };
+    let [object] = package.stats.as_slice() else {
+        panic!("expected the empty-catch object");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) = &result.ast.get(*object).kind
+    else {
+        panic!("expected the object definition");
+    };
+    let TreeKind::Template(Template { body, .. }) = &result.ast.get(module.template).kind else {
+        panic!("expected the object template");
+    };
+    let method = body
+        .iter()
+        .find(|tree| {
+            matches!(
+                &result.ast.get(**tree).kind,
+                TreeKind::DefDef(definition)
+                    if names.resolve(definition.name.as_name().text()) == "f"
+            )
+        })
+        .copied()
+        .expect("method f is retained");
+    let TreeKind::DefDef(DefDef {
+        rhs: Some(method_body),
+        ..
+    }) = result.ast.get(method).kind
+    else {
+        panic!("expected method f to have a body");
+    };
+    let try_expr = match result.ast.get(method_body).kind {
+        TreeKind::Block(Block { expr, .. }) => expr,
+        _ => method_body,
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::ParsedTry(ParsedTry {
+        handler: Some(handler),
+        ..
+    })) = result.ast.get(try_expr).kind
+    else {
+        panic!("expected a try expression with a catch handler");
+    };
+    let TreeKind::Match(Match { ref cases, .. }) = result.ast.get(handler).kind else {
+        panic!("expected a catch case list");
+    };
+    let [case] = cases.as_slice() else {
+        panic!("expected one catch case");
+    };
+    let TreeKind::CaseDef(CaseDef { body, .. }) = result.ast.get(*case).kind else {
+        panic!("expected the catch case definition");
+    };
+    let TreeKind::Block(Block { ref stats, expr }) = result.ast.get(body).kind else {
+        panic!("expected an empty catch body block");
+    };
+    assert!(stats.is_empty());
+    assert!(matches!(
+        result.ast.get(expr).kind,
+        TreeKind::Literal(Literal {
+            value: Constant::Unit
+        })
+    ));
+    let arrow_start = source.find("=>").expect("case arrow exists") as u32;
+    assert_eq!(
+        result.ast.get(body).position.unwrap().span().range(),
+        TextRange::new(arrow_start, arrow_start + 2).unwrap()
+    );
+}
+
+#[test]
+fn same_line_closing_brace_is_not_an_empty_catch_case_body() {
+    let source = "object O:\n  def f = {\n    try risky()\n    catch\n      case _: E => }\n";
+    let scanner = ContextualScanner::new(source).expect("source scans");
+    let mut names = NameInterner::new();
+    let result = parse_compilation_unit(
+        SourceText::new(source).expect("source text is valid"),
+        SourceId::from_index(0),
+        scanner,
+        &mut names,
+    );
+
+    assert!(
+        !result.diagnostics.is_empty(),
+        "a same-line closing brace must not be accepted as an empty body"
+    );
+}
+
+#[test]
 fn empty_nested_match_case_preserves_the_enclosing_match_case() {
     let source = "outer match\n  case A =>\n    inner match\n      case B =>\n  case C => 1\n";
     let scanner = ContextualScanner::new(source).expect("source scans");
