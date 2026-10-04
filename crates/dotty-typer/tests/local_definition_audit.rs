@@ -1214,6 +1214,25 @@ fn singleton_type_histogram_does_not_count_its_term_path() {
 }
 
 #[test]
+fn declared_type_tree_histogram_counts_pattern_types_and_omits_empty_placeholders() {
+    let source = "object Audit { def inferred = { val x = 1; x }; def patterned = { val (a, b): (A | B, C) = pair } }";
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source).unwrap(),
+        SourceId::from_index(0),
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let histogram = collect_declared_type_tree_histogram(&parsed.ast, &store.names);
+    assert_eq!(histogram.get("InfixOp::|"), Some(&1));
+    assert_eq!(histogram.get("TypeTree"), Some(&0));
+    assert_eq!(histogram.get("Tuple"), Some(&1));
+}
+
+#[test]
 fn local_expression_audit_schema_keeps_zero_count_forms_without_an_ast() {
     let audit = Audit::default();
 
@@ -3414,6 +3433,7 @@ const TYPE_TREE_FORMS: &[&str] = &[
     "FunctionWithMods",
     "ContextBoundTypeTree",
     "Parens",
+    "Tuple",
 ];
 
 fn empty_type_tree_histogram() -> BTreeMap<String, usize> {
@@ -3445,6 +3465,11 @@ fn collect_declared_type_tree_histogram(
             TreeKind::ValDef(definition) if local_stats.contains(&tree) => {
                 roots.push(definition.tpt);
             }
+            TreeKind::PhaseSpecific(UntypedNode::PatDef(definition))
+                if local_stats.contains(&tree) =>
+            {
+                roots.push(definition.tpt);
+            }
             TreeKind::TypeDef(definition)
                 if local_stats.contains(&tree)
                     && !matches!(arena.get(definition.rhs).kind, TreeKind::Template(_)) =>
@@ -3469,6 +3494,13 @@ fn collect_declared_type_tree_histogram(
         let Some(node) = nodes.get(&tree.index()) else {
             continue;
         };
+        if matches!(node.kind, TreeKind::TypeTree(_))
+            && node
+                .position
+                .is_some_and(|position| position.span().range().is_empty())
+        {
+            continue;
+        }
         if let Some(form) = type_tree_form(&node.kind, tree.index(), &operators) {
             *histogram.entry(form.to_owned()).or_default() += 1;
         }
@@ -3513,6 +3545,7 @@ fn type_tree_form(
             Some("ContextBoundTypeTree")
         }
         TreeKind::PhaseSpecific(UntypedNode::Parens(_)) => Some("Parens"),
+        TreeKind::PhaseSpecific(UntypedNode::Tuple(_)) => Some("Tuple"),
         _ => None,
     }
 }
@@ -3560,6 +3593,7 @@ fn type_tree_children(kind: &TreeKind<Untyped>) -> Vec<dotty_core::TreeId<Untype
             .collect(),
         TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(node)) => vec![node.bound],
         TreeKind::PhaseSpecific(UntypedNode::Parens(node)) => vec![node.inner],
+        TreeKind::PhaseSpecific(UntypedNode::Tuple(node)) => node.elements.clone(),
         TreeKind::ValDef(node) => vec![node.tpt],
         TreeKind::DefDef(node) => node
             .type_params

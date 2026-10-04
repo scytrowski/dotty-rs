@@ -62,26 +62,27 @@ expression_forms:
   PostfixOp=0
   Try=0
 type_tree_forms:
-  Annotated=1338
-  AppliedTypeTree=15227
+  Annotated=1393
+  AppliedTypeTree=15669
   ByNameTypeTree=456
   ContextBoundTypeTree=808
-  Function=1278
+  Function=1281
   FunctionWithMods=974
-  Ident=96875
+  Ident=100562
   InfixOp::&=252
   InfixOp::<other>=71
-  InfixOp::|=1077
+  InfixOp::|=1089
   LambdaTypeTree=160
   MatchTypeTree=0
   Parens=59
   PostfixOp::*=181
   PostfixOp::<other>=0
   RefinedTypeTree=22
-  Select=9838
+  Select=9903
   SingletonTypeTree=831
-  TypeBoundsTree=7916
-  TypeTree=29963
+  Tuple=1346
+  TypeBoundsTree=7919
+  TypeTree=0
 parser_diagnostics:
   ParserDiagnostic::ExpectedExpression=290
   ParserDiagnostic::UnexpectedToken=186
