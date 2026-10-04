@@ -1,6 +1,6 @@
 # Typer classpath corpus audit: Scala 3.9.0
 
-This normalized result was produced by two identical runs. It measures local-method typing reachability and isolated Match-case typing against pinned Scala 3.9.0; `NoSuccessfulEnclosingMethodTyping` is a downstream count and is excluded from the ranked semantic gaps. Parser recovery, parser/namer failures, classpath misses, and unsupported Typer semantics remain separate buckets. Match probes include alternatives, tuple patterns, infix patterns, and extractor-looking roots; outcomes report first errors and source files, while successes are grouped by supported extractor protocol. `UnsupportedTypeTree` retains its aggregate total and is also split by source AST shape and operator. `type_tree_forms` counts type-tree nodes reachable from method signatures and local declared types, independently of projection success; traversal follows type children and does not count term-expression children. A reduction in one unsupported-type sub-bucket may expose a later failure, so interpret it as type-projection reachability movement rather than automatically as a semantic improvement. Other deltas are historical measurements, not a claim that moving a failure to a later bucket is a semantic improvement.
+This normalized result was produced by two identical runs. It measures local-method typing reachability and isolated Match-case typing against pinned Scala 3.9.0; `NoSuccessfulEnclosingMethodTyping` is a downstream count and is excluded from the ranked semantic gaps. Parser recovery, parser/namer failures, classpath misses, and unsupported Typer semantics remain separate buckets. Match probes include alternatives, tuple patterns, infix patterns, and extractor-looking roots; outcomes report first errors and source files, while successes are grouped by supported extractor protocol. `UnsupportedTypeTree` retains its aggregate total and is also split by source AST shape and operator. `type_tree_forms` counts type-tree nodes reachable from method signatures and local declared types, including explicit annotations on local pattern definitions; it excludes zero-width synthetic `TypeTree` placeholders for omitted source annotations. Traversal follows type children and does not count term-expression children. A reduction in one unsupported-type sub-bucket may expose a later failure, so interpret it as type-projection reachability movement rather than automatically as a semantic improvement. Other deltas are historical measurements, not a claim that moving a failure to a later bucket is a semantic improvement.
 
 Run `tools/typer-classpath-corpus-audit/run` with the environment documented in `docs/typer-v0.1-compatibility.md` to regenerate this report.
 
@@ -62,13 +62,13 @@ expression_forms:
   PostfixOp=0
   Try=0
 type_tree_forms:
-  Annotated=1393
-  AppliedTypeTree=15669
+  Annotated=1396
+  AppliedTypeTree=15677
   ByNameTypeTree=456
   ContextBoundTypeTree=808
   Function=1281
   FunctionWithMods=974
-  Ident=100562
+  Ident=100592
   InfixOp::&=252
   InfixOp::<other>=71
   InfixOp::|=1089

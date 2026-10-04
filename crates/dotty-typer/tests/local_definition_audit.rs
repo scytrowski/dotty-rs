@@ -1215,7 +1215,7 @@ fn singleton_type_histogram_does_not_count_its_term_path() {
 
 #[test]
 fn declared_type_tree_histogram_counts_pattern_types_and_omits_empty_placeholders() {
-    let source = "object Audit { def inferred = { val x = 1; x }; def patterned = { val (a, b): (A | B, C) = pair } }";
+    let source = "object Audit { def inferred = { val x = 1; x }; def patterned = { val (a, b): (A | B, C) = pair; val (x: A, y: B) = pair } }";
     let mut store = SemanticStore::new();
     let scanner = ContextualScanner::new(source).unwrap();
     let parsed = parse_compilation_unit(
@@ -1230,6 +1230,7 @@ fn declared_type_tree_histogram_counts_pattern_types_and_omits_empty_placeholder
     assert_eq!(histogram.get("InfixOp::|"), Some(&1));
     assert_eq!(histogram.get("TypeTree"), Some(&0));
     assert_eq!(histogram.get("Tuple"), Some(&1));
+    assert_eq!(histogram.get("Ident"), Some(&5));
 }
 
 #[test]
@@ -2557,6 +2558,47 @@ fn local_stat_trees(arena: &dotty_core::AstArena<Untyped>) -> HashSet<dotty_core
         .collect()
 }
 
+fn local_pattern_type_trees(
+    arena: &dotty_core::AstArena<Untyped>,
+) -> HashSet<dotty_core::TreeId<Untyped>> {
+    let mut pending = local_stat_trees(arena)
+        .into_iter()
+        .flat_map(|tree| match &arena.get(tree).kind {
+            TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => definition.patterns.clone(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let mut visited = HashSet::new();
+    let mut types = HashSet::new();
+    while let Some(tree) = pending.pop() {
+        if !visited.insert(tree) {
+            continue;
+        }
+        match &arena.get(tree).kind {
+            TreeKind::Typed(typed) => {
+                types.insert(typed.tpt);
+                pending.push(typed.expr);
+            }
+            TreeKind::Bind(binding) => pending.push(binding.body),
+            TreeKind::Alternative(alternative) => {
+                pending.extend(alternative.alternatives.iter().copied());
+            }
+            TreeKind::UnApply(unapply) => pending.extend(unapply.patterns.iter().copied()),
+            TreeKind::Annotated(annotated) => pending.push(annotated.expr),
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => pending.push(parens.inner),
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+                pending.extend(tuple.elements.iter().copied());
+            }
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
+                pending.push(infix.left);
+                pending.push(infix.right);
+            }
+            _ => {}
+        }
+    }
+    types
+}
+
 fn local_pattern_bind_trees(
     arena: &dotty_core::AstArena<Untyped>,
 ) -> HashSet<dotty_core::TreeId<Untyped>> {
@@ -3450,6 +3492,7 @@ fn collect_declared_type_tree_histogram(
     let operators = source_operator_spellings(arena, names);
     let local_stats = local_stat_trees(arena);
     let mut roots = Vec::new();
+    roots.extend(local_pattern_type_trees(arena));
     for (tree, node) in arena.iter() {
         match &node.kind {
             TreeKind::DefDef(definition) => {
