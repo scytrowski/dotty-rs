@@ -68,7 +68,7 @@ type_tree_forms:
   ContextBoundTypeTree=808
   Function=1278
   FunctionWithMods=974
-  Ident=97190
+  Ident=96875
   InfixOp::&=252
   InfixOp::<other>=71
   InfixOp::|=1077
@@ -78,7 +78,7 @@ type_tree_forms:
   PostfixOp::*=181
   PostfixOp::<other>=0
   RefinedTypeTree=22
-  Select=9898
+  Select=9838
   SingletonTypeTree=831
   TypeBoundsTree=7916
   TypeTree=29963
