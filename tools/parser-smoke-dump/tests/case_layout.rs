@@ -1,4 +1,6 @@
-use dotty_core::ast::{Block, CaseDef, DefDef, If, Literal, Match, Template, UntypedNode};
+use dotty_core::ast::{
+    Block, CaseDef, DefDef, ErrorNodeKind, If, Literal, Match, Template, UntypedNode,
+};
 use dotty_core::{Constant, NameInterner, SourceId, SourceText, TextRange, TreeKind};
 use dotty_lexer::ContextualScanner;
 use dotty_parser::{parse_compilation_unit, parse_expression_fragment};
@@ -223,5 +225,59 @@ fn empty_nested_match_case_preserves_the_enclosing_match_case() {
     assert_eq!(
         result.ast.get(*second).position.unwrap().span().range(),
         TextRange::new(58, 69).unwrap()
+    );
+}
+
+#[test]
+fn missing_nested_case_arrow_reports_and_preserves_the_enclosing_match_case() {
+    let source = "outer match\n  case A =>\n    inner match\n      case B\n  case C => 1\n";
+    let scanner = ContextualScanner::new(source).expect("source scans");
+    let mut names = NameInterner::new();
+    let result = parse_expression_fragment(
+        SourceText::new(source).expect("source text is valid"),
+        SourceId::from_index(0),
+        scanner,
+        &mut names,
+    );
+
+    assert_eq!(result.diagnostics.len(), 1);
+    assert_eq!(
+        result.diagnostics[0].kind(),
+        dotty_parser::ParseDiagnosticKind::ExpectedToken
+    );
+    assert_eq!(
+        result.diagnostics[0].span(),
+        TextRange::new(55, 55).unwrap()
+    );
+
+    let TreeKind::Match(Match { ref cases, .. }) = result.ast.get(result.root).kind else {
+        panic!("expected an outer match expression");
+    };
+    let [first, second] = cases.as_slice() else {
+        panic!("recovery must preserve both outer cases");
+    };
+    let TreeKind::CaseDef(CaseDef { body, .. }) = result.ast.get(*first).kind else {
+        panic!("expected the first outer case");
+    };
+    let TreeKind::Block(Block { expr, .. }) = result.ast.get(body).kind else {
+        panic!("expected the first outer case body block");
+    };
+    let TreeKind::Match(Match { ref cases, .. }) = result.ast.get(expr).kind else {
+        panic!("expected the nested match in the first outer case");
+    };
+    let [nested_case] = cases.as_slice() else {
+        panic!("expected the malformed nested case to remain in its match");
+    };
+    let TreeKind::CaseDef(CaseDef { body, .. }) = result.ast.get(*nested_case).kind else {
+        panic!("expected a nested case definition");
+    };
+    assert!(matches!(
+        result.ast.get(body).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Error(error))
+            if error.kind == ErrorNodeKind::MissingExpression
+    ));
+    assert_eq!(
+        result.ast.get(*second).position.unwrap().span().range(),
+        TextRange::new(55, 66).unwrap()
     );
 }
