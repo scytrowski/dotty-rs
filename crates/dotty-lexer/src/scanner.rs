@@ -144,6 +144,42 @@ impl ContextualScanner {
         true
     }
 
+    fn insert_arrow_indent_after_current(&mut self) -> Option<u32> {
+        let index = self.current_index();
+        let current = self.tokens.get(index)?;
+        let mut body_index = index + 1;
+        while self
+            .tokens
+            .get(body_index)
+            .is_some_and(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines))
+        {
+            body_index += 1;
+        }
+        let body = self.tokens.get(body_index)?;
+        if body.kind == TokenKind::Indent
+            || body.kind == TokenKind::Eof
+            || !has_source_line_break(&self.source, current.span.end(), body.span.start())
+        {
+            return None;
+        }
+
+        let current_indent = line_indentation(&self.source, current.span.start());
+        let body_indent = line_indentation(&self.source, body.span.start());
+        if !current_indent.is_prefix_of(&body_indent) || current_indent == body_indent {
+            return None;
+        }
+
+        let offset = body.span.start();
+        self.tokens.insert(
+            body_index,
+            Token::new(
+                TokenKind::Indent,
+                TextRange::new(offset, offset).expect("synthetic range is valid"),
+            ),
+        );
+        Some(offset)
+    }
+
     fn insert_match_case_indent_after_current(&mut self) -> bool {
         let index = self.current_index();
         if self.next_line_starts_same_indent_cases(index)
@@ -394,7 +430,18 @@ impl ContextualScanner {
     /// are split; nested layout and the body-closing outdent remain feedback.
     fn insert_indented_body_separators(&mut self) {
         let introducer_index = self.current_index();
-        let body_index = introducer_index.saturating_add(2);
+        let mut indent_index = introducer_index.saturating_add(1);
+        while self
+            .tokens
+            .get(indent_index)
+            .is_some_and(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines))
+        {
+            indent_index = indent_index.saturating_add(1);
+        }
+        if self.tokens.get(indent_index).map(|token| token.kind) != Some(TokenKind::Indent) {
+            return;
+        }
+        let body_index = indent_index.saturating_add(1);
         let Some(first_body_token) = self.tokens.get(body_index) else {
             return;
         };
@@ -831,10 +878,12 @@ impl TokenSource for ContextualScanner {
                 }
             }
             ScannerEvent::ArrowIndented => {
-                if self.current_is_arrow() && self.insert_indent_after_current() {
+                if self.current_is_arrow()
+                    && let Some(indent_offset) = self.insert_arrow_indent_after_current()
+                {
                     self.feedback_regions.push(FeedbackRegion {
                         kind: FeedbackRegionKind::Indented,
-                        indent_offset: self.feedback_indent_offset_after_current(),
+                        indent_offset,
                         case_offset: None,
                     });
                     self.insert_indented_body_separators();
@@ -3505,6 +3554,34 @@ mod tests {
         assert_eq!(scanner.current().kind, TokenKind::Indent);
         scanner.advance();
         assert_eq!(scanner.current().kind, TokenKind::Identifier);
+    }
+
+    #[test]
+    fn arrow_indented_feedback_opens_after_newlines_containing_a_comment() {
+        let source = "f: Context ?=>\n  // explanatory comment\n  val local = 1\n  local";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while !(scanner.current().kind == TokenKind::Operator
+            && source.get(
+                scanner.current().span.start() as usize..scanner.current().span.end() as usize,
+            ) == Some("?=>"))
+        {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::ArrowIndented);
+
+        let mut body_offset = 1;
+        while matches!(
+            scanner.lookahead(body_offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            body_offset += 1;
+        }
+        assert_eq!(scanner.lookahead(body_offset).kind, TokenKind::Indent);
+        assert_eq!(
+            scanner.lookahead(body_offset + 1).kind,
+            TokenKind::Keyword(HardKeyword::Val)
+        );
     }
 
     #[test]

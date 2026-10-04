@@ -1472,6 +1472,143 @@ mod tests {
     }
 
     #[test]
+    fn if_branch_can_start_with_a_quote() {
+        const SOURCE: &str = "def quoted(x: Boolean) = if x then 1 else '{ 2 }";
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let rendered = render_tree(result.root, &result.ast, &names, SOURCE);
+        assert!(rendered.contains("\"kind\":\"Quote\""), "{rendered}");
+    }
+
+    #[test]
+    fn if_branches_can_start_with_character_literals() {
+        const SOURCE: &str = "def choose(x: Boolean) = if x then 'a' else 'b'";
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn extension_end_marker_is_owned_by_the_extension_declaration() {
+        const SOURCE: &str = "extension (x: Int)\n  def increment = x + 1\nend extension";
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn end_marker_for_anonymous_template_method_is_not_misaligned() {
+        const SOURCE: &str = concat!(
+            "object O:\n",
+            "  def traverser = new TreeTraverser:\n",
+            "    def traverse(tree: Tree) =\n",
+            "      visit(tree)\n",
+            "    end traverse\n",
+            "  end traverser\n",
+            "end O",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn enclosing_definition_end_marker_survives_anonymous_template_body() {
+        const SOURCE: &str = concat!(
+            "object O:\n",
+            "  private def nestedTypeTraverser = new TreeTraverser:\n",
+            "    def traverse(tree: Tree) =\n",
+            "      visit(tree)\n",
+            "    end traverse\n",
+            "  end nestedTypeTraverser\n",
+            "end O",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn enclosing_class_end_marker_survives_nested_anonymous_template() {
+        const SOURCE: &str = concat!(
+            "object O:\n",
+            "  class TreeMapWithVariance:\n",
+            "      def transform = new TreeTraverser:\n",
+            "        def visit = ()\n",
+            "        end visit\n",
+            "    end TreeMapWithVariance\n",
+            "end O",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn indented_lambda_body_can_begin_with_a_local_definition() {
+        const SOURCE: &str = concat!(
+            "object O:\n",
+            "  def run =\n",
+            "    val f = (x: Int) =>\n",
+            "      val y = x + 1\n",
+            "      y\n",
+            "    f(1)",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn context_lambda_with_a_comment_can_begin_its_body_with_a_definition() {
+        const SOURCE: &str = concat!(
+            "object O:\n",
+            "  def run =\n",
+            "    consume { (ctx0: Context) ?=>\n",
+            "      // Keep the current context out of the captured closure.\n",
+            "      val ctx1 = localContext(ctx0)\n",
+            "      inContext(ctx1) { 1 }\n",
+            "    }",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
     fn braced_template_dedented_else_remains_attached_to_its_if() {
         const SOURCE: &str = "object O {\n    val x = if true then 1\nelse 2\n}";
         let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");

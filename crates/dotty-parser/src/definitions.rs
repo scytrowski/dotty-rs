@@ -127,7 +127,9 @@ where
         let rhs = if is_bare_assignment(self) {
             let feedback_indent = self.observe_indented_body_region_from(mark.start);
             self.advance();
-            Some(self.parse_method_rhs(location, feedback_indent))
+            Some(self.with_end_marker_owner(*name.as_name(), |parser| {
+                parser.parse_method_rhs(location, feedback_indent)
+            }))
         } else if has_explicit_return_type && is_definition_boundary(self.current().kind) {
             None
         } else {

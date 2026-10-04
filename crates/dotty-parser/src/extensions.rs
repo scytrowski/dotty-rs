@@ -118,13 +118,28 @@ where
         self.consume_newlines_before_extension_body();
 
         let kind = self.current().kind;
+        let extension_end_marker =
+            dotty_core::Name::new(self.names.intern("extension"), dotty_core::Namespace::Term);
         let methods = self.with_secondary_constructor_allowed(false, |parser| match kind {
-            TokenKind::Punctuation(Punctuation::LeftBrace) => parser
-                .with_enum_body(false, |parser| {
-                    parser.parse_template_body(TemplateBody::Braced).members
-                }),
+            TokenKind::Punctuation(Punctuation::LeftBrace) => {
+                parser.with_enum_body(false, |parser| {
+                    parser
+                        .parse_template_body_with_feedback_and_owner(
+                            TemplateBody::Braced,
+                            None,
+                            Some(extension_end_marker),
+                        )
+                        .members
+                })
+            }
             TokenKind::Indent => parser.with_enum_body(false, |parser| {
-                parser.parse_template_body(TemplateBody::Indented).members
+                parser
+                    .parse_template_body_with_feedback_and_owner(
+                        TemplateBody::Indented,
+                        None,
+                        Some(extension_end_marker),
+                    )
+                    .members
             }),
             TokenKind::Keyword(HardKeyword::Def) | TokenKind::Keyword(HardKeyword::Export) => {
                 parser.parse_one_extension_method()
