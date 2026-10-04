@@ -676,11 +676,13 @@ The #720 rerun uses the same pinned revision, JDK 21, corpus roots, and
 classpath. Two normalized runs matched byte-for-byte. The #715 baseline's
 107 unsupported type-tree first blockers in 36 files are now 26 in 10 files;
 wildcard/bounds, union, intersection, singleton, and repeated-type blockers
-are zero. The remaining blockers are function type forms (24 across 10 files)
-and ordinary annotated types (2 in one file). The independent structural
-inventory records their source prevalence and file counts even when an earlier
-error prevents projection. The current global leaders are local pattern
-definitions (87 in 23 files) and `PrefixOp` expressions (62 in 21 files), so
+are zero. The remaining blockers are `Function` (11 in 7 files),
+`FunctionWithMods` (13 in 2 files; together these function-type blockers span
+9 distinct files), and ordinary annotated types (2 in 1 file). The independent
+structural inventory records their source prevalence and file counts even
+when an earlier error prevents projection. The current global leaders are
+local pattern definitions (87 in 23 files) and `PrefixOp` expressions (62 in
+21 files), so
 the audit recommends switching the next main increment to a transactional
 local pattern-definition slice. Function types, refinements, type lambdas,
 match types, and annotation/capture syntax remain separate candidate families;
