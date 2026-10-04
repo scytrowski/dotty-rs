@@ -811,9 +811,9 @@ conflicts do not compute a least upper bound. Concrete formal fragments still
 require conformance, and inferred arguments are checked against instantiated
 ordinary bounds. Unconstrained parameters and unsupported shapes return typed
 errors. Expected-result inference, variance solving, inherited-constructor
-matching and inference or relation solving through unions/intersections,
-wildcard capture, match-type reduction, type-lambda unification, implicit
-search, and numeric weak conformance remain deferred.
+matching, inference through unions/intersections, relation solving for those
+types, wildcard capture, match-type reduction, type-lambda unification,
+implicit search, and numeric weak conformance remain deferred.
 
 Source and TASTy snapshots intentionally normalize adapter-specific identity
 and provenance. TASTy's package prefixes on the built-in Scala and
