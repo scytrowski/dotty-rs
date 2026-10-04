@@ -11911,16 +11911,10 @@ mod tests {
 
     #[test]
     fn local_methods_defer_inferred_and_unsupported_signature_shapes() {
-        let cases = [
-            (
-                "def local(value: => Int): Int = value",
-                "by-name or repeated parameters",
-            ),
-            (
-                "def local(value: Int*): Int = 1",
-                "by-name or repeated parameters",
-            ),
-        ];
+        let cases = [(
+            "def local(value: => Int): Int = value",
+            "by-name parameters",
+        )];
         for (declaration, _) in cases {
             let source_code = format!("class C {{ def outer: Int = {{ {declaration}; 0 }} }}");
             let (parsed, mut store, packages, definitions, index, source) =
@@ -11970,6 +11964,51 @@ mod tests {
                 (_, other) => panic!("unexpected local signature error: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn local_method_repeated_parameter_uses_repeated_and_varargs_signature() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def outer: Int = { def inner(xs: Int*): Int = 1; 0 } }");
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let method_tree = block.stats[0];
+        let parameter_tree = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+            _ => panic!("local declaration should be a DefDef"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+
+        let method_type = typer.complete_symbol(method).unwrap();
+        let Type::Method(method_type) = typer.store().types.get(method_type) else {
+            panic!("local method should complete to MethodType");
+        };
+        assert_eq!(method_type.params.len(), 1);
+        assert_eq!(method_type.params[0].ty, definitions.int);
+        assert!(method_type.params[0].varargs);
+        let parameter = typer
+            .local_method_parameter_symbol_at(source, parameter_tree)
+            .unwrap();
+        let SymbolInfo::Complete(parameter_type) = *typer.store().symbols.info(parameter) else {
+            panic!("local parameter should retain its repeated type");
+        };
+        assert!(matches!(
+            typer.store().types.get(parameter_type),
+            Type::Repeated { element } if *element == definitions.int
+        ));
     }
 
     #[test]
