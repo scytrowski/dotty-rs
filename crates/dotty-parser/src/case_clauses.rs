@@ -198,7 +198,9 @@ where
             // another expression in its enclosing case body. Close that
             // exact match-case region, rather than an arbitrary outer layout
             // region, before deciding whether the case body is empty.
-            if let Some(indent_offset) = case_region_indent_offset {
+            if let Some(indent_offset) = case_region_indent_offset
+                && !self.cursor.at(TokenKind::Outdent)
+            {
                 self.observe_outdented_layout_region(indent_offset);
             } else if matches!(
                 self.current().kind,
