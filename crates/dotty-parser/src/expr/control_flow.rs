@@ -614,6 +614,36 @@ where
         feedback_indent: Option<u32>,
     ) -> TreeId<Untyped> {
         self.advance();
+        if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Case) {
+            let case_mark = self.mark();
+            let cases = self.case_clauses();
+            let closed_by_delimiter = feedback_indent.is_some()
+                && matches!(
+                    self.current().kind,
+                    TokenKind::Punctuation(Punctuation::RightParen | Punctuation::RightBrace)
+                )
+                || (feedback_indent.is_some()
+                    && self.context.location == Location::InArgs
+                    && self.current().kind == TokenKind::Punctuation(Punctuation::Comma));
+            if closed_by_delimiter {
+                self.observe_outdented_by_delimiter();
+            } else if let Some(indent_offset) = feedback_indent {
+                if !self.cursor.at(TokenKind::Outdent) {
+                    self.observe_outdented_region(indent_offset);
+                }
+            } else if !self.cursor.at(TokenKind::Outdent) {
+                self.observe_outdented();
+            }
+            if !closed_by_delimiter && !self.accept(TokenKind::Outdent) {
+                self.report(
+                    crate::ParseDiagnosticKind::ExpectedToken,
+                    "expected an outdent to close case-lambda clauses",
+                );
+            }
+            let selector = self.synthetic_unit_at(case_mark.start);
+            return self.alloc_from(case_mark, TreeKind::Match(Match { selector, cases }));
+        }
+
         let mark = self.mark();
         let (stats, expr) = if let Some(indent_offset) = feedback_indent {
             self.parse_region_feedback_expression_block_body(indent_offset)

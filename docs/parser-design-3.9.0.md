@@ -326,8 +326,8 @@ condition is a block containing the body followed by the condition, and whose
 loop body is synthetic Unit
 braced and indented `match` expressions with `case` patterns, guards, and bodies
 single-case `match` expressions in the expression-only form
-braced partial-function literals (`{ case ... }`), including as a braced
-application argument
+braced and indentation-style partial-function literals (`{ case ... }` and
+an indented `case` clause sequence), including as application arguments
 for-comprehensions with generators, case generators, aliases, guards, and
 `yield`/`do` bodies
 final `expr*` splices in parenthesized argument lists, normalized as
@@ -946,11 +946,13 @@ forms are implemented above this layer. Full types, argument validation,
 remaining colon forms, and the rest of the higher-level expression grammar
 remain future work.
 
-Braced partial-function literals use the same source-level `Match` node and
-`CaseDef` clauses as Dotty 3.9. Dotty's selector is `EmptyTree`; the current
-shared Rust `Match` node requires a selector ID, so the parser uses a
-zero-width synthetic Unit literal, which the oracle omits from normalized
-children.
+Braced and indentation-style partial-function literals use the same
+source-level `Match` node and `CaseDef` clauses as Dotty 3.9. Dotty's selector
+is `EmptyTree`; the current shared Rust `Match` node requires a selector ID,
+so the parser uses a zero-width synthetic Unit literal, which the oracle omits
+from normalized children. Indentation boundaries are taken from scanner
+`Indent`/`Outdent` tokens and scanner feedback, not reconstructed from source
+whitespace in the parser.
 
 ## For-comprehensions
 

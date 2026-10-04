@@ -116,6 +116,7 @@ where
             TokenKind::Quote => self.parse_quote(mark),
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_parens_or_tuple(mark),
             TokenKind::Punctuation(Punctuation::LeftBrace) => self.parse_block(mark),
+            TokenKind::Indent => self.parse_indented_block(),
             _ => self.unexpected_expression(),
         }
     }
