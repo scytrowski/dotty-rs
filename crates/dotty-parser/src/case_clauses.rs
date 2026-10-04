@@ -274,6 +274,25 @@ where
             );
         }
 
+        if self.current().kind == TokenKind::Indent
+            && self.cursor.lookahead(1).kind == TokenKind::Keyword(HardKeyword::Case)
+        {
+            // A case body may itself be an indentation-style case lambda.
+            // Let the expression grammar consume that Indent so it can build
+            // the nested Match and close its own case region. Treating it as
+            // an ordinary statement block would parse `case` as an expression
+            // start and lose the distinction between the inner and outer
+            // case-list boundaries.
+            let expr = self.with_case_body(|parser| parser.expr());
+            return self.alloc_from(
+                mark,
+                TreeKind::Block(Block {
+                    stats: Vec::new(),
+                    expr,
+                }),
+            );
+        }
+
         let (block_mark, stats, expr) = if self.current().kind == TokenKind::Indent {
             self.advance();
             let result = self
