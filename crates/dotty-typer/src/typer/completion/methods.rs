@@ -392,7 +392,7 @@ impl SourceTyper<'_> {
                 });
             }
             let completed_parameter_type =
-                self.complete_signature_parameter(symbol, info_journal)?;
+                self.complete_method_parameter_for_signature(symbol, info_journal)?;
             let ty = if repeated_parameter {
                 match self.store.types.try_get(completed_parameter_type) {
                     Some(Type::Repeated { element }) => *element,

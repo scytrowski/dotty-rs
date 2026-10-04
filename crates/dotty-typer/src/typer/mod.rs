@@ -103,6 +103,7 @@ pub struct SourceTyper<'a> {
     resolver: Box<dyn SymbolResolver + 'a>,
     type_index: SourceTypeIndex,
     source_type_projection_depth: usize,
+    signature_parameter_in_progress: Option<SymbolId>,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     pattern_bindings: PatternBindingIndex,
     local_methods: LocalMethodIndex,
@@ -156,6 +157,7 @@ impl<'a> SourceTyper<'a> {
             resolver: Box::new(NoResolver),
             type_index: SourceTypeIndex::default(),
             source_type_projection_depth: 0,
+            signature_parameter_in_progress: None,
             local_symbols: HashMap::new(),
             pattern_bindings: PatternBindingIndex::default(),
             local_methods: LocalMethodIndex::default(),
@@ -20549,6 +20551,17 @@ mod tests {
             definitions,
             &packages,
         );
+
+        let before = typer.store().checkpoint();
+        assert!(matches!(
+            typer.complete_symbol(parameter),
+            Err(TyperError::RepeatedParameterSignatureContextMissing {
+                parameter: found_parameter,
+                parameter_tree_index,
+            }) if found_parameter == parameter && parameter_tree_index == parameter_tree.index()
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(*typer.store().symbols.info(parameter), SymbolInfo::Missing);
 
         typer.complete_symbol(method).unwrap();
         let method_type = typer.store().symbols.info(method);

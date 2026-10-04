@@ -2945,6 +2945,9 @@ fn typer_error_name(error: &TyperError) -> &'static str {
             "RepeatedParameterClauseUnsupported"
         }
         TyperError::RepeatedParameterNotFinal { .. } => "RepeatedParameterNotFinal",
+        TyperError::RepeatedParameterSignatureContextMissing { .. } => {
+            "RepeatedParameterSignatureContextMissing"
+        }
         TyperError::ConstructorOwnerNotClassLike { .. } => "ConstructorOwnerNotClassLike",
         TyperError::MalformedConstructorOwnerInfo { .. } => "MalformedConstructorOwnerInfo",
         TyperError::MalformedConstructorOwner { .. } => "MalformedConstructorOwner",
