@@ -1196,6 +1196,24 @@ fn declared_type_tree_histogram_is_structural_and_deterministic() {
 }
 
 #[test]
+fn singleton_type_histogram_does_not_count_its_term_path() {
+    let source = "class C { def f(value: Any, singleton: value.type): Unit = () }";
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source).unwrap(),
+        SourceId::from_index(0),
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let histogram = collect_declared_type_tree_histogram(&parsed.ast, &store.names);
+    assert_eq!(histogram.get("SingletonTypeTree"), Some(&1));
+    assert_eq!(histogram.get("Ident"), Some(&2));
+}
+
+#[test]
 fn local_expression_audit_schema_keeps_zero_count_forms_without_an_ast() {
     let audit = Audit::default();
 
@@ -3510,7 +3528,9 @@ fn type_tree_children(kind: &TreeKind<Untyped>) -> Vec<dotty_core::TreeId<Untype
             .into_iter()
             .flatten()
             .collect(),
-        TreeKind::SingletonTypeTree(node) => vec![node.reference],
+        // The reference is a term path inside the singleton type, not another
+        // type-tree node for this structural histogram.
+        TreeKind::SingletonTypeTree(_) => Vec::new(),
         TreeKind::RefinedTypeTree(node) => std::iter::once(node.tpt)
             .chain(node.refinements.iter().copied())
             .collect(),
