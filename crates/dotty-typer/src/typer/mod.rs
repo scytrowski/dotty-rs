@@ -3376,6 +3376,33 @@ mod tests {
     }
 
     #[test]
+    fn failed_alias_bounds_roll_back_nested_stable_field_completions() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { val x: Int = 1; val y: x.type = x; type T >: y.type <: Missing }",
+        );
+        let x = val_symbol(&parsed, &store, &index, source, "x").0;
+        let y = val_symbol(&parsed, &store, &index, source, "y").0;
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "T");
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(alias),
+            Err(TyperError::TypeNameNotFound { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(typer.store().symbols.info(x), &SymbolInfo::Missing);
+        assert_eq!(typer.store().symbols.info(y), &SymbolInfo::Missing);
+    }
+
+    #[test]
     fn source_type_alias_completes_to_aliasing_bounds() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("type Alias = Int");

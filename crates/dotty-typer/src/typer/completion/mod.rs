@@ -134,7 +134,7 @@ impl SourceTyper<'_> {
                 let context = self
                     .parameter_source_context(symbol)
                     .ok_or(TyperError::DeclarationContextMissing { symbol })?;
-                let element_type = self.type_of_tpt(tpt, context)?;
+                let element_type = self.type_of_tpt_inner_journaled(tpt, context, info_journal)?;
                 let ty = if repeated_parameter {
                     self.store.types.alloc(Type::Repeated {
                         element: element_type,
