@@ -233,6 +233,7 @@ struct Audit {
     typed_local_defdefs: usize,
     failures: BTreeMap<String, FailureBucket>,
     expression_forms: BTreeMap<String, usize>,
+    type_tree_forms: BTreeMap<String, usize>,
     parser_diagnostics: BTreeMap<String, usize>,
     match_readiness: MatchReadiness,
     match_profile: MatchProfile,
@@ -253,6 +254,7 @@ impl Default for Audit {
             typed_local_defdefs: 0,
             failures: BTreeMap::new(),
             expression_forms: empty_expression_histogram(),
+            type_tree_forms: empty_type_tree_histogram(),
             parser_diagnostics: BTreeMap::new(),
             match_readiness: MatchReadiness::default(),
             match_profile: MatchProfile::default(),
@@ -319,6 +321,9 @@ impl Audit {
         self.typed_local_defdefs += other.typed_local_defdefs;
         for (name, count) in other.expression_forms {
             *self.expression_forms.entry(name).or_default() += count;
+        }
+        for (name, count) in other.type_tree_forms {
+            *self.type_tree_forms.entry(name).or_default() += count;
         }
         for (name, count) in other.parser_diagnostics {
             *self.parser_diagnostics.entry(name).or_default() += count;
@@ -500,6 +505,10 @@ fn pinned_scala39_local_definition_audit() {
     for (form, count) in expression_forms {
         println!("  {form}={count}");
     }
+    println!("type_tree_forms:");
+    for (form, count) in &audit.type_tree_forms {
+        println!("  {form}={count}");
+    }
     println!("parser_diagnostics:");
     let mut parser_diagnostics = audit.parser_diagnostics.iter().collect::<Vec<_>>();
     parser_diagnostics.sort_by(|(name_a, count_a), (name_b, count_b)| {
@@ -514,6 +523,24 @@ fn pinned_scala39_local_definition_audit() {
         "unsupported_expression_total={}",
         sum_buckets_with_prefix(&audit.failures, "UnsupportedExpression::")
     );
+    println!(
+        "UnsupportedTypeTree={}",
+        sum_buckets_with_prefix(&audit.failures, "UnsupportedTypeTree::")
+    );
+    println!("unsupported_type_tree_failures:");
+    for (name, bucket) in ordered_type_tree_failures(&audit) {
+        println!(
+            "  {name}: count={}, files={} [{}]",
+            bucket.count,
+            bucket.files.len(),
+            bucket
+                .examples
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     println!(
         "local_block_declaration_deferred={}",
         sum_buckets_with_prefix(&audit.failures, "LocalBlockDeclarationDeferred::")
@@ -666,6 +693,16 @@ fn sum_buckets_with_prefix(failures: &BTreeMap<String, FailureBucket>, prefix: &
         .filter(|(name, _)| name.starts_with(prefix))
         .map(|(_, bucket)| bucket.count)
         .sum()
+}
+
+fn ordered_type_tree_failures(audit: &Audit) -> Vec<(&String, &FailureBucket)> {
+    let mut failures = audit
+        .failures
+        .iter()
+        .filter(|(name, _)| name.starts_with("UnsupportedTypeTree::"))
+        .collect::<Vec<_>>();
+    failures.sort_by(|(name_a, a), (name_b, b)| b.count.cmp(&a.count).then(name_a.cmp(name_b)));
+    failures
 }
 
 fn print_ranked_gaps(failures: &BTreeMap<String, FailureBucket>) {
@@ -1127,11 +1164,44 @@ fn local_expression_histogram_excludes_parameters_and_type_trees() {
 }
 
 #[test]
+fn declared_type_tree_histogram_is_structural_and_deterministic() {
+    let source = "object Audit { def outer[A: Show](value: List[?], union: A | B, intersection: A & B, singleton: value.type, function: (A) => B, parens: (A), selected: pkg.Type, repeated: A*): A = { val refined: A { type Member = B } = value; type Higher = [X] =>> X; value.member + refined.member } }";
+    let mut store = SemanticStore::new();
+    let source_id = SourceId::from_index(0);
+    let scanner = ContextualScanner::new(source).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source).unwrap(),
+        source_id,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let first = collect_declared_type_tree_histogram(&parsed.ast, &store.names);
+    let second = collect_declared_type_tree_histogram(&parsed.ast, &store.names);
+    assert_eq!(first, second);
+    assert_eq!(first.get("InfixOp::|"), Some(&1));
+    assert_eq!(first.get("InfixOp::&"), Some(&1));
+    assert_eq!(first.get("InfixOp::<other>"), Some(&0));
+    assert_eq!(first.get("PostfixOp::*"), Some(&1));
+    assert_eq!(first.get("SingletonTypeTree"), Some(&1));
+    assert!(first["TypeBoundsTree"] > 0);
+    assert!(first["RefinedTypeTree"] > 0);
+    assert!(first["LambdaTypeTree"] > 0);
+    assert!(first["ContextBoundTypeTree"] > 0);
+    assert!(first["Function"] > 0);
+    assert!(first["Parens"] > 0);
+    assert_eq!(first.get("Select"), Some(&1));
+}
+
+#[test]
 fn local_expression_audit_schema_keeps_zero_count_forms_without_an_ast() {
     let audit = Audit::default();
 
     assert_eq!(audit.expression_forms.len(), EXPRESSION_FORMS.len());
     assert!(audit.expression_forms.values().all(|count| *count == 0));
+    assert_eq!(audit.type_tree_forms.len(), TYPE_TREE_FORMS.len());
+    assert!(audit.type_tree_forms.values().all(|count| *count == 0));
 }
 
 #[test]
@@ -1173,6 +1243,60 @@ fn local_expression_failure_examples_keep_the_smallest_five_paths() {
             .files
             .len(),
         6
+    );
+}
+
+#[test]
+fn unsupported_type_tree_failure_order_is_stable() {
+    let fixtures = [
+        (
+            "UnsupportedTypeTree::TypeBoundsTree",
+            2,
+            ["b.scala", "a.scala"],
+        ),
+        ("UnsupportedTypeTree::InfixOp::|", 3, ["d.scala", "c.scala"]),
+        (
+            "UnsupportedTypeTree::SingletonTypeTree",
+            2,
+            ["f.scala", "e.scala"],
+        ),
+    ];
+    let mut first = Audit::default();
+    for (bucket, count, paths) in fixtures {
+        let failure = FailureClassification {
+            bucket: bucket.to_owned(),
+            family: FailureFamily::Other,
+        };
+        for path in paths.into_iter().take(count.min(2)) {
+            record_failure(&mut first, failure.clone(), path);
+        }
+        for _ in 2..count {
+            record_failure(&mut first, failure.clone(), paths[0]);
+        }
+    }
+    let mut second = Audit::default();
+    for (bucket, count, paths) in fixtures.into_iter().rev() {
+        let failure = FailureClassification {
+            bucket: bucket.to_owned(),
+            family: FailureFamily::Other,
+        };
+        for _ in 2..count {
+            record_failure(&mut second, failure.clone(), paths[0]);
+        }
+        for path in paths.into_iter().take(count.min(2)).rev() {
+            record_failure(&mut second, failure.clone(), path);
+        }
+    }
+
+    assert_eq!(
+        ordered_type_tree_failures(&first)
+            .into_iter()
+            .map(|(name, bucket)| (name.clone(), bucket.count))
+            .collect::<Vec<_>>(),
+        ordered_type_tree_failures(&second)
+            .into_iter()
+            .map(|(name, bucket)| (name.clone(), bucket.count))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1500,6 +1624,7 @@ fn audit_source_inner(
     let mut audit = collect_local_nodes(&parsed.ast);
     audit.files_attempted = 1;
     audit.expression_forms = collect_expression_histogram(&parsed.ast);
+    audit.type_tree_forms = collect_declared_type_tree_histogram(&parsed.ast, &store.names);
     audit.recovered_parser_files = usize::from(!parsed.diagnostics.is_empty());
     collect_match_profile(&parsed.ast, path, &store, &mut audit.match_profile);
     for diagnostic in &parsed.diagnostics {
@@ -3231,6 +3356,185 @@ fn collect_expression_histogram(arena: &dotty_core::AstArena<Untyped>) -> BTreeM
         }
     }
     histogram
+}
+
+const TYPE_TREE_FORMS: &[&str] = &[
+    "Ident",
+    "Select",
+    "TypeTree",
+    "AppliedTypeTree",
+    "ByNameTypeTree",
+    "TypeBoundsTree",
+    "SingletonTypeTree",
+    "RefinedTypeTree",
+    "LambdaTypeTree",
+    "MatchTypeTree",
+    "Annotated",
+    "InfixOp::|",
+    "InfixOp::&",
+    "InfixOp::<other>",
+    "PostfixOp::*",
+    "PostfixOp::<other>",
+    "Function",
+    "FunctionWithMods",
+    "ContextBoundTypeTree",
+    "Parens",
+];
+
+fn empty_type_tree_histogram() -> BTreeMap<String, usize> {
+    TYPE_TREE_FORMS
+        .iter()
+        .map(|form| ((*form).to_owned(), 0))
+        .collect()
+}
+
+fn collect_declared_type_tree_histogram(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::names::NameInterner,
+) -> BTreeMap<String, usize> {
+    let operators = source_operator_spellings(arena, names);
+    let local_stats = local_stat_trees(arena);
+    let mut roots = Vec::new();
+    for (tree, node) in arena.iter() {
+        match &node.kind {
+            TreeKind::DefDef(definition) => {
+                roots.push(definition.tpt);
+                roots.extend(definition.type_params.iter().copied());
+                roots.extend(definition.value_param_clauses.iter().flatten().filter_map(
+                    |parameter| match &arena.get(*parameter).kind {
+                        TreeKind::ValDef(parameter) => Some(parameter.tpt),
+                        _ => None,
+                    },
+                ));
+            }
+            TreeKind::ValDef(definition) if local_stats.contains(&tree) => {
+                roots.push(definition.tpt);
+            }
+            TreeKind::TypeDef(definition)
+                if local_stats.contains(&tree)
+                    && !matches!(arena.get(definition.rhs).kind, TreeKind::Template(_)) =>
+            {
+                roots.push(definition.rhs);
+            }
+            _ => {}
+        }
+    }
+
+    let nodes = arena
+        .iter()
+        .map(|(tree, node)| (tree.index(), node))
+        .collect::<BTreeMap<_, _>>();
+    let mut histogram = empty_type_tree_histogram();
+    let mut visited = HashSet::new();
+    let mut pending = roots;
+    while let Some(tree) = pending.pop() {
+        if !visited.insert(tree) {
+            continue;
+        }
+        let Some(node) = nodes.get(&tree.index()) else {
+            continue;
+        };
+        if let Some(form) = type_tree_form(&node.kind, tree.index(), &operators) {
+            *histogram.entry(form.to_owned()).or_default() += 1;
+        }
+        pending.extend(type_tree_children(&node.kind));
+    }
+    histogram
+}
+
+fn type_tree_form(
+    kind: &TreeKind<Untyped>,
+    tree_index: u32,
+    operators: &BTreeMap<u32, String>,
+) -> Option<&'static str> {
+    match kind {
+        TreeKind::Ident(_) => Some("Ident"),
+        TreeKind::Select(_) => Some("Select"),
+        TreeKind::TypeTree(_) => Some("TypeTree"),
+        TreeKind::AppliedTypeTree(_) => Some("AppliedTypeTree"),
+        TreeKind::ByNameTypeTree(_) => Some("ByNameTypeTree"),
+        TreeKind::TypeBoundsTree(_) => Some("TypeBoundsTree"),
+        TreeKind::SingletonTypeTree(_) => Some("SingletonTypeTree"),
+        TreeKind::RefinedTypeTree(_) => Some("RefinedTypeTree"),
+        TreeKind::LambdaTypeTree(_) => Some("LambdaTypeTree"),
+        TreeKind::MatchTypeTree(_) => Some("MatchTypeTree"),
+        TreeKind::Annotated(_) => Some("Annotated"),
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => {
+            Some(match operators.get(&tree_index).map(String::as_str) {
+                Some("|") => "InfixOp::|",
+                Some("&") => "InfixOp::&",
+                _ => "InfixOp::<other>",
+            })
+        }
+        TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_)) => {
+            Some(match operators.get(&tree_index).map(String::as_str) {
+                Some("*") => "PostfixOp::*",
+                _ => "PostfixOp::<other>",
+            })
+        }
+        TreeKind::PhaseSpecific(UntypedNode::Function(_)) => Some("Function"),
+        TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_)) => Some("FunctionWithMods"),
+        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(_)) => {
+            Some("ContextBoundTypeTree")
+        }
+        TreeKind::PhaseSpecific(UntypedNode::Parens(_)) => Some("Parens"),
+        _ => None,
+    }
+}
+
+fn type_tree_children(kind: &TreeKind<Untyped>) -> Vec<dotty_core::TreeId<Untyped>> {
+    match kind {
+        TreeKind::Select(node) => vec![node.qualifier],
+        TreeKind::AppliedTypeTree(node) => std::iter::once(node.tpt)
+            .chain(node.args.iter().copied())
+            .collect(),
+        TreeKind::ByNameTypeTree(node) => vec![node.result],
+        TreeKind::TypeBoundsTree(node) => [node.low, node.high, node.alias]
+            .into_iter()
+            .flatten()
+            .collect(),
+        TreeKind::SingletonTypeTree(node) => vec![node.reference],
+        TreeKind::RefinedTypeTree(node) => std::iter::once(node.tpt)
+            .chain(node.refinements.iter().copied())
+            .collect(),
+        TreeKind::LambdaTypeTree(node) => node
+            .type_params
+            .iter()
+            .copied()
+            .chain([node.body])
+            .collect(),
+        TreeKind::MatchTypeTree(node) => node
+            .bound
+            .into_iter()
+            .chain([node.selector])
+            .chain(node.cases.iter().copied())
+            .collect(),
+        TreeKind::Annotated(node) => vec![node.expr],
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(node)) => vec![node.left, node.right],
+        TreeKind::PhaseSpecific(UntypedNode::PostfixOp(node)) => vec![node.operand],
+        TreeKind::PhaseSpecific(UntypedNode::Function(node)) => {
+            node.params.iter().copied().chain([node.body]).collect()
+        }
+        TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(node)) => {
+            node.params.iter().copied().chain([node.result]).collect()
+        }
+        TreeKind::PhaseSpecific(UntypedNode::ContextBounds(node)) => std::iter::once(node.bounds)
+            .chain(node.context_bounds.iter().copied())
+            .collect(),
+        TreeKind::PhaseSpecific(UntypedNode::ContextBoundTypeTree(node)) => vec![node.bound],
+        TreeKind::PhaseSpecific(UntypedNode::Parens(node)) => vec![node.inner],
+        TreeKind::ValDef(node) => vec![node.tpt],
+        TreeKind::DefDef(node) => node
+            .type_params
+            .iter()
+            .copied()
+            .chain(node.value_param_clauses.iter().flatten().copied())
+            .chain([node.tpt])
+            .collect(),
+        TreeKind::TypeDef(node) => vec![node.rhs],
+        TreeKind::CaseDef(node) => vec![node.pattern, node.body],
+        _ => Vec::new(),
+    }
 }
 
 fn term_expression_children(kind: &TreeKind<Untyped>) -> Vec<dotty_core::TreeId<Untyped>> {
