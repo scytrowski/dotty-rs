@@ -54,9 +54,14 @@ where
             parser.with_location(Location::Elsewhere, |parser| parser.expr())
         });
 
+        // Layout expressions can leave their final Outdent visible after the
+        // expression has consumed its own grammar. At this fragment boundary
+        // those scanner-generated closers are trailing syntax, like newlines.
         while matches!(
             self.current().kind,
-            dotty_core::TokenKind::Newline | dotty_core::TokenKind::Newlines
+            dotty_core::TokenKind::Newline
+                | dotty_core::TokenKind::Newlines
+                | dotty_core::TokenKind::Outdent
         ) {
             let checkpoint = self.cursor.checkpoint();
             self.advance();
