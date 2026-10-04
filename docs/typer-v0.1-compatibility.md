@@ -333,6 +333,9 @@ For the tested subset, source Typer completion currently supports:
 - extension-method signatures whose receiver and declared signature are
   supported by the source Typer;
 - aliases and bounds represented by the current semantic type model;
+- source singleton type trees (`x.type`, stable selections, and `this.type`),
+  projected to their resolved `TermRef` or `ThisType`; unstable or arbitrary
+  expression paths remain errors;
 - source union and intersection trees using exactly `|` and `&`, lowered to
   `Type::Or` and `Type::And` while preserving parser grouping. The pinned
   Scala 3.9.0 fixture is
@@ -344,6 +347,9 @@ For the tested subset, source Typer completion currently supports:
   `Type::Wildcard { bounds }` with canonical `Nothing`/`Any` defaults;
   wildcard capture, variance checks, and inference through wildcard bounds
   remain deferred. Declaration bounds continue to project as `Type::Bounds`;
+- ordinary repeated parameter type syntax (`T*`) as `Type::Repeated { element }`
+  in parameter info plus the method signature's `varargs` marker. This does not
+  model the runtime `Seq[T]` value visible inside a method body;
 - class header completion as `ClassInfo`, including its parent list, declared
   members, prefix, and explicit self type where supplied.
 - primary constructor signature normalization for a plain constructor.
@@ -666,6 +672,21 @@ from isolated-case failures and the global semantic-gap ranking. See the
 [normalized audit report](typer-classpath-corpus-audit-3.9.0.md) for current
 counts and the next-increment recommendation.
 
+The #720 rerun uses the same pinned revision, JDK 21, corpus roots, and
+classpath. Two normalized runs matched byte-for-byte. The #715 baseline's
+107 unsupported type-tree first blockers in 36 files are now 26 in 10 files;
+wildcard/bounds, union, intersection, singleton, and repeated-type blockers
+are zero. The remaining blockers are function type forms (24 across 10 files)
+and ordinary annotated types (2 in one file). The independent structural
+inventory records their source prevalence and file counts even when an earlier
+error prevents projection. The current global leaders are local pattern
+definitions (87 in 23 files) and `PrefixOp` expressions (62 in 21 files), so
+the audit recommends switching the next main increment to a transactional
+local pattern-definition slice. Function types, refinements, type lambdas,
+match types, and annotation/capture syntax remain separate candidate families;
+the report records their existing core representations, prerequisites, and
+non-goals.
+
 The previous wildcard-only report recorded 1,666 Match first-blocker methods,
 2,151 Match nodes, and 6,615 cases. It stopped at `Match`, so downstream
 pattern counters below were not reached in that snapshot. The current
@@ -867,7 +888,14 @@ are ready:
 - enum semantics, case-class synthetic APIs, and `derives`;
 - context-bound evidence synthesis;
 - default imports and general standard-library member lookup;
-- annotations not represented by the current source typer;
+- source function types, refined types, type lambdas, and match types are not
+  yet projected. The core has reusable representations for refined/recursive,
+  type-lambda, and match types; source binder and standard function-class
+  identity projection still need focused work. Match-type reduction remains a
+  separate non-goal;
+- ordinary annotated source types and capture-checking-only type syntax remain
+  unsupported. `Type::Annotated` exists, but source annotation identity and
+  capture wrappers must be inventoried and implemented separately;
 - advanced parent feasibility and compiler-generated wrapper members.
 
 Scala 3.9 TASTy records inferred/default module self references that source
