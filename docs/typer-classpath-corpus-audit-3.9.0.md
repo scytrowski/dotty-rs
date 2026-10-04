@@ -62,13 +62,13 @@ expression_forms:
   PostfixOp=0
   Try=0
 type_tree_forms:
-  Annotated=1396
-  AppliedTypeTree=15677
+  Annotated=1403
+  AppliedTypeTree=15684
   ByNameTypeTree=456
   ContextBoundTypeTree=808
   Function=1281
   FunctionWithMods=974
-  Ident=100592
+  Ident=100621
   InfixOp::&=252
   InfixOp::<other>=71
   InfixOp::|=1089
@@ -78,7 +78,7 @@ type_tree_forms:
   PostfixOp::*=181
   PostfixOp::<other>=0
   RefinedTypeTree=22
-  Select=9903
+  Select=9913
   SingletonTypeTree=831
   Tuple=1346
   TypeBoundsTree=7919

@@ -1215,7 +1215,7 @@ fn singleton_type_histogram_does_not_count_its_term_path() {
 
 #[test]
 fn declared_type_tree_histogram_counts_pattern_types_and_omits_empty_placeholders() {
-    let source = "object Audit { def inferred = { val x = 1; x }; def patterned = { val (a, b): (A | B, C) = pair; val (x: A, y: B) = pair } }";
+    let source = "object Audit { def inferred = { val x = 1; x }; def patterned = { val (a, b): (A | B, C) = pair; val (x: A, y: B) = pair; val Some(z: D) = option } }";
     let mut store = SemanticStore::new();
     let scanner = ContextualScanner::new(source).unwrap();
     let parsed = parse_compilation_unit(
@@ -1230,7 +1230,7 @@ fn declared_type_tree_histogram_counts_pattern_types_and_omits_empty_placeholder
     assert_eq!(histogram.get("InfixOp::|"), Some(&1));
     assert_eq!(histogram.get("TypeTree"), Some(&0));
     assert_eq!(histogram.get("Tuple"), Some(&1));
-    assert_eq!(histogram.get("Ident"), Some(&5));
+    assert_eq!(histogram.get("Ident"), Some(&6));
 }
 
 #[test]
@@ -2584,6 +2584,8 @@ fn local_pattern_type_trees(
                 pending.extend(alternative.alternatives.iter().copied());
             }
             TreeKind::UnApply(unapply) => pending.extend(unapply.patterns.iter().copied()),
+            TreeKind::Apply(application) => pending.extend(application.args.iter().copied()),
+            TreeKind::NamedArg(argument) => pending.push(argument.arg),
             TreeKind::Annotated(annotated) => pending.push(annotated.expr),
             TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => pending.push(parens.inner),
             TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
