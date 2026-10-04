@@ -5322,6 +5322,134 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_arguments_project_to_wildcards_with_ordered_bounds_and_cached_children() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            include_str!("../../tests/fixtures/wildcard-types/WildcardTypes.scala"),
+        );
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let TreeKind::AppliedTypeTree(applied_tree) = &parsed.ast.get(type_tree).kind else {
+            panic!("expected an applied type tree");
+        };
+        let wildcard_trees = applied_tree.args.clone();
+        let type_bounds = wildcard_trees
+            .iter()
+            .map(|tree| match &parsed.ast.get(*tree).kind {
+                TreeKind::TypeBoundsTree(bounds) => *bounds,
+                kind => panic!("expected wildcard bounds, got {kind:?}"),
+            })
+            .collect::<Vec<_>>();
+        let context = index.declaration_context_of(value).unwrap();
+        let symbols = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition) => {
+                    let name = store.names.resolve(definition.name.as_name().text());
+                    matches!(name, "F" | "Foo" | "Bar" | "Container" | "Outer" | "Bound")
+                        .then(|| (name.to_owned(), index.symbol_at(source, tree).unwrap()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let find_symbol = |name: &str| {
+            symbols
+                .iter()
+                .find_map(|(found, symbol)| (found == name).then_some(*symbol))
+                .unwrap()
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_of_tpt(wildcard_trees[0], context),
+            Err(TyperError::UnsupportedTypeTree { tree_index, .. })
+                if tree_index == wildcard_trees[0].index()
+        ));
+        let projected = typer.type_of_tpt(type_tree, context).unwrap();
+        assert_eq!(typer.type_of_tpt(type_tree, context).unwrap(), projected);
+        let Type::Applied {
+            tycon,
+            args: applied_args,
+        } = typer.store().types.get(projected)
+        else {
+            panic!("expected an applied type");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), find_symbol("F"));
+        assert_eq!(applied_args.len(), wildcard_trees.len());
+
+        let bounds_of = |ty: TypeId| {
+            let Type::Wildcard { bounds } = typer.store().types.get(ty) else {
+                panic!("expected a wildcard argument");
+            };
+            let Type::Bounds { low, high } = typer.store().types.get(*bounds) else {
+                panic!("expected wildcard bounds");
+            };
+            (*low, *high)
+        };
+        let (low, high) = bounds_of(applied_args[0]);
+        assert_eq!(low, definitions.nothing_type);
+        assert_eq!(high, definitions.any_type);
+        let (low, high) = bounds_of(applied_args[1]);
+        assert_eq!(low, definitions.nothing_type);
+        assert_eq!(type_symbol(typer.store(), high), find_symbol("Foo"));
+        let (low, high) = bounds_of(applied_args[2]);
+        assert_eq!(type_symbol(typer.store(), low), find_symbol("Bar"));
+        assert_eq!(high, definitions.any_type);
+        let (low, high) = bounds_of(applied_args[3]);
+        assert_eq!(type_symbol(typer.store(), low), find_symbol("Bar"));
+        assert_eq!(type_symbol(typer.store(), high), find_symbol("Foo"));
+        let (low, high) = bounds_of(applied_args[4]);
+        assert_eq!(low, definitions.nothing_type);
+        let Type::Applied {
+            tycon,
+            args: nested_args,
+        } = typer.store().types.get(high)
+        else {
+            panic!("expected the nested applied upper bound");
+        };
+        assert_eq!(type_symbol(typer.store(), *tycon), find_symbol("Container"));
+        assert_eq!(nested_args.len(), 1);
+        assert_eq!(
+            type_symbol(typer.store(), nested_args[0]),
+            find_symbol("Bound")
+        );
+        let (low, high) = bounds_of(applied_args[5]);
+        assert_eq!(type_symbol(typer.store(), low), find_symbol("Bound"));
+        assert_eq!(high, definitions.any_type);
+
+        for (tree, ty) in wildcard_trees.iter().zip(applied_args.iter().copied()) {
+            assert_eq!(typer.source_type_index().type_at(source, *tree), Some(ty));
+        }
+        for bounds in type_bounds.iter().skip(1) {
+            for child in [bounds.low, bounds.high].into_iter().flatten() {
+                assert!(typer.source_type_index().type_at(source, child).is_some());
+            }
+        }
+        let nested_bound = type_bounds[4].high.unwrap();
+        let TreeKind::AppliedTypeTree(nested_applied) = &parsed.ast.get(nested_bound).kind else {
+            panic!("expected an applied nested bound");
+        };
+        assert!(
+            typer
+                .source_type_index()
+                .type_at(source, nested_applied.tpt)
+                .is_some()
+        );
+        assert!(
+            typer
+                .source_type_index()
+                .type_at(source, nested_applied.args[0])
+                .is_some()
+        );
+    }
+
+    #[test]
     fn by_name_type_projects_its_result_type() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("def f(x: => Int): Unit = ()");
@@ -5378,6 +5506,47 @@ mod tests {
             typer.source_type_index().type_at(source, first_argument),
             None
         );
+    }
+
+    #[test]
+    fn failed_wildcard_bound_projection_rolls_back_wildcard_bounds_and_cache_entries() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class F[A, B]; class Known; val x: F[? <: Known, ? <: Missing] = 1");
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "x");
+        let TreeKind::AppliedTypeTree(applied) = &parsed.ast.get(type_tree).kind else {
+            panic!("expected an applied type tree");
+        };
+        let constructor = applied.tpt;
+        let first_wildcard = applied.args[0];
+        let first_bound = match &parsed.ast.get(first_wildcard).kind {
+            TreeKind::TypeBoundsTree(bounds) => bounds.high.unwrap(),
+            kind => panic!("expected wildcard bounds, got {kind:?}"),
+        };
+        let context = index.declaration_context_of(value).unwrap();
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_of_tpt(type_tree, context),
+            Err(TyperError::TypeNameNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "Missing"
+        ));
+
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(typer.source_type_index().type_at(source, type_tree), None);
+        assert_eq!(typer.source_type_index().type_at(source, constructor), None);
+        assert_eq!(
+            typer.source_type_index().type_at(source, first_wildcard),
+            None
+        );
+        assert_eq!(typer.source_type_index().type_at(source, first_bound), None);
     }
 
     #[test]

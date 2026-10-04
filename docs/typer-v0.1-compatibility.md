@@ -322,6 +322,10 @@ For the tested subset, source Typer completion currently supports:
 - extension-method signatures whose receiver and declared signature are
   supported by the source Typer;
 - aliases and bounds represented by the current semantic type model;
+- wildcard arguments in applied source types, projected as
+  `Type::Wildcard { bounds }` with canonical `Nothing`/`Any` defaults;
+  wildcard capture, variance checks, and inference through wildcard bounds
+  remain deferred. Declaration bounds continue to project as `Type::Bounds`;
 - class header completion as `ClassInfo`, including its parent list, declared
   members, prefix, and explicit self type where supplied.
 - primary constructor signature normalization for a plain constructor.

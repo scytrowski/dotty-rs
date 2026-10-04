@@ -1,0 +1,31 @@
+[[syntax trees at end of                     typer]] // crates/dotty-typer/tests/fixtures/wildcard-types/WildcardTypes.scala
+[33mpackage [0m<empty> {
+  [33mclass[0m [32mF[0m[[32mA[0m >: [32mNothing[0m <: [32mAny[0m, [32mB[0m >: [32mNothing[0m <: [32mAny[0m, [32mC[0m >: [32mNothing[0m <: [32mAny[0m,
+    [32mD[0m >: [32mNothing[0m <: [32mAny[0m, [32mE[0m >: [32mNothing[0m <: [32mAny[0m, [32mG[0m >: [32mNothing[0m <: [32mAny[0m]()[33m extends[0m
+    [32mObject[0m() {
+    [32mA[0m[32m[0m
+    [32mB[0m[32m[0m
+    [32mC[0m[32m[0m
+    [32mD[0m[32m[0m
+    [32mE[0m[32m[0m
+    [32mG[0m[32m[0m
+  }
+  [33mclass[0m [32mFoo[0m()[33m extends[0m [32mObject[0m() {}
+  [33mclass[0m [32mBar[0m()[33m extends[0m [32mObject[0m() {}
+  [33mclass[0m [32mContainer[0m[[32mX[0m >: [32mNothing[0m <: [32mAny[0m]()[33m extends[0m [32mObject[0m() {
+    [32mX[0m[32m[0m
+  }
+  [33mfinal[0m [33mlazy[0m [33mmodule[0m [33mval[0m [36mOuter[0m: [32mOuter[0m = [33mnew [0m[32mOuter[0m()
+  [33mfinal[0m [33mmodule[0m [33mclass[0m [32mOuter[0m()[33m extends[0m [32mObject[0m() { [33mthis[0m: Outer.[33mtype[0m =>
+    [33mclass[0m [32mBound[0m()[33m extends[0m [32mObject[0m() {}
+  }
+  [33mclass[0m [32mWildcardTypes[0m()[33m extends[0m [32mObject[0m() {
+    [33mdef[0m [36mwildcard[0m(
+      [36mvalue[0m:
+        [32mF[0m[? >: [32mNothing[0m <: [32mAny[0m, ? >: [32mNothing[0m <: [32mFoo[0m, ? >: [32mBar[0m <: [32mAny[0m,
+          ? >: [32mBar[0m <: [32mFoo[0m, ? >: [32mNothing[0m <: [32mContainer[0m[Outer.Bound], ?
+           >: Outer.Bound <: [32mAny[0m]
+    ): [32mUnit[0m = [32m()[0m
+  }
+}
+

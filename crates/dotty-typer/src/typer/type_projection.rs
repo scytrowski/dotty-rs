@@ -132,7 +132,16 @@ impl SourceTyper<'_> {
             let tycon = self.type_of_tpt_inner(applied.tpt, context)?;
             let mut args = Vec::with_capacity(applied.args.len());
             for argument in &applied.args {
-                args.push(self.type_of_tpt_inner(*argument, context)?);
+                let is_wildcard = self
+                    .arena
+                    .try_get(*argument)
+                    .is_some_and(|argument| matches!(argument.kind, TreeKind::TypeBoundsTree(_)));
+                let projected = if is_wildcard {
+                    self.type_of_wildcard_bounds(*argument, context)?
+                } else {
+                    self.type_of_tpt_inner(*argument, context)?
+                };
+                args.push(projected);
             }
             let ty = self.store.types.alloc(Type::Applied { tycon, args });
             if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
@@ -204,6 +213,49 @@ impl SourceTyper<'_> {
             });
         }
         Ok(ty)
+    }
+
+    fn type_of_wildcard_bounds(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: SourceContextId,
+    ) -> Result<TypeId, TyperError> {
+        if let Some(ty) = self.type_index.type_at(self.source, tree) {
+            return Ok(ty);
+        }
+        let Some(source_tree) = self.arena.try_get(tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            });
+        };
+        let TreeKind::TypeBoundsTree(bounds) = &source_tree.kind else {
+            return Err(TyperError::UnsupportedTypeTree {
+                source: self.source,
+                tree_index: tree.index(),
+                tree_kind: tree_kind_name(&source_tree.kind),
+            });
+        };
+        if bounds.alias.is_some() {
+            return Err(TyperError::UnsupportedTypeTree {
+                source: self.source,
+                tree_index: tree.index(),
+                tree_kind: "aliased wildcard bounds",
+            });
+        }
+        let projected_bounds = self.project_type_bounds(bounds, context)?;
+        let wildcard = self.store.types.alloc(Type::Wildcard {
+            bounds: projected_bounds,
+        });
+        if let Err(existing) = self.type_index.insert(self.source, tree, wildcard) {
+            return Err(TyperError::DuplicateSourceTypeCacheEntry {
+                source: self.source,
+                tree_index: tree.index(),
+                existing,
+                attempted: wildcard,
+            });
+        }
+        Ok(wildcard)
     }
 
     pub(super) fn type_symbol_prefix(&mut self, symbol: SymbolId) -> TypeId {

@@ -565,7 +565,7 @@ impl SourceTyper<'_> {
         Ok(info)
     }
 
-    fn project_type_bounds(
+    pub(in crate::typer) fn project_type_bounds(
         &mut self,
         bounds: &TypeBoundsTree<Untyped>,
         context: SourceContextId,
