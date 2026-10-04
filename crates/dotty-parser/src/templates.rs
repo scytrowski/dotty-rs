@@ -85,6 +85,7 @@ where
         // end of an indented body even when the scanner emitted no Outdent.
         let closes_at_end_marker =
             body == TemplateBody::Indented && self.current().kind == TokenKind::EndMarker;
+        let closes_at_eof = body == TemplateBody::Indented && self.current().kind == TokenKind::Eof;
 
         if body == TemplateBody::Indented {
             if let Some(indent_offset) = feedback_indent {
@@ -95,6 +96,7 @@ where
         }
         if !self.accept(closing)
             && !(closes_at_end_marker && self.current().kind == TokenKind::EndMarker)
+            && !closes_at_eof
         {
             self.report(
                 ParseDiagnosticKind::ExpectedToken,
@@ -186,6 +188,18 @@ where
                 ) {
                     self.advance();
                 }
+                continue;
+            }
+            if closing == TokenKind::Outdent
+                && self.current().kind == TokenKind::Outdent
+                && self.outdent_precedes_template_member(body_indent)
+            {
+                // A nested expression can leave its own closing Outdent
+                // visible before the next member at this template's
+                // indentation. Consume that nested boundary without closing
+                // the template itself.
+                self.advance();
+                self.consume_template_separators(closing);
                 continue;
             }
             if self.template_body_ended(closing) {
@@ -466,6 +480,21 @@ where
 
     fn template_body_ended(&self, closing: TokenKind) -> bool {
         self.current().kind == closing || self.current().kind == TokenKind::Eof
+    }
+
+    fn outdent_precedes_template_member(&mut self, body_indent: &str) -> bool {
+        let mut offset = 1;
+        while matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Outdent | TokenKind::Newline | TokenKind::Newlines
+        ) {
+            offset += 1;
+        }
+        let (kind, start) = {
+            let next = self.cursor.lookahead(offset);
+            (next.kind, next.span.start())
+        };
+        kind != TokenKind::Eof && self.source_line_indent_prefix(start) == body_indent
     }
 
     fn is_template_separator(&self, kind: TokenKind) -> bool {
