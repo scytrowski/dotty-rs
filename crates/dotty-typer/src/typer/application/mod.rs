@@ -395,7 +395,11 @@ impl SourceTyper<'_> {
 
         let mut type_arguments = Vec::with_capacity(application.args.len());
         for argument in &application.args {
-            type_arguments.push(self.type_of_tpt_inner(*argument, context.lexical)?);
+            type_arguments.push(self.type_of_tpt_inner_journaled(
+                *argument,
+                context.lexical,
+                info_journal,
+            )?);
         }
         if type_arguments.len() != poly.params.len() {
             return Err(TyperError::ExplicitTypeApplicationArityMismatch {

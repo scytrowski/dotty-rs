@@ -1776,7 +1776,7 @@ impl SourceTyper<'_> {
         };
 
         let type_context = self.expression_type_context(context)?;
-        let pattern_type = self.type_of_tpt_inner(tpt, type_context)?;
+        let pattern_type = self.type_of_tpt_inner_journaled(tpt, type_context, info_journal)?;
         if !self.typed_pattern_runtime_test_supported(pattern_type, info_journal)? {
             return Err(TyperError::TypedPatternRuntimeTestDeferred {
                 source: self.source,
@@ -4263,7 +4263,7 @@ mod tests {
         );
         let selector_context = typer.expression_type_context(context).unwrap();
         let selector = typer
-            .type_of_tpt_inner(parameter_tpt, selector_context)
+            .type_of_tpt_inner_journaled(parameter_tpt, selector_context, &mut Vec::new())
             .unwrap();
         let typed = typer
             .run_expression_transaction(|typer, journal, mappings| {

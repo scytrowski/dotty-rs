@@ -156,7 +156,7 @@ impl SourceTyper<'_> {
 
         let mut parents = Vec::with_capacity(template.parents.len().max(1));
         for parent in &template.parents {
-            parents.push(self.project_parent_type(*parent, type_context, 0)?);
+            parents.push(self.project_parent_type(*parent, type_context, 0, info_journal)?);
         }
         let first_parent_is_trait = match (parents.first(), template.parents.first()) {
             (Some(parent_type), Some(parent_tree)) => {
@@ -197,7 +197,11 @@ impl SourceTyper<'_> {
                     // default as `None`.
                     None
                 } else {
-                    Some(self.type_of_tpt_inner(self_definition.tpt, type_context)?)
+                    Some(self.type_of_tpt_inner_journaled(
+                        self_definition.tpt,
+                        type_context,
+                        info_journal,
+                    )?)
                 }
             }
             None => None,
@@ -227,6 +231,7 @@ impl SourceTyper<'_> {
         tree: TreeId<Untyped>,
         context: SourceContextId,
         depth: usize,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
         if depth > 256 {
             return Err(TyperError::MalformedClassParent {
@@ -242,23 +247,34 @@ impl SourceTyper<'_> {
         };
         match &node.kind {
             TreeKind::Apply(application) => {
-                self.project_parent_type(application.function, context, depth + 1)
+                self.project_parent_type(application.function, context, depth + 1, info_journal)
             }
-            TreeKind::Block(block) => self.project_parent_type(block.expr, context, depth + 1),
+            TreeKind::Block(block) => {
+                self.project_parent_type(block.expr, context, depth + 1, info_journal)
+            }
             TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
-                self.project_parent_type(parens.inner, context, depth + 1)
+                self.project_parent_type(parens.inner, context, depth + 1, info_journal)
             }
-            TreeKind::New(new) => self.type_of_tpt_inner(new.tpt, context),
+            TreeKind::New(new) => self.type_of_tpt_inner_journaled(new.tpt, context, info_journal),
             TreeKind::TypeApply(application) => {
                 let repeated_arguments =
                     self.parent_constructor_has_applied_tpt(application.function, depth + 1);
-                let tycon = self.project_parent_type(application.function, context, depth + 1)?;
+                let tycon = self.project_parent_type(
+                    application.function,
+                    context,
+                    depth + 1,
+                    info_journal,
+                )?;
                 if repeated_arguments {
                     return Ok(tycon);
                 }
                 let mut args = Vec::with_capacity(application.args.len());
                 for argument in &application.args {
-                    args.push(self.type_of_tpt_inner(*argument, context)?);
+                    args.push(self.type_of_tpt_inner_journaled(
+                        *argument,
+                        context,
+                        info_journal,
+                    )?);
                 }
                 Ok(self.store.types.alloc(Type::Applied { tycon, args }))
             }
@@ -277,9 +293,9 @@ impl SourceTyper<'_> {
                         tree_index: tree.index(),
                     });
                 };
-                self.type_of_tpt_inner(new.tpt, context)
+                self.type_of_tpt_inner_journaled(new.tpt, context, info_journal)
             }
-            _ => self.type_of_tpt_inner(tree, context),
+            _ => self.type_of_tpt_inner_journaled(tree, context, info_journal),
         }
     }
 
@@ -464,14 +480,15 @@ impl SourceTyper<'_> {
             TreeKind::TypeBoundsTree(bounds) => {
                 let bounds = *bounds;
                 if let Some(alias) = bounds.alias {
-                    let projected = self.type_of_tpt_inner(alias, context)?;
+                    let projected =
+                        self.type_of_tpt_inner_journaled(alias, context, info_journal)?;
                     self.alias_bounds_for_type(projected, alias.index())?
                 } else {
-                    self.project_type_bounds(&bounds, context)?
+                    self.project_type_bounds(&bounds, context, info_journal)?
                 }
             }
             _ => {
-                let projected = self.type_of_tpt_inner(rhs, context)?;
+                let projected = self.type_of_tpt_inner_journaled(rhs, context, info_journal)?;
                 self.alias_bounds_for_type(projected, rhs.index())?
             }
         };
@@ -556,7 +573,7 @@ impl SourceTyper<'_> {
                 tree_kind: "aliased type parameter bounds",
             });
         }
-        let info = self.project_type_bounds(&bounds, context)?;
+        let info = self.project_type_bounds(&bounds, context, info_journal)?;
         let previous = *self.store.symbols.info(symbol);
         info_journal.push((symbol, previous));
         self.store
@@ -569,14 +586,15 @@ impl SourceTyper<'_> {
         &mut self,
         bounds: &TypeBoundsTree<Untyped>,
         context: SourceContextId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
         let low = if let Some(low) = bounds.low {
-            self.type_of_tpt_inner(low, context)?
+            self.type_of_tpt_inner_journaled(low, context, info_journal)?
         } else {
             self.definitions.nothing_type
         };
         let high = if let Some(high) = bounds.high {
-            self.type_of_tpt_inner(high, context)?
+            self.type_of_tpt_inner_journaled(high, context, info_journal)?
         } else {
             self.definitions.any_type
         };

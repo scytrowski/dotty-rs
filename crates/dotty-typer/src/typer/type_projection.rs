@@ -86,16 +86,6 @@ impl SourceTyper<'_> {
         })
     }
 
-    pub(super) fn type_of_tpt_inner(
-        &mut self,
-        tree: TreeId<Untyped>,
-        context: SourceContextId,
-    ) -> Result<TypeId, TyperError> {
-        self.run_atomic(|typer, info_journal| {
-            typer.type_of_tpt_inner_journaled(tree, context, info_journal)
-        })
-    }
-
     pub(super) fn type_of_tpt_inner_journaled(
         &mut self,
         tree: TreeId<Untyped>,
@@ -192,7 +182,7 @@ impl SourceTyper<'_> {
                     .try_get(*argument)
                     .is_some_and(|argument| matches!(argument.kind, TreeKind::TypeBoundsTree(_)));
                 let projected = if is_wildcard {
-                    self.type_of_wildcard_bounds(*argument, context)?
+                    self.type_of_wildcard_bounds(*argument, context, info_journal)?
                 } else {
                     self.type_of_tpt_inner_journaled(*argument, context, info_journal)?
                 };
@@ -304,6 +294,7 @@ impl SourceTyper<'_> {
         &mut self,
         tree: TreeId<Untyped>,
         context: SourceContextId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
         if let Some(ty) = self.type_index.type_at(self.source, tree) {
             return Ok(ty);
@@ -328,7 +319,7 @@ impl SourceTyper<'_> {
                 tree_kind: "aliased wildcard bounds",
             });
         }
-        let projected_bounds = self.project_type_bounds(bounds, context)?;
+        let projected_bounds = self.project_type_bounds(bounds, context, info_journal)?;
         let wildcard = self.store.types.alloc(Type::Wildcard {
             bounds: projected_bounds,
         });
