@@ -1,0 +1,26 @@
+[[syntax trees at end of                     typer]] // crates/dotty-typer/tests/fixtures/union-intersection-types/UnionIntersectionTypes.scala
+package <empty> {
+  class A() extends Object() {}
+  class B() extends Object() {}
+  class C() extends Object() {}
+  class F[T >: Nothing <: Any]() extends Object() {
+    T
+  }
+  final lazy module val Outer: Outer = new Outer()
+  final module class Outer() extends Object() { this: Outer.type =>
+    class Nested() extends Object() {}
+  }
+  final lazy module val UnionIntersectionTypes: UnionIntersectionTypes =
+    new UnionIntersectionTypes()
+  final module class UnionIntersectionTypes() extends Object() {
+    this: UnionIntersectionTypes.type =>
+    type Alias = Outer.Nested & A
+    val simpleUnion: A | B = ???
+    val simpleIntersection: A & B = ???
+    val precedence: A | B & C = ???
+    val parenthesized: (A | B) & C = ???
+    val applied: F[A | B] = ???
+    val qualified: Outer.Nested | A = ???
+    def signature(value: A | B): A & C = ???
+  }
+}

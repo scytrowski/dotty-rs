@@ -2,6 +2,8 @@
 
 use super::*;
 
+pub(super) const MAX_SOURCE_TYPE_PROJECTION_DEPTH: usize = 256;
+
 /// Resolves source-written type names without making the type-tree dispatcher
 /// depend on the details of lexical scopes, imports, or semantic lookups.
 struct SourceNameResolver<'typer, 'store> {
@@ -90,6 +92,27 @@ impl SourceTyper<'_> {
         if let Some(ty) = self.type_index.type_at(self.source, tree) {
             return Ok(ty);
         }
+        if self.source_type_projection_depth >= MAX_SOURCE_TYPE_PROJECTION_DEPTH {
+            return Err(TyperError::SourceTypeProjectionDepthExceeded {
+                source: self.source,
+                tree_index: tree.index(),
+                max_depth: MAX_SOURCE_TYPE_PROJECTION_DEPTH,
+            });
+        }
+        self.source_type_projection_depth += 1;
+        let result = self.type_of_tpt_uncached(tree, context);
+        self.source_type_projection_depth -= 1;
+        result
+    }
+
+    fn type_of_tpt_uncached(
+        &mut self,
+        tree: TreeId<Untyped>,
+        context: SourceContextId,
+    ) -> Result<TypeId, TyperError> {
+        if let Some(ty) = self.type_index.type_at(self.source, tree) {
+            return Ok(ty);
+        }
         let Some(source_tree) = self.arena.try_get(tree) else {
             return Err(TyperError::TreeOutsideArena {
                 source: self.source,
@@ -144,6 +167,36 @@ impl SourceTyper<'_> {
                 args.push(projected);
             }
             let ty = self.store.types.alloc(Type::Applied { tycon, args });
+            if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
+                return Err(TyperError::DuplicateSourceTypeCacheEntry {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    existing,
+                    attempted: ty,
+                });
+            }
+            return Ok(ty);
+        }
+        if let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = &source_tree.kind {
+            let operator = self.store.names.resolve(infix.op.text());
+            let is_union = match operator {
+                "|" => true,
+                "&" => false,
+                _ => {
+                    return Err(TyperError::UnsupportedTypeTree {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        tree_kind: "infix type operator",
+                    });
+                }
+            };
+            let left = self.type_of_tpt_inner(infix.left, context)?;
+            let right = self.type_of_tpt_inner(infix.right, context)?;
+            let ty = if is_union {
+                self.store.types.alloc(Type::Or { left, right })
+            } else {
+                self.store.types.alloc(Type::And { left, right })
+            };
             if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
                 return Err(TyperError::DuplicateSourceTypeCacheEntry {
                     source: self.source,

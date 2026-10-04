@@ -1094,6 +1094,7 @@ fn unsupported_type_tree_failures_keep_exact_source_shapes() {
         ("class C { def f(x: List[?]): Unit = () }", "TypeBoundsTree"),
         ("class C { def f(x: A | B): Unit = () }", "InfixOp::|"),
         ("class C { def f(x: A & B): Unit = () }", "InfixOp::&"),
+        ("class C { def f(x: A + B): Unit = () }", "InfixOp::<other>"),
         (
             "class C { def f(x: Any, y: x.type): Unit = () }",
             "SingletonTypeTree",
@@ -2949,6 +2950,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::DeferredSymbolCompletion { .. } => "DeferredSymbolCompletion",
         TyperError::SymbolAlreadyErrored { .. } => "SymbolAlreadyErrored",
         TyperError::UnsupportedTypeTree { .. } => "UnsupportedTypeTree",
+        TyperError::SourceTypeProjectionDepthExceeded { .. } => "SourceTypeProjectionDepthExceeded",
         TyperError::MissingDeclaredType { .. } => "MissingDeclaredType",
         TyperError::MalformedSourceAst { .. } => "MalformedSourceAst",
         TyperError::SymbolSourceKindMismatch { .. } => "SymbolSourceKindMismatch",

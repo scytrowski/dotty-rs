@@ -102,6 +102,7 @@ pub struct SourceTyper<'a> {
     packages: &'a Packages,
     resolver: Box<dyn SymbolResolver + 'a>,
     type_index: SourceTypeIndex,
+    source_type_projection_depth: usize,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     pattern_bindings: PatternBindingIndex,
     local_methods: LocalMethodIndex,
@@ -154,6 +155,7 @@ impl<'a> SourceTyper<'a> {
             packages,
             resolver: Box::new(NoResolver),
             type_index: SourceTypeIndex::default(),
+            source_type_projection_depth: 0,
             local_symbols: HashMap::new(),
             pattern_bindings: PatternBindingIndex::default(),
             local_methods: LocalMethodIndex::default(),
@@ -5447,6 +5449,262 @@ mod tests {
                 .type_at(source, nested_applied.args[0])
                 .is_some()
         );
+    }
+
+    #[test]
+    fn source_union_and_intersection_types_preserve_parser_grouping_and_cache_identity() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class A; class B; class C; val union: A | B = null; val intersection: A & B = null; val precedence: A | B & C = null; val parenthesized: (A | B) & C = null",
+        );
+        let class = |name| class_symbol(&parsed, &store, &index, source, name);
+        let a = class("A");
+        let b = class("B");
+        let c = class("C");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let project = |typer: &mut SourceTyper<'_>, name| {
+            let (symbol, tree) = val_symbol(&parsed, typer.store(), &index, source, name);
+            let context = index.declaration_context_of(symbol).unwrap();
+            let ty = typer.type_of_tpt(tree, context).unwrap();
+            assert_eq!(typer.type_of_tpt(tree, context).unwrap(), ty);
+            assert_eq!(typer.source_type_index().type_at(source, tree), Some(ty));
+            ty
+        };
+
+        let union = project(&mut typer, "union");
+        let intersection = project(&mut typer, "intersection");
+        let precedence = project(&mut typer, "precedence");
+        let parenthesized = project(&mut typer, "parenthesized");
+        let Type::Or { left, right } = typer.store().types.get(union) else {
+            panic!("expected union type");
+        };
+        assert_eq!(type_symbol(typer.store(), *left), a);
+        assert_eq!(type_symbol(typer.store(), *right), b);
+        let Type::And { left, right } = typer.store().types.get(intersection) else {
+            panic!("expected intersection type");
+        };
+        assert_eq!(type_symbol(typer.store(), *left), a);
+        assert_eq!(type_symbol(typer.store(), *right), b);
+        let Type::Or { left, right } = typer.store().types.get(precedence) else {
+            panic!("expected parser's union root");
+        };
+        assert_eq!(type_symbol(typer.store(), *left), a);
+        let precedence_intersection = *right;
+        let Type::And { left, right } = typer.store().types.get(*right) else {
+            panic!("expected parser's nested intersection");
+        };
+        assert_eq!(type_symbol(typer.store(), *left), b);
+        assert_eq!(type_symbol(typer.store(), *right), c);
+        let (_, precedence_tree) = val_symbol(&parsed, typer.store(), &index, source, "precedence");
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(precedence_infix)) =
+            &parsed.ast.get(precedence_tree).kind
+        else {
+            panic!("expected source precedence infix tree");
+        };
+        assert_eq!(
+            typer
+                .source_type_index()
+                .type_at(source, precedence_infix.right),
+            Some(precedence_intersection)
+        );
+        let Type::And {
+            left,
+            right: intersection_right,
+        } = typer.store().types.get(parenthesized)
+        else {
+            panic!("expected parenthesized intersection root");
+        };
+        let parenthesized_union = *left;
+        let Type::Or { left, right } = typer.store().types.get(*left) else {
+            panic!("expected parenthesized union child");
+        };
+        assert_eq!(type_symbol(typer.store(), *left), a);
+        assert_eq!(type_symbol(typer.store(), *right), b);
+        assert_eq!(type_symbol(typer.store(), *intersection_right), c);
+        let (_, parenthesized_tree) =
+            val_symbol(&parsed, typer.store(), &index, source, "parenthesized");
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(parenthesized_infix)) =
+            &parsed.ast.get(parenthesized_tree).kind
+        else {
+            panic!("expected parenthesized source infix tree");
+        };
+        assert_eq!(
+            typer
+                .source_type_index()
+                .type_at(source, parenthesized_infix.left),
+            Some(parenthesized_union)
+        );
+    }
+
+    #[test]
+    fn source_union_types_compose_with_applied_qualified_and_alias_types() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class F[A]; class A; class B; object Outer { class Nested }; type Alias = Outer.Nested & A; val value: F[A | B] = null",
+        );
+        let (value, applied_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let applied_context = index.declaration_context_of(value).unwrap();
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Alias");
+        let alias_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition) if index.symbol_at(source, tree) == Some(alias) => {
+                    Some(definition.rhs)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let alias_context = index.declaration_context_of(alias).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let applied = typer.type_of_tpt(applied_tree, applied_context).unwrap();
+        let Type::Applied { args, .. } = typer.store().types.get(applied) else {
+            panic!("expected applied source type");
+        };
+        assert_eq!(args.len(), 1);
+        let Type::Or { left, right } = typer.store().types.get(args[0]) else {
+            panic!("expected applied union type argument");
+        };
+        assert!(matches!(
+            typer.store().symbols.get(type_symbol(typer.store(), *left)).name.text(),
+            name if typer.store().names.resolve(name) == "A"
+        ));
+        assert_eq!(
+            typer.store().names.resolve(
+                typer
+                    .store()
+                    .symbols
+                    .get(type_symbol(typer.store(), *right))
+                    .name
+                    .text()
+            ),
+            "B"
+        );
+
+        let alias_type = typer.type_of_tpt(alias_tree, alias_context).unwrap();
+        let Type::And { left, right } = typer.store().types.get(alias_type) else {
+            panic!("expected alias intersection type");
+        };
+        assert_eq!(
+            typer.store().names.resolve(
+                typer
+                    .store()
+                    .symbols
+                    .get(type_symbol(typer.store(), *left))
+                    .name
+                    .text()
+            ),
+            "Nested"
+        );
+        assert_eq!(
+            typer.store().names.resolve(
+                typer
+                    .store()
+                    .symbols
+                    .get(type_symbol(typer.store(), *right))
+                    .name
+                    .text()
+            ),
+            "A"
+        );
+    }
+
+    #[test]
+    fn unsupported_source_type_operator_is_explicit_and_failed_union_rolls_back() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class A; class B; val value: A + B = null");
+        let (value, tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let context = index.declaration_context_of(value).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.type_of_tpt(tree, context),
+            Err(TyperError::UnsupportedTypeTree { tree_index, tree_kind, .. })
+                if tree_index == tree.index() && tree_kind == "infix type operator"
+        ));
+
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class A; val value: A | Missing = null");
+        let (value, tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = &parsed.ast.get(tree).kind
+        else {
+            panic!("expected union type tree");
+        };
+        let left = infix.left;
+        let context = index.declaration_context_of(value).unwrap();
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.type_of_tpt(tree, context),
+            Err(TyperError::TypeNameNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "Missing"
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(typer.source_type_index().type_at(source, tree), None);
+        assert_eq!(typer.source_type_index().type_at(source, left), None);
+    }
+
+    #[test]
+    fn long_source_infix_type_projection_returns_a_bounded_error_and_rolls_back() {
+        let operands = vec!["A"; type_projection::MAX_SOURCE_TYPE_PROJECTION_DEPTH * 4].join(" | ");
+        let source_text = format!("class A; val value: {operands} = null");
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(&source_text);
+        let (value, tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let context = index.declaration_context_of(value).unwrap();
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for _ in 0..2 {
+            assert!(matches!(
+                typer.type_of_tpt(tree, context),
+                Err(TyperError::SourceTypeProjectionDepthExceeded {
+                    max_depth: type_projection::MAX_SOURCE_TYPE_PROJECTION_DEPTH,
+                    ..
+                })
+            ));
+            assert_eq!(typer.store().checkpoint(), before);
+            assert_eq!(typer.source_type_index().type_at(source, tree), None);
+            for (nested, node) in parsed.ast.iter() {
+                if matches!(node.kind, TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))) {
+                    assert_eq!(typer.source_type_index().type_at(source, nested), None);
+                }
+            }
+        }
     }
 
     #[test]

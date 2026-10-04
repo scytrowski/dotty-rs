@@ -322,6 +322,13 @@ For the tested subset, source Typer completion currently supports:
 - extension-method signatures whose receiver and declared signature are
   supported by the source Typer;
 - aliases and bounds represented by the current semantic type model;
+- source union and intersection trees using exactly `|` and `&`, lowered to
+  `Type::Or` and `Type::And` while preserving parser grouping. The pinned
+  Scala 3.9.0 fixture is
+  [`union-intersection-types`](../crates/dotty-typer/tests/fixtures/union-intersection-types).
+  Projection is bounded to 256 recursive source type trees; excess depth
+  returns a typed error. Arbitrary infix type operators remain explicitly
+  unsupported;
 - wildcard arguments in applied source types, projected as
   `Type::Wildcard { bounds }` with canonical `Nothing`/`Any` defaults;
   wildcard capture, variance checks, and inference through wildcard bounds
@@ -806,9 +813,9 @@ conflicts do not compute a least upper bound. Concrete formal fragments still
 require conformance, and inferred arguments are checked against instantiated
 ordinary bounds. Unconstrained parameters and unsupported shapes return typed
 errors. Expected-result inference, variance solving, inherited-constructor
-matching, unions/intersections, wildcard capture, match-type reduction,
-type-lambda unification, implicit search, and numeric weak conformance remain
-deferred.
+matching, inference through unions/intersections, relation solving for those
+types, wildcard capture, match-type reduction, type-lambda unification,
+implicit search, and numeric weak conformance remain deferred.
 
 Source and TASTy snapshots intentionally normalize adapter-specific identity
 and provenance. TASTy's package prefixes on the built-in Scala and
