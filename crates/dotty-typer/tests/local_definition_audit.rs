@@ -238,6 +238,7 @@ struct Audit {
     parser_diagnostics: BTreeMap<String, usize>,
     match_readiness: MatchReadiness,
     match_profile: MatchProfile,
+    patdef_profile: PatDefProfile,
 }
 
 impl Default for Audit {
@@ -260,6 +261,61 @@ impl Default for Audit {
             parser_diagnostics: BTreeMap::new(),
             match_readiness: MatchReadiness::default(),
             match_profile: MatchProfile::default(),
+            patdef_profile: PatDefProfile::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PatDefProfile {
+    total: usize,
+    root_shapes: BTreeMap<String, usize>,
+    root_shape_files: BTreeMap<String, BTreeSet<String>>,
+    source_pattern_counts: BTreeMap<String, usize>,
+    binder_counts: BTreeMap<String, usize>,
+    modifiers: BTreeMap<String, usize>,
+    explicit_tpt: BTreeMap<String, usize>,
+    rhs_states: BTreeMap<String, usize>,
+    representative_files: BTreeSet<String>,
+}
+
+impl Default for PatDefProfile {
+    fn default() -> Self {
+        Self {
+            total: 0,
+            root_shapes: [
+                "Tuple",
+                "Apply / extractor-looking",
+                "Bind",
+                "InfixOp",
+                "Typed",
+                "Alternative",
+                "Ident",
+                "wildcard",
+                "other",
+            ]
+            .into_iter()
+            .map(|shape| (shape.to_owned(), 0))
+            .collect(),
+            root_shape_files: BTreeMap::new(),
+            source_pattern_counts: BTreeMap::new(),
+            binder_counts: ["0", "1", "2", "3+"]
+                .into_iter()
+                .map(|count| (count.to_owned(), 0))
+                .collect(),
+            modifiers: ["val", "var", "lazy val"]
+                .into_iter()
+                .map(|modifier| (modifier.to_owned(), 0))
+                .collect(),
+            explicit_tpt: ["explicit PatDef-wide tpt", "synthetic inferred TypeTree"]
+                .into_iter()
+                .map(|form| (form.to_owned(), 0))
+                .collect(),
+            rhs_states: ["present", "missing", "recovery error"]
+                .into_iter()
+                .map(|state| (state.to_owned(), 0))
+                .collect(),
+            representative_files: BTreeSet::new(),
         }
     }
 }
@@ -338,6 +394,7 @@ impl Audit {
         }
         self.match_readiness.merge(other.match_readiness);
         self.match_profile.merge(other.match_profile);
+        self.patdef_profile.merge(other.patdef_profile);
         for (name, count) in other.buckets {
             *self.buckets.entry(name).or_default() += count;
         }
@@ -349,6 +406,20 @@ impl Audit {
             target.examples.extend(bucket.examples);
             target.examples = target.examples.iter().take(5).cloned().collect();
         }
+    }
+}
+
+impl PatDefProfile {
+    fn merge(&mut self, other: Self) {
+        self.total += other.total;
+        merge_counts(&mut self.root_shapes, other.root_shapes);
+        merge_file_sets(&mut self.root_shape_files, other.root_shape_files);
+        merge_counts(&mut self.source_pattern_counts, other.source_pattern_counts);
+        merge_counts(&mut self.binder_counts, other.binder_counts);
+        merge_counts(&mut self.modifiers, other.modifiers);
+        merge_counts(&mut self.explicit_tpt, other.explicit_tpt);
+        merge_counts(&mut self.rhs_states, other.rhs_states);
+        self.representative_files.extend(other.representative_files);
     }
 }
 
@@ -535,6 +606,7 @@ fn pinned_scala39_local_definition_audit() {
     }
     println!("local_defdefs={}", audit.local_defdefs);
     println!("typed_local_defdefs={}", audit.typed_local_defdefs);
+    print_local_patdefs(&audit.patdef_profile);
     println!(
         "unsupported_expression_total={}",
         sum_buckets_with_prefix(&audit.failures, "UnsupportedExpression::")
@@ -958,6 +1030,135 @@ fn local_definition_audit_counts_pattern_bindings_in_local_definitions() {
         audit.buckets.get("local_pattern_bindings"),
         Some(&1),
         "{audit:?}"
+    );
+}
+
+#[test]
+fn local_patdef_audit_profiles_roots_binders_modifiers_and_type_trees() {
+    let source = "object Audit { def pair = (1, \"x\"); def outer(value: Option[(Int, String)]): Int = { val Some((a, b)) = value; val (c, d) = pair; val (_, _) = pair; var (e, f) = pair; lazy val (g, h) = pair; val only @ Some(_) = value; val (i, j): (Int, String) = pair; val first, second = pair; 0 } }";
+    let audit = audit_source(source, "PatDef.scala");
+    let profile = audit.patdef_profile;
+
+    assert_eq!(profile.total, 8, "{profile:?}");
+    assert_eq!(
+        profile.root_shapes.get("Apply / extractor-looking"),
+        Some(&1)
+    );
+    assert_eq!(profile.root_shapes.get("Bind"), Some(&1));
+    assert_eq!(profile.root_shapes.get("Ident"), Some(&2));
+    assert_eq!(profile.root_shapes.get("Tuple"), Some(&5));
+    assert_eq!(profile.source_pattern_counts.get("1"), Some(&7));
+    assert_eq!(profile.source_pattern_counts.get("2"), Some(&1));
+    assert_eq!(profile.binder_counts.get("0"), Some(&1));
+    assert_eq!(profile.binder_counts.get("1"), Some(&1));
+    assert_eq!(profile.binder_counts.get("2"), Some(&6));
+    assert_eq!(profile.modifiers.get("val"), Some(&6));
+    assert_eq!(profile.modifiers.get("var"), Some(&1));
+    assert_eq!(profile.modifiers.get("lazy val"), Some(&1));
+    assert_eq!(
+        profile.explicit_tpt.get("explicit PatDef-wide tpt"),
+        Some(&1)
+    );
+    assert_eq!(
+        profile.explicit_tpt.get("synthetic inferred TypeTree"),
+        Some(&7)
+    );
+    assert_eq!(profile.rhs_states.get("present"), Some(&8));
+    assert_eq!(
+        profile.representative_files,
+        BTreeSet::from(["PatDef.scala".to_owned()])
+    );
+}
+
+#[test]
+fn local_patdef_audit_collects_nested_pattern_binders_structurally() {
+    let source = "object Audit { def outer(value: Option[(Int, Int)]): Int = { val Some((a, b)) = value; val left @ Some(_) = value; val (_, _) = (1, 2); 0 } }";
+    let audit = audit_source(source, "NestedPatDef.scala");
+    let profile = audit.patdef_profile;
+
+    assert_eq!(profile.total, 3, "{profile:?}");
+    assert_eq!(
+        profile.root_shapes.get("Apply / extractor-looking"),
+        Some(&1)
+    );
+    assert_eq!(profile.root_shapes.get("Bind"), Some(&1));
+    assert_eq!(profile.root_shapes.get("Tuple"), Some(&1));
+    assert_eq!(profile.binder_counts.get("0"), Some(&1));
+    assert_eq!(profile.binder_counts.get("1"), Some(&1));
+    assert_eq!(profile.binder_counts.get("2"), Some(&1));
+}
+
+#[test]
+fn local_patdef_audit_does_not_collect_binders_from_alternatives() {
+    let source = "object Audit { def outer(value: Option[Int]): Int = value match { case Some(x) | None => 0 } }";
+    let mut store = SemanticStore::new();
+    Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(source).expect("test source should scan");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source).expect("test source should be valid UTF-8"),
+        SourceId::from_index(0),
+        scanner,
+        &mut store.names,
+    );
+    let alternative = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| matches!(node.kind, TreeKind::Alternative(_)).then_some(tree))
+        .expect("fixture should contain a pattern alternative");
+    let mut binders = BTreeSet::new();
+
+    collect_patdef_binders(&parsed.ast, &store.names, alternative, &mut binders);
+
+    assert!(binders.is_empty(), "{binders:?}");
+}
+
+#[test]
+fn local_patdef_audit_is_deterministic() {
+    let source = "object Audit { def outer(value: Option[Int]): Int = { val Some(x) = value; val (_, _) = (1, 2); 0 } }";
+    let first = audit_source(source, "PatDef.scala");
+    let second = audit_source(source, "PatDef.scala");
+
+    assert_eq!(first.patdef_profile, second.patdef_profile);
+}
+
+#[test]
+fn local_patdef_audit_distinguishes_missing_and_recovered_rhs() {
+    let source = "object Audit { def outer: Unit = { val (left, right) = 1; () } }";
+    let source_id = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(source).expect("test source should scan");
+    let mut parsed = parse_compilation_unit(
+        SourceText::new(source).expect("test source should be valid UTF-8"),
+        source_id,
+        scanner,
+        &mut store.names,
+    );
+    let patdef_tree = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            matches!(node.kind, TreeKind::PhaseSpecific(UntypedNode::PatDef(_))).then_some(tree)
+        })
+        .expect("fixture should contain a PatDef");
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) =
+        &mut parsed.ast.get_mut(patdef_tree).kind
+    else {
+        unreachable!("selected tree is a PatDef")
+    };
+    definition.rhs = None;
+    let missing = collect_local_patdefs(&parsed.ast, &store.names, "MissingRhs.scala");
+    let recovered = audit_source(
+        "object Audit { def outer: Unit = { val (left, right) = ; () } }",
+        "RecoveredRhs.scala",
+    );
+
+    assert_eq!(missing.total, 1, "{missing:?}");
+    assert_eq!(missing.rhs_states.get("missing"), Some(&1));
+    assert_eq!(recovered.patdef_profile.total, 1, "{recovered:?}");
+    assert_eq!(
+        recovered.patdef_profile.rhs_states.get("recovery error"),
+        Some(&1)
     );
 }
 
@@ -1701,6 +1902,7 @@ fn audit_source_inner(
     );
     let mut audit = collect_local_nodes(&parsed.ast);
     audit.files_attempted = 1;
+    audit.patdef_profile = collect_local_patdefs(&parsed.ast, &store.names, path);
     audit.expression_forms = collect_expression_histogram(&parsed.ast);
     let (type_tree_forms, type_tree_form_names) =
         collect_declared_type_tree_inventory(&parsed.ast, &store.names);
@@ -2574,6 +2776,251 @@ fn collect_local_nodes(arena: &dotty_core::AstArena<Untyped>) -> Audit {
         }
     }
     audit
+}
+
+fn collect_local_patdefs(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::names::NameInterner,
+    path: &str,
+) -> PatDefProfile {
+    let nodes = arena
+        .iter()
+        .map(|(tree, node)| (tree.index(), node))
+        .collect::<BTreeMap<_, _>>();
+    let mut profile = PatDefProfile::default();
+    let mut visited = HashSet::new();
+    for (_, node) in arena.iter() {
+        let TreeKind::DefDef(definition) = &node.kind else {
+            continue;
+        };
+        let Some(rhs) = definition.rhs else {
+            continue;
+        };
+        let mut pending = VecDeque::from([rhs]);
+        while let Some(tree) = pending.pop_front() {
+            if !visited.insert(tree) {
+                continue;
+            }
+            let Some(node) = nodes.get(&tree.index()) else {
+                continue;
+            };
+            if let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &node.kind {
+                profile.total += 1;
+                *profile
+                    .source_pattern_counts
+                    .entry(definition.patterns.len().to_string())
+                    .or_default() += 1;
+                *profile
+                    .modifiers
+                    .entry(patdef_modifier(&definition.modifiers).to_owned())
+                    .or_default() += 1;
+                *profile
+                    .explicit_tpt
+                    .entry(patdef_type_annotation(arena, definition.tpt).to_owned())
+                    .or_default() += 1;
+                *profile
+                    .rhs_states
+                    .entry(patdef_rhs_state(&nodes, definition.rhs).to_owned())
+                    .or_default() += 1;
+
+                let mut binders = BTreeSet::new();
+                for pattern in &definition.patterns {
+                    let shape = patdef_root_shape(arena, names, *pattern);
+                    *profile.root_shapes.entry(shape.clone()).or_default() += 1;
+                    profile
+                        .root_shape_files
+                        .entry(shape)
+                        .or_default()
+                        .insert(path.to_owned());
+                    collect_patdef_binders(arena, names, *pattern, &mut binders);
+                }
+                let binder_bucket = match binders.len() {
+                    0 => "0",
+                    1 => "1",
+                    2 => "2",
+                    _ => "3+",
+                };
+                *profile
+                    .binder_counts
+                    .entry(binder_bucket.to_owned())
+                    .or_default() += 1;
+                profile.representative_files.insert(path.to_owned());
+            }
+            pending.extend(term_expression_children(&node.kind));
+        }
+    }
+    profile
+}
+
+fn patdef_modifier(modifiers: &dotty_core::ast::Modifiers) -> &'static str {
+    use dotty_core::ast::Modifier;
+    if modifiers.modifiers.contains(&Modifier::Lazy) {
+        "lazy val"
+    } else if modifiers.modifiers.contains(&Modifier::Var) {
+        "var"
+    } else {
+        "val"
+    }
+}
+
+fn patdef_type_annotation(
+    arena: &dotty_core::AstArena<Untyped>,
+    tree: dotty_core::TreeId<Untyped>,
+) -> &'static str {
+    let node = arena.try_get(tree);
+    if node.is_some_and(|node| {
+        matches!(node.kind, TreeKind::TypeTree(_))
+            && node
+                .position
+                .is_none_or(|position| position.span().range().is_empty())
+    }) {
+        "synthetic inferred TypeTree"
+    } else {
+        "explicit PatDef-wide tpt"
+    }
+}
+
+fn patdef_rhs_state(
+    nodes: &BTreeMap<u32, &dotty_core::Tree<Untyped>>,
+    rhs: Option<dotty_core::TreeId<Untyped>>,
+) -> &'static str {
+    let Some(rhs) = rhs else {
+        return "missing";
+    };
+    let mut pending = vec![rhs];
+    let mut visited = HashSet::new();
+    while let Some(tree) = pending.pop() {
+        if !visited.insert(tree) {
+            continue;
+        }
+        let Some(node) = nodes.get(&tree.index()) else {
+            continue;
+        };
+        if matches!(node.kind, TreeKind::PhaseSpecific(UntypedNode::Error(_))) {
+            return "recovery error";
+        }
+        pending.extend(term_expression_children(&node.kind));
+    }
+    "present"
+}
+
+fn patdef_root_shape(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::names::NameInterner,
+    mut tree: dotty_core::TreeId<Untyped>,
+) -> String {
+    loop {
+        match arena.try_get(tree).map(|node| &node.kind) {
+            Some(TreeKind::PhaseSpecific(UntypedNode::Parens(parens))) => tree = parens.inner,
+            Some(TreeKind::PhaseSpecific(UntypedNode::Tuple(_))) => return "Tuple".to_owned(),
+            Some(TreeKind::Apply(_))
+            | Some(TreeKind::TypeApply(_))
+            | Some(TreeKind::UnApply(_)) => {
+                return "Apply / extractor-looking".to_owned();
+            }
+            Some(TreeKind::Bind(_)) => return "Bind".to_owned(),
+            Some(TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))) => {
+                return "InfixOp".to_owned();
+            }
+            Some(TreeKind::Typed(_)) => return "Typed".to_owned(),
+            Some(TreeKind::Alternative(_)) => return "Alternative".to_owned(),
+            Some(TreeKind::Ident(ident))
+                if !ident.backquoted && names.resolve(ident.name.text()) == "_" =>
+            {
+                return "wildcard".to_owned();
+            }
+            Some(TreeKind::Ident(_)) => return "Ident".to_owned(),
+            _ => return "other".to_owned(),
+        }
+    }
+}
+
+fn collect_patdef_binders(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::names::NameInterner,
+    root: dotty_core::TreeId<Untyped>,
+    binders: &mut BTreeSet<String>,
+) {
+    let mut pending = vec![root];
+    let mut visited = HashSet::new();
+    while let Some(tree) = pending.pop() {
+        if !visited.insert(tree) {
+            continue;
+        }
+        let Some(node) = arena.try_get(tree) else {
+            continue;
+        };
+        match &node.kind {
+            TreeKind::Ident(ident)
+                if is_variable_pattern_ident(names, ident.name, ident.backquoted) =>
+            {
+                binders.insert(names.resolve(ident.name.text()).to_owned());
+            }
+            TreeKind::Bind(binding) => {
+                let name = names.resolve(binding.name.text());
+                if name != "_" {
+                    binders.insert(name.to_owned());
+                }
+                pending.push(binding.body);
+            }
+            TreeKind::Typed(typed) => pending.push(typed.expr),
+            // Dotty 3.9 reports variables under Alternative as illegal and
+            // does not expose them as PatDef binders (Desugar.getVariables).
+            TreeKind::Alternative(_) => {}
+            TreeKind::Apply(application) => pending.extend(application.args.iter().copied()),
+            TreeKind::UnApply(unapply) => pending.extend(unapply.patterns.iter().copied()),
+            TreeKind::NamedArg(argument) => pending.push(argument.arg),
+            TreeKind::Annotated(annotated) => pending.push(annotated.expr),
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => pending.push(parens.inner),
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+                pending.extend(tuple.elements.iter().copied());
+            }
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
+                pending.extend([infix.left, infix.right]);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn print_local_patdefs(profile: &PatDefProfile) {
+    println!("local_patdefs:");
+    println!("  total={}", profile.total);
+    println!("  root_shapes:");
+    for (shape, count) in &profile.root_shapes {
+        let files = profile
+            .root_shape_files
+            .get(shape)
+            .into_iter()
+            .flatten()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("    {shape}={count} files=[{files}]");
+    }
+    print_patdef_counts("source_pattern_counts", &profile.source_pattern_counts);
+    print_patdef_counts("binder_counts", &profile.binder_counts);
+    print_patdef_counts("modifiers", &profile.modifiers);
+    print_patdef_counts("explicit_tpt", &profile.explicit_tpt);
+    print_patdef_counts("rhs", &profile.rhs_states);
+    println!(
+        "  representative_files=[{}]",
+        profile
+            .representative_files
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+}
+
+fn print_patdef_counts(name: &str, counts: &BTreeMap<String, usize>) {
+    println!("  {name}:");
+    for (shape, count) in counts {
+        println!("    {shape}={count}");
+    }
 }
 
 fn local_method_trees(
