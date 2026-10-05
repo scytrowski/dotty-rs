@@ -230,11 +230,14 @@ impl SourceTyper<'_> {
                     }
                 }
                 TreeKind::Bind(binding) => {
-                    if names.insert(binding.name) {
+                    if self.store.names.resolve(binding.name.text()) != "_"
+                        && names.insert(binding.name)
+                    {
                         binders.push((tree, binding.name));
                     }
                     pending.push(binding.body);
                 }
+                TreeKind::NamedArg(argument) => pending.push(argument.arg),
                 TreeKind::Typed(typed) => pending.push(typed.expr),
                 TreeKind::Apply(application) => {
                     pending.extend(application.args.iter().rev().copied());

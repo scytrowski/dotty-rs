@@ -14311,6 +14311,68 @@ mod tests {
     }
 
     #[test]
+    fn patdef_binder_inventory_reaches_named_arguments_for_focused_pattern_errors() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = new MaybeInt }; class C { def use(input: Any): Int = { val Extractor(field = x) = input; x } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ExtractorPatternArgumentUnsupported {
+                issue: ExtractorPatternArgumentIssue::Named,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn patdef_binder_inventory_ignores_wildcard_aliases() {
+        for (pattern, expected) in [("_ @ Extractor(_) ", true), ("_ @ Extractor(x)", false)] {
+            let source_text = format!(
+                "class MaybeInt {{ def isEmpty: Boolean = false; def get: Int = 1 }}; object Extractor {{ def unapply(value: Any): MaybeInt = new MaybeInt }}; class C {{ def use(input: Any): Int = {{ val {pattern} = input; 1 }} }}"
+            );
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(&source_text);
+            let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+            let error = typer.type_expression(rhs, context).unwrap_err();
+
+            if expected {
+                assert!(matches!(
+                    error,
+                    TyperError::LocalBlockDeclarationDeferred {
+                        kind: "pattern definition",
+                        ..
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    error,
+                    TyperError::WildcardPatternBindingRejected { .. }
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn typing_a_local_valdef_outside_a_block_does_not_mutate_the_method_scope() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def use: Int = { val local: Int = 1; local } }");
