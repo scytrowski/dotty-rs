@@ -7,6 +7,70 @@ use dotty_core::types::*;
 use dotty_core::*;
 use std::collections::HashMap;
 
+/// The single typed identity for a source block statement and the ordered
+/// typed statements emitted into the enclosing block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::typer) struct TypedStatExpansion {
+    pub(in crate::typer) anchor: TreeId<Typed>,
+    pub(in crate::typer) emitted: Vec<TreeId<Typed>>,
+}
+
+impl TypedStatExpansion {
+    fn one(typed: TreeId<Typed>) -> Self {
+        Self {
+            anchor: typed,
+            emitted: vec![typed],
+        }
+    }
+
+    pub(in crate::typer) fn append_to(self, stats: &mut Vec<TreeId<Typed>>) {
+        debug_assert!(self.emitted.contains(&self.anchor));
+        stats.extend(self.emitted);
+    }
+}
+
+/// The typed result recorded for one source PatDef. User-visible binder
+/// symbols remain in `SourceTyper::local_symbols`; this record owns only the
+/// statement expansion and compiler-generated temporaries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::typer) struct PatDefStatExpansion {
+    pub(in crate::typer) anchor: TreeId<Typed>,
+    pub(in crate::typer) emitted: Vec<TreeId<Typed>>,
+    pub(in crate::typer) synthetic_symbols: Vec<SymbolId>,
+}
+
+#[derive(Clone, Default)]
+pub(in crate::typer) struct PatDefExpansionIndex {
+    by_tree: HashMap<(SourceId, TreeId<Untyped>), PatDefStatExpansion>,
+}
+
+impl PatDefExpansionIndex {
+    pub(in crate::typer) fn get(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<&PatDefStatExpansion> {
+        self.by_tree.get(&(source, tree))
+    }
+
+    fn insert(
+        &mut self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+        expansion: PatDefStatExpansion,
+    ) -> Result<(), ()> {
+        if let Some(previous) = self.get(source, tree) {
+            return if previous == &expansion {
+                Ok(())
+            } else {
+                Err(())
+            };
+        }
+        self.by_tree.insert((source, tree), expansion);
+        Ok(())
+    }
+}
+
 #[derive(Clone, Default)]
 pub(in crate::typer) struct LocalMethodIndex {
     pub(in crate::typer) symbols_by_tree: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
@@ -140,6 +204,105 @@ impl LocalMethodIndex {
 }
 
 impl SourceTyper<'_> {
+    /// Records the single source mapping for a successfully lowered PatDef.
+    /// Callers run this inside an expression transaction so the expansion,
+    /// source mapping, and any local symbols commit or roll back together.
+    #[allow(dead_code)] // The PatDef lowering issues consume this entry point.
+    pub(in crate::typer) fn record_patdef_expansion(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        context: ExpressionContext,
+        expansion: TypedStatExpansion,
+        synthetic_symbols: Vec<SymbolId>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<(), TyperError> {
+        let Some(source_node) = self.arena.try_get(source_tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: source_tree.index(),
+            });
+        };
+        if !matches!(
+            source_node.kind,
+            TreeKind::PhaseSpecific(UntypedNode::PatDef(_))
+        ) || !expansion.emitted.contains(&expansion.anchor)
+            || expansion
+                .emitted
+                .iter()
+                .any(|tree| self.typed_arena.try_get(*tree).is_none())
+            || synthetic_symbols.iter().any(|symbol| {
+                !self.store.symbols.contains(*symbol)
+                    || {
+                        let entry = self.store.symbols.get(*symbol);
+                        entry.kind != SymbolKind::Local
+                            || entry.owner != Some(context.owner)
+                            || entry.origin != SymbolOrigin::Synthetic
+                    }
+                    || self.local_symbols.values().any(|local| local == symbol)
+            })
+        {
+            return Err(TyperError::PatDefExpansionConflict {
+                source: self.source,
+                tree_index: source_tree.index(),
+            });
+        }
+
+        if let Some(existing) = self.typed_index.get(self.source, source_tree)
+            && existing != expansion.anchor
+        {
+            return Err(TyperError::ConflictingTypedExpression {
+                source: self.source,
+                tree_index: source_tree.index(),
+                existing: existing.index(),
+                attempted: expansion.anchor.index(),
+            });
+        }
+        let record = PatDefStatExpansion {
+            anchor: expansion.anchor,
+            emitted: expansion.emitted,
+            synthetic_symbols,
+        };
+        if self
+            .patdef_expansions
+            .get(self.source, source_tree)
+            .is_some_and(|existing| existing != &record)
+        {
+            return Err(TyperError::PatDefExpansionConflict {
+                source: self.source,
+                tree_index: source_tree.index(),
+            });
+        }
+
+        let is_new_mapping = self.typed_index.get(self.source, source_tree).is_none();
+        self.typed_index
+            .insert(self.source, source_tree, record.anchor)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        self.patdef_expansions
+            .insert(self.source, source_tree, record)
+            .map_err(|()| TyperError::PatDefExpansionConflict {
+                source: self.source,
+                tree_index: source_tree.index(),
+            })?;
+        if is_new_mapping {
+            new_mappings.push((self.source, source_tree));
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)] // Tests and the following PatDef issues inspect this record.
+    pub(in crate::typer) fn patdef_expansion_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<&PatDefStatExpansion> {
+        self.patdef_expansions.get(source, tree)
+    }
+
     pub(in crate::typer) fn preindex_local_methods(
         &mut self,
         stats: &[TreeId<Untyped>],
@@ -706,6 +869,86 @@ impl SourceTyper<'_> {
         new_mappings.push((self.source, source_tree));
         Ok(typed)
     }
+    fn type_block_stat_expansion(
+        &mut self,
+        stat: TreeId<Untyped>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TypedStatExpansion, TyperError> {
+        let Some(source_stat) = self.arena.try_get(stat).cloned() else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: stat.index(),
+            });
+        };
+        if let TreeKind::Import(import) = source_stat.kind {
+            let typed = self.type_local_import_statement(
+                stat,
+                import,
+                source_stat.position,
+                context,
+                info_journal,
+                new_mappings,
+            )?;
+            let Some(scope_stack) = context.local_scopes else {
+                return Err(TyperError::LocalBlockDeclarationDeferred {
+                    source: self.source,
+                    tree_index: stat.index(),
+                    kind: "import scope",
+                });
+            };
+            self.expression_scopes
+                .get_mut(scope_stack.index())
+                .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack: scope_stack })?
+                .imports
+                .push((stat, context));
+            return Ok(TypedStatExpansion::one(typed));
+        }
+
+        if let Some(kind) = local_block_declaration_kind(&source_stat.kind) {
+            if let TreeKind::DefDef(definition) = &source_stat.kind
+                && definition.rhs.is_some()
+            {
+                let typed = self.type_local_method_definition(
+                    stat,
+                    definition,
+                    source_stat.position,
+                    info_journal,
+                    new_mappings,
+                )?;
+                return Ok(TypedStatExpansion::one(typed));
+            }
+            if let TreeKind::ValDef(definition) = &source_stat.kind {
+                if definition
+                    .metadata
+                    .modifiers
+                    .iter()
+                    .any(|modifier| *modifier != dotty_core::ast::Modifier::Var)
+                {
+                    return Err(TyperError::LocalBlockDeclarationDeferred {
+                        source: self.source,
+                        tree_index: stat.index(),
+                        kind,
+                    });
+                }
+                let typed =
+                    self.type_value_expression_inner(stat, context, info_journal, new_mappings)?;
+                return Ok(TypedStatExpansion::one(typed));
+            }
+            // Concrete PatDef typing remains deferred until the following
+            // PatDef increments consume the expansion contract above.
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: stat.index(),
+                kind,
+            });
+        }
+
+        let typed = self.type_value_expression_inner(stat, context, info_journal, new_mappings)?;
+        Ok(TypedStatExpansion::one(typed))
+    }
+
     pub(in crate::typer) fn type_block_expression(
         &mut self,
         tree: TreeId<Untyped>,
@@ -734,82 +977,8 @@ impl SourceTyper<'_> {
         self.preindex_local_methods(&block.stats, block_context, block_scope)?;
         let mut stats = Vec::with_capacity(block.stats.len());
         for stat in block.stats {
-            let Some(source_stat) = self.arena.try_get(stat) else {
-                return Err(TyperError::TreeOutsideArena {
-                    source: self.source,
-                    tree_index: stat.index(),
-                });
-            };
-            if let TreeKind::Import(import) = &source_stat.kind {
-                let typed = self.type_local_import_statement(
-                    stat,
-                    import.clone(),
-                    source_stat.position,
-                    block_context,
-                    info_journal,
-                    new_mappings,
-                )?;
-                stats.push(typed);
-                let Some(scope_stack) = block_context.local_scopes else {
-                    return Err(TyperError::LocalBlockDeclarationDeferred {
-                        source: self.source,
-                        tree_index: stat.index(),
-                        kind: "import scope",
-                    });
-                };
-                self.expression_scopes
-                    .get_mut(scope_stack.index())
-                    .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack: scope_stack })?
-                    .imports
-                    .push((stat, block_context));
-                continue;
-            }
-            if let Some(kind) = local_block_declaration_kind(&source_stat.kind) {
-                if let TreeKind::DefDef(definition) = &source_stat.kind
-                    && definition.rhs.is_some()
-                {
-                    stats.push(self.type_local_method_definition(
-                        stat,
-                        definition,
-                        source_stat.position,
-                        info_journal,
-                        new_mappings,
-                    )?);
-                    continue;
-                }
-                if let TreeKind::ValDef(definition) = &source_stat.kind {
-                    if definition
-                        .metadata
-                        .modifiers
-                        .iter()
-                        .any(|modifier| *modifier != dotty_core::ast::Modifier::Var)
-                    {
-                        return Err(TyperError::LocalBlockDeclarationDeferred {
-                            source: self.source,
-                            tree_index: stat.index(),
-                            kind,
-                        });
-                    }
-                    stats.push(self.type_value_expression_inner(
-                        stat,
-                        block_context,
-                        info_journal,
-                        new_mappings,
-                    )?);
-                    continue;
-                }
-                return Err(TyperError::LocalBlockDeclarationDeferred {
-                    source: self.source,
-                    tree_index: stat.index(),
-                    kind,
-                });
-            }
-            stats.push(self.type_value_expression_inner(
-                stat,
-                block_context,
-                info_journal,
-                new_mappings,
-            )?);
+            self.type_block_stat_expansion(stat, block_context, info_journal, new_mappings)?
+                .append_to(&mut stats);
         }
         let expr = self.type_value_expression_inner(
             block.expr,

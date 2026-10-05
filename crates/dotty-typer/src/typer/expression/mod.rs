@@ -7,7 +7,7 @@ use dotty_core::types::*;
 use dotty_core::*;
 
 mod assignment;
-mod blocks;
+pub(super) mod blocks;
 mod control_flow;
 mod match_expr;
 mod new;

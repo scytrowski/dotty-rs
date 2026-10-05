@@ -105,6 +105,7 @@ pub struct SourceTyper<'a> {
     source_type_projection_depth: usize,
     signature_parameter_in_progress: Option<SymbolId>,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
+    patdef_expansions: expression::blocks::PatDefExpansionIndex,
     pattern_bindings: PatternBindingIndex,
     local_methods: LocalMethodIndex,
     active_local_type_scopes: Vec<(SourceContextId, ScopeId)>,
@@ -159,6 +160,7 @@ impl<'a> SourceTyper<'a> {
             source_type_projection_depth: 0,
             signature_parameter_in_progress: None,
             local_symbols: HashMap::new(),
+            patdef_expansions: expression::blocks::PatDefExpansionIndex::default(),
             pattern_bindings: PatternBindingIndex::default(),
             local_methods: LocalMethodIndex::default(),
             active_local_type_scopes: Vec::new(),
@@ -10771,10 +10773,16 @@ mod tests {
 
     #[test]
     fn unsupported_block_declaration_statements_are_deferred_explicitly() {
-        let sources = [(
-            "class C { def use: Int = { 1; type Local = Int; 3 } }",
-            "type definition",
-        )];
+        let sources = [
+            (
+                "class C { def use: Int = { 1; type Local = Int; 3 } }",
+                "type definition",
+            ),
+            (
+                "class C { def use: Int = { val (a, b) = pair; 3 } }",
+                "pattern definition",
+            ),
+        ];
 
         for (source_text, expected_kind) in sources {
             let (parsed, mut store, packages, definitions, index, source) =
@@ -13759,6 +13767,284 @@ mod tests {
         assert_eq!(typer.expression_scopes.len(), scope_count);
         assert!(typer.typed_ast().iter().next().is_none());
         assert!(typer.source_typed_index().is_empty());
+    }
+
+    #[test]
+    fn one_to_one_block_stat_expansions_preserve_order_and_are_idempotent() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def use: Int = { val first: Int = 1; val second: Int = 2; first } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let source_stats = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats.clone(),
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let first = typer.type_expression(rhs, context).unwrap();
+        let typed_count = typer.typed_ast().iter().count();
+        let second = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(typer.typed_ast().iter().count(), typed_count);
+        let TreeKind::Block(block) = &typer.typed_ast().get(first).kind else {
+            unreachable!();
+        };
+        assert_eq!(block.stats.len(), source_stats.len());
+        assert_eq!(
+            block.stats,
+            source_stats
+                .iter()
+                .map(|tree| typer.source_typed_index().get(source, *tree).unwrap())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn patdef_expansion_keeps_one_anchor_and_source_binder_provenance() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = { val (a, b) = pair; 0 } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let source_patdef = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                matches!(node.kind, TreeKind::PhaseSpecific(UntypedNode::PatDef(_))).then_some(tree)
+            })
+            .unwrap();
+        let binder_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Ident(ident) if store.names.resolve(ident.name.text()) == "a" => {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let unrelated_tree = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.expr,
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let user_binder = typer.store.symbols.alloc(dotty_core::Symbol {
+            name: Name::new(typer.store.names.intern("a"), Namespace::Term),
+            owner: Some(context.owner),
+            kind: SymbolKind::Local,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Complete(typer.definitions.int),
+            origin: SymbolOrigin::Source(source),
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let temporary = typer.store.symbols.alloc(dotty_core::Symbol {
+            name: Name::new(typer.store.names.intern("$pat"), Namespace::Term),
+            owner: Some(context.owner),
+            kind: SymbolKind::Local,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Complete(typer.definitions.int),
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let emitted = ["anchor", "binder-1", "binder-2"]
+            .into_iter()
+            .map(|name| {
+                let name = Name::new(typer.store.names.intern(name), Namespace::Term);
+                let ty = typer.store.types.alloc(Type::NoType);
+                typer.typed_arena.alloc(Tree {
+                    kind: TreeKind::Ident(Ident {
+                        name,
+                        backquoted: false,
+                    }),
+                    position: None,
+                    ty,
+                })
+            })
+            .collect::<Vec<_>>();
+        let expansion = expression::blocks::TypedStatExpansion {
+            anchor: emitted[0],
+            emitted: emitted.clone(),
+        };
+        let mut block_stats = Vec::new();
+        expansion.clone().append_to(&mut block_stats);
+        assert_eq!(block_stats, emitted);
+
+        typer
+            .run_expression_transaction(|typer, _, new_mappings| {
+                typer
+                    .local_symbols
+                    .insert((source, binder_tree), user_binder);
+                typer.record_patdef_expansion(
+                    source_patdef,
+                    context,
+                    expansion.clone(),
+                    vec![temporary],
+                    new_mappings,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(typer.source_typed_index().len(), 1);
+        assert_eq!(
+            typer.source_typed_index().get(source, source_patdef),
+            Some(emitted[0])
+        );
+        assert!(
+            emitted
+                .iter()
+                .all(|tree| typer.typed_ast().try_get(*tree).is_some())
+        );
+        assert_eq!(
+            typer.local_symbol_at(source, binder_tree),
+            Some(user_binder)
+        );
+        assert_eq!(typer.local_symbol_at(source, source_patdef), None);
+        assert_eq!(typer.local_symbol_at(source, unrelated_tree), None);
+        let recorded = typer.patdef_expansion_at(source, source_patdef).unwrap();
+        assert_eq!(recorded.anchor, emitted[0]);
+        assert_eq!(recorded.emitted, emitted);
+        assert_eq!(recorded.synthetic_symbols, vec![temporary]);
+
+        let new_mapping_count = typer
+            .run_expression_transaction(|typer, _, new_mappings| {
+                typer.record_patdef_expansion(
+                    source_patdef,
+                    context,
+                    expansion,
+                    vec![temporary],
+                    new_mappings,
+                )?;
+                Ok(new_mappings.len())
+            })
+            .unwrap();
+        assert_eq!(new_mapping_count, 0);
+        assert_eq!(typer.source_typed_index().len(), 1);
+    }
+
+    #[test]
+    fn failed_patdef_expansion_rolls_back_anchor_symbols_and_mappings() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = { val (a, b) = pair; 0 } }");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let source_patdef = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                matches!(node.kind, TreeKind::PhaseSpecific(UntypedNode::PatDef(_))).then_some(tree)
+            })
+            .unwrap();
+        let binder_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Ident(ident) if store.names.resolve(ident.name.text()) == "a" => {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let store_checkpoint = typer.store.checkpoint();
+        let scope_count = typer.expression_scopes.len();
+
+        let result: Result<(), TyperError> =
+            typer.run_expression_transaction(|typer, _, new_mappings| {
+                let scope = context.local_scopes.unwrap();
+                typer
+                    .expression_scopes
+                    .push(typer.expression_scopes[scope.index()].clone());
+                let ty = typer.store.types.alloc(Type::NoType);
+                let anchor = typer.typed_arena.alloc(Tree {
+                    kind: TreeKind::Ident(Ident {
+                        name: Name::new(typer.store.names.intern("testAnchor"), Namespace::Term),
+                        backquoted: false,
+                    }),
+                    position: None,
+                    ty,
+                });
+                let user_binder = typer.store.symbols.alloc(dotty_core::Symbol {
+                    name: Name::new(typer.store.names.intern("a"), Namespace::Term),
+                    owner: Some(context.owner),
+                    kind: SymbolKind::Local,
+                    flags: SymbolFlags::EMPTY,
+                    visibility: Visibility::Public,
+                    info: SymbolInfo::Complete(typer.definitions.int),
+                    origin: SymbolOrigin::Source(source),
+                    annotations: Vec::new(),
+                    position: None,
+                    links: SymbolLinks::default(),
+                });
+                let temporary = typer.store.symbols.alloc(dotty_core::Symbol {
+                    name: Name::new(typer.store.names.intern("$pat"), Namespace::Term),
+                    owner: Some(context.owner),
+                    kind: SymbolKind::Local,
+                    flags: SymbolFlags::EMPTY,
+                    visibility: Visibility::Public,
+                    info: SymbolInfo::Complete(typer.definitions.int),
+                    origin: SymbolOrigin::Synthetic,
+                    annotations: Vec::new(),
+                    position: None,
+                    links: SymbolLinks::default(),
+                });
+                typer
+                    .local_symbols
+                    .insert((source, binder_tree), user_binder);
+                typer.record_patdef_expansion(
+                    source_patdef,
+                    context,
+                    expression::blocks::TypedStatExpansion {
+                        anchor,
+                        emitted: vec![anchor],
+                    },
+                    vec![temporary],
+                    new_mappings,
+                )?;
+                Err(TyperError::PatDefExpansionConflict {
+                    source,
+                    tree_index: source_patdef.index(),
+                })
+            });
+
+        assert!(matches!(
+            result,
+            Err(TyperError::PatDefExpansionConflict { .. })
+        ));
+        assert_eq!(typer.store.checkpoint(), store_checkpoint);
+        assert_eq!(typer.expression_scopes.len(), scope_count);
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.patdef_expansion_at(source, source_patdef).is_none());
+        assert!(typer.local_symbol_at(source, binder_tree).is_none());
     }
 
     #[test]

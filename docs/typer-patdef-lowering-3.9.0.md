@@ -83,6 +83,19 @@ initialized; Scala reports a forward-reference error. The lowering uses the
 source RHS for the generated check, so the binder's availability does not make
 later local values initialized earlier.
 
+## Typed block expansion convention
+
+Block typing associates each source statement with one typed `anchor` in the
+`SourceTypedIndex`, while the enclosing typed block may contain an ordered
+list of emitted statements for that source statement. Ordinary statements use
+the same tree as both anchor and sole emitted statement. A lowered PatDef may
+emit several typed statements, but its source PatDef still maps only to its
+single anchor. User binder identities remain available through the existing
+`local_symbol_at` mapping on the source binder tree; compiler-generated
+temporary symbols are recorded as PatDef expansion metadata and do not receive
+source-tree mappings. Expansion metadata, semantic symbols, and typed mappings
+participate in the enclosing expression transaction.
+
 ## Scope
 
 The fixtures cover extractor and tuple roots, zero/one/multiple binders,
