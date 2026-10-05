@@ -38,6 +38,10 @@ where
     pub(crate) last_advance_was_outdent: bool,
     /// The scanner suppressed a physical newline after a malformed construct.
     pub(crate) last_advance_consumed_statement_separator: bool,
+    /// Indentation offset for a statement sequence opened through scanner
+    /// feedback. Nested grammar such as a lambda body must keep notifying the
+    /// scanner so it can emit the matching outdent at the right boundary.
+    pub(crate) feedback_block_indent: Option<u32>,
     /// AST constructs already closed by an explicit Scala `end` marker.
     pub(crate) end_marked_trees: HashSet<TreeId<Untyped>>,
     /// Active enclosing constructs that can own Scala `end` markers, from
@@ -92,6 +96,7 @@ where
             placeholder_params: Vec::new(),
             last_advance_was_outdent: false,
             last_advance_consumed_statement_separator: false,
+            feedback_block_indent: None,
             end_marked_trees: HashSet::new(),
             end_marker_owners: Vec::new(),
             expression_quote_depth: 0,
@@ -260,6 +265,19 @@ where
         self.context.block_end = block_end;
         let result = parse(self);
         self.context.block_end = previous;
+        result
+    }
+
+    /// Runs a nested parse with the active scanner-feedback block boundary.
+    pub(crate) fn with_feedback_block_indent<T>(
+        &mut self,
+        indent_offset: Option<u32>,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = self.feedback_block_indent;
+        self.feedback_block_indent = indent_offset;
+        let result = parse(self);
+        self.feedback_block_indent = previous;
         result
     }
 

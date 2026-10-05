@@ -476,7 +476,19 @@ where
                         }
                         StatementSequenceBoundary::CompilationUnit => None,
                     },
-                    |parser| parser.parse_statement_sequence(boundary),
+                    |parser| {
+                        let feedback_indent = match boundary {
+                            StatementSequenceBoundary::FeedbackRegionBlock {
+                                indent_offset,
+                                ..
+                            } => Some(indent_offset),
+                            StatementSequenceBoundary::Block(_)
+                            | StatementSequenceBoundary::CompilationUnit => None,
+                        };
+                        parser.with_feedback_block_indent(feedback_indent, |parser| {
+                            parser.parse_statement_sequence(boundary)
+                        })
+                    },
                 )
             })
         })

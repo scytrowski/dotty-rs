@@ -250,6 +250,11 @@ where
             return self.error_expr(position);
         }
         if self.current().kind == TokenKind::Indent {
+            if self.context.location == Location::InBlock
+                && self.context.block_end == Some(TokenKind::Outdent)
+            {
+                return self.parse_lambda_indented_block_body();
+            }
             return self.parse_feedback_indented_block();
         }
 
@@ -260,7 +265,13 @@ where
             }
 
             if self.context.block_end == Some(TokenKind::Outdent) {
-                return self.expr();
+                // An inline lambda in an indented statement sequence owns
+                // the rest of that sequence as its body, through (but not
+                // including) the enclosing Outdent.
+                if let Some(indent_offset) = self.feedback_block_indent {
+                    return self.parse_lambda_feedback_block_body(indent_offset);
+                }
+                return self.parse_lambda_block_body(TokenKind::Outdent);
             }
 
             if let Some(end) = self.context.block_end {
@@ -293,6 +304,52 @@ where
     fn parse_lambda_block_body(&mut self, end: TokenKind) -> TreeId<Untyped> {
         let mark = self.mark();
         let (stats, expr) = self.parse_expression_block_body(end);
+        self.alloc_from(
+            mark,
+            TreeKind::Block(dotty_core::ast::Block { stats, expr }),
+        )
+    }
+
+    fn parse_lambda_feedback_block_body(&mut self, indent_offset: u32) -> TreeId<Untyped> {
+        let mark = self.mark();
+        let (stats, expr) = self.parse_region_feedback_expression_block_body(indent_offset);
+        self.alloc_from(
+            mark,
+            TreeKind::Block(dotty_core::ast::Block { stats, expr }),
+        )
+    }
+
+    fn parse_lambda_indented_block_body(&mut self) -> TreeId<Untyped> {
+        let body = self.parse_feedback_indented_block_preserving_block();
+        if let Some(indent_offset) = self.feedback_block_indent {
+            self.observe_outdented_region(indent_offset);
+        }
+        if matches!(self.current().kind, TokenKind::Outdent | TokenKind::Eof) {
+            return body;
+        }
+
+        let (tail_stats, expr) = if let Some(indent_offset) = self.feedback_block_indent {
+            self.parse_region_feedback_expression_block_body(indent_offset)
+        } else {
+            self.parse_expression_block_body(TokenKind::Outdent)
+        };
+        let mark = crate::Mark {
+            start: self
+                .ast
+                .get(body)
+                .position
+                .map(|position| position.span().range().start())
+                .unwrap_or_else(|| self.mark().start),
+        };
+        // Preserve nested statement sequences as a block so their local
+        // definitions remain scoped to the lambda body. Dotty does flatten
+        // the synthetic one-expression block used for an inline lambda body.
+        let body_statement = match &self.ast.get(body).kind {
+            TreeKind::Block(block) if block.stats.is_empty() => block.expr,
+            _ => body,
+        };
+        let mut stats = vec![body_statement];
+        stats.extend(tail_stats);
         self.alloc_from(
             mark,
             TreeKind::Block(dotty_core::ast::Block { stats, expr }),
@@ -819,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn lambda_inside_a_block_end_uses_only_its_expression_body() {
+    fn lambda_inside_a_braced_block_keeps_its_block_without_consuming_delimiter() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "x => x}",
@@ -837,17 +894,21 @@ mod tests {
             &mut names,
         );
 
-        let tree = parser.with_block_end(Some(TokenKind::Outdent), |parser| {
-            parser.with_location(Location::InBlock, |parser| parser.expr())
-        });
+        let tree = parser.with_block_end(
+            Some(TokenKind::Punctuation(Punctuation::RightBrace)),
+            |parser| parser.with_location(Location::InBlock, |parser| parser.expr()),
+        );
         let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
         else {
             panic!("expected a function literal");
         };
-        assert!(matches!(
-            parser.ast().get(function.body).kind,
-            TreeKind::Ident(_)
-        ));
+        let TreeKind::Block(dotty_core::ast::Block { stats, expr }) =
+            &parser.ast().get(function.body).kind
+        else {
+            panic!("expected a one-expression block body");
+        };
+        assert!(stats.is_empty());
+        assert!(matches!(parser.ast().get(*expr).kind, TreeKind::Ident(_)));
         assert_eq!(
             parser.current().kind,
             TokenKind::Punctuation(Punctuation::RightBrace)

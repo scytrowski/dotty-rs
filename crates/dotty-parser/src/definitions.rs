@@ -49,7 +49,7 @@ where
 
     pub(crate) fn parse_method_definition_with_prefix(
         &mut self,
-        location: Location,
+        _location: Location,
         prefix: DefinitionPrefix,
     ) -> ParsedStatement {
         let mark = crate::Mark {
@@ -128,7 +128,7 @@ where
             let feedback_indent = self.observe_indented_body_region_from(mark.start);
             self.advance();
             Some(self.with_end_marker_owner(*name.as_name(), |parser| {
-                parser.parse_method_rhs(location, feedback_indent)
+                parser.parse_method_rhs(feedback_indent)
             }))
         } else if has_explicit_return_type && is_definition_boundary(self.current().kind) {
             None
@@ -155,12 +155,8 @@ where
         ParsedStatement::Definition(definition)
     }
 
-    fn parse_method_rhs(
-        &mut self,
-        location: Location,
-        feedback_indent: Option<u32>,
-    ) -> TreeId<Untyped> {
-        self.parse_definition_rhs(location, feedback_indent)
+    fn parse_method_rhs(&mut self, feedback_indent: Option<u32>) -> TreeId<Untyped> {
+        self.parse_definition_rhs(feedback_indent)
     }
 
     /// Consumes statement separators only when the method's result-type colon
@@ -184,11 +180,7 @@ where
         true
     }
 
-    fn parse_definition_rhs(
-        &mut self,
-        location: Location,
-        feedback_indent: Option<u32>,
-    ) -> TreeId<Untyped> {
+    fn parse_definition_rhs(&mut self, feedback_indent: Option<u32>) -> TreeId<Untyped> {
         self.consume_control_newlines();
         self.with_secondary_constructor_allowed(false, |parser| {
             if parser.current().kind == TokenKind::Indent {
@@ -198,7 +190,10 @@ where
                     parser.parse_indented_block()
                 }
             } else {
-                parser.with_location(location, |parser| parser.expr())
+                // Dotty parses definition RHSs through `subExpr()` at
+                // `Location.Elsewhere`; do not leak the enclosing block's
+                // statement location into lambda-body parsing.
+                parser.with_location(Location::Elsewhere, |parser| parser.expr())
             }
         })
     }
@@ -324,7 +319,7 @@ where
         let rhs = if is_bare_assignment(self) {
             let feedback_indent = self.observe_definition_rhs_indentation();
             self.advance();
-            Some(self.parse_definition_rhs(location, feedback_indent))
+            Some(self.parse_definition_rhs(feedback_indent))
         } else {
             if has_explicit_type && !is_definition_boundary(self.current().kind) {
                 self.report(
@@ -359,7 +354,7 @@ where
         &mut self,
         mark: crate::Mark,
         is_var: bool,
-        location: Location,
+        _location: Location,
         mut metadata: Modifiers,
     ) -> ParsedStatement {
         if is_definition_boundary(self.current().kind) {
@@ -417,7 +412,7 @@ where
         let rhs = if is_bare_assignment(self) {
             let feedback_indent = self.observe_definition_rhs_indentation();
             self.advance();
-            Some(self.parse_definition_rhs(location, feedback_indent))
+            Some(self.parse_definition_rhs(feedback_indent))
         } else if has_explicit_type
             && all_simple_identifiers
             && is_definition_boundary(self.current().kind)
