@@ -14048,6 +14048,269 @@ mod tests {
     }
 
     #[test]
+    fn single_binding_local_patdef_extracts_once_and_enters_only_the_final_binder() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = new MaybeInt }; class C { def use(value: Any): Int = { val Extractor(x) = value; x } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let block = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block,
+            _ => panic!("method body should be a block"),
+        };
+        let source_patdef = block.stats[0];
+        let binder_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Ident(ident) if store.names.resolve(ident.name.text()) == "x" => {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .expect("pattern should have a source binder");
+        let source_rhs = match &parsed.ast.get(source_patdef).kind {
+            TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
+                definition.rhs.expect("PatDef should retain its RHS")
+            }
+            _ => panic!("first block statement should be a PatDef"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Block(typed_block) = &typer.typed_arena.get(typed).kind else {
+            panic!("method body should type to a block");
+        };
+        assert_eq!(typed_block.stats.len(), 1);
+        let final_val = typed_block.stats[0];
+        let TreeKind::ValDef(final_val_node) = &typer.typed_arena.get(final_val).kind else {
+            panic!("PatDef expansion should emit one final ValDef");
+        };
+        assert_eq!(typer.typed_arena.get(final_val).ty, definitions.int);
+        let typed_match = final_val_node
+            .rhs
+            .expect("final ValDef should have its extraction RHS");
+        let TreeKind::Match(synthetic_match) = &typer.typed_arena.get(typed_match).kind else {
+            panic!("PatDef RHS should retain the refutable synthetic Match");
+        };
+        assert_eq!(
+            synthetic_match.selector,
+            typer.source_typed_index().get(source, source_rhs).unwrap(),
+            "the synthetic Match must reuse the one typed source RHS"
+        );
+        let TreeKind::CaseDef(case_def) = &typer.typed_arena.get(synthetic_match.cases[0]).kind
+        else {
+            panic!("synthetic Match should contain a single case");
+        };
+        let TreeKind::UnApply(_) = &typer.typed_arena.get(case_def.pattern).kind else {
+            panic!("source extractor pattern should use the shared pattern typer");
+        };
+        assert_eq!(
+            typer.typed_index.get(source, source_patdef),
+            Some(final_val)
+        );
+        assert!(typer.typed_index.get(source, source_rhs).is_some());
+        let temporary = typer
+            .pattern_bindings
+            .by_tree
+            .get(&(source, binder_tree))
+            .copied()
+            .expect("pattern checker should record its temporary binder");
+        let final_symbol = typer.local_symbol_at(source, binder_tree).unwrap();
+        assert_ne!(temporary, final_symbol);
+        assert_eq!(typer.store.symbols.get(temporary).kind, SymbolKind::Local);
+        assert_eq!(
+            typer.store.symbols.get(final_symbol).kind,
+            SymbolKind::Local
+        );
+        assert!(matches!(
+            typer.store.symbols.get(final_symbol).info,
+            SymbolInfo::Complete(ty) if ty == definitions.int
+        ));
+        assert!(matches!(
+            typer.store.types.get(typer.typed_arena.get(typed_block.expr).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if symbol == &final_symbol
+        ));
+        let typed_binder = typer.typed_index.get(source, binder_tree).unwrap();
+        assert!(matches!(
+            typer.typed_arena.get(typed_binder).kind,
+            TreeKind::Bind(_)
+        ));
+        let prior_local_symbol_count = typer.local_symbols.len();
+        let prior_pattern_binding_count = typer.pattern_bindings.by_tree.len();
+        let first_stats = typed_block.stats.clone();
+        let repeated = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Block(repeated_block) = &typer.typed_arena.get(repeated).kind else {
+            panic!("repeated method body should type to a block");
+        };
+        assert_eq!(repeated_block.stats, first_stats);
+        assert_eq!(typer.local_symbols.len(), prior_local_symbol_count);
+        assert_eq!(
+            typer.pattern_bindings.by_tree.len(),
+            prior_pattern_binding_count
+        );
+        assert_eq!(
+            typer.local_symbol_at(source, binder_tree),
+            Some(final_symbol)
+        );
+    }
+
+    #[test]
+    fn local_patdef_rhs_resolves_outer_same_named_parameter_before_final_binding() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = new MaybeInt }; class C { def use(value: Any): Int = { val Extractor(value) = value; value } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let block = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block,
+            _ => panic!("method body should be a block"),
+        };
+        let source_patdef = block.stats[0];
+        let source_rhs = match &parsed.ast.get(source_patdef).kind {
+            TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => definition.rhs.unwrap(),
+            _ => panic!("first block statement should be a PatDef"),
+        };
+        let binder_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Ident(ident)
+                    if tree != source_rhs && store.names.resolve(ident.name.text()) == "value" =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let parameter = method_parameter_symbol(&parsed, &index, source, method, 0);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let typed_rhs = typer.source_typed_index().get(source, source_rhs).unwrap();
+        assert!(matches!(
+            typer.store.types.get(typer.typed_ast().get(typed_rhs).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == parameter
+        ));
+        let local = typer.local_symbol_at(source, binder_tree).unwrap();
+        assert_ne!(local, parameter);
+        assert!(matches!(
+            typer.store.types.get(typer.typed_ast().get(typed).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == local
+        ));
+    }
+
+    #[test]
+    fn local_patdef_alias_over_extractor_binds_the_original_selector_type() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = new MaybeInt }; class C { def use(input: Any): Any = { val x @ Extractor(_) = input; x } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let block = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block,
+            _ => panic!("method body should be a block"),
+        };
+        let source_patdef = block.stats[0];
+        let binder_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Bind(binding) if store.names.resolve(binding.name.text()) == "x" => {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .expect("alias pattern should have a source Bind tree");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed).kind else {
+            panic!("method body should type to a block");
+        };
+        let final_val = typed_block.stats[0];
+        assert_eq!(typer.typed_ast().get(final_val).ty, definitions.any_type);
+        let final_symbol = typer.local_symbol_at(source, binder_tree).unwrap();
+        assert!(matches!(
+            typer.store.symbols.get(final_symbol).info,
+            SymbolInfo::Complete(ty) if ty == definitions.any_type
+        ));
+        let patdef = typer.patdef_expansion_at(source, source_patdef).unwrap();
+        let TreeKind::ValDef(final_val) = &typer.typed_ast().get(patdef.anchor).kind else {
+            panic!("PatDef anchor should be its final ValDef");
+        };
+        let TreeKind::Match(matched) = &typer.typed_ast().get(final_val.rhs.unwrap()).kind else {
+            panic!("alias extractor definition must remain refutable");
+        };
+        let TreeKind::CaseDef(case_def) = &typer.typed_ast().get(matched.cases[0]).kind else {
+            panic!("synthetic Match should contain a single case");
+        };
+        let TreeKind::Bind(binding) = &typer.typed_ast().get(case_def.pattern).kind else {
+            panic!("typed alias should stay a Bind pattern");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(binding.body).kind,
+            TreeKind::UnApply(_)
+        ));
+    }
+
+    #[test]
+    fn unsupported_nested_patdef_pattern_rolls_back_all_pattern_and_local_state() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = new MaybeInt }; class C { def use(input: Any): Int = { val Extractor(x | _) = input; 1 } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let source_patdef = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("method body should be a block"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let checkpoint = typer.store.checkpoint();
+
+        let error = typer.type_expression(rhs, context).unwrap_err();
+        assert!(matches!(
+            error,
+            TyperError::PatternBindingInAlternative { .. }
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.patdef_expansion_at(source, source_patdef).is_none());
+        assert!(typer.local_symbols.is_empty());
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+    }
+
+    #[test]
     fn typing_a_local_valdef_outside_a_block_does_not_mutate_the_method_scope() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def use: Int = { val local: Int = 1; local } }");
