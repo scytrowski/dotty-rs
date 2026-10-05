@@ -321,6 +321,18 @@ where
 
     fn parse_lambda_indented_block_body(&mut self) -> TreeId<Untyped> {
         let body = self.parse_feedback_indented_block_preserving_block();
+        if let Some(indent_offset) = self.feedback_block_indent {
+            self.observe_outdented_region(indent_offset);
+        }
+        if matches!(self.current().kind, TokenKind::Outdent | TokenKind::Eof) {
+            return body;
+        }
+
+        let (tail_stats, expr) = if let Some(indent_offset) = self.feedback_block_indent {
+            self.parse_region_feedback_expression_block_body(indent_offset)
+        } else {
+            self.parse_expression_block_body(TokenKind::Outdent)
+        };
         let mark = crate::Mark {
             start: self
                 .ast
@@ -329,30 +341,14 @@ where
                 .map(|position| position.span().range().start())
                 .unwrap_or_else(|| self.mark().start),
         };
-        let (mut stats, first_expr) = match &self.ast.get(body).kind {
-            TreeKind::Block(block) => (block.stats.clone(), block.expr),
-            _ => (Vec::new(), body),
+        // Preserve nested statement sequences as a block so their local
+        // definitions remain scoped to the lambda body. Dotty does flatten
+        // the synthetic one-expression block used for an inline lambda body.
+        let body_statement = match &self.ast.get(body).kind {
+            TreeKind::Block(block) if block.stats.is_empty() => block.expr,
+            _ => body,
         };
-
-        if let Some(indent_offset) = self.feedback_block_indent {
-            self.observe_outdented_region(indent_offset);
-        }
-        if matches!(self.current().kind, TokenKind::Outdent | TokenKind::Eof) {
-            return self.alloc_from(
-                mark,
-                TreeKind::Block(dotty_core::ast::Block {
-                    stats,
-                    expr: first_expr,
-                }),
-            );
-        }
-
-        let (tail_stats, expr) = if let Some(indent_offset) = self.feedback_block_indent {
-            self.parse_region_feedback_expression_block_body(indent_offset)
-        } else {
-            self.parse_expression_block_body(TokenKind::Outdent)
-        };
-        stats.push(first_expr);
+        let mut stats = vec![body_statement];
         stats.extend(tail_stats);
         self.alloc_from(
             mark,

@@ -158,7 +158,7 @@ fn lambda_block_stops_before_the_next_template_member() {
         panic!("expected val h's lambda body to retain a block");
     };
     let [first] = stats.as_slice() else {
-        panic!("expected first lambda-body expression as a statement: {stats:?}");
+        panic!("expected the first expression as a lambda-body statement: {stats:?}");
     };
     assert!(matches!(
         result.ast.get(*first).kind,
@@ -253,6 +253,66 @@ fn indented_lambda_body_includes_following_statements_before_its_outdent() {
     };
     assert!(matches!(
         result.ast.get(*first).kind,
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+    ));
+    assert!(matches!(
+        result.ast.get(*expr).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Number(_))
+    ));
+}
+
+#[test]
+fn statements_after_an_indented_lambda_body_preserve_its_scope() {
+    let source = include_str!(
+        "../../scala-parser-oracle/fixtures/colon-argument-lambda-indented-body-scoped-tail.scala"
+    );
+    let scanner = ContextualScanner::new(source).expect("source scans");
+    let mut names = NameInterner::new();
+    let result = parse_expression_fragment(
+        SourceText::new(source).expect("source text is valid"),
+        SourceId::from_index(0),
+        scanner,
+        &mut names,
+    );
+
+    assert!(
+        result.diagnostics.is_empty(),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let TreeKind::Apply(application) = &result.ast.get(result.root).kind else {
+        panic!("expected the colon argument to form an application");
+    };
+    let [argument] = application.args.as_slice() else {
+        panic!("expected one colon argument");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::Function(Function { body, .. })) =
+        &result.ast.get(*argument).kind
+    else {
+        panic!("expected a lambda argument");
+    };
+    let TreeKind::Block(Block { stats, expr }) = &result.ast.get(*body).kind else {
+        panic!("expected the lambda to have an outer block");
+    };
+    let [nested_body] = stats.as_slice() else {
+        panic!("expected the nested lambda body to remain scoped: {stats:?}");
+    };
+    let TreeKind::Block(Block {
+        stats: nested_stats,
+        expr: nested_expr,
+    }) = &result.ast.get(*nested_body).kind
+    else {
+        panic!("expected the lambda body to remain a nested block");
+    };
+    let [definition] = nested_stats.as_slice() else {
+        panic!("expected local val y in the nested lambda block: {nested_stats:?}");
+    };
+    let TreeKind::ValDef(ValDef { name, .. }) = &result.ast.get(*definition).kind else {
+        panic!("expected a local val definition");
+    };
+    assert_eq!(names.resolve(name.as_name().text()), "y");
+    assert!(matches!(
+        result.ast.get(*nested_expr).kind,
         TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
     ));
     assert!(matches!(
