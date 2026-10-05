@@ -23,6 +23,11 @@ pub(crate) enum StatementSequenceBoundary {
         closing: TokenKind,
         indent_offset: u32,
     },
+    /// An eager scanner indent whose grammar boundary needs per-statement feedback.
+    LayoutRegionBlock {
+        closing: TokenKind,
+        indent_offset: u32,
+    },
 }
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
@@ -226,6 +231,10 @@ where
                                 closing: TokenKind::Outdent,
                                 ..
                             }
+                            | StatementSequenceBoundary::LayoutRegionBlock {
+                                closing: TokenKind::Outdent,
+                                ..
+                            }
                     )
                 {
                     return self.finish_statement_sequence(statements);
@@ -240,7 +249,8 @@ where
             let location = match boundary {
                 StatementSequenceBoundary::CompilationUnit => Location::Elsewhere,
                 StatementSequenceBoundary::Block(_)
-                | StatementSequenceBoundary::FeedbackRegionBlock { .. } => Location::InBlock,
+                | StatementSequenceBoundary::FeedbackRegionBlock { .. }
+                | StatementSequenceBoundary::LayoutRegionBlock { .. } => Location::InBlock,
             };
             statements.push(self.parse_statement(location));
 
@@ -257,6 +267,9 @@ where
                         StatementSequenceBoundary::FeedbackRegionBlock { .. } => {
                             "parser made no progress while parsing a block"
                         }
+                        StatementSequenceBoundary::LayoutRegionBlock { .. } => {
+                            "parser made no progress while parsing a block"
+                        }
                     },
                 );
                 let recovery_checkpoint = self.cursor.checkpoint();
@@ -268,6 +281,9 @@ where
 
             if let StatementSequenceBoundary::FeedbackRegionBlock { indent_offset, .. } = boundary {
                 self.observe_outdented_region(indent_offset);
+            }
+            if let StatementSequenceBoundary::LayoutRegionBlock { indent_offset, .. } = boundary {
+                self.observe_outdented_layout_region(indent_offset);
             }
 
             if self.is_sequence_separator(boundary) {
@@ -290,6 +306,9 @@ where
                         StatementSequenceBoundary::FeedbackRegionBlock { .. } => {
                             "expected a block statement separator"
                         }
+                        StatementSequenceBoundary::LayoutRegionBlock { .. } => {
+                            "expected a block statement separator"
+                        }
                     },
                 );
                 self.recover_until(RecoverySet::Statement);
@@ -304,6 +323,10 @@ where
                         boundary,
                         StatementSequenceBoundary::Block(TokenKind::Outdent)
                             | StatementSequenceBoundary::FeedbackRegionBlock {
+                                closing: TokenKind::Outdent,
+                                ..
+                            }
+                            | StatementSequenceBoundary::LayoutRegionBlock {
                                 closing: TokenKind::Outdent,
                                 ..
                             }
@@ -498,6 +521,11 @@ where
                             == TokenKind::Punctuation(Punctuation::Comma))
                     || (self.context.case_body && self.is_case_body_terminator())
             }
+            StatementSequenceBoundary::LayoutRegionBlock { closing: end, .. } => {
+                self.current().kind == end
+                    || self.current().kind == TokenKind::Eof
+                    || (self.context.case_body && self.is_case_body_terminator())
+            }
         }
     }
 
@@ -507,7 +535,8 @@ where
                 is_statement_separator(self.current().kind)
             }
             StatementSequenceBoundary::Block(_)
-            | StatementSequenceBoundary::FeedbackRegionBlock { .. } => {
+            | StatementSequenceBoundary::FeedbackRegionBlock { .. }
+            | StatementSequenceBoundary::LayoutRegionBlock { .. } => {
                 is_block_separator(self.current().kind)
             }
         }

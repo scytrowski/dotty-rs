@@ -869,9 +869,11 @@ impl TokenSource for ContextualScanner {
                 // so a match-case region may end at the marker's own indentation
                 // (as in legacy layouts where `case` and `end match` align).
                 let closes_with_end_marker = self.current().kind == TokenKind::EndMarker;
+                let closes_at_same_indent_else =
+                    self.current().kind == TokenKind::Keyword(HardKeyword::Else);
                 if self.innermost_open_indent_offset(self.current_index()) == Some(indent_offset)
                     && self.insert_outdent_before_current(
-                        closes_with_end_marker,
+                        closes_with_end_marker || closes_at_same_indent_else,
                         true,
                         Some(indent_offset),
                     )
@@ -5582,6 +5584,41 @@ mod tests {
 
         assert_eq!(scanner.current().kind, TokenKind::Outdent);
         assert_eq!(scanner.lookahead(1).kind, TokenKind::EndMarker);
+    }
+
+    #[test]
+    fn outdented_layout_closes_a_then_body_before_an_aligned_else() {
+        let source = "def f =\n  if test then\n    one()\n    else\n      two()";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        let then_index = scanner
+            .tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::Keyword(HardKeyword::Then))
+            .expect("then token");
+        let body_indent = scanner
+            .tokens
+            .iter()
+            .skip(then_index + 1)
+            .find(|token| token.kind == TokenKind::Indent)
+            .expect("then body indent")
+            .span
+            .start();
+        let else_index = scanner
+            .tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::Keyword(HardKeyword::Else))
+            .expect("else token");
+        scanner.position = else_index;
+
+        scanner.observe(ScannerEvent::OutdentedLayoutRegion {
+            indent_offset: body_indent,
+        });
+
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        assert_eq!(
+            scanner.lookahead(1).kind,
+            TokenKind::Keyword(HardKeyword::Else)
+        );
     }
 
     #[test]

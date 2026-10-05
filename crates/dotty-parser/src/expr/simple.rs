@@ -462,6 +462,18 @@ where
         )
     }
 
+    pub(crate) fn parse_layout_region_expression_block_body(
+        &mut self,
+        indent_offset: u32,
+    ) -> (Vec<TreeId<Untyped>>, TreeId<Untyped>) {
+        self.parse_expression_block_body_with_boundary(
+            StatementSequenceBoundary::LayoutRegionBlock {
+                closing: TokenKind::Outdent,
+                indent_offset,
+            },
+        )
+    }
+
     fn parse_expression_block_body_with_boundary(
         &mut self,
         boundary: StatementSequenceBoundary,
@@ -471,7 +483,8 @@ where
                 parser.with_block_end(
                     match boundary {
                         StatementSequenceBoundary::Block(end)
-                        | StatementSequenceBoundary::FeedbackRegionBlock { closing: end, .. } => {
+                        | StatementSequenceBoundary::FeedbackRegionBlock { closing: end, .. }
+                        | StatementSequenceBoundary::LayoutRegionBlock { closing: end, .. } => {
                             Some(end)
                         }
                         StatementSequenceBoundary::CompilationUnit => None,
@@ -483,6 +496,7 @@ where
                                 ..
                             } => Some(indent_offset),
                             StatementSequenceBoundary::Block(_)
+                            | StatementSequenceBoundary::LayoutRegionBlock { .. }
                             | StatementSequenceBoundary::CompilationUnit => None,
                         };
                         parser.with_feedback_block_indent(feedback_indent, |parser| {
