@@ -305,18 +305,25 @@ where
                 self.current().kind,
                 TokenKind::Punctuation(Punctuation::RightParen | Punctuation::RightBrace)
             );
-            if !self.cursor.at(TokenKind::Outdent) {
-                if let Some((indent_offset, opened_by_feedback)) = body_indent {
-                    if closed_by_delimiter {
-                        if opened_by_feedback {
-                            self.observe_outdented_by_delimiter();
-                        }
-                    } else {
-                        self.observe_outdented_layout_region(indent_offset);
+            let already_outdented = self.cursor.at(TokenKind::Outdent);
+            if let Some((indent_offset, opened_by_feedback)) = body_indent {
+                if closed_by_delimiter {
+                    if opened_by_feedback {
+                        self.observe_outdented_by_delimiter();
                     }
-                } else if !closed_by_delimiter {
-                    self.observe_outdented();
+                } else if already_outdented {
+                    if opened_by_feedback {
+                        // The scanner already supplied this body's Outdent.
+                        // Still close the parser-feedback region, or a later
+                        // outdent request can incorrectly terminate sibling
+                        // case clauses.
+                        self.observe_outdented_by_delimiter();
+                    }
+                } else {
+                    self.observe_outdented_layout_region(indent_offset);
                 }
+            } else if !closed_by_delimiter && !already_outdented {
+                self.observe_outdented();
             }
             if !self.accept(TokenKind::Outdent) && !closed_by_delimiter {
                 self.report(

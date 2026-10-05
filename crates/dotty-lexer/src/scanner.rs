@@ -1000,9 +1000,13 @@ impl TokenSource for ContextualScanner {
             }
             ScannerEvent::OutdentedByDelimiter => {
                 if let Some(region) = self.feedback_regions.pop() {
-                    // No parser-visible Outdent is inserted at the delimiter,
-                    // so remember the indent token as logically closed.
-                    self.delimiter_closed_indents.push(region.indent_offset);
+                    // No parser-visible Outdent is inserted at a grammar
+                    // delimiter. If an Outdent is already current, it closes
+                    // the region in the token stream and only feedback state
+                    // needs to be discarded.
+                    if self.current().kind != TokenKind::Outdent {
+                        self.delimiter_closed_indents.push(region.indent_offset);
+                    }
                 }
             }
             ScannerEvent::ArrowIndented => {
@@ -3242,6 +3246,34 @@ mod tests {
             scanner.current().kind,
             TokenKind::Punctuation(Punctuation::RightParen)
         );
+    }
+
+    #[test]
+    fn consumed_outdent_closes_feedback_state_without_marking_a_delimiter() {
+        let source = "if ready then\n  run()\nafter";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        let indent = scanner
+            .tokens
+            .iter()
+            .find(|token| token.kind == TokenKind::Indent)
+            .expect("body indent");
+        let outdent_index = scanner
+            .tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::Outdent)
+            .expect("body outdent");
+        scanner.feedback_regions.push(FeedbackRegion {
+            kind: FeedbackRegionKind::CaseBody,
+            indent_offset: indent.span.start(),
+            case_offset: None,
+        });
+        scanner.position = outdent_index;
+
+        scanner.observe(ScannerEvent::OutdentedByDelimiter);
+
+        assert!(scanner.feedback_regions.is_empty());
+        assert!(scanner.delimiter_closed_indents.is_empty());
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
     }
 
     #[test]

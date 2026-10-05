@@ -431,8 +431,8 @@ where
             .or_else(|| feedback_indent.map(|indent_offset| (indent_offset, true)))
     }
 
-    /// Closes a feedback-opened layout region at a grammar delimiter without
-    /// asking the scanner to insert a parser-visible `Outdent` token.
+    /// Closes a feedback-opened layout region at a grammar boundary without
+    /// asking the scanner to insert another parser-visible `Outdent` token.
     pub(crate) fn observe_outdented_by_delimiter(&mut self) {
         self.observe(ScannerEvent::OutdentedByDelimiter);
     }
