@@ -844,8 +844,12 @@ impl TokenSource for ContextualScanner {
                     .feedback_regions
                     .last()
                     .is_some_and(|region| region.indent_offset == indent_offset);
-                let closes_at_same_indent_else =
-                    self.current().kind == TokenKind::Keyword(HardKeyword::Else);
+                let closes_at_same_indent_else = self.current().kind
+                    == TokenKind::Keyword(HardKeyword::Else)
+                    || (self.current().kind == TokenKind::Punctuation(Punctuation::Semicolon)
+                        && next_real_token(&self.tokens, self.current_index()).is_some_and(
+                            |token| token.kind == TokenKind::Keyword(HardKeyword::Else),
+                        ));
                 if matches_top_region
                     && self.insert_outdent_before_current(
                         closes_at_same_indent_else,

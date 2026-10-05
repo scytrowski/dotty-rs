@@ -8,6 +8,18 @@ fn else_aligned_with_an_indented_then_expression_remains_in_the_if() {
     let source = include_str!(
         "../../scala-parser-oracle/fixtures/compilation/if-else-aligned-with-then-body.scala"
     );
+    assert_if_branches_and_following_member_are_preserved(source);
+}
+
+#[test]
+fn else_aligned_after_a_semicolon_remains_in_the_if() {
+    let source = include_str!(
+        "../../scala-parser-oracle/fixtures/compilation/if-else-aligned-after-semicolon.scala"
+    );
+    assert_if_branches_and_following_member_are_preserved(source);
+}
+
+fn assert_if_branches_and_following_member_are_preserved(source: &str) {
     let scanner = ContextualScanner::new(source).expect("source scans");
     let mut names = NameInterner::new();
     let result = parse_compilation_unit(
