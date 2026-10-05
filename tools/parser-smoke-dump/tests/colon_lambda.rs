@@ -104,8 +104,8 @@ fn lambda_block_stops_before_the_next_template_member() {
     };
     assert_eq!(
         members.len(),
-        2,
-        "val g must remain outside the lambda block"
+        3,
+        "val g must remain outside both lambda blocks"
     );
     let TreeKind::ValDef(ValDef { rhs: Some(rhs), .. }) = result.ast.get(members[0]).kind else {
         panic!("expected val f to have a right-hand side");
@@ -139,8 +139,124 @@ fn lambda_block_stops_before_the_next_template_member() {
         panic!("expected y as the lambda body's final expression");
     };
     assert_eq!(names.resolve(identifier.name.text()), "y");
-    let TreeKind::ValDef(ValDef { name, .. }) = &result.ast.get(members[1]).kind else {
+
+    let TreeKind::ValDef(ValDef { rhs: Some(rhs), .. }) = result.ast.get(members[1]).kind else {
+        panic!("expected val h to have a right-hand side");
+    };
+    let TreeKind::Apply(application) = &result.ast.get(rhs).kind else {
+        panic!("expected val h's right-hand side to be an application");
+    };
+    let [argument] = application.args.as_slice() else {
+        panic!("expected one colon argument for val h");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::Function(Function { body, .. })) =
+        &result.ast.get(*argument).kind
+    else {
+        panic!("expected val h's colon argument to be a lambda");
+    };
+    let TreeKind::Block(Block { stats, expr }) = &result.ast.get(*body).kind else {
+        panic!("expected val h's lambda body to retain a block");
+    };
+    let [first] = stats.as_slice() else {
+        panic!("expected first lambda-body expression as a statement: {stats:?}");
+    };
+    assert!(matches!(
+        result.ast.get(*first).kind,
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+    ));
+    assert!(matches!(
+        result.ast.get(*expr).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Number(_))
+    ));
+
+    let TreeKind::ValDef(ValDef { name, .. }) = &result.ast.get(members[2]).kind else {
         panic!("expected val g after the colon argument");
     };
     assert_eq!(names.resolve(name.as_name().text()), "g");
+}
+
+#[test]
+fn indented_lambda_body_keeps_dottys_single_expression_block() {
+    let source = include_str!(
+        "../../scala-parser-oracle/fixtures/colon-argument-lambda-indented-body.scala"
+    );
+    let scanner = ContextualScanner::new(source).expect("source scans");
+    let mut names = NameInterner::new();
+    let result = parse_expression_fragment(
+        SourceText::new(source).expect("source text is valid"),
+        SourceId::from_index(0),
+        scanner,
+        &mut names,
+    );
+
+    assert!(
+        result.diagnostics.is_empty(),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let TreeKind::Apply(application) = &result.ast.get(result.root).kind else {
+        panic!("expected the colon argument to form an application");
+    };
+    let [argument] = application.args.as_slice() else {
+        panic!("expected one colon argument");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::Function(Function { body, .. })) =
+        &result.ast.get(*argument).kind
+    else {
+        panic!("expected the colon argument to be a lambda");
+    };
+    let TreeKind::Block(Block { stats, expr }) = &result.ast.get(*body).kind else {
+        panic!("expected Dotty's one-expression block around the lambda body");
+    };
+    assert!(stats.is_empty());
+    assert!(matches!(
+        result.ast.get(*expr).kind,
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+    ));
+}
+
+#[test]
+fn indented_lambda_body_includes_following_statements_before_its_outdent() {
+    let source = include_str!(
+        "../../scala-parser-oracle/fixtures/colon-argument-lambda-indented-body-following.scala"
+    );
+    let scanner = ContextualScanner::new(source).expect("source scans");
+    let mut names = NameInterner::new();
+    let result = parse_expression_fragment(
+        SourceText::new(source).expect("source text is valid"),
+        SourceId::from_index(0),
+        scanner,
+        &mut names,
+    );
+
+    assert!(
+        result.diagnostics.is_empty(),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
+    let TreeKind::Apply(application) = &result.ast.get(result.root).kind else {
+        panic!("expected the colon argument to form an application");
+    };
+    let [argument] = application.args.as_slice() else {
+        panic!("expected one colon argument");
+    };
+    let TreeKind::PhaseSpecific(UntypedNode::Function(Function { body, .. })) =
+        &result.ast.get(*argument).kind
+    else {
+        panic!("expected the colon argument to be a lambda");
+    };
+    let TreeKind::Block(Block { stats, expr }) = &result.ast.get(*body).kind else {
+        panic!("expected the lambda body to be a block");
+    };
+    let [first] = stats.as_slice() else {
+        panic!("expected the first expression as a lambda-body statement: {stats:?}");
+    };
+    assert!(matches!(
+        result.ast.get(*first).kind,
+        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+    ));
+    assert!(matches!(
+        result.ast.get(*expr).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Number(_))
+    ));
 }

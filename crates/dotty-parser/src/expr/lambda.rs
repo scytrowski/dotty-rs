@@ -250,6 +250,11 @@ where
             return self.error_expr(position);
         }
         if self.current().kind == TokenKind::Indent {
+            if self.context.location == Location::InBlock
+                && self.context.block_end == Some(TokenKind::Outdent)
+            {
+                return self.parse_lambda_indented_block_body();
+            }
             return self.parse_feedback_indented_block();
         }
 
@@ -308,6 +313,47 @@ where
     fn parse_lambda_feedback_block_body(&mut self, indent_offset: u32) -> TreeId<Untyped> {
         let mark = self.mark();
         let (stats, expr) = self.parse_region_feedback_expression_block_body(indent_offset);
+        self.alloc_from(
+            mark,
+            TreeKind::Block(dotty_core::ast::Block { stats, expr }),
+        )
+    }
+
+    fn parse_lambda_indented_block_body(&mut self) -> TreeId<Untyped> {
+        let body = self.parse_feedback_indented_block_preserving_block();
+        let mark = crate::Mark {
+            start: self
+                .ast
+                .get(body)
+                .position
+                .map(|position| position.span().range().start())
+                .unwrap_or_else(|| self.mark().start),
+        };
+        let (mut stats, first_expr) = match &self.ast.get(body).kind {
+            TreeKind::Block(block) => (block.stats.clone(), block.expr),
+            _ => (Vec::new(), body),
+        };
+
+        if let Some(indent_offset) = self.feedback_block_indent {
+            self.observe_outdented_region(indent_offset);
+        }
+        if matches!(self.current().kind, TokenKind::Outdent | TokenKind::Eof) {
+            return self.alloc_from(
+                mark,
+                TreeKind::Block(dotty_core::ast::Block {
+                    stats,
+                    expr: first_expr,
+                }),
+            );
+        }
+
+        let (tail_stats, expr) = if let Some(indent_offset) = self.feedback_block_indent {
+            self.parse_region_feedback_expression_block_body(indent_offset)
+        } else {
+            self.parse_expression_block_body(TokenKind::Outdent)
+        };
+        stats.push(first_expr);
+        stats.extend(tail_stats);
         self.alloc_from(
             mark,
             TreeKind::Block(dotty_core::ast::Block { stats, expr }),

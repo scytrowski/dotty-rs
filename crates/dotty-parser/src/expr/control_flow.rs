@@ -595,23 +595,28 @@ where
     }
 
     pub(crate) fn parse_indented_block(&mut self) -> TreeId<Untyped> {
-        self.parse_indented_block_with_feedback(None)
+        self.parse_indented_block_with_feedback(None, false)
     }
 
     pub(crate) fn parse_feedback_indented_block(&mut self) -> TreeId<Untyped> {
-        self.parse_indented_block_with_feedback(Some(self.current().span.start()))
+        self.parse_indented_block_with_feedback(Some(self.current().span.start()), false)
+    }
+
+    pub(crate) fn parse_feedback_indented_block_preserving_block(&mut self) -> TreeId<Untyped> {
+        self.parse_indented_block_with_feedback(Some(self.current().span.start()), true)
     }
 
     pub(crate) fn parse_region_feedback_indented_block(
         &mut self,
         indent_offset: u32,
     ) -> TreeId<Untyped> {
-        self.parse_indented_block_with_feedback(Some(indent_offset))
+        self.parse_indented_block_with_feedback(Some(indent_offset), false)
     }
 
     fn parse_indented_block_with_feedback(
         &mut self,
         feedback_indent: Option<u32>,
+        preserve_block: bool,
     ) -> TreeId<Untyped> {
         let region_indent = (self.current().kind == TokenKind::Indent)
             .then(|| self.current().span.start())
@@ -672,7 +677,11 @@ where
                 "expected an outdent to close an indented block",
             );
         }
-        self.finish_indented_block(mark, stats, expr)
+        if preserve_block {
+            self.alloc_from(mark, TreeKind::Block(Block { stats, expr }))
+        } else {
+            self.finish_indented_block(mark, stats, expr)
+        }
     }
 
     fn finish_indented_block(
