@@ -18,6 +18,11 @@ as one final `ValDef` carrying the RHS directly. For a general pattern, Dotty
 collects non-wildcard variable binders and lowers the check/extraction as
 follows:
 
+Variables inside a pattern `Alternative` are diagnosed as illegal by the
+pinned `Desugar.getVariables` implementation and are not returned as final
+PatDef binders. The corpus audit therefore retains `Alternative` as the root
+shape but stops binder collection at that node.
+
 | User binders | Normalized result |
 | --- | --- |
 | One | One final `ValDef`; its RHS performs the pattern match/check and yields the binder value. |

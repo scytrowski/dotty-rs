@@ -1089,6 +1089,30 @@ fn local_patdef_audit_collects_nested_pattern_binders_structurally() {
 }
 
 #[test]
+fn local_patdef_audit_does_not_collect_binders_from_alternatives() {
+    let source = "object Audit { def outer(value: Option[Int]): Int = value match { case Some(x) | None => 0 } }";
+    let mut store = SemanticStore::new();
+    Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(source).expect("test source should scan");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source).expect("test source should be valid UTF-8"),
+        SourceId::from_index(0),
+        scanner,
+        &mut store.names,
+    );
+    let alternative = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| matches!(node.kind, TreeKind::Alternative(_)).then_some(tree))
+        .expect("fixture should contain a pattern alternative");
+    let mut binders = BTreeSet::new();
+
+    collect_patdef_binders(&parsed.ast, &store.names, alternative, &mut binders);
+
+    assert!(binders.is_empty(), "{binders:?}");
+}
+
+#[test]
 fn local_patdef_audit_is_deterministic() {
     let source = "object Audit { def outer(value: Option[Int]): Int = { val Some(x) = value; val (_, _) = (1, 2); 0 } }";
     let first = audit_source(source, "PatDef.scala");
@@ -2940,9 +2964,9 @@ fn collect_patdef_binders(
                 pending.push(binding.body);
             }
             TreeKind::Typed(typed) => pending.push(typed.expr),
-            TreeKind::Alternative(alternative) => {
-                pending.extend(alternative.alternatives.iter().copied());
-            }
+            // Dotty 3.9 reports variables under Alternative as illegal and
+            // does not expose them as PatDef binders (Desugar.getVariables).
+            TreeKind::Alternative(_) => {}
             TreeKind::Apply(application) => pending.extend(application.args.iter().copied()),
             TreeKind::UnApply(unapply) => pending.extend(unapply.patterns.iter().copied()),
             TreeKind::NamedArg(argument) => pending.push(argument.arg),
