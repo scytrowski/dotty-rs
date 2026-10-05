@@ -274,11 +274,17 @@ impl SourceTyper<'_> {
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TypedStatExpansion, TyperError> {
         if let Some(expansion) = self.patdef_expansion_at(self.source, tree).cloned() {
-            let Some((binder_tree, binder_name)) =
-                self.patdef_binders(&definition.patterns).first().copied()
-            else {
+            let binders = self.patdef_binders(&definition.patterns);
+            if binders.is_empty() {
+                return Ok(TypedStatExpansion {
+                    anchor: expansion.anchor,
+                    emitted: expansion.emitted,
+                });
+            }
+            if binders.len() != 1 {
                 return Err(self.patdef_deferred(tree));
-            };
+            }
+            let (binder_tree, binder_name) = binders[0];
             let final_symbol = self
                 .local_symbols
                 .get(&(self.source, binder_tree))
@@ -334,42 +340,47 @@ impl SourceTyper<'_> {
             return Err(self.patdef_deferred(tree));
         }
         let binders = self.patdef_binders(&definition.patterns);
-        if binders.len() != 1 {
+        if binders.len() > 1 {
             return Err(self.patdef_deferred(tree));
         }
-        let (binder_tree, binder_name) = binders[0];
-        let Some(local_stack) = context.local_scopes else {
-            return Err(TyperError::ExpressionLocalScopeStackMissing {
-                stack: ExpressionScopeId::new(
-                    self.expression_scope_owner,
-                    self.expression_scopes.len(),
-                ),
-            });
+        let local_binding = binders.first().copied();
+        let scope = if let Some((_, binder_name)) = local_binding {
+            let Some(local_stack) = context.local_scopes else {
+                return Err(TyperError::ExpressionLocalScopeStackMissing {
+                    stack: ExpressionScopeId::new(
+                        self.expression_scope_owner,
+                        self.expression_scopes.len(),
+                    ),
+                });
+            };
+            let frame = self
+                .expression_scopes
+                .get(local_stack.index())
+                .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack: local_stack })?;
+            if !frame.is_block_scope {
+                return Err(TyperError::LocalValueOutsideBlock {
+                    source: self.source,
+                    tree_index: tree.index(),
+                });
+            }
+            let scope = frame.scope;
+            if !self
+                .store
+                .scopes
+                .get(scope)
+                .lookup_all(&binder_name)
+                .is_empty()
+            {
+                return Err(TyperError::DuplicateLocalValue {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    name: binder_name,
+                });
+            }
+            Some(scope)
+        } else {
+            None
         };
-        let frame = self
-            .expression_scopes
-            .get(local_stack.index())
-            .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack: local_stack })?;
-        if !frame.is_block_scope {
-            return Err(TyperError::LocalValueOutsideBlock {
-                source: self.source,
-                tree_index: tree.index(),
-            });
-        }
-        let scope = frame.scope;
-        if !self
-            .store
-            .scopes
-            .get(scope)
-            .lookup_all(&binder_name)
-            .is_empty()
-        {
-            return Err(TyperError::DuplicateLocalValue {
-                source: self.source,
-                tree_index: tree.index(),
-                name: binder_name,
-            });
-        }
         let rhs = definition.rhs.expect("checked above");
         let typed_selector =
             self.type_value_expression_inner(rhs, context, info_journal, new_mappings)?;
@@ -386,6 +397,7 @@ impl SourceTyper<'_> {
         // SourceTypedIndex mapping. The scope is discarded before the final
         // block-local symbol is entered.
         let expression_scope_depth = self.expression_scopes.len();
+        let prior_pattern_binding_count = self.pattern_bindings.by_tree.len();
         let case_context = self.push_case_scope(context)?;
         let typed_pattern = self.type_pattern(
             definition.patterns[0],
@@ -396,6 +408,49 @@ impl SourceTyper<'_> {
         );
         self.expression_scopes.truncate(expression_scope_depth);
         let typed_pattern = typed_pattern?;
+        if local_binding.is_none() {
+            let actual_pattern_binding_count = self
+                .pattern_bindings
+                .by_tree
+                .len()
+                .saturating_sub(prior_pattern_binding_count);
+            if actual_pattern_binding_count != 0 {
+                return Err(TyperError::PatDefBinderInventoryConflict {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    expected: 0,
+                    actual: actual_pattern_binding_count,
+                });
+            }
+            let unit_literal_type = self
+                .store
+                .types
+                .alloc(Type::Constant(dotty_core::Constant::Unit));
+            let unit_body = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).literal(
+                dotty_core::Constant::Unit,
+                unit_literal_type,
+                None,
+            );
+            let case = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).case_def(
+                typed_pattern,
+                None,
+                unit_body,
+                unit_literal_type,
+                position,
+            );
+            let extraction = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .match_expr(typed_selector, vec![case], self.definitions.unit, position);
+            let expansion = TypedStatExpansion::one(extraction);
+            self.record_patdef_expansion(
+                tree,
+                context,
+                expansion.clone(),
+                Vec::new(),
+                new_mappings,
+            )?;
+            return Ok(expansion);
+        }
+        let (binder_tree, binder_name) = local_binding.ok_or_else(|| self.patdef_deferred(tree))?;
         let temporary = self
             .pattern_bindings
             .by_tree
@@ -456,6 +511,7 @@ impl SourceTyper<'_> {
             position: binder_position,
             links: dotty_core::SymbolLinks::default(),
         });
+        let scope = scope.ok_or_else(|| self.patdef_deferred(tree))?;
         self.store
             .scopes
             .get_mut(scope)

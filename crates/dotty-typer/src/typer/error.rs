@@ -672,6 +672,14 @@ pub enum TyperError {
         source: SourceId,
         tree_index: u32,
     },
+    /// Pattern typing introduced user bindings even though a PatDef's binder
+    /// inventory reported a different count.
+    PatDefBinderInventoryConflict {
+        source: SourceId,
+        tree_index: u32,
+        expected: usize,
+        actual: usize,
+    },
     /// String constants do not have a canonical source type in this session yet.
     StringLiteralTypingDeferred {
         source: SourceId,

@@ -3667,6 +3667,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::UnstableSelectionPrefix { .. } => "UnstableSelectionPrefix",
         TyperError::UnsupportedSingletonReference { .. } => "UnsupportedSingletonReference",
         TyperError::PatDefExpansionConflict { .. } => "PatDefExpansionConflict",
+        TyperError::PatDefBinderInventoryConflict { .. } => "PatDefBinderInventoryConflict",
     }
 }
 
