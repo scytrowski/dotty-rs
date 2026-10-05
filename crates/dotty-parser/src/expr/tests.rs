@@ -2533,6 +2533,47 @@ fn parses_an_unchecked_type_ascription_as_a_match_selector() {
 }
 
 #[test]
+fn parses_an_unparenthesized_unchecked_ascription_as_a_match_selector() {
+    let source = "value: @unchecked match { case _ => value }";
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        source,
+        vec![
+            token(TokenKind::Identifier, 0, 5),
+            token(TokenKind::ColonFollow, 5, 6),
+            token(TokenKind::Operator, 7, 8),
+            token(TokenKind::Identifier, 8, 17),
+            token(TokenKind::Keyword(HardKeyword::Match), 18, 23),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 24, 25),
+            token(TokenKind::Keyword(HardKeyword::Case), 26, 30),
+            token(TokenKind::Identifier, 31, 32),
+            token(TokenKind::Operator, 33, 35),
+            token(TokenKind::Identifier, 36, 41),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 42, 43),
+            token(TokenKind::Eof, 43, 43),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+    let TreeKind::Match(Match { selector, cases }) = &parser.ast().get(tree).kind else {
+        panic!("expected an unparenthesized annotated match selector");
+    };
+    let TreeKind::Annotated(Annotated { expr, annotation }) = &parser.ast().get(*selector).kind
+    else {
+        panic!("expected an annotated match selector");
+    };
+    assert!(matches!(parser.ast().get(*expr).kind, TreeKind::Ident(_)));
+    assert!(matches!(
+        parser.ast().get(*annotation).kind,
+        TreeKind::Apply(_)
+    ));
+    assert_eq!(cases.len(), 1);
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
 fn parses_a_colon_followed_by_an_indented_lambda_as_an_argument() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
