@@ -677,22 +677,27 @@ from isolated-case failures and the global semantic-gap ranking. See the
 [normalized audit report](typer-classpath-corpus-audit-3.9.0.md) for current
 counts and the next-increment recommendation.
 
-The #720 rerun uses the same pinned revision, JDK 21, corpus roots, and
-classpath. Two normalized runs matched byte-for-byte. The #715 baseline's
-107 unsupported type-tree first blockers in 36 files are now 26 in 10 files;
-wildcard/bounds, union, intersection, singleton, and repeated-type blockers
-are zero. The remaining blockers are `Function` (11 in 7 files),
-`FunctionWithMods` (13 in 2 files; together these function-type blockers span
-9 distinct files), and ordinary annotated types (2 in 1 file). The independent
-structural inventory records their source prevalence and file counts even
-when an earlier error prevents projection. The current global leaders are
-local pattern definitions (87 in 23 files) and `PrefixOp` expressions (62 in
-21 files), so
-the audit recommends switching the next main increment to a transactional
-local pattern-definition slice. Function types, refinements, type lambdas,
-match types, and annotation/capture syntax remain separate candidate families;
-the report records their existing core representations, prerequisites, and
-non-goals.
+The #720 rerun snapshot used the same pinned revision, JDK 21, corpus roots,
+and classpath; two normalized runs matched byte-for-byte. At that snapshot,
+the #715 baseline's 107 unsupported type-tree first blockers in 36 files had
+fallen to 26 in 10 files. The remaining snapshot counts were `Function` (11
+in 7 files), `FunctionWithMods` (13 in 2 files), and ordinary annotated types
+(2 in 1 file). Those figures are retained as historical #720 measurements.
+
+The latest #738 rerun still uses the pinned Scala revision, JDK 21, corpus
+roots, and classpath, and its two normalized runs matched byte-for-byte. It
+records 28 unsupported type-tree first blockers in 12 files: `Function` (12
+in 8 files), `FunctionWithMods` (13 in 2 files), and ordinary annotated types
+(3 in 2 files). Wildcard/bounds, union, intersection, singleton, and repeated-
+type blockers remain zero. The current global leaders are local pattern
+definitions (87 in 23 files) and `PrefixOp` expressions (66 in 23 files). The
+independent structural inventory records source prevalence and file counts
+even when an earlier error prevents projection. The audit recommends a
+transactional local pattern-definition slice as the next main increment;
+function types, refinements, type lambdas, match types, and annotation/capture
+syntax remain separate candidate families. See the [latest normalized audit
+report](typer-classpath-corpus-audit-3.9.0.md) for detailed counts and
+prerequisites.
 
 The previous wildcard-only report recorded 1,666 Match first-blocker methods,
 2,151 Match nodes, and 6,615 cases. It stopped at `Match`, so downstream

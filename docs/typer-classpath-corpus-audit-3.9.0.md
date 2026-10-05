@@ -6,7 +6,7 @@ Run `tools/typer-classpath-corpus-audit/run` with the environment documented in 
 
 ## Type-projection deltas and next increment
 
-The baseline is the audit snapshot before #716–#719. Counts are first blockers, so reaching a later error can increase a downstream bucket.
+“Before” preserves the historical audit snapshot before #716–#719. “Current” is the latest normalized classpath audit on the branch. Counts are first blockers, so reaching a later error can increase a downstream bucket.
 
 | Unsupported type-tree family | Before (count / files) | Current (count / files) |
 | --- | ---: | ---: |
@@ -16,9 +16,9 @@ The baseline is the audit snapshot before #716–#719. Counts are first blockers
 | `SingletonTypeTree` | 22 / 1 | 0 / 0 |
 | `PostfixOp::*` | 0 / 0 | 0 / 0 |
 | `FunctionWithMods` | 13 / 2 | 13 / 2 |
-| `Function` | 11 / 7 | 11 / 7 |
-| `Annotated` | 2 / 1 | 2 / 1 |
-| **Total** | **107 / 36** | **26 / 10** |
+| `Function` | 11 / 7 | 12 / 8 |
+| `Annotated` | 2 / 1 | 3 / 2 |
+| **Total** | **107 / 36** | **28 / 12** |
 
 No arbitrary infix or postfix type operator remains in the failed type-tree buckets. Zero-count structural families are retained in `type_tree_forms`; `type_tree_form_files` reports the independent source-file inventory for every form, including forms whose files never become type-projection first blockers. Current unsupported families and deterministic representative paths are listed in `unsupported_type_tree_failures`.
 
@@ -26,9 +26,9 @@ No arbitrary infix or postfix type operator remains in the failed type-tree buck
 
 | First blocker | Before (count / files) | Current (count / files) |
 | --- | ---: | ---: |
-| `UnsupportedTypeTree` | 107 / 36 | 26 / 10 |
+| `UnsupportedTypeTree` | 107 / 36 | 28 / 12 |
 | Local pattern definitions | 82 / 23 | 87 / 23 |
-| `PrefixOp` expression | 62 / 21 | 62 / 21 |
+| `PrefixOp` expression | 62 / 21 | 66 / 23 |
 | `Function` expression | 58 / 8 | 58 / 8 |
 | `MissingDeclaredType` | 32 / 14 | 34 / 15 |
 | Anonymous class instantiation | 23 / 14 | 22 / 14 |
@@ -37,18 +37,18 @@ No arbitrary infix or postfix type operator remains in the failed type-tree buck
 | `LocalMethodSignatureDeferred` | 14 / 3 | 14 / 3 |
 | `RecursiveInferredMethodResult` | 13 / 1 | 13 / 1 |
 
-Type projection reduced its aggregate first-blocker bucket by 81 (107 to 26); the remaining blockers cover three AST forms. Local pattern definitions now lead at 87 occurrences in 23 files, followed by prefix expressions at 62 in 21 files. Recommend switching the next main sprint to transactional typing of one local pattern-definition slice. It has over three times the remaining type-projection blocker count and fits the existing block-typing ownership boundary. Keep prefix expressions as an independent low-risk follow-up candidate, not a dependency of that work.
+Type projection reduced its aggregate first-blocker bucket by 79 (107 to 28); the remaining blockers cover three AST forms. Local pattern definitions now lead at 87 occurrences in 23 files, followed by prefix expressions at 66 in 23 files. Recommend switching the next main sprint to transactional typing of one local pattern-definition slice. It has over three times the remaining type-projection blocker count and fits the existing block-typing ownership boundary. Keep prefix expressions as an independent low-risk follow-up candidate, not a dependency of that work.
 
 ### Remaining type-family candidates
 
 | Candidate | Evidence and existing model | Smallest slice, prerequisites, and boundaries |
 | --- | --- | --- |
-| `Function` | 11 blockers / 7 files; representatives: `compiler/src/dotty/tools/backend/jvm/BTypes.scala`, `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala`, `compiler/src/dotty/tools/dotc/core/Denotations.scala`, `compiler/src/dotty/tools/dotc/core/Types.scala`, `compiler/src/dotty/tools/dotc/transform/PostTyper.scala`. Structural inventory: 1,281 nodes / 233 files. Existing model: `Type::Applied` can hold a class application, but there is no dedicated source function-type node or `FunctionN` identity in `Definitions`. | Source lowering only after resolving canonical `FunctionN` identities from definitions/classpath; first slice: one ordinary function type with explicit argument/result types. Prerequisite: class symbol identity. Non-goals: function expressions, subtyping, or inference changes. |
+| `Function` | 12 blockers / 8 files; representatives: `compiler/src/dotty/tools/backend/jvm/BTypes.scala`, `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala`, `compiler/src/dotty/tools/dotc/core/Denotations.scala`, `compiler/src/dotty/tools/dotc/core/Types.scala`, `compiler/src/dotty/tools/dotc/parsing/Parsers.scala`. Structural inventory: 1,281 nodes / 233 files. Existing model: `Type::Applied` can hold a class application, but there is no dedicated source function-type node or `FunctionN` identity in `Definitions`. | Source lowering only after resolving canonical `FunctionN` identities from definitions/classpath; first slice: one ordinary function type with explicit argument/result types. Prerequisite: class symbol identity. Non-goals: function expressions, subtyping, or inference changes. |
 | `FunctionWithMods` | 13 blockers / 2 files: `library/src/scala/collection/StringParsers.scala`, `library/src/scala/collection/convert/JavaCollectionWrappers.scala`. Structural inventory: 974 nodes / 128 files. `Type::Applied` can hold a class application, but there is no source `ContextFunctionN` identity or function modifier wrapper in `Definitions`. | Source lowering after modifier classification and canonical `ContextFunctionN` identity lookup; first slice: ordinary context-function signature. Prerequisites: distinguish contextual, erased, and capture-related modifiers. Non-goals: capture checking, erased-function semantics, and grouping capture wrappers with ordinary annotations. |
 | `RefinedTypeTree` | 22 structural nodes / 10 files [compiler/src/dotty/tools/dotc/core/Symbols.scala, compiler/src/dotty/tools/dotc/transform/CompleteJavaEnums.scala, compiler/src/dotty/tools/dotc/transform/MacroAnnotations.scala, library/src/scala/collection/MapView.scala, library/src/scala/collection/generic/IsIterable.scala]; no current unsupported bucket. Core already has `Type::Refined`, `Type::Recursive`, name-designed structural `TypeRef`s, and structural member lookup. | Source lowering over existing machinery if namer metadata suffices; first slice: one abstract type member over a parent. Prerequisites: source refinement member ownership and self-reference rebinding. Non-goals: general structural invocation, refinement subtyping, or new solver rules. |
 | `LambdaTypeTree` | 160 structural nodes / 49 files [library/src/scala/NamedTuple.scala, library/src/scala/Tuple.scala, library/src/scala/collection/BuildFrom.scala, library/src/scala/collection/Factory.scala, library/src/scala/collection/IndexedSeq.scala]; no current unsupported bucket. Core has `Type::TypeLambda`, `TypeParam`, `ParamRef`, and tested binder-rebinding operations. | Source binder lowering; first slice: one source type-lambda with ordinary bounds and rebound parameter references. Prerequisites: reliable source parameter symbols/bounds. Non-goals: broad higher-kinded alias completion, type-lambda unification, or variance solving. |
 | `MatchTypeTree` | 0 structural nodes in this corpus; core has `Type::Match`, `MatchCase`, and `TypeLambda` for case binders. | No corpus-backed first slice now. Later, construct one unbound case, then a binder-capturing case. Prerequisites are source case binder projection. Non-goals: match-type reduction or relation solver expansion. |
-| `Annotated` | 2 blockers / 1 file: `library/src/scala/collection/immutable/ArraySeq.scala`. Structural inventory: 1,403 nodes / 115 files. Core `Type::Annotated` needs an `AnnotationId`; it does not establish source annotation identity. | Source lowering only after resolving the ordinary annotation symbol/ID; first slice: one ordinary annotation over a supported type. Prerequisites: source annotation payload and identity. Non-goals: capture checking, wildcard capture, and capture-only wrappers. |
+| `Annotated` | 3 blockers / 2 files: `library/src/scala/collection/immutable/ArraySeq.scala`, `library/src/scala/collection/immutable/LazyListIterable.scala`. Structural inventory: 1,403 nodes / 115 files. Core `Type::Annotated` needs an `AnnotationId`; it does not establish source annotation identity. | Source lowering only after resolving the ordinary annotation symbol/ID; first slice: one ordinary annotation over a supported type. Prerequisites: source annotation payload and identity. Non-goals: capture checking, wildcard capture, and capture-only wrappers. |
 | Capture-related type syntax | No separately classified unsupported bucket; it is included in the structural `Annotated` / `FunctionWithMods` inventory. | Inventory and classify it separately before implementation. Prerequisites: syntax-to-modifier mapping. Non-goals: silently interpreting capture syntax as an ordinary annotation or enabling capture checking here. |
 
 ```text
