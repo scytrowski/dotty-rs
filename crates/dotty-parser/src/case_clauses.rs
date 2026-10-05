@@ -25,11 +25,13 @@ where
         let pattern = self.with_parse_kind(ParseKind::Pattern, |parser| {
             parser.with_location(Location::InPattern, |parser| parser.pattern())
         });
+        self.observe_case_clause_started(mark.start);
         let guard = self.parse_case_guard();
         self.consume_newlines_before_case_arrow();
         let body_mark = self.mark();
 
         if !self.current_is_arrow() {
+            self.observe_case_clause_ended();
             self.report(
                 ParseDiagnosticKind::ExpectedToken,
                 "expected `=>` after case pattern",
@@ -45,6 +47,8 @@ where
                 }),
             );
         }
+
+        self.observe_case_clause_ended();
 
         let body = if expr_only {
             // Braced templates suppress eager layout tokens, but an
@@ -612,6 +616,8 @@ mod tests {
         assert_eq!(
             observed.borrow().as_slice(),
             &[
+                ScannerEvent::CaseClauseStarted { case_start: 0 },
+                ScannerEvent::CaseClauseEnded,
                 ScannerEvent::CaseBodyIndented { case_start: 0 },
                 ScannerEvent::Outdented,
             ]
