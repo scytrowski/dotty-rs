@@ -667,6 +667,11 @@ pub enum TyperError {
         existing: u32,
         attempted: u32,
     },
+    /// A source PatDef already has a different one-to-many typed expansion.
+    PatDefExpansionConflict {
+        source: SourceId,
+        tree_index: u32,
+    },
     /// String constants do not have a canonical source type in this session yet.
     StringLiteralTypingDeferred {
         source: SourceId,

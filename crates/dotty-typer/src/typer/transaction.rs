@@ -13,6 +13,7 @@ impl SourceTyper<'_> {
         let typed_ast_checkpoint = self.typed_arena.checkpoint();
         let typed_index_checkpoint = self.typed_index.clone();
         let local_symbols_checkpoint = self.local_symbols.clone();
+        let patdef_expansions_checkpoint = self.patdef_expansions.clone();
         let pattern_bindings_checkpoint = self.pattern_bindings.clone();
         let local_methods_checkpoint = self.local_methods.clone();
         let initializing_local_symbols_checkpoint = self.initializing_local_symbols.clone();
@@ -32,6 +33,7 @@ impl SourceTyper<'_> {
             self.typed_arena.rollback_to(typed_ast_checkpoint);
             self.typed_index = typed_index_checkpoint;
             self.local_symbols = local_symbols_checkpoint;
+            self.patdef_expansions = patdef_expansions_checkpoint;
             self.pattern_bindings = pattern_bindings_checkpoint;
             self.local_methods = local_methods_checkpoint;
             self.initializing_local_symbols = initializing_local_symbols_checkpoint;
@@ -55,6 +57,7 @@ impl SourceTyper<'_> {
         let resolver_checkpoint = self.resolver.checkpoint();
         let type_index_checkpoint = self.type_index.checkpoint();
         let local_symbols_checkpoint = self.local_symbols.clone();
+        let patdef_expansions_checkpoint = self.patdef_expansions.clone();
         let pattern_bindings_checkpoint = self.pattern_bindings.clone();
         let local_methods_checkpoint = self.local_methods.clone();
         let initializing_local_symbols_checkpoint = self.initializing_local_symbols.clone();
@@ -75,6 +78,7 @@ impl SourceTyper<'_> {
                 self.store.rollback_to(store_checkpoint);
                 self.type_index.restore(type_index_checkpoint);
                 self.local_symbols = local_symbols_checkpoint;
+                self.patdef_expansions = patdef_expansions_checkpoint;
                 self.pattern_bindings = pattern_bindings_checkpoint;
                 self.local_methods = local_methods_checkpoint;
                 self.initializing_local_symbols = initializing_local_symbols_checkpoint;
