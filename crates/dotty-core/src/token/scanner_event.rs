@@ -38,6 +38,13 @@ pub enum ScannerEvent {
     CaseBodyIndented {
         case_start: u32,
     },
+    /// Opens the guard portion of a case clause, where operator continuations
+    /// may cross a line at the case indentation.
+    CaseClauseStarted {
+        case_start: u32,
+    },
+    /// Closes the case-clause separator region after its optional guard.
+    CaseClauseEnded,
     /// Closes a parser-requested indentation region using a grammar delimiter
     /// without exposing an `Outdent` token to the parser.
     OutdentedByDelimiter,

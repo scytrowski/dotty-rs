@@ -27,6 +27,7 @@ pub struct ContextualScanner {
 enum FeedbackRegionKind {
     Indented,
     MatchCases,
+    CaseClause,
     CaseBody,
 }
 
@@ -377,6 +378,63 @@ impl ContextualScanner {
         self.feedback_regions.truncate(match_region_index);
     }
 
+    fn preserve_case_guard_infix_newline(&mut self) {
+        let Some(case_start) = self
+            .feedback_regions
+            .iter()
+            .rev()
+            .find(|region| region.kind == FeedbackRegionKind::CaseClause)
+            .and_then(|region| region.case_offset)
+        else {
+            return;
+        };
+
+        let index = self.current_index();
+        let Some(previous) = self.tokens.get(index) else {
+            return;
+        };
+        let mut operator_index = index + 1;
+        let mut outdent_index = None;
+        while let Some(token) = self.tokens.get(operator_index) {
+            match token.kind {
+                TokenKind::Outdent if outdent_index.is_none() => {
+                    outdent_index = Some(operator_index);
+                    operator_index += 1;
+                }
+                TokenKind::Newline | TokenKind::Newlines => operator_index += 1,
+                _ => break,
+            }
+        }
+        let Some(outdent_index) = outdent_index else {
+            return;
+        };
+        let Some(operator) = self.tokens.get(operator_index) else {
+            return;
+        };
+        if !matches!(operator.kind, TokenKind::Operator | TokenKind::ColonOp)
+            || !can_end_statement(Some(previous.kind))
+            || !has_source_line_break(&self.source, previous.span.end(), operator.span.start())
+            || has_blank_line(&self.source, previous.span.end(), operator.span.start())
+            || line_indentation(&self.source, operator.span.start())
+                != line_indentation(&self.source, case_start)
+            || next_real_token(&self.tokens, operator_index)
+                .is_none_or(|next| !can_start_statement_kind(next.kind))
+        {
+            return;
+        }
+
+        let spelling = &self.source[operator.span.start() as usize..operator.span.end() as usize];
+        if matches!(spelling, "=" | "=>") {
+            return;
+        }
+
+        self.tokens[outdent_index] = Token::new(
+            TokenKind::Newline,
+            TextRange::new(previous.span.end(), operator.span.start())
+                .expect("source-ordered guard separator range is valid"),
+        );
+    }
+
     fn feedback_indent_offset_after_current(&self) -> u32 {
         let index = self.current_index();
         self.tokens[index + 1].span.start()
@@ -668,6 +726,7 @@ impl TokenSource for ContextualScanner {
     }
 
     fn advance(&mut self) {
+        self.preserve_case_guard_infix_newline();
         self.close_match_cases_before_dedented_infix();
         if self.position + 1 < self.tokens.len() {
             self.position += 1;
@@ -773,6 +832,20 @@ impl TokenSource for ContextualScanner {
                         indent_offset: self.feedback_case_indent_offset_after_current(),
                         case_offset: None,
                     });
+                }
+            }
+            ScannerEvent::CaseClauseStarted { case_start } => {
+                self.feedback_regions.push(FeedbackRegion {
+                    kind: FeedbackRegionKind::CaseClause,
+                    indent_offset: case_start,
+                    case_offset: Some(case_start),
+                });
+            }
+            ScannerEvent::CaseClauseEnded => {
+                if self.feedback_regions.last().map(|region| region.kind)
+                    == Some(FeedbackRegionKind::CaseClause)
+                {
+                    self.feedback_regions.pop();
                 }
             }
             ScannerEvent::MatchCasesOutdented => {

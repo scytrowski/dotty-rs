@@ -24,6 +24,7 @@ where
         let mut operators = Vec::new();
 
         loop {
+            self.consume_guard_infix_newlines();
             // The scanner suppresses a physical newline when an outdent
             // closes a nested layout region. An alphabetic identifier at
             // that boundary starts the enclosing statement, not an infix
@@ -245,6 +246,56 @@ where
             self.current().kind,
             TokenKind::Newline | TokenKind::Newlines
         ) {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
+    }
+
+    fn consume_guard_infix_newlines(&mut self) {
+        if self.context.location != crate::Location::InGuard {
+            return;
+        }
+
+        if !matches!(
+            self.current().kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            return;
+        }
+        // The scanner preserves the match-case region while parsing a guard
+        // and exposes a same-indent operator continuation as a newline.
+        let mut operator_offset = 0;
+        while matches!(
+            self.cursor.lookahead(operator_offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            operator_offset = operator_offset.saturating_add(1);
+        }
+        let operator = self.cursor.lookahead(operator_offset);
+        if !matches!(operator.kind, TokenKind::Operator | TokenKind::ColonOp) {
+            return;
+        }
+
+        let spelling = self.source.slice(operator.span).unwrap_or_default();
+        if matches!(spelling, "=" | "=>") {
+            return;
+        }
+
+        let mut operand_offset = operator_offset.saturating_add(1);
+        if matches!(
+            self.cursor.lookahead(operand_offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            operand_offset = operand_offset.saturating_add(1);
+        }
+        if !can_start_prefix_expr(self.cursor.lookahead(operand_offset).kind) {
+            return;
+        }
+
+        for _ in 0..operator_offset {
             let checkpoint = self.cursor.checkpoint();
             self.advance();
             if !self.cursor.progressed_since(checkpoint) {

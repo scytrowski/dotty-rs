@@ -407,6 +407,14 @@ where
             .map(|indent_offset| (indent_offset, true))
     }
 
+    pub(crate) fn observe_case_clause_started(&mut self, case_start: u32) {
+        self.observe(ScannerEvent::CaseClauseStarted { case_start });
+    }
+
+    pub(crate) fn observe_case_clause_ended(&mut self) {
+        self.observe(ScannerEvent::CaseClauseEnded);
+    }
+
     /// Tells the scanner that an indented region was exited.
     pub fn observe_outdented(&mut self) {
         self.observe(ScannerEvent::Outdented);
