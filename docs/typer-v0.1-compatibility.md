@@ -625,6 +625,11 @@ Classpath-resolution buckets are also reported separately and excluded from
 the Typer-semantic ranking so missing external symbols cannot masquerade as
 Typer features.
 
+The `local_patdefs` section profiles source `PatDef` shapes and binders inside
+named method bodies without adding pattern-definition typing semantics. Its
+Scala 3.9 lowering and visibility contract is pinned in
+[`typer-patdef-lowering-3.9.0.md`](typer-patdef-lowering-3.9.0.md).
+
 The #581 baseline resolved 1,965 packages from the classpath, reused 5,025
 source packages, and materialized no external classes or members (3,884
 unresolved member requests and 91 resolver errors). The #610 rerun resolves

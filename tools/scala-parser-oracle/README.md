@@ -214,3 +214,10 @@ bounded forms), import/export clauses, and named `end` markers across nested
 control-flow, member, and top-level boundaries. Dotty returns `EmptyTree`
 for an empty compilation unit; the Scala renderer normalizes that one case to
 the Rust parser's documented zero-width empty `PackageDef` root.
+
+The `patdef-*-3.9.0.scala` fixtures retain local source pattern definitions in
+the parser comparison. Their Scala 3.9 compiler lowering and typed-tree oracle
+are normalized separately in
+[`docs/typer-patdef-lowering-3.9.0.md`](../../docs/typer-patdef-lowering-3.9.0.md);
+the binder-visibility fixture intentionally includes a forward reference that
+the compiler rejects.
