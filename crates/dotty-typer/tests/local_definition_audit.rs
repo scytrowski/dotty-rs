@@ -1098,6 +1098,47 @@ fn local_patdef_audit_is_deterministic() {
 }
 
 #[test]
+fn local_patdef_audit_distinguishes_missing_and_recovered_rhs() {
+    let source = "object Audit { def outer: Unit = { val (left, right) = 1; () } }";
+    let source_id = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(source).expect("test source should scan");
+    let mut parsed = parse_compilation_unit(
+        SourceText::new(source).expect("test source should be valid UTF-8"),
+        source_id,
+        scanner,
+        &mut store.names,
+    );
+    let patdef_tree = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            matches!(node.kind, TreeKind::PhaseSpecific(UntypedNode::PatDef(_))).then_some(tree)
+        })
+        .expect("fixture should contain a PatDef");
+    let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) =
+        &mut parsed.ast.get_mut(patdef_tree).kind
+    else {
+        unreachable!("selected tree is a PatDef")
+    };
+    definition.rhs = None;
+    let missing = collect_local_patdefs(&parsed.ast, &store.names, "MissingRhs.scala");
+    let recovered = audit_source(
+        "object Audit { def outer: Unit = { val (left, right) = ; () } }",
+        "RecoveredRhs.scala",
+    );
+
+    assert_eq!(missing.total, 1, "{missing:?}");
+    assert_eq!(missing.rhs_states.get("missing"), Some(&1));
+    assert_eq!(recovered.patdef_profile.total, 1, "{recovered:?}");
+    assert_eq!(
+        recovered.patdef_profile.rhs_states.get("recovery error"),
+        Some(&1)
+    );
+}
+
+#[test]
 fn local_expression_audit_types_infix_calls_and_counts_them_structurally() {
     let source = "class Box { def combine(other: Box): Box = this }; object Audit { def outer(left: Box, right: Box): Box = { def local: Box = left `combine` right; local } }";
     let audit = audit_source(source, "Infix.scala");
