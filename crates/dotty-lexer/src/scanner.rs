@@ -417,8 +417,7 @@ impl ContextualScanner {
             || has_blank_line(&self.source, previous.span.end(), operator.span.start())
             || line_indentation(&self.source, operator.span.start())
                 != line_indentation(&self.source, case_start)
-            || next_real_token(&self.tokens, operator_index)
-                .is_none_or(|next| !can_start_statement_kind(next.kind))
+            || !self.can_start_case_guard_infix_operand(operator_index)
         {
             return;
         }
@@ -433,6 +432,52 @@ impl ContextualScanner {
             TextRange::new(previous.span.end(), operator.span.start())
                 .expect("source-ordered guard separator range is valid"),
         );
+    }
+
+    fn can_start_case_guard_infix_operand(&self, operator_index: usize) -> bool {
+        let mut index = operator_index.saturating_add(1);
+        let mut has_prefix_operator = false;
+        while self
+            .tokens
+            .get(index)
+            .is_some_and(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines))
+        {
+            index += 1;
+        }
+        loop {
+            let Some(token) = self.tokens.get(index) else {
+                return false;
+            };
+            if token.kind == TokenKind::Operator && is_prefix_operator(&self.source, token.span) {
+                has_prefix_operator = true;
+                let prefix = token;
+                index += 1;
+                while self
+                    .tokens
+                    .get(index)
+                    .is_some_and(|token| is_layout_token(token.kind))
+                {
+                    if matches!(
+                        self.tokens[index].kind,
+                        TokenKind::Newline | TokenKind::Newlines
+                    ) {
+                        return false;
+                    }
+                    index += 1;
+                }
+                if self.tokens.get(index).is_none_or(|operand| {
+                    has_source_line_break(&self.source, prefix.span.end(), operand.span.start())
+                }) {
+                    return false;
+                }
+                continue;
+            }
+            return if has_prefix_operator {
+                can_start_simple_expr_kind(token.kind)
+            } else {
+                can_start_statement_kind(token.kind)
+            };
+        }
     }
 
     fn feedback_indent_offset_after_current(&self) -> u32 {
