@@ -1,0 +1,2 @@
+val allBitsSet = 0xFFFFFFFFFFFFFFFFL
+val signBitSet = 0x8000000000000000L

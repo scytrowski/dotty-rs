@@ -185,6 +185,11 @@ fn parse_long_literal(spelling: &str) -> Option<i64> {
         } else {
             i64::try_from(value).ok()?.checked_neg()
         }
+    } else if radix != 10 {
+        // Scala accepts a full-width non-decimal Long bit pattern and
+        // interprets it as a signed two's-complement value (e.g. the
+        // hexadecimal spelling 0xFFFFFFFFFFFFFFFFL denotes -1).
+        Some(value as i64)
     } else {
         i64::try_from(value).ok()
     }
@@ -445,6 +450,28 @@ mod tests {
             parser.ast().get(id).kind,
             TreeKind::Literal(Literal {
                 value: Constant::Long(255)
+            })
+        ));
+    }
+
+    #[test]
+    fn decodes_a_full_width_hexadecimal_long_as_a_signed_bit_pattern() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "0xFFFFFFFFFFFFFFFFL",
+            vec![
+                token(TokenKind::LongLiteral, 0, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Long(-1)
             })
         ));
     }
