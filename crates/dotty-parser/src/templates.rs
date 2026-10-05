@@ -133,6 +133,17 @@ where
             .any(|owner| self.current_end_marker_matches_name(owner))
     }
 
+    pub(crate) fn current_end_marker_matches_active_template(&mut self) -> bool {
+        let owners: Vec<_> = self
+            .end_marker_owners
+            .iter()
+            .filter_map(|owner| *owner)
+            .collect();
+        owners
+            .into_iter()
+            .any(|owner| self.current_end_marker_matches_name(owner))
+    }
+
     fn parse_template_members(
         &mut self,
         closing: TokenKind,
@@ -966,6 +977,28 @@ mod tests {
             "the outer marker must not be diagnosed by the nested template: {:?}",
             parser.diagnostics()
         );
+    }
+
+    #[test]
+    fn nested_indented_blocks_recognize_an_active_template_end_marker() {
+        let source = "end Outer";
+        let mut names = NameInterner::new();
+        let outer = names.intern("Outer");
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::EndMarker, 0, 3),
+                token(TokenKind::Identifier, 4, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+        parser
+            .end_marker_owners
+            .push(Some(Name::new(outer, dotty_core::Namespace::Term)));
+
+        assert!(parser.current_end_marker_matches_active_template());
+        assert!(parser.diagnostics().is_empty());
     }
 
     #[test]

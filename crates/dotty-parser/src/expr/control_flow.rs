@@ -671,7 +671,12 @@ where
         } else if let Some(indent_offset) = feedback_indent {
             self.observe_outdented_region(indent_offset);
         }
-        if !closed_by_delimiter && !self.accept(TokenKind::Outdent) {
+        let closes_at_enclosing_end_marker = self.current().kind == TokenKind::EndMarker
+            && self.current_end_marker_matches_active_template();
+        if !closed_by_delimiter
+            && !self.accept(TokenKind::Outdent)
+            && !closes_at_enclosing_end_marker
+        {
             self.report(
                 crate::ParseDiagnosticKind::ExpectedToken,
                 "expected an outdent to close an indented block",

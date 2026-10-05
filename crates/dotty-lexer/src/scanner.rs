@@ -1939,6 +1939,8 @@ fn is_end_marker_target(kind: TokenKind) -> bool {
         kind,
         TokenKind::Identifier
             | TokenKind::BackquotedIdentifier
+            | TokenKind::Operator
+            | TokenKind::ColonOp
             | TokenKind::Keyword(
                 HardKeyword::If
                     | HardKeyword::For
@@ -2762,6 +2764,20 @@ mod tests {
                 TokenKind::Newline,
                 TokenKind::EndMarker,
                 TokenKind::Identifier,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_a_symbolic_method_as_an_end_marker_target() {
+        assert_eq!(
+            kinds("value\nend =?="),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Operator,
                 TokenKind::Eof,
             ]
         );
