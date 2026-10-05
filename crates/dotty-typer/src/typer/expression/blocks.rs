@@ -204,6 +204,281 @@ impl LocalMethodIndex {
 }
 
 impl SourceTyper<'_> {
+    fn patdef_deferred(&self, tree: TreeId<Untyped>) -> TyperError {
+        TyperError::LocalBlockDeclarationDeferred {
+            source: self.source,
+            tree_index: tree.index(),
+            kind: "pattern definition",
+        }
+    }
+
+    fn patdef_binders(&self, patterns: &[TreeId<Untyped>]) -> Vec<(TreeId<Untyped>, Name)> {
+        let mut binders = Vec::new();
+        let mut names = std::collections::HashSet::new();
+        let mut pending = patterns.iter().rev().copied().collect::<Vec<_>>();
+        while let Some(tree) = pending.pop() {
+            let Some(node) = self.arena.try_get(tree) else {
+                continue;
+            };
+            match &node.kind {
+                TreeKind::Ident(ident)
+                    if !ident.backquoted
+                        && super::patterns::is_variable_pattern_name(self.store, ident.name) =>
+                {
+                    if names.insert(ident.name) {
+                        binders.push((tree, ident.name));
+                    }
+                }
+                TreeKind::Bind(binding) => {
+                    if self.store.names.resolve(binding.name.text()) != "_"
+                        && names.insert(binding.name)
+                    {
+                        binders.push((tree, binding.name));
+                    }
+                    pending.push(binding.body);
+                }
+                TreeKind::NamedArg(argument) => pending.push(argument.arg),
+                TreeKind::Typed(typed) => pending.push(typed.expr),
+                TreeKind::Apply(application) => {
+                    pending.extend(application.args.iter().rev().copied());
+                }
+                TreeKind::Alternative(alternative) => {
+                    if let Some(first) = alternative.alternatives.first() {
+                        pending.push(*first);
+                    }
+                }
+                TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => pending.push(parens.inner),
+                TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+                    pending.extend(tuple.elements.iter().rev().copied());
+                }
+                TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
+                    pending.push(infix.right);
+                    pending.push(infix.left);
+                }
+                TreeKind::UnApply(unapply) => {
+                    pending.extend(unapply.patterns.iter().rev().copied());
+                }
+                _ => {}
+            }
+        }
+        binders
+    }
+
+    fn type_local_patdef(
+        &mut self,
+        tree: TreeId<Untyped>,
+        definition: &dotty_core::ast::PatDef,
+        position: Option<SourceSpan>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TypedStatExpansion, TyperError> {
+        if let Some(expansion) = self.patdef_expansion_at(self.source, tree).cloned() {
+            let Some((binder_tree, binder_name)) =
+                self.patdef_binders(&definition.patterns).first().copied()
+            else {
+                return Err(self.patdef_deferred(tree));
+            };
+            let final_symbol = self
+                .local_symbols
+                .get(&(self.source, binder_tree))
+                .copied()
+                .ok_or_else(|| self.patdef_deferred(tree))?;
+            let Some(local_stack) = context.local_scopes else {
+                return Err(TyperError::ExpressionLocalScopeStackMissing {
+                    stack: ExpressionScopeId::new(
+                        self.expression_scope_owner,
+                        self.expression_scopes.len(),
+                    ),
+                });
+            };
+            let frame = self
+                .expression_scopes
+                .get(local_stack.index())
+                .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack: local_stack })?;
+            if !frame.is_block_scope {
+                return Err(TyperError::LocalValueOutsideBlock {
+                    source: self.source,
+                    tree_index: tree.index(),
+                });
+            }
+            let scope = frame.scope;
+            let existing = self.store.scopes.get(scope).lookup_all(&binder_name);
+            if existing.is_empty() {
+                self.store
+                    .scopes
+                    .get_mut(scope)
+                    .enter(binder_name, final_symbol);
+            } else if !existing.contains(&final_symbol) {
+                return Err(TyperError::DuplicateLocalValue {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    name: binder_name,
+                });
+            }
+            return Ok(TypedStatExpansion {
+                anchor: expansion.anchor,
+                emitted: expansion.emitted,
+            });
+        }
+        if !definition.modifiers.modifiers.is_empty()
+            || definition.modifiers.visibility.is_some()
+            || !definition.modifiers.annotations.is_empty()
+            || definition.patterns.len() != 1
+            || definition.rhs.is_none()
+            || !self
+                .arena
+                .try_get(definition.tpt)
+                .is_some_and(|tpt| matches!(tpt.kind, TreeKind::TypeTree(_)))
+        {
+            return Err(self.patdef_deferred(tree));
+        }
+        let binders = self.patdef_binders(&definition.patterns);
+        if binders.len() != 1 {
+            return Err(self.patdef_deferred(tree));
+        }
+        let (binder_tree, binder_name) = binders[0];
+        let Some(local_stack) = context.local_scopes else {
+            return Err(TyperError::ExpressionLocalScopeStackMissing {
+                stack: ExpressionScopeId::new(
+                    self.expression_scope_owner,
+                    self.expression_scopes.len(),
+                ),
+            });
+        };
+        let frame = self
+            .expression_scopes
+            .get(local_stack.index())
+            .ok_or(TyperError::ExpressionLocalScopeStackMissing { stack: local_stack })?;
+        if !frame.is_block_scope {
+            return Err(TyperError::LocalValueOutsideBlock {
+                source: self.source,
+                tree_index: tree.index(),
+            });
+        }
+        let scope = frame.scope;
+        if !self
+            .store
+            .scopes
+            .get(scope)
+            .lookup_all(&binder_name)
+            .is_empty()
+        {
+            return Err(TyperError::DuplicateLocalValue {
+                source: self.source,
+                tree_index: tree.index(),
+                name: binder_name,
+            });
+        }
+        let rhs = definition.rhs.expect("checked above");
+        let typed_selector =
+            self.type_value_expression_inner(rhs, context, info_journal, new_mappings)?;
+        let selector_type = self.typed_arena.get(typed_selector).ty;
+        let selector_type = self
+            .pattern_selector_type(selector_type, info_journal)
+            .map_err(|error| TyperError::MatchSelectorTypeCannotBeAdapted {
+                source: self.source,
+                tree_index: tree.index(),
+                error: Box::new(error),
+            })?;
+
+        // The source pattern engine owns the temporary case binding and its
+        // SourceTypedIndex mapping. The scope is discarded before the final
+        // block-local symbol is entered.
+        let expression_scope_depth = self.expression_scopes.len();
+        let case_context = self.push_case_scope(context)?;
+        let typed_pattern = self.type_pattern(
+            definition.patterns[0],
+            selector_type,
+            case_context,
+            info_journal,
+            new_mappings,
+        );
+        self.expression_scopes.truncate(expression_scope_depth);
+        let typed_pattern = typed_pattern?;
+        let temporary = self
+            .pattern_bindings
+            .by_tree
+            .get(&(self.source, binder_tree))
+            .copied()
+            .ok_or_else(|| self.patdef_deferred(tree))?;
+        if !self.store.symbols.contains(temporary) {
+            return Err(self.patdef_deferred(tree));
+        }
+        let binder_type = match self.store.symbols.get(temporary).info {
+            SymbolInfo::Complete(ty) => ty,
+            _ => return Err(self.patdef_deferred(tree)),
+        };
+        let body_type = self.pattern_binding_term_ref(temporary);
+        let typed_body = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).ident(
+            binder_name,
+            body_type,
+            self.arena
+                .try_get(binder_tree)
+                .and_then(|node| node.position),
+        );
+        let case = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).case_def(
+            typed_pattern,
+            None,
+            typed_body,
+            body_type,
+            position,
+        );
+        let match_type = self.widen_expression_type_journaled(body_type, info_journal, 0)?;
+        let extraction = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).match_expr(
+            typed_selector,
+            vec![case],
+            match_type,
+            position,
+        );
+        if match_type != binder_type {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                kind: "pattern binding result type",
+            });
+        }
+        self.validate_inferred_local_value_type(binder_type, tree.index())?;
+
+        let binder_position = self
+            .arena
+            .try_get(binder_tree)
+            .and_then(|node| node.position);
+        let final_symbol = self.store.symbols.alloc(dotty_core::Symbol {
+            name: binder_name,
+            owner: Some(context.owner),
+            kind: SymbolKind::Local,
+            flags: SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Complete(binder_type),
+            origin: SymbolOrigin::Source(self.source),
+            annotations: Vec::new(),
+            position: binder_position,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        self.store
+            .scopes
+            .get_mut(scope)
+            .enter(binder_name, final_symbol);
+        self.local_symbols
+            .insert((self.source, binder_tree), final_symbol);
+        let typed_tpt =
+            self.reify_inferred_local_type_tree(definition.tpt, binder_type, new_mappings)?;
+        let typed_val = self.typed_arena.alloc(Tree {
+            kind: TreeKind::ValDef(ValDef {
+                name: TermName::new(binder_name.text()),
+                tpt: typed_tpt,
+                rhs: Some(extraction),
+                metadata: (),
+            }),
+            position,
+            ty: binder_type,
+        });
+        let expansion = TypedStatExpansion::one(typed_val);
+        self.record_patdef_expansion(tree, context, expansion.clone(), Vec::new(), new_mappings)?;
+        Ok(expansion)
+    }
+
     /// Records the single source mapping for a successfully lowered PatDef.
     /// Callers run this inside an expression transaction so the expansion,
     /// source mapping, and any local symbols commit or roll back together.
@@ -907,6 +1182,16 @@ impl SourceTyper<'_> {
         }
 
         if let Some(kind) = local_block_declaration_kind(&source_stat.kind) {
+            if let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &source_stat.kind {
+                return self.type_local_patdef(
+                    stat,
+                    definition,
+                    source_stat.position,
+                    context,
+                    info_journal,
+                    new_mappings,
+                );
+            }
             if let TreeKind::DefDef(definition) = &source_stat.kind
                 && definition.rhs.is_some()
             {

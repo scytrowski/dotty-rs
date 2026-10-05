@@ -96,10 +96,22 @@ temporary symbols are recorded as PatDef expansion metadata and do not receive
 source-tree mappings. Expansion metadata, semantic symbols, and typed mappings
 participate in the enclosing expression transaction.
 
+The current typer increment implements one source pattern with exactly one
+user-visible binder when it is an immutable inferred local `val`. It types the
+RHS once, then reuses that typed tree as the selector of the synthetic
+`Match`; the `Match` result becomes the final `ValDef` RHS so refutable patterns
+retain their runtime failure behavior. Pattern typing runs in a temporary case
+scope. The typed source binder node remains mapped to the temporary typed
+`Bind`, while `local_symbol_at(source, binder_tree)` records the distinct final
+block-local symbol. The PatDef source root maps to the final `ValDef` anchor.
+The final symbol enters the block scope only after RHS and pattern typing have
+succeeded. Modifier-bearing, explicitly typed, missing-RHS, zero-binder, and
+multi-binder forms remain deferred.
+
 ## Scope
 
 The fixtures cover extractor and tuple roots, zero/one/multiple binders,
 wildcards, aliases, `var`, `lazy val`, a PatDef-wide annotation, `@unchecked`
-and `.runtimeChecked` RHSes, and binder visibility. They pin the inputs and normalized lowering
-contract for a later typing increment; they do not add PatDef typing to
-dotty-rs.
+and `.runtimeChecked` RHSes, and binder visibility. They pin the inputs and
+normalized lowering contract; the typer supports the bounded one-binder
+inferred-`val` slice described above.

@@ -1252,7 +1252,7 @@ impl SourceTyper<'_> {
         Ok((symbol, self.pattern_binding_term_ref(symbol)))
     }
 
-    fn pattern_binding_term_ref(&mut self, symbol: SymbolId) -> TypeId {
+    pub(super) fn pattern_binding_term_ref(&mut self, symbol: SymbolId) -> TypeId {
         self.store.types.alloc(Type::TermRef {
             prefix: self.definitions.no_prefix,
             target: TermRefTarget::Symbol(symbol),
@@ -1704,6 +1704,10 @@ impl SourceTyper<'_> {
             TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
                 self.bind_pattern_body_is_supported(parens.inner)
             }
+            // An explicit alias may wrap a refutable extractor pattern. The
+            // recursive pattern typer below remains responsible for deciding
+            // whether that extractor shape is supported.
+            TreeKind::Apply(_) | TreeKind::TypeApply(_) | TreeKind::UnApply(_) => true,
             _ => false,
         }
     }
@@ -2093,7 +2097,7 @@ impl SourceTyper<'_> {
 
 /// Mirrors the parser's pattern-variable first-character rule. Backquotes are
 /// checked by the caller; literal keywords and the wildcard are never binders.
-fn is_variable_pattern_name(store: &SemanticStore, name: Name) -> bool {
+pub(super) fn is_variable_pattern_name(store: &SemanticStore, name: Name) -> bool {
     let spelling = store.names.resolve(name.text());
     if matches!(spelling, "_" | "false" | "true" | "null") {
         return false;
