@@ -422,20 +422,16 @@ impl SourceTyper<'_> {
                     actual: actual_pattern_binding_count,
                 });
             }
-            let unit_literal_type = self
-                .store
-                .types
-                .alloc(Type::Constant(dotty_core::Constant::Unit));
             let unit_body = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).literal(
                 dotty_core::Constant::Unit,
-                unit_literal_type,
+                self.definitions.unit,
                 None,
             );
             let case = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).case_def(
                 typed_pattern,
                 None,
                 unit_body,
-                unit_literal_type,
+                self.definitions.unit,
                 position,
             );
             let extraction = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)

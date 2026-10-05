@@ -14205,6 +14205,7 @@ mod tests {
         let TreeKind::CaseDef(case_def) = &typer.typed_ast().get(matched.cases[0]).kind else {
             panic!("synthetic Match should contain one case");
         };
+        assert_eq!(typer.typed_ast().get(matched.cases[0]).ty, definitions.unit);
         assert!(matches!(
             typer.typed_ast().get(case_def.pattern).kind,
             TreeKind::UnApply(_)
@@ -14215,10 +14216,7 @@ mod tests {
                 value: dotty_core::Constant::Unit
             })
         ));
-        assert_eq!(
-            typer.typed_ast().get(matched.cases[0]).ty,
-            typer.typed_ast().get(case_def.body).ty
-        );
+        assert_eq!(typer.typed_ast().get(case_def.body).ty, definitions.unit);
         assert_eq!(
             typer.source_typed_index().get(source, source_patdef),
             Some(anchor)
@@ -14263,10 +14261,12 @@ mod tests {
         let TreeKind::CaseDef(case_def) = &typer.typed_ast().get(matched.cases[0]).kind else {
             panic!("synthetic Match should contain one case");
         };
+        assert_eq!(typer.typed_ast().get(matched.cases[0]).ty, definitions.unit);
         assert!(matches!(
             typer.typed_ast().get(case_def.pattern).kind,
             TreeKind::UnApply(_)
         ));
+        assert_eq!(typer.typed_ast().get(case_def.body).ty, definitions.unit);
         assert!(matches!(
             typer.store.types.get(typer.typed_ast().get(block.expr).ty),
             Type::Constant(dotty_core::Constant::Boolean(true))
