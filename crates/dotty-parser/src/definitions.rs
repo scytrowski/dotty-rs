@@ -180,7 +180,7 @@ where
         true
     }
 
-    fn parse_definition_rhs(&mut self, feedback_indent: Option<u32>) -> TreeId<Untyped> {
+    pub(crate) fn parse_definition_rhs(&mut self, feedback_indent: Option<u32>) -> TreeId<Untyped> {
         self.consume_control_newlines();
         self.with_secondary_constructor_allowed(false, |parser| {
             if parser.current().kind == TokenKind::Indent {
