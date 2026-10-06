@@ -180,7 +180,12 @@ fn parse_long_literal(spelling: &str) -> Option<i64> {
         .unwrap_or(digits);
     let value = u64::from_str_radix(digits, radix).ok()?;
     if negative {
-        if value == 1_u64 << 63 {
+        if radix != 10 {
+            // Non-decimal Long spellings represent a signed 64-bit bit
+            // pattern. Apply the source minus sign to that value with the
+            // same wrapping arithmetic used by the JVM Long representation.
+            Some((value as i64).wrapping_neg())
+        } else if value == 1_u64 << 63 {
             Some(i64::MIN)
         } else {
             i64::try_from(value).ok()?.checked_neg()
@@ -474,6 +479,16 @@ mod tests {
                 value: Constant::Long(-1)
             })
         ));
+    }
+
+    #[test]
+    fn decodes_a_negative_full_width_hexadecimal_long() {
+        assert_eq!(parse_long_literal("-0xFFFFFFFFFFFFFFFFL"), Some(1));
+    }
+
+    #[test]
+    fn decodes_the_non_decimal_long_sign_bit_boundary() {
+        assert_eq!(parse_long_literal("0x8000000000000000L"), Some(i64::MIN));
     }
 
     #[test]
