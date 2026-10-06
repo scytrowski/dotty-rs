@@ -190,21 +190,14 @@ impl SourceTyper<'_> {
             return Err(deferred());
         }
         let mut assigned = vec![false; method.params.len()];
-        let mut positional = 0;
-        let mut saw_named = false;
-        for (argument, value_tree) in arguments.iter().zip(value_trees) {
+        for (call_index, (argument, value_tree)) in arguments.iter().zip(value_trees).enumerate() {
             let parameter_index = if let Some(name) = argument.name {
-                saw_named = true;
                 method
                     .params
                     .iter()
                     .position(|parameter| parameter.name == name)
-            } else if saw_named {
-                None
             } else {
-                let index = positional;
-                positional += 1;
-                Some(index)
+                Some(call_index)
             };
             let Some(parameter_index) = parameter_index.filter(|index| *index < assigned.len())
             else {

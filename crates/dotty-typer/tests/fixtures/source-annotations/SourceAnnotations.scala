@@ -8,4 +8,5 @@ object SourceAnnotations {
   def positional(value: Int): Int = value: @Annot(1)
   def named(value: Int): Int = value: @Annot(n = 1)
   def mixed(value: Int): Int = value: @Multi(1, second = 2)
+  def mixedAfterNamed(value: Int): Int = value: @Multi(first = 1, 2)
 }
