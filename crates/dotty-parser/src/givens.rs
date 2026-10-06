@@ -74,6 +74,10 @@ where
             Vec::new()
         };
         if !type_params.is_empty() && self.type_param_clause_followed_by_definition() {
+            self.report(
+                ParseDiagnosticKind::ExpectedType,
+                "expected a given result type after type parameters",
+            );
             let tpt = self.error_type(self.zero_width_span(self.current().span.start()));
             let mut metadata = prefix.metadata;
             if !metadata
