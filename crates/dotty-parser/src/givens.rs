@@ -561,6 +561,7 @@ where
                 candidate.kind,
                 TokenKind::Identifier
                     | TokenKind::BackquotedIdentifier
+                    | TokenKind::Punctuation(Punctuation::LeftBracket)
                     | TokenKind::Punctuation(Punctuation::LeftParen)
             )
             && !self.has_line_break_between(next.span.end(), candidate.span.start())
