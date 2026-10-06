@@ -1572,6 +1572,86 @@ mod tests {
     }
 
     #[test]
+    fn misaligned_symbolic_end_marker_keeps_the_following_extension_method() {
+        const SOURCE: &str = concat!(
+            "object O:\n",
+            "  extension (value: Int)\n",
+            "    def =?=(other: Int): Boolean =\n",
+            "      value == other\n",
+            "    end !==\n",
+            "    def next = 1\n",
+            "end O",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        let diagnostic = &result.diagnostics[0];
+        assert_eq!(
+            diagnostic.kind(),
+            dotty_parser::ParseDiagnosticKind::UnexpectedToken
+        );
+        assert_eq!(diagnostic.message(), "misaligned end marker");
+        let marker_start = SOURCE.find("end !==").expect("mismatched marker") as u32;
+        assert_eq!(
+            diagnostic.span(),
+            dotty_core::TextRange::new(marker_start, marker_start + "end !==".len() as u32)
+                .unwrap()
+        );
+
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let object_id = package
+            .stats
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    &result.ast.get(*id).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module))
+                        if names.resolve(module.name.as_name().text()) == "O"
+                )
+            })
+            .expect("object O remains in the package");
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+            &result.ast.get(object_id).kind
+        else {
+            unreachable!();
+        };
+        let TreeKind::Template(template) = &result.ast.get(module.template).kind else {
+            panic!("expected object template");
+        };
+        let extension_id = template
+            .body
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    result.ast.get(*id).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(_))
+                )
+            })
+            .expect("extension declaration remains in the object");
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+            &result.ast.get(extension_id).kind
+        else {
+            unreachable!();
+        };
+        assert!(
+            extension.methods.iter().any(|id| matches!(
+                &result.ast.get(*id).kind,
+                TreeKind::DefDef(definition)
+                    if names.resolve(definition.name.as_name().text()) == "next"
+            )),
+            "the following method must survive end-marker recovery"
+        );
+    }
+
+    #[test]
     fn end_marker_for_anonymous_template_method_is_not_misaligned() {
         const SOURCE: &str = concat!(
             "object O:\n",

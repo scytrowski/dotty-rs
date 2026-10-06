@@ -578,6 +578,8 @@ where
             target_kind,
             TokenKind::Identifier
                 | TokenKind::BackquotedIdentifier
+                | TokenKind::Operator
+                | TokenKind::ColonOp
                 | TokenKind::Keyword(
                     HardKeyword::If
                         | HardKeyword::For
@@ -847,7 +849,10 @@ where
                 }
                 _ => false,
             },
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
+            TokenKind::Identifier
+            | TokenKind::BackquotedIdentifier
+            | TokenKind::Operator
+            | TokenKind::ColonOp => {
                 let Some(target) = self.names.get(target_text) else {
                     return false;
                 };
