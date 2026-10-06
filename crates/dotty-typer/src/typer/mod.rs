@@ -19113,6 +19113,66 @@ mod tests {
     }
 
     #[test]
+    fn prefix_selection_accepts_mutable_local_operand() {
+        let source_text = "class Box { def unary_! : Box = this }; class Use { def use(x: Box): Box = { var y: Box = x; !y } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (owner, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let member = method_symbol(&parsed, &store, &index, source, "unary_!");
+        let TreeKind::Block(source_block) = &parsed.ast.get(rhs).kind else {
+            panic!("method body should be a source block");
+        };
+        let prefix = source_block.expr;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(owner).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let local = typer
+            .local_symbol_at(source, source_block.stats[0])
+            .unwrap();
+        assert!(
+            typer
+                .store()
+                .symbols
+                .get(local)
+                .flags
+                .contains(SymbolFlags::MUTABLE)
+        );
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed).kind else {
+            panic!("method body should produce a typed block");
+        };
+        let TreeKind::Select(selection) = &typer.typed_ast().get(typed_block.expr).kind else {
+            panic!("prefix expression should select unary_!");
+        };
+        assert_eq!(
+            typer.source_typed_index().get(source, prefix),
+            Some(typed_block.expr)
+        );
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(selection.qualifier).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == local
+        ));
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_block.expr).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == member
+        ));
+        let widened = typer
+            .widen_expression_type(typer.typed_ast().get(typed_block.expr).ty)
+            .unwrap();
+        assert_eq!(
+            type_symbol(typer.store(), widened),
+            class_symbol(&parsed, typer.store(), &index, source, "Box")
+        );
+    }
+
+    #[test]
     fn prefix_missing_member_rolls_back_operand_and_selection_state() {
         let source_text = "class Box; class Use { def use(value: Box): Box = !value }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);

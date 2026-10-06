@@ -48,8 +48,6 @@ impl SourceTyper<'_> {
         let unary_name = Name::new(self.store.names.intern(unary_name), Namespace::Term);
         let operand =
             self.type_value_expression_inner(prefix.operand, context, info_journal, new_mappings)?;
-        let receiver_type = self.typed_arena.get(operand).ty;
-        self.require_stable_selection_prefix(receiver_type, tree.index())?;
         let selected = self.type_selected_member_on_qualifier(
             tree.index(),
             operand,
