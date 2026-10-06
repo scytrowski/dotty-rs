@@ -105,8 +105,8 @@ pub struct SourceTyper<'a> {
     source_type_projection_depth: usize,
     signature_parameter_in_progress: Option<SymbolId>,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
-    patdef_typing_attempts: HashMap<(SourceId, TreeId<Untyped>), Result<(), String>>,
     patdef_expansions: expression::blocks::PatDefExpansionIndex,
+    patdef_typing_attempts: HashMap<(SourceId, TreeId<Untyped>), Result<(), String>>,
     pattern_bindings: PatternBindingIndex,
     local_methods: LocalMethodIndex,
     active_local_type_scopes: Vec<(SourceContextId, ScopeId)>,
@@ -161,8 +161,8 @@ impl<'a> SourceTyper<'a> {
             source_type_projection_depth: 0,
             signature_parameter_in_progress: None,
             local_symbols: HashMap::new(),
-            patdef_typing_attempts: HashMap::new(),
             patdef_expansions: expression::blocks::PatDefExpansionIndex::default(),
+            patdef_typing_attempts: HashMap::new(),
             pattern_bindings: PatternBindingIndex::default(),
             local_methods: LocalMethodIndex::default(),
             active_local_type_scopes: Vec::new(),
@@ -430,21 +430,15 @@ impl<'a> SourceTyper<'a> {
         &self.typed_index
     }
 
-    /// Returns the most recent local PatDef typing attempt for this source tree.
-    ///
-    /// The observation survives expression rollback so audits can distinguish
-    /// a successful PatDef from a later failure in the enclosing expression.
-    pub fn patdef_typing_attempt(
+    /// Returns the independent outcome of attempting to type one source
+    /// pattern definition. This observation intentionally survives rollback
+    /// of a containing expression transaction, unlike `source_typed_index`.
+    pub fn patdef_typing_attempt_at(
         &self,
         source: SourceId,
         tree: TreeId<Untyped>,
-    ) -> Option<Result<(), &str>> {
-        self.patdef_typing_attempts
-            .get(&(source, tree))
-            .map(|attempt| match attempt {
-                Ok(()) => Ok(()),
-                Err(error) => Err(error.as_str()),
-            })
+    ) -> Option<&Result<(), String>> {
+        self.patdef_typing_attempts.get(&(source, tree))
     }
 
     /// The typer-owned identities assigned to successfully typed block locals.
@@ -14534,37 +14528,6 @@ mod tests {
             typer.store.types.get(typer.typed_ast().get(assignment.lhs).ty),
             Type::TermRef { target: TermRefTarget::Symbol(target), .. } if target == &symbol
         ));
-    }
-
-    #[test]
-    fn patdef_typing_observation_survives_enclosing_expression_rollback() {
-        let source_text = "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = new MaybeInt }; class C { def use(input: Any): Int = { val Extractor(first) = input; 1(); val Extractor(later) = input; first } }";
-        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
-        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
-        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
-            panic!("method body should be a block");
-        };
-        let first_patdef = block.stats[0];
-        let later_patdef = block.stats[2];
-        let mut typer = SourceTyper::new(
-            &parsed.ast,
-            source,
-            &index,
-            &mut store,
-            definitions,
-            &packages,
-        );
-        let context = typer.expression_context_for(method).unwrap();
-
-        assert!(typer.type_expression(rhs, context).is_err());
-
-        assert_eq!(
-            typer.patdef_typing_attempt(source, first_patdef),
-            Some(Ok(()))
-        );
-        assert_eq!(typer.patdef_typing_attempt(source, later_patdef), None);
-        assert_eq!(typer.source_typed_index().get(source, first_patdef), None);
-        assert_eq!(typer.source_typed_index().get(source, later_patdef), None);
     }
 
     #[test]

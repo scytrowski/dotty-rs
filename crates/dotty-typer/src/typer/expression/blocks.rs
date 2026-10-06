@@ -273,7 +273,7 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TypedStatExpansion, TyperError> {
-        let result = self.type_local_patdef_attempt(
+        let outcome = self.type_local_patdef_inner(
             tree,
             definition,
             position,
@@ -281,16 +281,43 @@ impl SourceTyper<'_> {
             info_journal,
             new_mappings,
         );
-        let observation = result
+        let recorded = outcome
             .as_ref()
             .map(|_| ())
-            .map_err(Self::patdef_attempt_error_bucket);
-        self.patdef_typing_attempts
-            .insert((self.source, tree), observation);
-        result
+            .map_err(Self::patdef_attempt_failure);
+        let key = (self.source, tree);
+        match self.patdef_typing_attempts.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry.get().is_err() || recorded.is_ok() {
+                    let _ = entry.insert(recorded);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(recorded);
+            }
+        }
+        outcome
     }
 
-    fn type_local_patdef_attempt(
+    fn patdef_attempt_failure(error: &TyperError) -> String {
+        match error {
+            TyperError::LocalPatDefDeferred { kind, .. } => {
+                format!("LocalPatDefDeferred::{kind}")
+            }
+            TyperError::PatDefAggregateArityDeferred {
+                arity,
+                max_supported,
+                ..
+            } => format!("PatDefAggregateArityDeferred::{arity}>{max_supported}"),
+            _ => format!("{error:?}")
+                .split([' ', '{', '('])
+                .next()
+                .unwrap_or("TyperError")
+                .to_owned(),
+        }
+    }
+
+    fn type_local_patdef_inner(
         &mut self,
         tree: TreeId<Untyped>,
         definition: &dotty_core::ast::PatDef,
@@ -773,27 +800,6 @@ impl SourceTyper<'_> {
         let expansion = TypedStatExpansion::one(typed_val);
         self.record_patdef_expansion(tree, context, expansion.clone(), Vec::new(), new_mappings)?;
         Ok(expansion)
-    }
-
-    fn patdef_attempt_error_bucket(error: &TyperError) -> String {
-        let debug = format!("{error:?}");
-        for prefix in ["LocalPatDefDeferred", "LocalBlockDeclarationDeferred"] {
-            if let Some(details) = debug.strip_prefix(prefix)
-                && let Some((_, kind)) = details.split_once("kind: ")
-            {
-                let kind = kind
-                    .trim_start_matches('"')
-                    .split('"')
-                    .next()
-                    .unwrap_or(kind);
-                return format!("{prefix}::{kind}");
-            }
-        }
-        debug
-            .split([' ', '{', '('])
-            .next()
-            .unwrap_or("UnknownTyperError")
-            .to_owned()
     }
 
     /// Records the single source mapping for a successfully lowered PatDef.
