@@ -1510,6 +1510,68 @@ mod tests {
     }
 
     #[test]
+    fn feedback_opened_then_body_keeps_the_enclosing_end_marker_boundary() {
+        const SOURCE: &str = concat!(
+            "object O:\n",
+            "  def f =\n",
+            "    object Inner {\n",
+            "      def g =\n",
+            "        if cond then\n",
+            "          yes\n",
+            "        else no\n",
+            "    }\n",
+            "    1\n",
+            "  end f\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+            &result.ast.get(package.stats[0]).kind
+        else {
+            panic!("expected object O");
+        };
+        let TreeKind::Template(template) = &result.ast.get(module.template).kind else {
+            panic!("expected object template");
+        };
+        let method_id = template.body[0];
+        let TreeKind::DefDef(method) = &result.ast.get(method_id).kind else {
+            panic!("expected method f");
+        };
+        let TreeKind::Block(body) = &result.ast.get(method.rhs.expect("method body")).kind else {
+            panic!("expected method block");
+        };
+        assert_eq!(
+            body.stats.len(),
+            1,
+            "the inner object must remain in f's body"
+        );
+        assert!(matches!(
+            result.ast.get(body.expr).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+        ));
+        assert_eq!(
+            result
+                .ast
+                .get(method_id)
+                .position
+                .unwrap()
+                .span()
+                .range()
+                .end(),
+            (SOURCE.find("end f").unwrap() + "end f".len()) as u32,
+            "end f must still close the enclosing method",
+        );
+    }
+
+    #[test]
     fn end_marker_for_anonymous_template_method_is_not_misaligned() {
         const SOURCE: &str = concat!(
             "object O:\n",

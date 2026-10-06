@@ -708,7 +708,18 @@ impl ContextualScanner {
             || (self.current().kind == TokenKind::Punctuation(Punctuation::Semicolon)
                 && next_real_token(&self.tokens, index)
                     .is_some_and(|token| token.kind == TokenKind::Keyword(HardKeyword::Else)));
-        if closes_same_indent_else
+        // Only an eager indent has a redundant eager outdent to discard.
+        // After a feedback-opened body closes here, its next visible outdent
+        // may belong to an enclosing definition (including its `end` marker).
+        let closes_eager_indent = closes_same_indent_else
+            && matching_indent_index.is_some_and(|indent_index| {
+                let indent_offset = self.tokens[indent_index].span.start();
+                !self
+                    .feedback_regions
+                    .iter()
+                    .any(|region| region.indent_offset == indent_offset)
+            });
+        if closes_eager_indent
             && let Some(indent_index) = matching_indent_index
             && let Some(outdent_index) = self.matching_eager_outdent_index(indent_index)
             && outdent_index > index
@@ -5614,6 +5625,56 @@ mod tests {
             })
             .count();
         assert_eq!(outdents_between, 1);
+    }
+
+    #[test]
+    fn feedback_then_outdent_does_not_remove_a_later_enclosing_outdent() {
+        let source = "{\n  if ready then\n    yes\n  else no\n  after\n}";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Then) {
+            scanner.advance();
+        }
+        scanner.observe(ScannerEvent::Indented);
+        let indent_offset = scanner.lookahead(1).span.start();
+
+        let after_index = scanner
+            .tokens
+            .iter()
+            .position(|token| {
+                scanner
+                    .source
+                    .get(token.span.start() as usize..token.span.end() as usize)
+                    == Some("after")
+            })
+            .expect("following statement");
+        let after_offset = scanner.tokens[after_index].span.start();
+        scanner.tokens.insert(
+            after_index,
+            Token::new(
+                TokenKind::Outdent,
+                TextRange::new(after_offset, after_offset).unwrap(),
+            ),
+        );
+        scanner.position = scanner
+            .tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::Keyword(HardKeyword::Else))
+            .expect("else token");
+
+        scanner.observe(ScannerEvent::OutdentedRegion { indent_offset });
+
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        assert_eq!(
+            scanner
+                .tokens
+                .iter()
+                .filter(|token| {
+                    token.kind == TokenKind::Outdent && token.span.start() == after_offset
+                })
+                .count(),
+            1,
+            "closing the feedback region must not delete the later boundary",
+        );
     }
 
     #[test]
