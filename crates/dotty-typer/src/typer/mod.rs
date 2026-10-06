@@ -19699,6 +19699,34 @@ mod tests {
     }
 
     #[test]
+    fn source_annotation_projection_defers_curried_constructors() {
+        let source_text = "package scala.annotation { abstract class Annotation }; class Curried(val first: Int)(val second: Int) extends scala.annotation.Annotation; class Use { def use(x: Int): Int = x: @Curried(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (owner, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Annotated(annotated) = &parsed.ast.get(rhs).kind else {
+            panic!("expected annotated expression");
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(owner).unwrap();
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_source_annotation(annotated.annotation, context),
+            Err(TyperError::SourceAnnotationConstructorDeferred { source: error_source, .. })
+                if error_source == source
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.source_annotations.is_empty());
+    }
+
+    #[test]
     fn source_annotation_class_without_canonical_base_is_deferred() {
         let source_text = "class Annot; class Use { def use(x: Int): Int = x: @Annot() }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);

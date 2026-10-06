@@ -178,6 +178,12 @@ impl SourceTyper<'_> {
         if method.kind != MethodKind::Plain {
             return Err(deferred());
         }
+        if matches!(
+            self.store.types.try_get(method.result),
+            Some(Type::Method(_) | Type::Poly(_))
+        ) {
+            return Err(deferred());
+        }
         if method.params.len() != arguments.len() {
             // MethodType does not record parameter defaults. An omitted
             // argument may be legal, so arity alone cannot reject the call.
