@@ -46,7 +46,7 @@ where
     /// parser only consumes the resulting `Indent`/`Outdent` tokens.
     #[cfg(test)]
     pub(crate) fn parse_template_body(&mut self, body: TemplateBody) -> TemplateBodyResult {
-        self.parse_template_body_with_feedback_and_owner(body, None, None)
+        self.parse_template_body_with_feedback_and_owner(body, None, None, false)
     }
 
     pub(crate) fn parse_template_body_with_feedback_and_owner(
@@ -54,6 +54,7 @@ where
         body: TemplateBody,
         feedback_indent: Option<u32>,
         expected_end_marker: Option<Name>,
+        comma_terminates: bool,
     ) -> TemplateBodyResult {
         let (opening, closing) = match body {
             TemplateBody::Braced => (
@@ -75,7 +76,12 @@ where
         let result = self.with_placeholder_scope(|parser| {
             parser.with_location(Location::InBlock, |parser| {
                 parser.with_block_end(Some(closing), |parser| {
-                    parser.parse_template_members(closing, &body_indent, expected_end_marker)
+                    parser.parse_template_members(
+                        closing,
+                        &body_indent,
+                        expected_end_marker,
+                        comma_terminates,
+                    )
                 })
             })
         });
@@ -86,17 +92,24 @@ where
         let closes_at_end_marker =
             body == TemplateBody::Indented && self.current().kind == TokenKind::EndMarker;
         let closes_at_eof = body == TemplateBody::Indented && self.current().kind == TokenKind::Eof;
+        let closes_at_comma = comma_terminates
+            && body == TemplateBody::Indented
+            && self.current().kind == TokenKind::Punctuation(Punctuation::Comma);
 
-        if body == TemplateBody::Indented {
+        if body == TemplateBody::Indented && !closes_at_comma {
             if let Some(indent_offset) = feedback_indent {
                 self.observe_outdented_region(indent_offset);
-            } else if self.current().kind != TokenKind::Outdent {
+            } else if self.current().kind != TokenKind::Outdent
+                && !(comma_terminates
+                    && self.current().kind == TokenKind::Punctuation(Punctuation::Comma))
+            {
                 self.observe_outdented();
             }
         }
         if !self.accept(closing)
             && !(closes_at_end_marker && self.current().kind == TokenKind::EndMarker)
             && !closes_at_eof
+            && !closes_at_comma
         {
             self.report(
                 ParseDiagnosticKind::ExpectedToken,
@@ -149,6 +162,7 @@ where
         closing: TokenKind,
         body_indent: &str,
         expected_end_marker: Option<Name>,
+        comma_terminates: bool,
     ) -> TemplateBodyResult {
         let mut members = Vec::new();
         self.consume_template_separators(closing);
@@ -245,6 +259,13 @@ where
                 }
             }
 
+            let comma_closes_body = comma_terminates
+                && closing == TokenKind::Outdent
+                && self.current().kind == TokenKind::Punctuation(Punctuation::Comma);
+            if comma_closes_body {
+                self.observe_outdented_by_delimiter();
+                break;
+            }
             if closing == TokenKind::Outdent {
                 // A nested method/body parser may already have consumed its
                 // own Outdent. Re-check before consuming the following
@@ -968,6 +989,7 @@ mod tests {
             TemplateBody::Indented,
             None,
             Some(Name::new(inner, dotty_core::Namespace::Term)),
+            false,
         );
 
         assert_eq!(result.members.len(), 1);

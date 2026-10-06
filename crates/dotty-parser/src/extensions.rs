@@ -128,6 +128,7 @@ where
                             TemplateBody::Braced,
                             None,
                             Some(extension_end_marker),
+                            false,
                         )
                         .members
                 })
@@ -138,6 +139,7 @@ where
                         TemplateBody::Indented,
                         None,
                         Some(extension_end_marker),
+                        false,
                     )
                     .members
             }),

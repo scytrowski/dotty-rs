@@ -777,6 +777,7 @@ where
             false,
             indent_reference,
             Some(expected_end_marker),
+            false,
         );
         if required_body && !self.cursor.progressed_since(body_checkpoint) {
             self.report(
@@ -1053,7 +1054,7 @@ where
     }
 
     pub(crate) fn parse_optional_template_body(&mut self) -> TemplateBodyResult {
-        self.parse_optional_template_body_with_feedback(None, false)
+        self.parse_optional_template_body_with_feedback_and_reference(None, false, None, None, true)
     }
 
     pub(crate) fn parse_optional_template_body_with_feedback(
@@ -1066,6 +1067,7 @@ where
             required,
             None,
             None,
+            false,
         )
     }
 
@@ -1075,6 +1077,7 @@ where
         required: bool,
         indent_reference: Option<u32>,
         expected_end_marker: Option<dotty_core::Name>,
+        comma_terminates: bool,
     ) -> TemplateBodyResult {
         self.consume_newlines_before_template_body();
         if required
@@ -1109,6 +1112,7 @@ where
                         TemplateBody::Indented,
                         feedback_indent,
                         expected_end_marker,
+                        comma_terminates,
                     );
                 }
                 self.report(
@@ -1128,11 +1132,13 @@ where
                     TemplateBody::Braced,
                     None,
                     expected_end_marker,
+                    comma_terminates,
                 ),
             TokenKind::Indent => self.parse_template_body_with_feedback_and_owner(
                 TemplateBody::Indented,
                 feedback_indent,
                 expected_end_marker,
+                comma_terminates,
             ),
             _ => TemplateBodyResult {
                 self_val: None,
