@@ -680,6 +680,13 @@ pub enum TyperError {
         expected: usize,
         actual: usize,
     },
+    /// A multi-binding PatDef exceeds the supported canonical TupleN bound.
+    PatDefAggregateArityDeferred {
+        source: SourceId,
+        tree_index: u32,
+        arity: usize,
+        max_supported: usize,
+    },
     /// String constants do not have a canonical source type in this session yet.
     StringLiteralTypingDeferred {
         source: SourceId,

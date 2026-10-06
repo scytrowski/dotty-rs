@@ -13,6 +13,13 @@ use dotty_core::{
 };
 
 const MAX_REIFIABLE_TYPE_PREFIX_DEPTH: usize = 64;
+pub(super) const MAX_CANONICAL_TUPLE_ARITY: usize = 22;
+
+#[derive(Clone, Copy)]
+pub(super) struct CanonicalTupleSymbols {
+    pub(super) class: SymbolId,
+    pub(super) companion: SymbolId,
+}
 
 /// Resolved extractor metadata retained for later result-protocol and nested
 /// pattern typing increments.
@@ -328,36 +335,11 @@ impl SourceTyper<'_> {
         }
     }
 
-    fn type_tuple_pattern(
+    pub(super) fn resolve_canonical_tuple_symbols(
         &mut self,
         pattern: TreeId<Untyped>,
-        tuple: &dotty_core::ast::Tuple,
-        selector_type: TypeId,
-        context: ExpressionContext,
-        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
-        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
-    ) -> Result<TreeId<Typed>, TyperError> {
-        let arity = tuple.elements.len();
-        if arity == 0 {
-            let literal = self.type_literal_expression(
-                pattern,
-                dotty_core::ast::Literal {
-                    value: dotty_core::Constant::Unit,
-                },
-                self.arena.get(pattern).position,
-            )?;
-            let literal_type = self.typed_arena.get(literal).ty;
-            let widened_type =
-                self.widen_expression_type_journaled(literal_type, info_journal, 0)?;
-            self.require_literal_pattern_compatible(
-                literal_type,
-                widened_type,
-                selector_type,
-                pattern.index(),
-            )?;
-            return Ok(literal);
-        }
-
+        arity: usize,
+    ) -> Result<CanonicalTupleSymbols, TyperError> {
         let tree_index = pattern.index();
         let tuple_name_text = format!("Tuple{arity}");
         let tuple_type_name = Name::new(self.store.names.intern(&tuple_name_text), Namespace::Type);
@@ -374,7 +356,6 @@ impl SourceTyper<'_> {
             )
         })?;
         let package_prefix = self.package_type_prefix(scala_package);
-
         let local_type_candidates = self
             .packages
             .scope_of(scala_package)
@@ -425,7 +406,6 @@ impl SourceTyper<'_> {
                 ));
             }
         };
-
         let linked_companion = self.store.symbols.get(tuple_class).links.companion;
         let scoped_companion = linked_companion
             .filter(|symbol| {
@@ -449,7 +429,7 @@ impl SourceTyper<'_> {
                     }
                 })
             });
-        let tuple_object = match scoped_companion {
+        let companion = match scoped_companion {
             Some(object) => object,
             None => {
                 let request = dotty_core::MemberRequest {
@@ -478,6 +458,291 @@ impl SourceTyper<'_> {
                     })?
             }
         };
+        Ok(CanonicalTupleSymbols {
+            class: tuple_class,
+            companion,
+        })
+    }
+
+    pub(super) fn construct_canonical_tuple_value(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        component_types: &[TypeId],
+        component_values: Vec<TreeId<Typed>>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(TreeId<Typed>, TypeId), TyperError> {
+        let arity = component_types.len();
+        if !(2..=MAX_CANONICAL_TUPLE_ARITY).contains(&arity) || component_values.len() != arity {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: source_tree.index(),
+                kind: "pattern definition aggregate tuple arity",
+            });
+        }
+        let symbols = self.resolve_canonical_tuple_symbols(source_tree, arity)?;
+        let tuple_prefix = self.type_symbol_prefix(symbols.class);
+        let tuple_constructor = self
+            .store
+            .types
+            .alloc(Type::type_ref(tuple_prefix, symbols.class));
+        let tuple_type = self.store.types.alloc(Type::Applied {
+            tycon: tuple_constructor,
+            args: component_types.to_vec(),
+        });
+        let companion_prefix = self.type_symbol_prefix(symbols.companion);
+        let companion_type = self.store.types.alloc(Type::TermRef {
+            prefix: companion_prefix,
+            target: TermRefTarget::Symbol(symbols.companion),
+        });
+        let receiver =
+            self.tuple_companion_receiver(companion_type, source_tree, arity, info_journal)?;
+        let apply_name = Name::new(self.store.names.intern("apply"), Namespace::Term);
+        let members = self
+            .lookup_overload_members_journaled(receiver, apply_name, info_journal)
+            .map_err(|_| TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: source_tree.index(),
+                kind: "pattern definition aggregate tuple constructor overload",
+            })?;
+        let mut candidates = members
+            .into_iter()
+            .map(|member| {
+                let callable = self.member_type_on_journaled(&member, info_journal)?;
+                Ok(crate::typer::application::ApplicationCandidate {
+                    symbol: member.symbol,
+                    callable,
+                    member: Some(member),
+                    rejection: None,
+                })
+            })
+            .collect::<Result<Vec<_>, TyperError>>()?;
+        self.remove_overridden_overload_candidates(&mut candidates, source_tree.index())?;
+        let [candidate] = candidates.as_slice() else {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: source_tree.index(),
+                kind: "pattern definition aggregate tuple constructor selection",
+            });
+        };
+        let Some(Type::Poly(poly)) = self.store.types.try_get(candidate.callable) else {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: source_tree.index(),
+                kind: "pattern definition aggregate tuple constructor type parameters",
+            });
+        };
+        if poly.params.len() != arity {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: source_tree.index(),
+                kind: "pattern definition aggregate tuple constructor",
+            });
+        }
+        let instantiated =
+            dotty_core::types::instantiate_poly(self.store, candidate.callable, component_types)
+                .map_err(|_| TyperError::LocalBlockDeclarationDeferred {
+                    source: self.source,
+                    tree_index: source_tree.index(),
+                    kind: "pattern definition aggregate tuple constructor instantiation",
+                })?;
+        for (index, (argument, bounds)) in component_types
+            .iter()
+            .copied()
+            .zip(instantiated.bounds.iter().copied())
+            .enumerate()
+        {
+            self.check_explicit_type_argument_bounds(
+                argument,
+                bounds,
+                index,
+                source_tree.index(),
+                info_journal,
+            )?;
+        }
+        let Some(Type::Method(method)) = self.store.types.try_get(instantiated.result) else {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: source_tree.index(),
+                kind: "pattern definition aggregate tuple constructor method type",
+            });
+        };
+        if method.kind != MethodKind::Plain
+            || method.params.iter().any(|parameter| {
+                parameter.erased
+                    || parameter.varargs
+                    || matches!(
+                        self.store.types.try_get(parameter.ty),
+                        Some(Type::ByName { .. } | Type::Repeated { .. })
+                    )
+            })
+            || matches!(
+                self.store.types.try_get(method.result),
+                Some(Type::Method(_) | Type::Poly(_))
+            )
+        {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: source_tree.index(),
+                kind: "pattern definition aggregate tuple constructor method shape",
+            });
+        }
+        let result_matches_tuple = match self.store.types.try_get(method.result) {
+            Some(Type::Applied { tycon, args }) if args == component_types => {
+                matches!(
+                    self.store.types.try_get(*tycon),
+                    Some(Type::TypeRef {
+                        target: TypeRefTarget::Symbol(symbol),
+                        ..
+                    }) if *symbol == symbols.class
+                )
+            }
+            _ => false,
+        };
+        if method.params.len() != arity
+            || method
+                .params
+                .iter()
+                .zip(component_types)
+                .any(|(parameter, component)| parameter.ty != *component)
+            || !result_matches_tuple
+        {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: source_tree.index(),
+                kind: "pattern definition aggregate tuple constructor signature",
+            });
+        }
+        let function_type = self.store.types.alloc(Type::TermRef {
+            prefix: companion_type,
+            target: TermRefTarget::Symbol(candidate.symbol),
+        });
+        let position = self
+            .arena
+            .try_get(source_tree)
+            .and_then(|tree| tree.position);
+        let function = {
+            let mut builder = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types);
+            let qualifier = builder.ident(
+                self.store.symbols.get(symbols.companion).name,
+                companion_type,
+                position,
+            );
+            let selected = builder.select(qualifier, apply_name, false, function_type, position);
+            let arguments = component_types
+                .iter()
+                .map(|component| builder.type_tree(*component, position))
+                .collect();
+            builder.type_apply(selected, arguments, instantiated.result, position)
+        };
+        let tuple_value = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply(
+            function,
+            component_values,
+            tuple_type,
+            position,
+        );
+        Ok((tuple_value, tuple_type))
+    }
+
+    pub(super) fn select_canonical_tuple_component(
+        &mut self,
+        source_tree: TreeId<Untyped>,
+        tuple_value: TreeId<Typed>,
+        tuple_type: TypeId,
+        component_index: usize,
+        expected_type: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let spelling = format!("_{}", component_index + 1);
+        let name = Name::new(self.store.names.intern(&spelling), Namespace::Term);
+        let members = self
+            .lookup_overload_members_journaled(tuple_type, name, info_journal)
+            .map_err(|_| TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: source_tree.index(),
+                kind: "pattern definition aggregate tuple selector",
+            })?;
+        let mut candidates = members
+            .into_iter()
+            .map(|member| {
+                let callable = self.member_type_on_journaled(&member, info_journal)?;
+                Ok(crate::typer::application::ApplicationCandidate {
+                    symbol: member.symbol,
+                    callable,
+                    member: Some(member),
+                    rejection: None,
+                })
+            })
+            .collect::<Result<Vec<_>, TyperError>>()?;
+        self.remove_overridden_overload_candidates(&mut candidates, source_tree.index())?;
+        let [candidate] = candidates.as_slice() else {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: source_tree.index(),
+                kind: "pattern definition aggregate tuple selector",
+            });
+        };
+        let member_conforms = self.conforms(candidate.callable, expected_type);
+        let expected_conforms = self.conforms(expected_type, candidate.callable);
+        if !matches!(member_conforms, Ok(true)) || !matches!(expected_conforms, Ok(true)) {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: source_tree.index(),
+                kind: "pattern definition aggregate tuple selector type",
+            });
+        }
+        let selected_type = self.store.types.alloc(Type::TermRef {
+            prefix: self.typed_arena.get(tuple_value).ty,
+            target: TermRefTarget::Symbol(candidate.symbol),
+        });
+        let position = self
+            .arena
+            .try_get(source_tree)
+            .and_then(|tree| tree.position);
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).select(
+                tuple_value,
+                name,
+                false,
+                selected_type,
+                position,
+            ),
+        )
+    }
+
+    fn type_tuple_pattern(
+        &mut self,
+        pattern: TreeId<Untyped>,
+        tuple: &dotty_core::ast::Tuple,
+        selector_type: TypeId,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let arity = tuple.elements.len();
+        if arity == 0 {
+            let literal = self.type_literal_expression(
+                pattern,
+                dotty_core::ast::Literal {
+                    value: dotty_core::Constant::Unit,
+                },
+                self.arena.get(pattern).position,
+            )?;
+            let literal_type = self.typed_arena.get(literal).ty;
+            let widened_type =
+                self.widen_expression_type_journaled(literal_type, info_journal, 0)?;
+            self.require_literal_pattern_compatible(
+                literal_type,
+                widened_type,
+                selector_type,
+                pattern.index(),
+            )?;
+            return Ok(literal);
+        }
+
+        let tree_index = pattern.index();
+        let tuple_symbols = self.resolve_canonical_tuple_symbols(pattern, arity)?;
+        let tuple_class = tuple_symbols.class;
+        let tuple_object = tuple_symbols.companion;
 
         let type_arguments = match self.store.types.try_get(selector_type) {
             Some(Type::Applied { tycon, args }) => {

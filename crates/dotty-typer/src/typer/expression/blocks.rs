@@ -281,15 +281,14 @@ impl SourceTyper<'_> {
                     emitted: expansion.emitted,
                 });
             }
-            if binders.len() != 1 {
-                return Err(self.patdef_deferred(tree));
+            if binders.len() > super::patterns::MAX_CANONICAL_TUPLE_ARITY {
+                return Err(TyperError::PatDefAggregateArityDeferred {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    arity: binders.len(),
+                    max_supported: super::patterns::MAX_CANONICAL_TUPLE_ARITY,
+                });
             }
-            let (binder_tree, binder_name) = binders[0];
-            let final_symbol = self
-                .local_symbols
-                .get(&(self.source, binder_tree))
-                .copied()
-                .ok_or_else(|| self.patdef_deferred(tree))?;
             let Some(local_stack) = context.local_scopes else {
                 return Err(TyperError::ExpressionLocalScopeStackMissing {
                     stack: ExpressionScopeId::new(
@@ -309,18 +308,30 @@ impl SourceTyper<'_> {
                 });
             }
             let scope = frame.scope;
-            let existing = self.store.scopes.get(scope).lookup_all(&binder_name);
-            if existing.is_empty() {
-                self.store
-                    .scopes
-                    .get_mut(scope)
-                    .enter(binder_name, final_symbol);
-            } else if !existing.contains(&final_symbol) {
-                return Err(TyperError::DuplicateLocalValue {
-                    source: self.source,
-                    tree_index: tree.index(),
-                    name: binder_name,
-                });
+            let mut bindings = Vec::with_capacity(binders.len());
+            for (binder_tree, binder_name) in binders {
+                let final_symbol = self
+                    .local_symbols
+                    .get(&(self.source, binder_tree))
+                    .copied()
+                    .ok_or_else(|| self.patdef_deferred(tree))?;
+                let existing = self.store.scopes.get(scope).lookup_all(&binder_name);
+                if !existing.is_empty() && !existing.contains(&final_symbol) {
+                    return Err(TyperError::DuplicateLocalValue {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        name: binder_name,
+                    });
+                }
+                bindings.push((binder_name, final_symbol, existing.is_empty()));
+            }
+            for (binder_name, final_symbol, should_enter) in bindings {
+                if should_enter {
+                    self.store
+                        .scopes
+                        .get_mut(scope)
+                        .enter(binder_name, final_symbol);
+                }
             }
             return Ok(TypedStatExpansion {
                 anchor: expansion.anchor,
@@ -340,11 +351,15 @@ impl SourceTyper<'_> {
             return Err(self.patdef_deferred(tree));
         }
         let binders = self.patdef_binders(&definition.patterns);
-        if binders.len() > 1 {
-            return Err(self.patdef_deferred(tree));
+        if binders.len() > super::patterns::MAX_CANONICAL_TUPLE_ARITY {
+            return Err(TyperError::PatDefAggregateArityDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                arity: binders.len(),
+                max_supported: super::patterns::MAX_CANONICAL_TUPLE_ARITY,
+            });
         }
-        let local_binding = binders.first().copied();
-        let scope = if let Some((_, binder_name)) = local_binding {
+        let scope = if !binders.is_empty() {
             let Some(local_stack) = context.local_scopes else {
                 return Err(TyperError::ExpressionLocalScopeStackMissing {
                     stack: ExpressionScopeId::new(
@@ -364,18 +379,20 @@ impl SourceTyper<'_> {
                 });
             }
             let scope = frame.scope;
-            if !self
-                .store
-                .scopes
-                .get(scope)
-                .lookup_all(&binder_name)
-                .is_empty()
-            {
-                return Err(TyperError::DuplicateLocalValue {
-                    source: self.source,
-                    tree_index: tree.index(),
-                    name: binder_name,
-                });
+            for (_, binder_name) in &binders {
+                if !self
+                    .store
+                    .scopes
+                    .get(scope)
+                    .lookup_all(binder_name)
+                    .is_empty()
+                {
+                    return Err(TyperError::DuplicateLocalValue {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        name: *binder_name,
+                    });
+                }
             }
             Some(scope)
         } else {
@@ -408,7 +425,7 @@ impl SourceTyper<'_> {
         );
         self.expression_scopes.truncate(expression_scope_depth);
         let typed_pattern = typed_pattern?;
-        if local_binding.is_none() {
+        if binders.is_empty() {
             let actual_pattern_binding_count = self
                 .pattern_bindings
                 .by_tree
@@ -446,7 +463,166 @@ impl SourceTyper<'_> {
             )?;
             return Ok(expansion);
         }
-        let (binder_tree, binder_name) = local_binding.ok_or_else(|| self.patdef_deferred(tree))?;
+        let actual_pattern_binding_count = self
+            .pattern_bindings
+            .by_tree
+            .len()
+            .saturating_sub(prior_pattern_binding_count);
+        if actual_pattern_binding_count != binders.len() {
+            return Err(TyperError::PatDefBinderInventoryConflict {
+                source: self.source,
+                tree_index: tree.index(),
+                expected: binders.len(),
+                actual: actual_pattern_binding_count,
+            });
+        }
+        if binders.len() > 1 {
+            let mut component_types = Vec::with_capacity(binders.len());
+            let mut component_values = Vec::with_capacity(binders.len());
+            for (binder_tree, binder_name) in &binders {
+                let temporary = self
+                    .pattern_bindings
+                    .by_tree
+                    .get(&(self.source, *binder_tree))
+                    .copied()
+                    .ok_or_else(|| self.patdef_deferred(tree))?;
+                if !self.store.symbols.contains(temporary) {
+                    return Err(self.patdef_deferred(tree));
+                }
+                let SymbolInfo::Complete(binder_type) = self.store.symbols.get(temporary).info
+                else {
+                    return Err(self.patdef_deferred(tree));
+                };
+                let body_type = self.pattern_binding_term_ref(temporary);
+                let binder_position = self
+                    .arena
+                    .try_get(*binder_tree)
+                    .and_then(|node| node.position);
+                let value = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).ident(
+                    *binder_name,
+                    body_type,
+                    binder_position,
+                );
+                component_types.push(binder_type);
+                component_values.push(value);
+            }
+            let (aggregate_body, aggregate_type) = self.construct_canonical_tuple_value(
+                tree,
+                &component_types,
+                component_values,
+                info_journal,
+            )?;
+            let case = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).case_def(
+                typed_pattern,
+                None,
+                aggregate_body,
+                aggregate_type,
+                position,
+            );
+            let extraction = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .match_expr(typed_selector, vec![case], aggregate_type, position);
+            let synthetic_name = Name::new(
+                self.store
+                    .names
+                    .intern(&format!("$patdef${}", tree.index())),
+                Namespace::Term,
+            );
+            let synthetic_symbol = self.store.symbols.alloc(dotty_core::Symbol {
+                name: synthetic_name,
+                owner: Some(context.owner),
+                kind: SymbolKind::Local,
+                flags: SymbolFlags::SYNTHETIC,
+                visibility: dotty_core::Visibility::Public,
+                info: SymbolInfo::Complete(aggregate_type),
+                origin: SymbolOrigin::Synthetic,
+                annotations: Vec::new(),
+                position,
+                links: dotty_core::SymbolLinks::default(),
+            });
+            let synthetic_tpt = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .type_tree(aggregate_type, position);
+            let synthetic_val = self.typed_arena.alloc(Tree {
+                kind: TreeKind::ValDef(ValDef {
+                    name: TermName::new(synthetic_name.text()),
+                    tpt: synthetic_tpt,
+                    rhs: Some(extraction),
+                    metadata: (),
+                }),
+                position,
+                ty: aggregate_type,
+            });
+            let synthetic_ref = self.pattern_binding_term_ref(synthetic_symbol);
+            let synthetic_value = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .ident(synthetic_name, synthetic_ref, position);
+            let scope = scope.ok_or_else(|| self.patdef_deferred(tree))?;
+            let mut emitted = Vec::with_capacity(binders.len() + 1);
+            emitted.push(synthetic_val);
+            for (component_index, ((binder_tree, binder_name), binder_type)) in binders
+                .iter()
+                .zip(component_types.iter().copied())
+                .enumerate()
+            {
+                let selection = self.select_canonical_tuple_component(
+                    tree,
+                    synthetic_value,
+                    aggregate_type,
+                    component_index,
+                    binder_type,
+                    info_journal,
+                )?;
+                let binder_position = self
+                    .arena
+                    .try_get(*binder_tree)
+                    .and_then(|node| node.position);
+                let final_symbol = self.store.symbols.alloc(dotty_core::Symbol {
+                    name: *binder_name,
+                    owner: Some(context.owner),
+                    kind: SymbolKind::Local,
+                    flags: SymbolFlags::EMPTY,
+                    visibility: dotty_core::Visibility::Public,
+                    info: SymbolInfo::Complete(binder_type),
+                    origin: SymbolOrigin::Source(self.source),
+                    annotations: Vec::new(),
+                    position: binder_position,
+                    links: dotty_core::SymbolLinks::default(),
+                });
+                self.store
+                    .scopes
+                    .get_mut(scope)
+                    .enter(*binder_name, final_symbol);
+                self.local_symbols
+                    .insert((self.source, *binder_tree), final_symbol);
+                let typed_tpt = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                    .type_tree(binder_type, binder_position);
+                let typed_val = self.typed_arena.alloc(Tree {
+                    kind: TreeKind::ValDef(ValDef {
+                        name: TermName::new(binder_name.text()),
+                        tpt: typed_tpt,
+                        rhs: Some(selection),
+                        metadata: (),
+                    }),
+                    position: binder_position,
+                    ty: binder_type,
+                });
+                emitted.push(typed_val);
+            }
+            let expansion = TypedStatExpansion {
+                anchor: synthetic_val,
+                emitted,
+            };
+            self.record_patdef_expansion(
+                tree,
+                context,
+                expansion.clone(),
+                vec![synthetic_symbol],
+                new_mappings,
+            )?;
+            return Ok(expansion);
+        }
+        let (binder_tree, binder_name) = binders
+            .first()
+            .copied()
+            .ok_or_else(|| self.patdef_deferred(tree))?;
         let temporary = self
             .pattern_bindings
             .by_tree
