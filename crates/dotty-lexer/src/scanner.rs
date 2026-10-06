@@ -1001,12 +1001,17 @@ impl TokenSource for ContextualScanner {
             ScannerEvent::OutdentedByDelimiter => {
                 if let Some(region) = self.feedback_regions.pop() {
                     // No parser-visible Outdent is inserted at a grammar
-                    // delimiter. If an Outdent is already current, it closes
-                    // the region in the token stream and only feedback state
-                    // needs to be discarded.
-                    if self.current().kind != TokenKind::Outdent {
-                        self.delimiter_closed_indents.push(region.indent_offset);
-                    }
+                    // delimiter, so remember the indent token as logically closed.
+                    self.delimiter_closed_indents.push(region.indent_offset);
+                }
+            }
+            ScannerEvent::OutdentedByExistingOutdent { indent_offset } => {
+                if self
+                    .feedback_regions
+                    .last()
+                    .is_some_and(|region| region.indent_offset == indent_offset)
+                {
+                    self.feedback_regions.pop();
                 }
             }
             ScannerEvent::ArrowIndented => {
@@ -3269,10 +3274,72 @@ mod tests {
         });
         scanner.position = outdent_index;
 
-        scanner.observe(ScannerEvent::OutdentedByDelimiter);
+        scanner.observe(ScannerEvent::OutdentedByExistingOutdent {
+            indent_offset: indent.span.start(),
+        });
 
         assert!(scanner.feedback_regions.is_empty());
         assert!(scanner.delimiter_closed_indents.is_empty());
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+    }
+
+    #[test]
+    fn existing_outdent_does_not_pop_an_unrelated_feedback_region() {
+        let source = "if ready then\n  run()\nafter";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        let indent_offset = scanner
+            .tokens
+            .iter()
+            .find(|token| token.kind == TokenKind::Indent)
+            .expect("body indent")
+            .span
+            .start();
+        let outdent_index = scanner
+            .tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::Outdent)
+            .expect("body outdent");
+        scanner.feedback_regions.push(FeedbackRegion {
+            kind: FeedbackRegionKind::CaseBody,
+            indent_offset: indent_offset + 1,
+            case_offset: None,
+        });
+        scanner.position = outdent_index;
+
+        scanner.observe(ScannerEvent::OutdentedByExistingOutdent { indent_offset });
+
+        assert_eq!(scanner.feedback_regions.len(), 1);
+        assert!(scanner.delimiter_closed_indents.is_empty());
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+    }
+
+    #[test]
+    fn grammar_delimiter_still_marks_feedback_indent_when_outdent_is_current() {
+        let source = "if ready then\n  run()\nafter";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        let indent_offset = scanner
+            .tokens
+            .iter()
+            .find(|token| token.kind == TokenKind::Indent)
+            .expect("body indent")
+            .span
+            .start();
+        let outdent_index = scanner
+            .tokens
+            .iter()
+            .position(|token| token.kind == TokenKind::Outdent)
+            .expect("body outdent");
+        scanner.feedback_regions.push(FeedbackRegion {
+            kind: FeedbackRegionKind::CaseBody,
+            indent_offset,
+            case_offset: None,
+        });
+        scanner.position = outdent_index;
+
+        scanner.observe(ScannerEvent::OutdentedByDelimiter);
+
+        assert!(scanner.feedback_regions.is_empty());
+        assert_eq!(scanner.delimiter_closed_indents, vec![indent_offset]);
         assert_eq!(scanner.current().kind, TokenKind::Outdent);
     }
 

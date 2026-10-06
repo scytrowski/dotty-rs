@@ -317,7 +317,7 @@ where
                         // Still close the parser-feedback region, or a later
                         // outdent request can incorrectly terminate sibling
                         // case clauses.
-                        self.observe_outdented_by_delimiter();
+                        self.observe_outdented_by_existing_outdent(indent_offset);
                     }
                 } else {
                     self.observe_outdented_layout_region(indent_offset);
