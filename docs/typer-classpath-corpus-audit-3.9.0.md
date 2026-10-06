@@ -6,7 +6,7 @@ Run `tools/typer-classpath-corpus-audit/run` with the environment documented in 
 
 ## PatDef sprint result (#743)
 
-The pre-sprint baseline had 87 `LocalBlockDeclarationDeferred::pattern definition` first blockers in 23 files. The current broad bucket is absent. The PatDef outcome table now counts actual local PatDef typing attempts: successful PatDefs, PatDef-local failure buckets, and PatDefs not reached because an earlier expression failed. Attempt observations survive a later rollback in the enclosing expression and do not inherit unrelated method errors. Focused fixtures verify mutable multi-binder assignment, single-binder extractor assignment, zero-binder effect checking, attempts across enclosing method failures, and lazy/explicit-type boundaries.
+The pre-sprint baseline had 87 `LocalBlockDeclarationDeferred::pattern definition` first blockers in 23 files. The current broad bucket is absent. The PatDef outcome table now counts actual local PatDef typing attempts: successful PatDefs, PatDef-local failure buckets, and PatDefs not reached because an earlier expression failed. The status totals cover source-ranged PatDefs inside typed method bodies; PatDefs outside those ranges or without source ranges are reported separately. Attempt observations survive a later rollback in the enclosing expression and do not inherit unrelated method errors. Focused fixtures verify mutable multi-binder assignment, single-binder extractor assignment, zero-binder effect checking, attempts across enclosing method failures, and lazy/explicit-type boundaries.
 
 ## Type-projection deltas and next increment
 
@@ -208,6 +208,12 @@ local_patdefs:
     failure::TypeNameNotFound=24 files=5
     failure::UnsupportedExpression=35 files=22
     failure::UnsupportedTypeTree=8 files=6
+    not_attempted=630 files=171
+  typing_attempt_statuses:
+    profiled=781
+    outside_typed_method_ranges_or_without_source_range=9
+    success=0 files=0
+    failure=151 files=78
     not_attempted=630 files=171
   typing_outcomes:
     failure::ApplicationCalleeNotMethod::val::binders=3+::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala]

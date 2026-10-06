@@ -3173,6 +3173,33 @@ fn print_local_patdefs(profile: &PatDefProfile) {
     for (outcome, (count, files)) in outcome_totals {
         println!("    {outcome}={count} files={}", files.len());
     }
+    let mut attempt_statuses = BTreeMap::<String, (usize, BTreeSet<String>)>::new();
+    for (key, bucket) in &profile.typing_outcomes {
+        let status = if key == "success" || key.starts_with("success::") {
+            "success"
+        } else if key == "not_attempted" || key.starts_with("not_attempted::") {
+            "not_attempted"
+        } else {
+            "failure"
+        };
+        let total = attempt_statuses.entry(status.to_owned()).or_default();
+        total.0 += bucket.count;
+        total.1.extend(bucket.files.iter().cloned());
+    }
+    let profiled_count = attempt_statuses
+        .values()
+        .map(|(count, _)| count)
+        .sum::<usize>();
+    println!("  typing_attempt_statuses:");
+    println!("    profiled={profiled_count}");
+    println!(
+        "    outside_typed_method_ranges_or_without_source_range={}",
+        profile.total.saturating_sub(profiled_count)
+    );
+    for status in ["success", "failure", "not_attempted"] {
+        let (count, files) = attempt_statuses.get(status).cloned().unwrap_or_default();
+        println!("    {status}={count} files={}", files.len());
+    }
     println!("  typing_outcomes:");
     for (outcome, bucket) in &profile.typing_outcomes {
         println!(
