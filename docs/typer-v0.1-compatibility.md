@@ -362,6 +362,11 @@ Ordinary left-associative term infix calls lower through selected-member
 application, including overload selection and generic argument inference. Their
 typed shape is a `Select` followed by an `Apply`; the Scala 3.9.0 oracle fixture
 is `crates/dotty-typer/tests/fixtures/infix-expressions/InfixExpressions.scala`.
+The four supported prefix operators (`!`, `~`, `+`, `-`) select the corresponding
+`unary_` member on their operand. The typed shape is a `Select` for a parameterless
+method or value member, matching the pinned Scala 3.9.0 fixture in
+`crates/dotty-typer/tests/fixtures/prefix-expressions/`. An empty-parentheses
+method requires an explicit argument list in that compiler and is rejected here.
 Right-associative infix calls (operators ending in `:`) remain explicitly
 deferred because they require Scala's operand rewrite.
 It also supports expected-type conformance checks, source type ascriptions, direct
