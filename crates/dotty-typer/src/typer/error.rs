@@ -467,6 +467,52 @@ pub enum TyperError {
         tree_index: u32,
         name: dotty_core::Name,
     },
+    /// The source annotation is outside the parser's ordinary constructor shape.
+    MalformedSourceAnnotation {
+        source: SourceId,
+        tree_index: u32,
+    },
+    /// The annotation's exact class identity or annotation ancestry is unavailable.
+    SourceAnnotationClassDeferred {
+        source: SourceId,
+        tree_index: u32,
+        class: Option<SymbolId>,
+    },
+    /// The resolved class does not derive from the canonical annotation base.
+    SourceAnnotationNotAnnotationClass {
+        source: SourceId,
+        tree_index: u32,
+        class: SymbolId,
+    },
+    /// An argument is not a supported source literal constant.
+    SourceAnnotationArgumentNotConstant {
+        source: SourceId,
+        tree_index: u32,
+    },
+    /// The same named annotation argument appears more than once.
+    SourceAnnotationDuplicateNamedArgument {
+        source: SourceId,
+        tree_index: u32,
+        name: dotty_core::TermName,
+    },
+    /// Constructor overloads or signature semantics exceed the first slice.
+    SourceAnnotationConstructorDeferred {
+        source: SourceId,
+        tree_index: u32,
+        class: SymbolId,
+    },
+    /// The source arguments do not match the resolved constructor's parameters.
+    SourceAnnotationConstructorArgumentMismatch {
+        source: SourceId,
+        tree_index: u32,
+        class: SymbolId,
+    },
+    /// A constant cannot yet be checked against its constructor parameter type.
+    SourceAnnotationArgumentTypeDeferred {
+        source: SourceId,
+        tree_index: u32,
+        class: SymbolId,
+    },
     /// A source method parameter tree has no symbol for this method owner.
     MethodParameterSymbolMissing {
         method: SymbolId,

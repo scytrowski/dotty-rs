@@ -29,6 +29,7 @@ mod expression;
 use expression::LocalMethodIndex;
 mod resolution;
 use resolution::imports::ImportSelection;
+mod source_annotations;
 mod transaction;
 mod type_projection;
 
@@ -102,6 +103,7 @@ pub struct SourceTyper<'a> {
     packages: &'a Packages,
     resolver: Box<dyn SymbolResolver + 'a>,
     type_index: SourceTypeIndex,
+    source_annotations: HashMap<TreeId<Untyped>, dotty_core::AnnotationId>,
     source_type_projection_depth: usize,
     signature_parameter_in_progress: Option<SymbolId>,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
@@ -158,6 +160,7 @@ impl<'a> SourceTyper<'a> {
             packages,
             resolver: Box::new(NoResolver),
             type_index: SourceTypeIndex::default(),
+            source_annotations: HashMap::new(),
             source_type_projection_depth: 0,
             signature_parameter_in_progress: None,
             local_symbols: HashMap::new(),
@@ -19476,7 +19479,7 @@ mod tests {
 
     #[test]
     fn source_annotation_constructor_shapes_are_explicit() {
-        let source_text = "package scala.annotation { abstract class Annotation; class unchecked extends Annotation; class EmptyAnnot extends Annotation; class Annot(val n: Int) extends Annotation; class Multi(val first: Int, val second: Int) extends Annotation }; class Use { def bare(x: Int): Int = x: @unchecked; def empty(x: Int): Int = x: @EmptyAnnot(); def positional(x: Int): Int = x: @Annot(1); def named(x: Int): Int = x: @Annot(n = 1); def mixed(x: Int): Int = x: @Multi(1, second = 2) }";
+        let source_text = "package scala.annotation { abstract class Annotation }; class unchecked extends scala.annotation.Annotation; class EmptyAnnot extends scala.annotation.Annotation; class Annot(val n: Int) extends scala.annotation.Annotation; class Multi(val first: Int, val second: Int) extends scala.annotation.Annotation; class Use { def bare(x: Int): Int = x: @unchecked; def empty(x: Int): Int = x: @EmptyAnnot(); def positional(x: Int): Int = x: @Annot(1); def named(x: Int): Int = x: @Annot(n = 1); def mixed(x: Int): Int = x: @Multi(1, second = 2) }";
         let (parsed, store, _, _, index, source) = parse_and_name(source_text);
 
         for (method, expected_args) in [
@@ -19513,6 +19516,292 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn source_annotation_projection_preserves_class_and_constant_arguments() {
+        let source_text = "package scala.annotation { abstract class Annotation }; class unchecked extends scala.annotation.Annotation; class EmptyAnnot extends scala.annotation.Annotation; class Annot(val n: Int) extends scala.annotation.Annotation; class Multi(val first: Int, val second: Int) extends scala.annotation.Annotation; class Use { def bare(x: Int): Int = x: @unchecked; def empty(x: Int): Int = x: @EmptyAnnot(); def positional(x: Int): Int = x: @Annot(1); def named(x: Int): Int = x: @Annot(n = 1); def mixed(x: Int): Int = x: @Multi(1, second = 2) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let cases = [
+            ("bare", "unchecked", 0),
+            ("empty", "EmptyAnnot", 0),
+            ("positional", "Annot", 1),
+            ("named", "Annot", 1),
+            ("mixed", "Multi", 2),
+        ];
+        let methods = cases.map(|(method, class, count)| {
+            let (owner, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, method);
+            let TreeKind::Annotated(annotated) = &parsed.ast.get(rhs).kind else {
+                panic!("expected annotated source expression");
+            };
+            (
+                method,
+                owner,
+                annotated.annotation,
+                class_symbol(&parsed, &store, &index, source, class),
+                count,
+            )
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for (method, owner, annotation_tree, class, expected_count) in methods {
+            let context = typer.expression_context_for(owner).unwrap();
+            let id = typer
+                .type_source_annotation(annotation_tree, context)
+                .unwrap();
+            let annotation = typer.store().annotations.get(id);
+            assert_eq!(typer.store().annotation_class(annotation), Some(class));
+            assert_eq!(annotation.tree, None);
+            let dotty_core::types::AnnotationArguments::Known(arguments) = &annotation.arguments
+            else {
+                panic!("source arguments should be known");
+            };
+            assert_eq!(arguments.len(), expected_count);
+            for (index, argument) in arguments.iter().enumerate() {
+                assert!(matches!(
+                    argument.value,
+                    dotty_core::types::AnnotationValue::Constant(dotty_core::Constant::Int(value))
+                        if value == if method == "mixed" && index == 1 { 2 } else { 1 }
+                ));
+                let expected_name = match (method, index) {
+                    ("named", 0) => Some("n"),
+                    ("mixed", 1) => Some("second"),
+                    _ => None,
+                };
+                assert_eq!(
+                    argument
+                        .name
+                        .map(|name| typer.store().names.resolve(name.as_name().text())),
+                    expected_name
+                );
+            }
+            assert_eq!(
+                typer
+                    .type_source_annotation(annotation_tree, context)
+                    .unwrap(),
+                id
+            );
+        }
+        assert_eq!(typer.source_typed_index().len(), 0);
+    }
+
+    fn source_annotation_case(
+        spelling: &str,
+    ) -> (
+        dotty_parser::ParseResult,
+        SemanticStore,
+        Packages,
+        Definitions,
+        SourceSemanticIndex,
+        SourceId,
+    ) {
+        let source_text = format!(
+            "package scala.annotation {{ abstract class Annotation }}; class Annot(val n: Int) extends scala.annotation.Annotation; class Plain; class Use {{ def use(x: Int): Int = x: @{spelling} }}"
+        );
+        parse_and_name(&source_text)
+    }
+
+    #[test]
+    fn source_annotation_projection_rejects_nonconstant_and_duplicate_arguments() {
+        for (spelling, duplicate) in [("Annot(x)", false), ("Annot(n = 1, n = 2)", true)] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                source_annotation_case(spelling);
+            let (owner, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+            let TreeKind::Annotated(annotated) = &parsed.ast.get(rhs).kind else {
+                panic!("expected annotated expression");
+            };
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(owner).unwrap();
+            let checkpoint = typer.store().checkpoint();
+
+            let error = typer
+                .type_source_annotation(annotated.annotation, context)
+                .unwrap_err();
+            assert!(
+                if duplicate {
+                    matches!(error, TyperError::SourceAnnotationDuplicateNamedArgument { source: error_source, name, .. }
+                        if error_source == source && typer.store().names.resolve(name.as_name().text()) == "n")
+                } else {
+                    matches!(error, TyperError::SourceAnnotationArgumentNotConstant { source: error_source, .. }
+                        if error_source == source)
+                },
+                "{spelling}: {error:?}"
+            );
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert!(typer.source_annotations.is_empty());
+            assert_eq!(typer.source_typed_index().len(), 0);
+        }
+    }
+
+    #[test]
+    fn source_annotation_projection_checks_class_and_constructor_boundaries() {
+        for spelling in [
+            "Plain()",
+            "Missing()",
+            "Annot()",
+            "Annot(true)",
+            "Annot(m = 1)",
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                source_annotation_case(spelling);
+            let (owner, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+            let TreeKind::Annotated(annotated) = &parsed.ast.get(rhs).kind else {
+                panic!("expected annotated expression");
+            };
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(owner).unwrap();
+            let checkpoint = typer.store().checkpoint();
+
+            let error = typer
+                .type_source_annotation(annotated.annotation, context)
+                .unwrap_err();
+            assert!(
+                match spelling {
+                    "Plain()" =>
+                        matches!(error, TyperError::SourceAnnotationNotAnnotationClass { .. }),
+                    "Missing()" => matches!(error, TyperError::TypeNameNotFound { .. }),
+                    _ => matches!(
+                        error,
+                        TyperError::SourceAnnotationConstructorArgumentMismatch { .. }
+                    ),
+                },
+                "{spelling}: {error:?}"
+            );
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert!(typer.source_annotations.is_empty());
+            assert_eq!(typer.typed_ast().iter().count(), 0);
+        }
+    }
+
+    #[test]
+    fn source_annotation_class_without_canonical_base_is_deferred() {
+        let source_text = "class Annot; class Use { def use(x: Int): Int = x: @Annot() }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (owner, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Annotated(annotated) = &parsed.ast.get(rhs).kind else {
+            panic!("expected annotated expression");
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(owner).unwrap();
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_source_annotation(annotated.annotation, context),
+            Err(TyperError::SourceAnnotationClassDeferred { source: error_source, .. })
+                if error_source == source
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.source_annotations.is_empty());
+    }
+
+    #[test]
+    fn source_annotation_ambiguous_import_is_explicit() {
+        let source_text = "package scala.annotation { abstract class Annotation }; package a { class Annot extends scala.annotation.Annotation }; package b { class Annot extends scala.annotation.Annotation }; class Use { import a.*; import b.*; def use(x: Int): Int = x: @Annot() }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (owner, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Annotated(annotated) = &parsed.ast.get(rhs).kind else {
+            panic!("expected annotated expression");
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(owner).unwrap();
+
+        assert!(matches!(
+            typer.type_source_annotation(annotated.annotation, context),
+            Err(TyperError::AmbiguousTypeName { .. })
+        ));
+        assert!(typer.source_annotations.is_empty());
+    }
+
+    #[test]
+    fn source_annotation_allocation_rolls_back_with_enclosing_expression() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            source_annotation_case("Annot(1)");
+        let (owner, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Annotated(annotated) = &parsed.ast.get(rhs).kind else {
+            panic!("expected annotated expression");
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(owner).unwrap();
+        let checkpoint = typer.store().checkpoint();
+        let mut allocated = None;
+
+        let result: Result<(), TyperError> =
+            typer.run_expression_transaction(|typer, info_journal, new_mappings| {
+                allocated = Some(typer.type_source_annotation_inner(
+                    annotated.annotation,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?);
+                Err(TyperError::ExpectedExpressionTypeMismatch {
+                    source,
+                    tree_index: rhs.index(),
+                    actual: definitions.int,
+                    expected: definitions.boolean,
+                })
+            });
+
+        assert!(matches!(
+            result,
+            Err(TyperError::ExpectedExpressionTypeMismatch { .. })
+        ));
+        assert!(
+            typer
+                .store()
+                .annotations
+                .try_get(allocated.unwrap())
+                .is_none()
+        );
+        assert!(typer.source_annotations.is_empty());
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(typer.source_typed_index().len(), 0);
+
+        let retried = typer
+            .type_source_annotation(annotated.annotation, context)
+            .unwrap();
+        assert_eq!(retried, allocated.unwrap());
     }
 
     #[test]
