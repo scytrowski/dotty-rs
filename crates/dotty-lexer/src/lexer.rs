@@ -20,6 +20,7 @@ enum LexMode {
 struct StringState {
     part_start: u32,
     multiline: bool,
+    raw: bool,
     started: bool,
 }
 
@@ -429,7 +430,7 @@ impl<'source> RawLexer<'source> {
                 continue;
             }
 
-            if !state.multiline && self.cursor.peek() == Some('\\') {
+            if !state.multiline && !state.raw && self.cursor.peek() == Some('\\') {
                 let _ = self.scan_escape(state.part_start)?;
             } else {
                 let _ = self.cursor.bump();
@@ -651,6 +652,7 @@ impl<'source> RawLexer<'source> {
             self.modes.push(LexMode::InterpolatedString(StringState {
                 part_start: self.cursor.position(),
                 multiline,
+                raw: text == "raw",
                 started: false,
             }));
             return Ok(RawToken {
@@ -4254,6 +4256,39 @@ mod tests {
             ]
         );
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn raw_interpolator_accepts_regex_backslashes_as_string_content() {
+        let source = r#"raw"([^=]+)=(.+)" raw"E?(\d+)""#;
+        let (items, diagnostics) = scan(source);
+        let kinds: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                RawItem::Token(token) => Some(token.kind),
+                RawItem::Trivia(_) => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                RawTokenKind::InterpolationId,
+                RawTokenKind::StringPart,
+                RawTokenKind::InterpolationId,
+                RawTokenKind::StringPart,
+                RawTokenKind::Eof,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn ordinary_interpolator_still_reports_invalid_escapes() {
+        let (_, diagnostics) = scan(r#"s"\d+""#);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message(), "invalid escape character");
     }
 
     #[test]
