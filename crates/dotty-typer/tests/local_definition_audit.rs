@@ -1175,6 +1175,39 @@ fn local_patdef_audit_records_typing_successes_with_file_counts() {
 }
 
 #[test]
+fn local_patdef_audit_preserves_attempts_across_method_failures() {
+    let audit = audit_source(
+        "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = new MaybeInt }; object Audit { def later(value: Any): Int = { var Extractor(reached) = value; missingAfter; reached }; def earlier(value: Any): Int = { missingBefore; var Extractor(unreached) = value; unreached } }",
+        "PatDefAttempt.scala",
+    );
+
+    let successful = audit
+        .patdef_profile
+        .typing_outcomes
+        .iter()
+        .find(|(key, _)| key.starts_with("success::var::binders=1"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the PatDef before the later error should retain its own success: {:#?}",
+                audit.patdef_profile.typing_outcomes
+            )
+        });
+    assert_eq!(successful.1.count, 1);
+
+    let not_attempted = audit
+        .patdef_profile
+        .typing_outcomes
+        .iter()
+        .find(|(key, _)| key.starts_with("not_attempted::var::binders=1"))
+        .expect("the PatDef after an earlier error should not inherit that error");
+    assert_eq!(not_attempted.1.count, 1);
+    assert_eq!(
+        successful.1.files,
+        BTreeSet::from(["PatDefAttempt.scala".to_owned()])
+    );
+}
+
+#[test]
 fn local_patdef_audit_distinguishes_missing_and_recovered_rhs() {
     let source = "object Audit { def outer: Unit = { val (left, right) = 1; () } }";
     let source_id = SourceId::from_index(0);
@@ -2150,27 +2183,24 @@ fn audit_source_inner(
             |pattern| patdef_root_shape(&parsed.ast, &typer.store().names, *pattern),
         );
         let tpt = patdef_type_annotation(&parsed.ast, definition.tpt);
-        let failure = if typer.source_typed_index().get(source, tree).is_some() {
-            None
-        } else {
-            root_failures
-                .iter()
-                .filter(|(method, _)| {
-                    method.start() <= range.start() && range.end() <= method.end()
-                })
-                .min_by_key(|(method, _)| method.end().saturating_sub(method.start()))
-                .map(|(_, failure)| failure.clone())
-                .or_else(|| {
-                    Some(FailureClassification {
-                        bucket: "NoSuccessfulEnclosingMethodTyping".to_owned(),
-                        family: FailureFamily::Other,
-                    })
-                })
+        let (outcome, failure) = match typer.patdef_typing_attempt_at(source, tree) {
+            Some(Ok(())) => ("success".to_owned(), None),
+            Some(Err(bucket)) => {
+                let family = if bucket.starts_with("LocalPatDefDeferred::")
+                    || bucket.starts_with("PatDefAggregateArityDeferred::")
+                {
+                    FailureFamily::LocalDeclarationDeferral
+                } else {
+                    FailureFamily::Other
+                };
+                let failure = FailureClassification {
+                    bucket: bucket.clone(),
+                    family,
+                };
+                (format!("failure::{bucket}"), Some(failure))
+            }
+            None => ("not_attempted".to_owned(), None),
         };
-        let outcome = failure.as_ref().map_or_else(
-            || "success".to_owned(),
-            |failure| format!("failure::{}", failure.bucket),
-        );
         let key = format!(
             "{outcome}::{}::binders={binder_bucket}::root={root}::tpt={tpt}",
             patdef_modifier(&definition.modifiers)

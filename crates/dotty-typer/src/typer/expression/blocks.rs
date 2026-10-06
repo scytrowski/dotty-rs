@@ -273,6 +273,59 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TypedStatExpansion, TyperError> {
+        let outcome = self.type_local_patdef_inner(
+            tree,
+            definition,
+            position,
+            context,
+            info_journal,
+            new_mappings,
+        );
+        let recorded = outcome
+            .as_ref()
+            .map(|_| ())
+            .map_err(Self::patdef_attempt_failure);
+        let key = (self.source, tree);
+        match self.patdef_typing_attempts.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry.get().is_err() || recorded.is_ok() {
+                    let _ = entry.insert(recorded);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(recorded);
+            }
+        }
+        outcome
+    }
+
+    fn patdef_attempt_failure(error: &TyperError) -> String {
+        match error {
+            TyperError::LocalPatDefDeferred { kind, .. } => {
+                format!("LocalPatDefDeferred::{kind}")
+            }
+            TyperError::PatDefAggregateArityDeferred {
+                arity,
+                max_supported,
+                ..
+            } => format!("PatDefAggregateArityDeferred::{arity}>{max_supported}"),
+            _ => format!("{error:?}")
+                .split([' ', '{'])
+                .next()
+                .unwrap_or("TyperError")
+                .to_owned(),
+        }
+    }
+
+    fn type_local_patdef_inner(
+        &mut self,
+        tree: TreeId<Untyped>,
+        definition: &dotty_core::ast::PatDef,
+        position: Option<SourceSpan>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TypedStatExpansion, TyperError> {
         use dotty_core::ast::Modifier;
 
         if let Some(expansion) = self.patdef_expansion_at(self.source, tree).cloned() {

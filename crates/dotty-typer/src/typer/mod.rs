@@ -106,6 +106,7 @@ pub struct SourceTyper<'a> {
     signature_parameter_in_progress: Option<SymbolId>,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     patdef_expansions: expression::blocks::PatDefExpansionIndex,
+    patdef_typing_attempts: HashMap<(SourceId, TreeId<Untyped>), Result<(), String>>,
     pattern_bindings: PatternBindingIndex,
     local_methods: LocalMethodIndex,
     active_local_type_scopes: Vec<(SourceContextId, ScopeId)>,
@@ -161,6 +162,7 @@ impl<'a> SourceTyper<'a> {
             signature_parameter_in_progress: None,
             local_symbols: HashMap::new(),
             patdef_expansions: expression::blocks::PatDefExpansionIndex::default(),
+            patdef_typing_attempts: HashMap::new(),
             pattern_bindings: PatternBindingIndex::default(),
             local_methods: LocalMethodIndex::default(),
             active_local_type_scopes: Vec::new(),
@@ -426,6 +428,17 @@ impl<'a> SourceTyper<'a> {
     /// Source-to-typed mappings produced by this typer instance.
     pub fn source_typed_index(&self) -> &SourceTypedIndex {
         &self.typed_index
+    }
+
+    /// Returns the independent outcome of attempting to type one source
+    /// pattern definition. This observation intentionally survives rollback
+    /// of a containing expression transaction, unlike `source_typed_index`.
+    pub fn patdef_typing_attempt_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<&Result<(), String>> {
+        self.patdef_typing_attempts.get(&(source, tree))
     }
 
     /// The typer-owned identities assigned to successfully typed block locals.
