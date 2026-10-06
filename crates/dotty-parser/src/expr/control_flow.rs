@@ -275,7 +275,7 @@ where
             return if feedback_opened {
                 self.parse_feedback_indented_block()
             } else {
-                self.parse_indented_block()
+                self.parse_layout_region_indented_block()
             };
         }
         if !can_start_expr(self.current().kind) {
@@ -602,6 +602,10 @@ where
         self.parse_indented_block_with_feedback(Some(self.current().span.start()), false)
     }
 
+    fn parse_layout_region_indented_block(&mut self) -> TreeId<Untyped> {
+        self.parse_indented_block_with_layout_region(false)
+    }
+
     pub(crate) fn parse_feedback_indented_block_preserving_block(&mut self) -> TreeId<Untyped> {
         self.parse_indented_block_with_feedback(Some(self.current().span.start()), true)
     }
@@ -617,6 +621,19 @@ where
         &mut self,
         feedback_indent: Option<u32>,
         preserve_block: bool,
+    ) -> TreeId<Untyped> {
+        self.parse_indented_block_with_region(feedback_indent, preserve_block, false)
+    }
+
+    fn parse_indented_block_with_layout_region(&mut self, preserve_block: bool) -> TreeId<Untyped> {
+        self.parse_indented_block_with_region(None, preserve_block, true)
+    }
+
+    fn parse_indented_block_with_region(
+        &mut self,
+        feedback_indent: Option<u32>,
+        preserve_block: bool,
+        layout_region: bool,
     ) -> TreeId<Untyped> {
         let region_indent = (self.current().kind == TokenKind::Indent)
             .then(|| self.current().span.start())
@@ -653,7 +670,11 @@ where
         }
 
         let mark = self.mark();
-        let (stats, expr) = if let Some(indent_offset) = feedback_indent {
+        let (stats, expr) = if layout_region {
+            self.parse_layout_region_expression_block_body(
+                region_indent.expect("layout block has an indentation region"),
+            )
+        } else if let Some(indent_offset) = feedback_indent {
             self.parse_region_feedback_expression_block_body(indent_offset)
         } else {
             self.parse_expression_block_body(TokenKind::Outdent)
@@ -668,6 +689,10 @@ where
                 && self.current().kind == TokenKind::Punctuation(Punctuation::Comma));
         if closed_by_delimiter {
             self.observe_outdented_by_delimiter();
+        } else if layout_region {
+            self.observe_outdented_layout_region(
+                region_indent.expect("layout block has an indentation region"),
+            );
         } else if let Some(indent_offset) = feedback_indent {
             self.observe_outdented_region(indent_offset);
         }
