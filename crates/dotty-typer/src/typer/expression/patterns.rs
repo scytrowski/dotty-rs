@@ -565,6 +565,26 @@ impl SourceTyper<'_> {
                 kind: "pattern definition aggregate tuple constructor method type",
             });
         };
+        if method.kind != MethodKind::Plain
+            || method.params.iter().any(|parameter| {
+                parameter.erased
+                    || parameter.varargs
+                    || matches!(
+                        self.store.types.try_get(parameter.ty),
+                        Some(Type::ByName { .. } | Type::Repeated { .. })
+                    )
+            })
+            || matches!(
+                self.store.types.try_get(method.result),
+                Some(Type::Method(_) | Type::Poly(_))
+            )
+        {
+            return Err(TyperError::LocalBlockDeclarationDeferred {
+                source: self.source,
+                tree_index: source_tree.index(),
+                kind: "pattern definition aggregate tuple constructor method shape",
+            });
+        }
         let result_matches_tuple = match self.store.types.try_get(method.result) {
             Some(Type::Applied { tycon, args }) if args == component_types => {
                 matches!(

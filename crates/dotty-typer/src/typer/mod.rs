@@ -14361,6 +14361,38 @@ mod tests {
     }
 
     #[test]
+    fn multi_binding_patdef_rejects_duplicate_names_and_rolls_back() {
+        let source_text = "package scala { trait Product; class Tuple2[A, B](val _1: A, val _2: B) extends Product; class PairResult[A, B](val _1: A, val _2: B) extends Product; object Tuple2 { def unapply[A, B](value: Tuple2[A, B]): PairResult[A, B] = new PairResult(value._1, value._2) } }; class C { def use(value: scala.Tuple2[Int, Boolean]): Int = { val (same, same) = value; same } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let source_patdef = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("method body should be a block"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let checkpoint = typer.store.checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::DuplicatePatternBinding { .. })
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.patdef_expansion_at(source, source_patdef).is_none());
+        assert!(typer.local_symbols.is_empty());
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+    }
+
+    #[test]
     fn nested_extractor_multi_binding_patdef_reuses_one_pattern_and_aggregate_match() {
         let source_text = "package scala { trait Product; class Tuple2[A, B](val _1: A, val _2: B) extends Product; class MaybeTuple2[A, B](val value: Tuple2[A, B]) { def isEmpty: Boolean = false; def get: Tuple2[A, B] = value }; object Tuple2 { def unapply[A, B](value: Tuple2[A, B]): MaybeTuple2[A, B] = new MaybeTuple2(value); def apply[A, B](first: A, second: B): Tuple2[A, B] = new Tuple2(first, second) } }; package app { object Extractor { def unapply(value: scala.Tuple2[Int, Boolean]): scala.MaybeTuple2[Int, Boolean] = new scala.MaybeTuple2(value) }; class C { def use(value: scala.Tuple2[Int, Boolean]): Boolean = { val Extractor((first, second)) = value; second } } }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
