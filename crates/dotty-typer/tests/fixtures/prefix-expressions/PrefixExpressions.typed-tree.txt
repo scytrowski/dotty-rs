@@ -1,0 +1,6 @@
+// Scala 3.9.0 `-Vprint:typer` at revision 777528f19a58e794c9954a42f433373472ec57f8.
+def not(value: Box): Box = value.unary_!
+def complement(value: Box): Box = value.unary_~
+def positive(value: Box): Box = value.unary_+
+def negative(value: Box): Box = value.unary_-
+def valueMember(value: ValueBox): ValueBox = value.unary_!
