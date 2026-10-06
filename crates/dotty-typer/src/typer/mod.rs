@@ -14567,6 +14567,28 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_infix_patdef_keeps_the_pattern_specific_error() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def use(value: Int): Int = { val left + right = value; 1 } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::InfixPatternDeferred { .. })
+        ));
+    }
+
+    #[test]
     fn multi_binding_patdef_rejects_duplicate_names_and_rolls_back() {
         let source_text = "package scala { trait Product; class Tuple2[A, B](val _1: A, val _2: B) extends Product; class PairResult[A, B](val _1: A, val _2: B) extends Product; object Tuple2 { def unapply[A, B](value: Tuple2[A, B]): PairResult[A, B] = new PairResult(value._1, value._2) } }; class C { def use(value: scala.Tuple2[Int, Boolean]): Int = { val (same, same) = value; same } }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
