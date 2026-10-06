@@ -508,31 +508,31 @@ match_corpus_profile:
   infix_pattern_forms=781
   extractor_representative_files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala]
 resolver_metrics:
-  resolver_package_requests=21280
-  external_package_requests=13066
-  external_package_successes=3213
-  external_package_unresolved=9853
+  resolver_package_requests=21683
+  external_package_requests=13369
+  external_package_successes=3214
+  external_package_unresolved=10155
   external_package_errors=0
-  source_package_reuse=8214
-  resolver_member_requests=6856
-  external_member_requests=6856
+  source_package_reuse=8314
+  resolver_member_requests=6908
+  external_member_requests=6908
   external_member_successes=0
   external_class_symbol_successes=0
   external_non_class_member_successes=0
   source_member_reuse=0
-  external_member_unresolved=6674
+  external_member_unresolved=6726
   external_member_errors=182
   distinct_packages=25
   distinct_classes=0
   distinct_members=0
   classloader_success_gate=BLOCKED: external members not materialized
 resolver_581_comparison:
-  external_package_successes=3213 (baseline=1965, delta=+1248)
-  external_package_unresolved=9853 (baseline=5816, delta=+4037)
+  external_package_successes=3214 (baseline=1965, delta=+1249)
+  external_package_unresolved=10155 (baseline=5816, delta=+4339)
   external_package_errors=0 (baseline=0, delta=+0)
   external_class_materializations=0 (baseline=0, delta=+0)
   external_non_class_member_successes=0 (baseline=0, delta=+0)
-  external_member_unresolved=6674 (baseline=3884, delta=+2790)
+  external_member_unresolved=6726 (baseline=3884, delta=+2842)
   external_member_errors=182 (baseline=91, delta=+91)
   distinct_packages=25 (baseline=23, delta=+2)
   member_error_kinds:
@@ -586,14 +586,14 @@ resolver_581_comparison:
     Malformed { reason: "invalid .tasty file for scala/collection/mutable/StringBuilder: a supertype reference could not be resolved to a name" }=7
   most_requested_unresolved_member_names:
     tpd=692
-    scala=594
+    scala=610
     Contexts=468
     Int=395
     core=264
     CollectionConverters=260
+    Array=163
     ast=153
     Type=150
-    Array=131
     Boolean=108
     Symbol=105
     Tree=91

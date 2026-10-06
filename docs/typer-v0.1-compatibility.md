@@ -368,6 +368,10 @@ method or value member; the operand may be a mutable local. This matches the
 pinned Scala 3.9.0 fixture in
 `crates/dotty-typer/tests/fixtures/prefix-expressions/`. An empty-parentheses
 method requires an explicit argument list in that compiler and is rejected here.
+Prefix selection uses the shared zero-argument member path, including inherited
+members, applied receiver adaptation, and transparent source aliases. Expected
+typing checks the resulting value type after selection; no expected-result
+inference is added for overloaded or polymorphic unary members.
 Right-associative infix calls (operators ending in `:`) remain explicitly
 deferred because they require Scala's operand rewrite.
 It also supports expected-type conformance checks, source type ascriptions, direct
