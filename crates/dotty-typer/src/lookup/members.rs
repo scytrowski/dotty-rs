@@ -235,9 +235,10 @@ impl SourceTyper<'_> {
         for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
             match TypeNormalizer::new(self.store).normalize_for_lookup(receiver) {
                 Ok(normalized) => return Ok(normalized),
-                Err(TypeNormalizeError::AliasInfoIncomplete { symbol, .. })
-                    if self.index.definition_of(symbol).is_some() =>
-                {
+                Err(TypeNormalizeError::AliasInfoIncomplete {
+                    symbol,
+                    state: SymbolInfoState::Missing,
+                }) if self.index.definition_of(symbol).is_some() => {
                     self.complete_symbol_inner(symbol, journal)
                         .map_err(|error| MemberLookupError::SourceAliasCompletion {
                             symbol,

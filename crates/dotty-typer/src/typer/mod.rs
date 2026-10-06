@@ -19392,6 +19392,41 @@ mod tests {
     }
 
     #[test]
+    fn prefix_lookup_does_not_recomplete_source_alias_in_error_state() {
+        let source_text = "class Box { def unary_! : Box = this }; class Use { type Alias = Box; def use(value: Alias): Box = !value }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Alias");
+        let (owner, tree) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        store.symbols.set_info(alias, SymbolInfo::Error);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(owner).unwrap();
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(tree, context),
+            Err(TyperError::MemberLookup(error))
+                if matches!(*error,
+                    MemberLookupError::TypeNormalization(
+                        crate::types::TypeNormalizeError::AliasInfoIncomplete {
+                            symbol,
+                            state: crate::types::SymbolInfoState::Error,
+                        }
+                    ) if symbol == alias)
+        ));
+        assert_eq!(*typer.store().symbols.info(alias), SymbolInfo::Error);
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(typer.typed_ast().iter().count(), 0);
+        assert_eq!(typer.source_typed_index().len(), 0);
+    }
+
+    #[test]
     fn nested_prefix_expressions_keep_both_source_mappings() {
         let source_text = "class Box { def unary_! : Box = this }; class Use { def use(value: Box): Box = !(!value) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
