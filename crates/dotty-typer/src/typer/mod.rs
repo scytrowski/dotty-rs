@@ -19475,6 +19475,47 @@ mod tests {
     }
 
     #[test]
+    fn source_annotation_constructor_shapes_are_explicit() {
+        let source_text = "package scala.annotation { abstract class Annotation; class unchecked extends Annotation; class EmptyAnnot extends Annotation; class Annot(val n: Int) extends Annotation; class Multi(val first: Int, val second: Int) extends Annotation }; class Use { def bare(x: Int): Int = x: @unchecked; def empty(x: Int): Int = x: @EmptyAnnot(); def positional(x: Int): Int = x: @Annot(1); def named(x: Int): Int = x: @Annot(n = 1); def mixed(x: Int): Int = x: @Multi(1, second = 2) }";
+        let (parsed, store, _, _, index, source) = parse_and_name(source_text);
+
+        for (method, expected_args) in [
+            ("bare", 0),
+            ("empty", 0),
+            ("positional", 1),
+            ("named", 1),
+            ("mixed", 2),
+        ] {
+            let (_, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, method);
+            let TreeKind::Annotated(annotated) = &parsed.ast.get(rhs).kind else {
+                panic!("{method} should retain an Annotated source node");
+            };
+            let TreeKind::Apply(application) = &parsed.ast.get(annotated.annotation).kind else {
+                panic!("{method} annotation should be an Apply");
+            };
+            assert_eq!(application.args.len(), expected_args);
+            let TreeKind::Select(constructor) = &parsed.ast.get(application.function).kind else {
+                panic!("{method} annotation should select a constructor");
+            };
+            assert_eq!(store.names.resolve(constructor.name.text()), "<init>");
+            let TreeKind::New(_) = &parsed.ast.get(constructor.qualifier).kind else {
+                panic!("{method} annotation should wrap its type in New");
+            };
+            if method == "named" || method == "mixed" {
+                let TreeKind::NamedArg(named) =
+                    &parsed.ast.get(*application.args.last().unwrap()).kind
+                else {
+                    panic!("{method} should preserve its named argument");
+                };
+                assert_eq!(
+                    store.names.resolve(named.name.text()),
+                    if method == "named" { "n" } else { "second" }
+                );
+            }
+        }
+    }
+
+    #[test]
     fn prefix_rejects_an_unexpected_operator_spelling() {
         let source_text = "class Box { def unary_! : Box = this }; class Use { def use(value: Box): Box = !value }";
         let (mut parsed, mut store, packages, definitions, index, source) =
