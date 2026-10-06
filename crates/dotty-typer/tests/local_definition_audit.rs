@@ -2150,33 +2150,18 @@ fn audit_source_inner(
             |pattern| patdef_root_shape(&parsed.ast, &typer.store().names, *pattern),
         );
         let tpt = patdef_type_annotation(&parsed.ast, definition.tpt);
-        let failure = if typer.source_typed_index().get(source, tree).is_some() {
-            None
-        } else {
-            root_failures
-                .iter()
-                .filter(|(method, _)| {
-                    method.start() <= range.start() && range.end() <= method.end()
-                })
-                .min_by_key(|(method, _)| method.end().saturating_sub(method.start()))
-                .map(|(_, failure)| failure.clone())
-                .or_else(|| {
-                    Some(FailureClassification {
-                        bucket: "NoSuccessfulEnclosingMethodTyping".to_owned(),
-                        family: FailureFamily::Other,
-                    })
-                })
+        let attempt = typer.patdef_typing_attempt(source, tree);
+        let (outcome, family) = match attempt {
+            Some(Ok(())) => ("success".to_owned(), FailureFamily::Other),
+            Some(Err(bucket)) => (format!("failure::{bucket}"), FailureFamily::Other),
+            None => ("not_attempted".to_owned(), FailureFamily::Other),
         };
-        let outcome = failure.as_ref().map_or_else(
-            || "success".to_owned(),
-            |failure| format!("failure::{}", failure.bucket),
-        );
         let key = format!(
             "{outcome}::{}::binders={binder_bucket}::root={root}::tpt={tpt}",
             patdef_modifier(&definition.modifiers)
         );
         let bucket = audit.patdef_profile.typing_outcomes.entry(key).or_default();
-        bucket.family = failure.map_or(FailureFamily::Other, |failure| failure.family);
+        bucket.family = family;
         bucket.count += 1;
         bucket.files.insert(path.to_owned());
         bucket.examples.insert(path.to_owned());

@@ -273,6 +273,32 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TypedStatExpansion, TyperError> {
+        let result = self.type_local_patdef_attempt(
+            tree,
+            definition,
+            position,
+            context,
+            info_journal,
+            new_mappings,
+        );
+        let observation = result
+            .as_ref()
+            .map(|_| ())
+            .map_err(Self::patdef_attempt_error_bucket);
+        self.patdef_typing_attempts
+            .insert((self.source, tree), observation);
+        result
+    }
+
+    fn type_local_patdef_attempt(
+        &mut self,
+        tree: TreeId<Untyped>,
+        definition: &dotty_core::ast::PatDef,
+        position: Option<SourceSpan>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TypedStatExpansion, TyperError> {
         use dotty_core::ast::Modifier;
 
         if let Some(expansion) = self.patdef_expansion_at(self.source, tree).cloned() {
@@ -747,6 +773,27 @@ impl SourceTyper<'_> {
         let expansion = TypedStatExpansion::one(typed_val);
         self.record_patdef_expansion(tree, context, expansion.clone(), Vec::new(), new_mappings)?;
         Ok(expansion)
+    }
+
+    fn patdef_attempt_error_bucket(error: &TyperError) -> String {
+        let debug = format!("{error:?}");
+        for prefix in ["LocalPatDefDeferred", "LocalBlockDeclarationDeferred"] {
+            if let Some(details) = debug.strip_prefix(prefix)
+                && let Some((_, kind)) = details.split_once("kind: ")
+            {
+                let kind = kind
+                    .trim_start_matches('"')
+                    .split('"')
+                    .next()
+                    .unwrap_or(kind);
+                return format!("{prefix}::{kind}");
+            }
+        }
+        debug
+            .split([' ', '{', '('])
+            .next()
+            .unwrap_or("UnknownTyperError")
+            .to_owned()
     }
 
     /// Records the single source mapping for a successfully lowered PatDef.
