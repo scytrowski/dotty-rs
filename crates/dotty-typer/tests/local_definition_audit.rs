@@ -276,6 +276,7 @@ struct PatDefProfile {
     modifiers: BTreeMap<String, usize>,
     explicit_tpt: BTreeMap<String, usize>,
     rhs_states: BTreeMap<String, usize>,
+    typing_outcomes: BTreeMap<String, FailureBucket>,
     representative_files: BTreeSet<String>,
 }
 
@@ -315,6 +316,7 @@ impl Default for PatDefProfile {
                 .into_iter()
                 .map(|state| (state.to_owned(), 0))
                 .collect(),
+            typing_outcomes: BTreeMap::new(),
             representative_files: BTreeSet::new(),
         }
     }
@@ -419,6 +421,14 @@ impl PatDefProfile {
         merge_counts(&mut self.modifiers, other.modifiers);
         merge_counts(&mut self.explicit_tpt, other.explicit_tpt);
         merge_counts(&mut self.rhs_states, other.rhs_states);
+        for (key, bucket) in other.typing_outcomes {
+            let target = self.typing_outcomes.entry(key).or_default();
+            target.family = bucket.family;
+            target.count += bucket.count;
+            target.files.extend(bucket.files);
+            target.examples.extend(bucket.examples);
+            target.examples = target.examples.iter().take(5).cloned().collect();
+        }
         self.representative_files.extend(other.representative_files);
     }
 }
@@ -1119,6 +1129,82 @@ fn local_patdef_audit_is_deterministic() {
     let second = audit_source(source, "PatDef.scala");
 
     assert_eq!(first.patdef_profile, second.patdef_profile);
+}
+
+#[test]
+fn local_patdef_audit_records_typing_successes_with_file_counts() {
+    let audit = audit_source(
+        "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = new MaybeInt }; object Audit { def outer(value: Any): Int = { var Extractor(result) = value; result } }",
+        "MutablePatDef.scala",
+    );
+
+    let (key, outcome) = audit
+        .patdef_profile
+        .typing_outcomes
+        .iter()
+        .find(|(key, _)| key.starts_with("success::var::binders=1::root=Apply / extractor-looking"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the mutable PatDef should be typed successfully: {:#?}",
+                audit.patdef_profile
+            )
+        });
+    assert!(key.contains("tpt=synthetic inferred TypeTree"), "{key}");
+    assert_eq!(outcome.count, 1);
+    assert_eq!(
+        outcome.files,
+        BTreeSet::from(["MutablePatDef.scala".to_owned()])
+    );
+
+    let deferred = audit_source(
+        "object Audit { def outer(value: Option[Int]): Int = { lazy val Some(result) = value; result } }",
+        "LazyPatDef.scala",
+    );
+    let (key, outcome) = deferred
+        .patdef_profile
+        .typing_outcomes
+        .iter()
+        .find(|(key, _)| key.starts_with("failure::LocalPatDefDeferred::lazy::lazy val"))
+        .expect("lazy PatDef should be counted in its focused deferral bucket");
+    assert!(key.contains("binders=1"), "{key}");
+    assert_eq!(outcome.count, 1);
+    assert_eq!(
+        outcome.files,
+        BTreeSet::from(["LazyPatDef.scala".to_owned()])
+    );
+}
+
+#[test]
+fn local_patdef_audit_preserves_attempts_across_method_failures() {
+    let audit = audit_source(
+        "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = new MaybeInt }; object Audit { def later(value: Any): Int = { var Extractor(reached) = value; missingAfter; reached }; def earlier(value: Any): Int = { missingBefore; var Extractor(unreached) = value; unreached } }",
+        "PatDefAttempt.scala",
+    );
+
+    let successful = audit
+        .patdef_profile
+        .typing_outcomes
+        .iter()
+        .find(|(key, _)| key.starts_with("success::var::binders=1"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the PatDef before the later error should retain its own success: {:#?}",
+                audit.patdef_profile.typing_outcomes
+            )
+        });
+    assert_eq!(successful.1.count, 1);
+
+    let not_attempted = audit
+        .patdef_profile
+        .typing_outcomes
+        .iter()
+        .find(|(key, _)| key.starts_with("not_attempted::var::binders=1"))
+        .expect("the PatDef after an earlier error should not inherit that error");
+    assert_eq!(not_attempted.1.count, 1);
+    assert_eq!(
+        successful.1.files,
+        BTreeSet::from(["PatDefAttempt.scala".to_owned()])
+    );
 }
 
 #[test]
@@ -1943,7 +2029,7 @@ fn audit_source_inner(
             return audit;
         }
     };
-    if audit.local_defdefs == 0 {
+    if audit.local_defdefs == 0 && audit.patdef_profile.total == 0 {
         return audit;
     }
     let probe_classpath = classpath.as_ref().map(|(classpath, _)| classpath.clone());
@@ -1999,6 +2085,15 @@ fn audit_source_inner(
         }));
     }
     let mut root_failures = Vec::new();
+    let mut method_ranges = root_methods
+        .iter()
+        .map(|(_, _, range)| *range)
+        .collect::<Vec<_>>();
+    method_ranges.extend(parsed.ast.iter().filter_map(|(_, node)| {
+        matches!(&node.kind, TreeKind::DefDef(definition) if definition.rhs.is_some())
+            .then(|| node.position.map(|position| position.span().range()))
+            .flatten()
+    }));
     for (method, rhs, range) in root_methods {
         let outcome = typer
             .expression_context_for(method)
@@ -2058,6 +2153,64 @@ fn audit_source_inner(
             }
             root_failures.push((range, failure));
         }
+    }
+
+    for (tree, node) in parsed.ast.iter() {
+        let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &node.kind else {
+            continue;
+        };
+        let Some(range) = node.position.map(|position| position.span().range()) else {
+            continue;
+        };
+        if !method_ranges
+            .iter()
+            .any(|method| method.start() <= range.start() && range.end() <= method.end())
+        {
+            continue;
+        }
+        let mut binders = BTreeSet::new();
+        for pattern in &definition.patterns {
+            collect_patdef_binders(&parsed.ast, &typer.store().names, *pattern, &mut binders);
+        }
+        let binder_bucket = match binders.len() {
+            0 => "0",
+            1 => "1",
+            2 => "2",
+            _ => "3+",
+        };
+        let root = definition.patterns.first().map_or_else(
+            || "none".to_owned(),
+            |pattern| patdef_root_shape(&parsed.ast, &typer.store().names, *pattern),
+        );
+        let tpt = patdef_type_annotation(&parsed.ast, definition.tpt);
+        let (outcome, failure) = match typer.patdef_typing_attempt_at(source, tree) {
+            Some(Ok(())) => ("success".to_owned(), None),
+            Some(Err(bucket)) => {
+                let family = if bucket.starts_with("LocalPatDefDeferred::")
+                    || bucket.starts_with("PatDefAggregateArityDeferred::")
+                {
+                    FailureFamily::LocalDeclarationDeferral
+                } else {
+                    FailureFamily::Other
+                };
+                let failure = FailureClassification {
+                    bucket: bucket.clone(),
+                    family,
+                };
+                (format!("failure::{bucket}"), Some(failure))
+            }
+            None => ("not_attempted".to_owned(), None),
+        };
+        let key = format!(
+            "{outcome}::{}::binders={binder_bucket}::root={root}::tpt={tpt}",
+            patdef_modifier(&definition.modifiers)
+        );
+        let bucket = audit.patdef_profile.typing_outcomes.entry(key).or_default();
+        bucket.family = failure.map_or(FailureFamily::Other, |failure| failure.family);
+        bucket.count += 1;
+        bucket.files.insert(path.to_owned());
+        bucket.examples.insert(path.to_owned());
+        bucket.examples = bucket.examples.iter().take(5).cloned().collect();
     }
 
     for (tree, range) in local_method_trees {
@@ -3004,6 +3157,64 @@ fn print_local_patdefs(profile: &PatDefProfile) {
     print_patdef_counts("modifiers", &profile.modifiers);
     print_patdef_counts("explicit_tpt", &profile.explicit_tpt);
     print_patdef_counts("rhs", &profile.rhs_states);
+    let mut outcome_totals = BTreeMap::<String, (usize, BTreeSet<String>)>::new();
+    for (key, bucket) in &profile.typing_outcomes {
+        let status_end = ["::lazy val::", "::val::", "::var::"]
+            .iter()
+            .filter_map(|marker| key.find(marker))
+            .min()
+            .unwrap_or(key.len());
+        let status = &key[..status_end];
+        let total = outcome_totals.entry(status.to_owned()).or_default();
+        total.0 += bucket.count;
+        total.1.extend(bucket.files.iter().cloned());
+    }
+    println!("  typing_outcome_totals:");
+    for (outcome, (count, files)) in outcome_totals {
+        println!("    {outcome}={count} files={}", files.len());
+    }
+    let mut attempt_statuses = BTreeMap::<String, (usize, BTreeSet<String>)>::new();
+    for (key, bucket) in &profile.typing_outcomes {
+        let status = if key == "success" || key.starts_with("success::") {
+            "success"
+        } else if key == "not_attempted" || key.starts_with("not_attempted::") {
+            "not_attempted"
+        } else {
+            "failure"
+        };
+        let total = attempt_statuses.entry(status.to_owned()).or_default();
+        total.0 += bucket.count;
+        total.1.extend(bucket.files.iter().cloned());
+    }
+    let profiled_count = attempt_statuses
+        .values()
+        .map(|(count, _)| count)
+        .sum::<usize>();
+    println!("  typing_attempt_statuses:");
+    println!("    profiled={profiled_count}");
+    println!(
+        "    outside_typed_method_ranges_or_without_source_range={}",
+        profile.total.saturating_sub(profiled_count)
+    );
+    for status in ["success", "failure", "not_attempted"] {
+        let (count, files) = attempt_statuses.get(status).cloned().unwrap_or_default();
+        println!("    {status}={count} files={}", files.len());
+    }
+    println!("  typing_outcomes:");
+    for (outcome, bucket) in &profile.typing_outcomes {
+        println!(
+            "    {outcome}={} files={} [{}]",
+            bucket.count,
+            bucket.files.len(),
+            bucket
+                .examples
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     println!(
         "  representative_files=[{}]",
         profile
@@ -3164,6 +3375,10 @@ fn classify_typer_error(
         }
         TyperError::LocalBlockDeclarationDeferred { kind, .. } => FailureClassification {
             bucket: format!("LocalBlockDeclarationDeferred::{kind}"),
+            family: FailureFamily::LocalDeclarationDeferral,
+        },
+        TyperError::LocalPatDefDeferred { kind, .. } => FailureClassification {
+            bucket: format!("LocalPatDefDeferred::{kind}"),
             family: FailureFamily::LocalDeclarationDeferral,
         },
         TyperError::UnsupportedTypeTree { tree_index, .. } => {
@@ -3654,6 +3869,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::MalformedStablePatternTarget { .. } => "MalformedStablePatternTarget",
         TyperError::UnstablePatternValue { .. } => "UnstablePatternValue",
         TyperError::LocalBlockDeclarationDeferred { .. } => "LocalBlockDeclarationDeferred",
+        TyperError::LocalPatDefDeferred { .. } => "LocalPatDefDeferred",
         TyperError::InvalidInferredLocalValueType { .. } => "InvalidInferredLocalValueType",
         TyperError::LocalValueRightHandSideMissing { .. } => "LocalValueRightHandSideMissing",
         TyperError::RecursiveLocalValueInitializer { .. } => "RecursiveLocalValueInitializer",

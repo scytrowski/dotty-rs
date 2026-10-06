@@ -273,6 +273,61 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TypedStatExpansion, TyperError> {
+        let outcome = self.type_local_patdef_inner(
+            tree,
+            definition,
+            position,
+            context,
+            info_journal,
+            new_mappings,
+        );
+        let recorded = outcome
+            .as_ref()
+            .map(|_| ())
+            .map_err(Self::patdef_attempt_failure);
+        let key = (self.source, tree);
+        match self.patdef_typing_attempts.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry.get().is_err() || recorded.is_ok() {
+                    let _ = entry.insert(recorded);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(recorded);
+            }
+        }
+        outcome
+    }
+
+    fn patdef_attempt_failure(error: &TyperError) -> String {
+        match error {
+            TyperError::LocalPatDefDeferred { kind, .. } => {
+                format!("LocalPatDefDeferred::{kind}")
+            }
+            TyperError::PatDefAggregateArityDeferred {
+                arity,
+                max_supported,
+                ..
+            } => format!("PatDefAggregateArityDeferred::{arity}>{max_supported}"),
+            _ => format!("{error:?}")
+                .split([' ', '{', '('])
+                .next()
+                .unwrap_or("TyperError")
+                .to_owned(),
+        }
+    }
+
+    fn type_local_patdef_inner(
+        &mut self,
+        tree: TreeId<Untyped>,
+        definition: &dotty_core::ast::PatDef,
+        position: Option<SourceSpan>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TypedStatExpansion, TyperError> {
+        use dotty_core::ast::Modifier;
+
         if let Some(expansion) = self.patdef_expansion_at(self.source, tree).cloned() {
             let binders = self.patdef_binders(&definition.patterns);
             if binders.is_empty() {
@@ -338,17 +393,49 @@ impl SourceTyper<'_> {
                 emitted: expansion.emitted,
             });
         }
-        if !definition.modifiers.modifiers.is_empty()
+        let modifiers = &definition.modifiers.modifiers;
+        if modifiers.contains(&Modifier::Lazy) {
+            return Err(TyperError::LocalPatDefDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                kind: "lazy",
+            });
+        }
+        let is_mutable = modifiers.contains(&Modifier::Var);
+        if modifiers.iter().any(|modifier| *modifier != Modifier::Var)
             || definition.modifiers.visibility.is_some()
             || !definition.modifiers.annotations.is_empty()
-            || definition.patterns.len() != 1
-            || definition.rhs.is_none()
-            || !self
-                .arena
-                .try_get(definition.tpt)
-                .is_some_and(|tpt| matches!(tpt.kind, TreeKind::TypeTree(_)))
         {
-            return Err(self.patdef_deferred(tree));
+            return Err(TyperError::LocalPatDefDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                kind: "modifiers",
+            });
+        }
+        if definition.patterns.len() != 1 {
+            return Err(TyperError::LocalPatDefDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                kind: "multiple source patterns",
+            });
+        }
+        if definition.rhs.is_none() {
+            return Err(TyperError::LocalPatDefDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                kind: "missing right-hand side",
+            });
+        }
+        if !self
+            .arena
+            .try_get(definition.tpt)
+            .is_some_and(|tpt| matches!(tpt.kind, TreeKind::TypeTree(_)))
+        {
+            return Err(TyperError::LocalPatDefDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                kind: "explicit type",
+            });
         }
         let binders = self.patdef_binders(&definition.patterns);
         if binders.len() > super::patterns::MAX_CANONICAL_TUPLE_ARITY {
@@ -578,7 +665,11 @@ impl SourceTyper<'_> {
                     name: *binder_name,
                     owner: Some(context.owner),
                     kind: SymbolKind::Local,
-                    flags: SymbolFlags::EMPTY,
+                    flags: if is_mutable {
+                        SymbolFlags::MUTABLE
+                    } else {
+                        SymbolFlags::EMPTY
+                    },
                     visibility: dotty_core::Visibility::Public,
                     info: SymbolInfo::Complete(binder_type),
                     origin: SymbolOrigin::Source(self.source),
@@ -675,7 +766,11 @@ impl SourceTyper<'_> {
             name: binder_name,
             owner: Some(context.owner),
             kind: SymbolKind::Local,
-            flags: SymbolFlags::EMPTY,
+            flags: if is_mutable {
+                SymbolFlags::MUTABLE
+            } else {
+                SymbolFlags::EMPTY
+            },
             visibility: dotty_core::Visibility::Public,
             info: SymbolInfo::Complete(binder_type),
             origin: SymbolOrigin::Source(self.source),

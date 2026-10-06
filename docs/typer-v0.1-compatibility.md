@@ -625,10 +625,19 @@ Classpath-resolution buckets are also reported separately and excluded from
 the Typer-semantic ranking so missing external symbols cannot masquerade as
 Typer features.
 
-The `local_patdefs` section profiles source `PatDef` shapes and binders inside
-named method bodies without adding pattern-definition typing semantics. Its
-Scala 3.9 lowering and visibility contract is pinned in
-[`typer-patdef-lowering-3.9.0.md`](typer-patdef-lowering-3.9.0.md).
+The `local_patdefs` section profiles source `PatDef` shapes, binders, and
+typed outcomes inside named method bodies. Outcomes are grouped by
+immutable/mutable/lazy form, binder count, root pattern family, inferred vs
+explicit type, and final Typer failure bucket, with occurrence and file counts.
+The supported Scala 3.9 subset is strict inferred local `val`/`var` definitions
+with one source pattern and zero or more supported binders. Mutable final
+binders use ordinary local symbols flagged `MUTABLE` and work with the existing
+assignment path. Non-lazy zero-binder `var` patterns preserve the effect/check
+expression and introduce no symbol, matching the pinned `Desugar.makePatDef`
+contract. Lazy and explicitly typed forms use focused PatDef deferrals;
+unsupported tuple, infix, extractor, or typed-pattern behavior keeps its
+downstream specific error. The complete lowering and identity contract is
+pinned in [`typer-patdef-lowering-3.9.0.md`](typer-patdef-lowering-3.9.0.md).
 
 The #581 baseline resolved 1,965 packages from the classpath, reused 5,025
 source packages, and materialized no external classes or members (3,884

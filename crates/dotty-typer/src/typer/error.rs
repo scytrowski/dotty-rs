@@ -687,6 +687,12 @@ pub enum TyperError {
         arity: usize,
         max_supported: usize,
     },
+    /// A local pattern definition is outside the bounded PatDef subset.
+    LocalPatDefDeferred {
+        source: SourceId,
+        tree_index: u32,
+        kind: &'static str,
+    },
     /// String constants do not have a canonical source type in this session yet.
     StringLiteralTypingDeferred {
         source: SourceId,
