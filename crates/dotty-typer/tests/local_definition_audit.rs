@@ -3166,6 +3166,10 @@ fn classify_typer_error(
             bucket: format!("LocalBlockDeclarationDeferred::{kind}"),
             family: FailureFamily::LocalDeclarationDeferral,
         },
+        TyperError::LocalPatDefDeferred { kind, .. } => FailureClassification {
+            bucket: format!("LocalPatDefDeferred::{kind}"),
+            family: FailureFamily::LocalDeclarationDeferral,
+        },
         TyperError::UnsupportedTypeTree { tree_index, .. } => {
             let kind = arena
                 .iter()
@@ -3654,6 +3658,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::MalformedStablePatternTarget { .. } => "MalformedStablePatternTarget",
         TyperError::UnstablePatternValue { .. } => "UnstablePatternValue",
         TyperError::LocalBlockDeclarationDeferred { .. } => "LocalBlockDeclarationDeferred",
+        TyperError::LocalPatDefDeferred { .. } => "LocalPatDefDeferred",
         TyperError::InvalidInferredLocalValueType { .. } => "InvalidInferredLocalValueType",
         TyperError::LocalValueRightHandSideMissing { .. } => "LocalValueRightHandSideMissing",
         TyperError::RecursiveLocalValueInitializer { .. } => "RecursiveLocalValueInitializer",
