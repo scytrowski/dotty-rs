@@ -467,6 +467,64 @@ mod tests {
     }
 
     #[test]
+    fn consumes_a_matching_end_marker_after_the_case_body_outdent() {
+        let source = "case _ =>\n  if c then x\n  end if\n  y";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Newline, 9, 10),
+                token(TokenKind::Indent, 12, 12),
+                token(TokenKind::Keyword(HardKeyword::If), 12, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Keyword(HardKeyword::Then), 17, 21),
+                token(TokenKind::Identifier, 22, 23),
+                token(TokenKind::Newline, 23, 24),
+                token(TokenKind::Outdent, 26, 26),
+                token(TokenKind::EndMarker, 26, 29),
+                token(TokenKind::Keyword(HardKeyword::If), 30, 32),
+                token(TokenKind::Newline, 32, 33),
+                token(TokenKind::Identifier, 35, 36),
+                token(TokenKind::Outdent, 36, 36),
+                token(TokenKind::Eof, 36, 36),
+            ],
+            &mut names,
+        );
+
+        let case = parser.case_clause(false);
+        let TreeKind::CaseDef(CaseDef { body, .. }) = parser.ast().get(case).kind else {
+            panic!("expected a case clause");
+        };
+        let TreeKind::Block(block) = &parser.ast().get(body).kind else {
+            panic!("expected an indented case-body block");
+        };
+        assert_eq!(block.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(block.stats[0]).kind,
+            TreeKind::If(_)
+        ));
+        assert_eq!(
+            parser
+                .ast()
+                .get(block.stats[0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(12, 32).unwrap()
+        );
+        let TreeKind::Ident(result) = parser.ast().get(block.expr).kind else {
+            panic!("expected the statement after the end marker to stay in the case body");
+        };
+        assert_eq!(parser.names.resolve(result.name.text()), "y");
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn accepts_a_line_break_between_case_pattern_and_arrow() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
