@@ -874,7 +874,7 @@ impl TokenSource for ContextualScanner {
                 if self.innermost_open_indent_offset(self.current_index()) == Some(indent_offset)
                     && self.insert_outdent_before_current(
                         closes_with_end_marker || closes_at_same_indent_else,
-                        true,
+                        false,
                         Some(indent_offset),
                     )
                     && matches_top_feedback_region
