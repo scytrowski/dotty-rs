@@ -19282,6 +19282,164 @@ mod tests {
     }
 
     #[test]
+    fn prefix_expected_typing_and_repeated_typing_keep_exact_selection() {
+        let source_text =
+            "class Box { def unary_! : Int = 1 }; class Use { def use(value: Box): Int = !value }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (owner, tree) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::PhaseSpecific(UntypedNode::PrefixOp(prefix)) = &parsed.ast.get(tree).kind
+        else {
+            panic!("expected source PrefixOp");
+        };
+        let expected_position = parsed.ast.get(tree).position;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(owner).unwrap();
+
+        let typed = typer
+            .type_expression_expected(tree, context, definitions.int)
+            .unwrap();
+        let typed_nodes = typer.typed_ast().iter().count();
+        let source_mappings = typer.source_typed_index().len();
+        assert_eq!(typer.typed_ast().get(typed).position, expected_position);
+        assert!(matches!(
+            typer.typed_ast().get(typed).kind,
+            TreeKind::Select(_)
+        ));
+        assert_eq!(typer.source_typed_index().get(source, tree), Some(typed));
+        assert!(
+            typer
+                .source_typed_index()
+                .get(source, prefix.operand)
+                .is_some()
+        );
+        assert_eq!(typer.type_expression(tree, context).unwrap(), typed);
+        assert_eq!(typer.typed_ast().iter().count(), typed_nodes);
+        assert_eq!(typer.source_typed_index().len(), source_mappings);
+        assert!(matches!(
+            typer.type_expression_expected(tree, context, definitions.boolean),
+            Err(TyperError::ExpectedExpressionTypeMismatch { source: error_source, tree_index, actual, expected })
+                if error_source == source && tree_index == tree.index()
+                    && actual == definitions.int && expected == definitions.boolean
+        ));
+        assert_eq!(typer.source_typed_index().get(source, tree), Some(typed));
+    }
+
+    #[test]
+    fn prefix_lookup_sees_source_import_and_alias_receivers() {
+        let source_text = "package lib { class Box { def unary_! : Int = 1 } }; package app { import lib.Box; class Use { type Alias = Box; def imported(value: Box): Int = !value; def aliased(value: Alias): Int = !value } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let member = method_symbol(&parsed, &store, &index, source, "unary_!");
+        let methods = ["imported", "aliased"]
+            .map(|name| method_definition_and_rhs(&parsed, &store, &index, source, name));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for (owner, tree) in methods {
+            let context = typer.expression_context_for(owner).unwrap();
+            let typed = typer.type_expression(tree, context).unwrap();
+            assert!(matches!(
+                typer.store().types.get(typer.typed_ast().get(typed).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == member
+            ));
+            assert_eq!(
+                typer
+                    .widen_expression_type(typer.typed_ast().get(typed).ty)
+                    .unwrap(),
+                definitions.int
+            );
+        }
+    }
+
+    #[test]
+    fn failed_prefix_lookup_rolls_back_source_alias_completion() {
+        let source_text =
+            "class Box; class Use { type Alias = Box; def use(value: Alias): Box = !value }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Alias");
+        let (owner, tree) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(owner).unwrap();
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(tree, context),
+            Err(TyperError::MemberNotFound { tree_index, .. }) if tree_index == tree.index()
+        ));
+        assert_eq!(*typer.store().symbols.info(alias), SymbolInfo::Missing);
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(typer.typed_ast().iter().count(), 0);
+        assert_eq!(typer.source_typed_index().len(), 0);
+    }
+
+    #[test]
+    fn nested_prefix_expressions_keep_both_source_mappings() {
+        let source_text = "class Box { def unary_! : Box = this }; class Use { def use(value: Box): Box = !(!value) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (owner, tree) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::PhaseSpecific(UntypedNode::PrefixOp(outer)) = &parsed.ast.get(tree).kind
+        else {
+            panic!("expected outer PrefixOp");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) =
+            &parsed.ast.get(outer.operand).kind
+        else {
+            panic!("expected parenthesized inner prefix");
+        };
+        let inner = parens.inner;
+        assert!(matches!(
+            parsed.ast.get(inner).kind,
+            TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_))
+        ));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(owner).unwrap();
+
+        let typed = typer.type_expression(tree, context).unwrap();
+        let TreeKind::Select(outer_selection) = &typer.typed_ast().get(typed).kind else {
+            panic!("outer prefix should select unary_!");
+        };
+        assert_eq!(typer.source_typed_index().get(source, tree), Some(typed));
+        assert_eq!(
+            typer.source_typed_index().get(source, inner),
+            Some(outer_selection.qualifier)
+        );
+        assert_eq!(
+            typer.typed_ast().get(typed).position,
+            parsed.ast.get(tree).position
+        );
+        assert_eq!(
+            typer.typed_ast().get(outer_selection.qualifier).position,
+            parsed.ast.get(inner).position
+        );
+    }
+
+    #[test]
     fn prefix_rejects_an_unexpected_operator_spelling() {
         let source_text = "class Box { def unary_! : Box = this }; class Use { def use(value: Box): Box = !value }";
         let (mut parsed, mut store, packages, definitions, index, source) =
