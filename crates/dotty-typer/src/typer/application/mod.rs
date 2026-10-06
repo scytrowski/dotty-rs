@@ -60,7 +60,46 @@ pub(in crate::typer) struct TypedArgument {
     pub(in crate::typer) widened_type: TypeId,
 }
 
+/// A selected member cannot be used without source argument syntax.
+pub(in crate::typer) enum ZeroArgumentSelectionError {
+    Selection(TyperError),
+    MethodNeedsArgumentList,
+    PolymorphicDeferred,
+}
+
 impl SourceTyper<'_> {
+    /// Selects a member used without an argument list. Parameterless methods
+    /// and values retain their exact selected reference; methods with a clause
+    /// and polymorphic results need syntax/inference this call does not supply.
+    pub(in crate::typer) fn type_zero_argument_selected_call(
+        &mut self,
+        tree_index: u32,
+        qualifier: TreeId<Typed>,
+        name: Name,
+        position: Option<SourceSpan>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, ZeroArgumentSelectionError> {
+        let selected = self
+            .type_selected_member_on_qualifier(
+                tree_index,
+                qualifier,
+                name,
+                false,
+                position,
+                info_journal,
+            )
+            .map_err(ZeroArgumentSelectionError::Selection)?;
+        let selected_type = self.typed_arena.get(selected).ty;
+        let callable = self
+            .widen_expression_type_journaled(selected_type, info_journal, 0)
+            .map_err(ZeroArgumentSelectionError::Selection)?;
+        match self.store.types.try_get(callable) {
+            Some(Type::Method(_)) => Err(ZeroArgumentSelectionError::MethodNeedsArgumentList),
+            Some(Type::Poly(_)) => Err(ZeroArgumentSelectionError::PolymorphicDeferred),
+            _ => Ok(selected),
+        }
+    }
+
     pub(in crate::typer) fn type_application(
         &mut self,
         tree: TreeId<Untyped>,

@@ -1,6 +1,8 @@
 //! Expression typing orchestration and shared expression helpers.
 
-use super::application::{InfixApplicationRequest, ResolvedApplication};
+use super::application::{
+    InfixApplicationRequest, ResolvedApplication, ZeroArgumentSelectionError,
+};
 use super::{ExpressionContext, SourceTyper, TyperError, tree_kind_name};
 use dotty_core::ast::*;
 use dotty_core::types::*;
@@ -48,29 +50,30 @@ impl SourceTyper<'_> {
         let unary_name = Name::new(self.store.names.intern(unary_name), Namespace::Term);
         let operand =
             self.type_value_expression_inner(prefix.operand, context, info_journal, new_mappings)?;
-        let selected = self.type_selected_member_on_qualifier(
+        self.type_zero_argument_selected_call(
             tree.index(),
             operand,
             unary_name,
-            false,
             position,
             info_journal,
-        )?;
-        let selected_type = self.typed_arena.get(selected).ty;
-        let callable = self.widen_expression_type_journaled(selected_type, info_journal, 0)?;
-        match self.store.types.try_get(callable) {
-            Some(Type::Method(_)) => Err(TyperError::PrefixMethodNeedsArgumentList {
-                source: self.source,
-                tree_index: tree.index(),
-                name: unary_name,
-            }),
-            Some(Type::Poly(_)) => Err(TyperError::PrefixPolymorphicDeferred {
-                source: self.source,
-                tree_index: tree.index(),
-                name: unary_name,
-            }),
-            _ => Ok(selected),
-        }
+        )
+        .map_err(|error| match error {
+            ZeroArgumentSelectionError::Selection(error) => error,
+            ZeroArgumentSelectionError::MethodNeedsArgumentList => {
+                TyperError::PrefixMethodNeedsArgumentList {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    name: unary_name,
+                }
+            }
+            ZeroArgumentSelectionError::PolymorphicDeferred => {
+                TyperError::PrefixPolymorphicDeferred {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    name: unary_name,
+                }
+            }
+        })
     }
 
     pub(super) fn type_infix_expression(
