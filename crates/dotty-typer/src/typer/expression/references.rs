@@ -507,26 +507,47 @@ impl SourceTyper<'_> {
                 ),
             );
         }
+        self.type_selected_member_on_qualifier(
+            tree.index(),
+            qualifier,
+            selection.name,
+            selection.backquoted,
+            position,
+            info_journal,
+        )
+    }
+
+    /// Selects a member from a qualifier already typed by the caller.
+    pub(in crate::typer) fn type_selected_member_on_qualifier(
+        &mut self,
+        tree_index: u32,
+        qualifier: TreeId<Typed>,
+        name: Name,
+        backquoted: bool,
+        position: Option<SourceSpan>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let receiver_type = self.typed_arena.get(qualifier).ty;
         let receiver = self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
         let receiver = self.this_type_receiver_view(receiver)?;
         let candidates = self
-            .lookup_members_journaled(receiver, selection.name, info_journal)
+            .lookup_members_journaled(receiver, name, info_journal)
             .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
         let candidate = match candidates.as_slice() {
             [] => {
                 return Err(TyperError::MemberNotFound {
                     source: self.source,
-                    tree_index: tree.index(),
+                    tree_index,
                     receiver,
-                    name: selection.name,
+                    name,
                 });
             }
             [candidate] => candidate,
             _ => {
                 return Err(TyperError::OverloadedSelectionDeferred {
                     source: self.source,
-                    tree_index: tree.index(),
-                    name: selection.name,
+                    tree_index,
+                    name,
                 });
             }
         };
@@ -535,13 +556,8 @@ impl SourceTyper<'_> {
             target: TermRefTarget::Symbol(candidate.symbol),
         });
         Ok(
-            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).select(
-                qualifier,
-                selection.name,
-                selection.backquoted,
-                ty,
-                position,
-            ),
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .select(qualifier, name, backquoted, ty, position),
         )
     }
 

@@ -449,6 +449,24 @@ pub enum TyperError {
         tree_index: u32,
         operator: dotty_core::Name,
     },
+    /// A source PrefixOp has a spelling outside Scala's four unary operators.
+    UnsupportedPrefixOperator {
+        source: SourceId,
+        tree_index: u32,
+        operator: dotty_core::Name,
+    },
+    /// Scala prefix syntax cannot call a unary method declared with `()`.
+    PrefixMethodNeedsArgumentList {
+        source: SourceId,
+        tree_index: u32,
+        name: dotty_core::Name,
+    },
+    /// A polymorphic unary selection requires result-directed inference.
+    PrefixPolymorphicDeferred {
+        source: SourceId,
+        tree_index: u32,
+        name: dotty_core::Name,
+    },
     /// A source method parameter tree has no symbol for this method owner.
     MethodParameterSymbolMissing {
         method: SymbolId,
