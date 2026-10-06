@@ -13,6 +13,7 @@ use dotty_core::{
 };
 
 const MAX_REIFIABLE_TYPE_PREFIX_DEPTH: usize = 64;
+pub(super) const MAX_CANONICAL_TUPLE_ARITY: usize = 22;
 
 #[derive(Clone, Copy)]
 pub(super) struct CanonicalTupleSymbols {
@@ -471,7 +472,7 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<(TreeId<Typed>, TypeId), TyperError> {
         let arity = component_types.len();
-        if !(2..=22).contains(&arity) || component_values.len() != arity {
+        if !(2..=MAX_CANONICAL_TUPLE_ARITY).contains(&arity) || component_values.len() != arity {
             return Err(TyperError::LocalBlockDeclarationDeferred {
                 source: self.source,
                 tree_index: source_tree.index(),
@@ -680,8 +681,9 @@ impl SourceTyper<'_> {
                 kind: "pattern definition aggregate tuple selector",
             });
         };
-        let conforms = self.conforms(candidate.callable, expected_type);
-        if !matches!(conforms, Ok(true)) {
+        let member_conforms = self.conforms(candidate.callable, expected_type);
+        let expected_conforms = self.conforms(expected_type, candidate.callable);
+        if !matches!(member_conforms, Ok(true)) || !matches!(expected_conforms, Ok(true)) {
             return Err(TyperError::LocalBlockDeclarationDeferred {
                 source: self.source,
                 tree_index: source_tree.index(),

@@ -281,12 +281,12 @@ impl SourceTyper<'_> {
                     emitted: expansion.emitted,
                 });
             }
-            if binders.len() > 22 {
+            if binders.len() > super::patterns::MAX_CANONICAL_TUPLE_ARITY {
                 return Err(TyperError::PatDefAggregateArityDeferred {
                     source: self.source,
                     tree_index: tree.index(),
                     arity: binders.len(),
-                    max_supported: 22,
+                    max_supported: super::patterns::MAX_CANONICAL_TUPLE_ARITY,
                 });
             }
             let Some(local_stack) = context.local_scopes else {
@@ -351,12 +351,12 @@ impl SourceTyper<'_> {
             return Err(self.patdef_deferred(tree));
         }
         let binders = self.patdef_binders(&definition.patterns);
-        if binders.len() > 22 {
+        if binders.len() > super::patterns::MAX_CANONICAL_TUPLE_ARITY {
             return Err(TyperError::PatDefAggregateArityDeferred {
                 source: self.source,
                 tree_index: tree.index(),
                 arity: binders.len(),
-                max_supported: 22,
+                max_supported: super::patterns::MAX_CANONICAL_TUPLE_ARITY,
             });
         }
         let scope = if !binders.is_empty() {
