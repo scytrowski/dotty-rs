@@ -208,6 +208,7 @@ where
             );
         }
 
+        let feedback_indent = self.observe_definition_rhs_indentation();
         self.advance();
         if !method_like
             && !metadata.modifiers.contains(&Modifier::Inline)
@@ -216,7 +217,7 @@ where
             metadata.modifiers.push(Modifier::Final);
             metadata.modifiers.push(Modifier::Lazy);
         }
-        let rhs = self.with_location(location, |parser| parser.expr());
+        let rhs = self.parse_definition_rhs(feedback_indent);
         self.alloc_given_definition(
             mark,
             GivenSignature {
@@ -714,6 +715,105 @@ mod tests {
         assert!(parser.diagnostics().is_empty());
         drop(parser);
         assert_eq!(names.resolve(name_id), "");
+    }
+
+    #[test]
+    fn parses_indented_local_statements_in_a_given_alias_without_swallowing_the_next_given() {
+        let source = "given Offset =\n  val local = 1\n  make(local)\ngiven Later = other";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 12),
+                token(TokenKind::Operator, 13, 14),
+                token(TokenKind::Newline, 14, 15),
+                token(TokenKind::Indent, 17, 17),
+                token(TokenKind::Keyword(HardKeyword::Val), 17, 20),
+                token(TokenKind::Identifier, 21, 26),
+                token(TokenKind::Operator, 27, 28),
+                token(TokenKind::IntegerLiteral, 29, 30),
+                token(TokenKind::Newline, 30, 31),
+                token(TokenKind::Identifier, 33, 37),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 37, 38),
+                token(TokenKind::Identifier, 38, 43),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 43, 44),
+                token(TokenKind::Newline, 44, 45),
+                token(TokenKind::Outdent, 45, 45),
+                token(TokenKind::Keyword(HardKeyword::Given), 45, 50),
+                token(TokenKind::Identifier, 51, 56),
+                token(TokenKind::Operator, 57, 58),
+                token(TokenKind::Identifier, 59, 64),
+                token(TokenKind::Eof, 64, 64),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_given_definition(Location::Elsewhere)
+        else {
+            panic!("expected a given alias");
+        };
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected the given alias to produce a value definition");
+        };
+        let Some(rhs) = definition.rhs else {
+            panic!("expected the given alias initializer");
+        };
+        let TreeKind::Block(block) = &parser.ast().get(rhs).kind else {
+            panic!("expected an indented block as the given initializer");
+        };
+        assert_eq!(
+            parser.ast().get(rhs).position.unwrap().span().range(),
+            TextRange::new(17, 44).unwrap()
+        );
+        assert_eq!(block.stats.len(), 1);
+        assert!(matches!(
+            parser.ast().get(block.stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(block.expr).kind,
+            TreeKind::Apply(_)
+        ));
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Keyword(HardKeyword::Given)
+        );
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn recovers_from_a_malformed_indented_given_alias_at_eof() {
+        let source = "given Offset =\n  val local =";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 12),
+                token(TokenKind::Operator, 13, 14),
+                token(TokenKind::Newline, 14, 15),
+                token(TokenKind::Indent, 17, 17),
+                token(TokenKind::Keyword(HardKeyword::Val), 17, 20),
+                token(TokenKind::Identifier, 21, 26),
+                token(TokenKind::Operator, 27, 28),
+                token(TokenKind::Eof, 28, 28),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(_) = parser.parse_given_definition(Location::Elsewhere)
+        else {
+            panic!("expected a recoverable given definition");
+        };
+
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedExpression)
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
