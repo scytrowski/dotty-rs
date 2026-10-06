@@ -14286,13 +14286,9 @@ mod tests {
             else {
                 panic!("each final binder should select its aggregate tuple component");
             };
-            assert_eq!(
-                typer.store.names.resolve(selection.name.text()),
-                if component_index == 0 { "_1" } else { "_2" }
-            );
             let Type::TermRef {
+                prefix,
                 target: TermRefTarget::Symbol(selector),
-                ..
             } = typer
                 .store
                 .types
@@ -14300,6 +14296,15 @@ mod tests {
             else {
                 panic!("tuple component selection should retain its canonical member");
             };
+            assert_eq!(
+                *prefix,
+                typer.typed_ast().get(selection.qualifier).ty,
+                "tuple component type should preserve the aggregate local reference as its prefix"
+            );
+            assert_eq!(
+                typer.store.names.resolve(selection.name.text()),
+                if component_index == 0 { "_1" } else { "_2" }
+            );
             assert_eq!(
                 typer
                     .store

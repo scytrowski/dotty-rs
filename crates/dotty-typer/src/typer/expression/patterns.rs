@@ -691,7 +691,7 @@ impl SourceTyper<'_> {
             });
         }
         let selected_type = self.store.types.alloc(Type::TermRef {
-            prefix: tuple_type,
+            prefix: self.typed_arena.get(tuple_value).ty,
             target: TermRefTarget::Symbol(candidate.symbol),
         });
         let position = self
