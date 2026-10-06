@@ -14164,6 +14164,154 @@ mod tests {
     }
 
     #[test]
+    fn zero_binding_extractor_patdef_emits_a_unit_match_and_no_local_symbols() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = new MaybeInt }; class C { def use(input: Any): Int = { val Extractor(_) = input; 1 } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let block = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block,
+            _ => panic!("method body should be a block"),
+        };
+        let source_patdef = block.stats[0];
+        let source_rhs = match &parsed.ast.get(source_patdef).kind {
+            TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => definition.rhs.unwrap(),
+            _ => panic!("first block statement should be a PatDef"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed).kind else {
+            panic!("method body should type to a block");
+        };
+        assert_eq!(typed_block.stats.len(), 1);
+        let anchor = typed_block.stats[0];
+        let TreeKind::Match(matched) = &typer.typed_ast().get(anchor).kind else {
+            panic!("zero-binding PatDef should emit its synthetic Match directly");
+        };
+        assert_eq!(typer.typed_ast().get(anchor).ty, definitions.unit);
+        assert_eq!(
+            matched.selector,
+            typer.source_typed_index().get(source, source_rhs).unwrap()
+        );
+        let TreeKind::CaseDef(case_def) = &typer.typed_ast().get(matched.cases[0]).kind else {
+            panic!("synthetic Match should contain one case");
+        };
+        assert_eq!(typer.typed_ast().get(matched.cases[0]).ty, definitions.unit);
+        assert!(matches!(
+            typer.typed_ast().get(case_def.pattern).kind,
+            TreeKind::UnApply(_)
+        ));
+        assert!(matches!(
+            typer.typed_ast().get(case_def.body).kind,
+            TreeKind::Literal(dotty_core::ast::Literal {
+                value: dotty_core::Constant::Unit
+            })
+        ));
+        assert_eq!(typer.typed_ast().get(case_def.body).ty, definitions.unit);
+        assert_eq!(
+            typer.source_typed_index().get(source, source_patdef),
+            Some(anchor)
+        );
+        assert!(typer.local_symbols.is_empty());
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+
+        let first_stats = typed_block.stats.clone();
+        let repeated = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Block(repeated_block) = &typer.typed_ast().get(repeated).kind else {
+            panic!("repeated method body should type to a block");
+        };
+        assert_eq!(repeated_block.stats, first_stats);
+        assert!(typer.local_symbols.is_empty());
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+    }
+
+    #[test]
+    fn zero_binding_tuple_patdef_preserves_pattern_check_and_later_block_statement() {
+        let source_text = "package scala { trait Product; class Tuple2[A, B](val _1: A, val _2: B) extends Product; class MaybeTuple2[A, B](val value: Tuple2[A, B]) { def isEmpty: Boolean = false; def get: Tuple2[A, B] = value }; object Tuple2 { def unapply[A, B](value: Tuple2[A, B]): MaybeTuple2[A, B] = new MaybeTuple2(value) } }; package app { class C { def use(value: scala.Tuple2[Int, Boolean]): Boolean = { val (_, _) = value; true } } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed).kind else {
+            panic!("method body should type to a block");
+        };
+        assert_eq!(block.stats.len(), 1);
+        let TreeKind::Match(matched) = &typer.typed_ast().get(block.stats[0]).kind else {
+            panic!("tuple PatDef should preserve a synthetic Match");
+        };
+        assert_eq!(typer.typed_ast().get(block.stats[0]).ty, definitions.unit);
+        let TreeKind::CaseDef(case_def) = &typer.typed_ast().get(matched.cases[0]).kind else {
+            panic!("synthetic Match should contain one case");
+        };
+        assert_eq!(typer.typed_ast().get(matched.cases[0]).ty, definitions.unit);
+        assert!(matches!(
+            typer.typed_ast().get(case_def.pattern).kind,
+            TreeKind::UnApply(_)
+        ));
+        assert_eq!(typer.typed_ast().get(case_def.body).ty, definitions.unit);
+        assert!(matches!(
+            typer.store.types.get(typer.typed_ast().get(block.expr).ty),
+            Type::Constant(dotty_core::Constant::Boolean(true))
+        ));
+        assert!(typer.local_symbols.is_empty());
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+    }
+
+    #[test]
+    fn zero_binding_patdef_failure_rolls_back_selector_pattern_and_expansion() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = new MaybeInt }; class C { def use(input: Any): Int = { val Extractor(field = _) = input; 1 } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let source_patdef = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("method body should be a block"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let checkpoint = typer.store.checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ExtractorPatternArgumentUnsupported {
+                issue: ExtractorPatternArgumentIssue::Named,
+                ..
+            })
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.patdef_expansion_at(source, source_patdef).is_none());
+        assert!(typer.local_symbols.is_empty());
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+    }
+
+    #[test]
     fn local_patdef_rhs_resolves_outer_same_named_parameter_before_final_binding() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = new MaybeInt }; class C { def use(value: Any): Int = { val Extractor(value) = value; value } }",
@@ -14337,7 +14485,7 @@ mod tests {
 
     #[test]
     fn patdef_binder_inventory_ignores_wildcard_aliases() {
-        for (pattern, expected) in [("_ @ Extractor(_) ", true), ("_ @ Extractor(x)", false)] {
+        for pattern in ["_ @ Extractor(_) ", "_ @ Extractor(x)"] {
             let source_text = format!(
                 "class MaybeInt {{ def isEmpty: Boolean = false; def get: Int = 1 }}; object Extractor {{ def unapply(value: Any): MaybeInt = new MaybeInt }}; class C {{ def use(input: Any): Int = {{ val {pattern} = input; 1 }} }}"
             );
@@ -14355,20 +14503,10 @@ mod tests {
             let context = typer.expression_context_for(method).unwrap();
             let error = typer.type_expression(rhs, context).unwrap_err();
 
-            if expected {
-                assert!(matches!(
-                    error,
-                    TyperError::LocalBlockDeclarationDeferred {
-                        kind: "pattern definition",
-                        ..
-                    }
-                ));
-            } else {
-                assert!(matches!(
-                    error,
-                    TyperError::WildcardPatternBindingRejected { .. }
-                ));
-            }
+            assert!(matches!(
+                error,
+                TyperError::WildcardPatternBindingRejected { .. }
+            ));
         }
     }
 
