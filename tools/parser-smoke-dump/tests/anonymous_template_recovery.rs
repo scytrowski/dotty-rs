@@ -1,4 +1,4 @@
-use dotty_core::ast::{Apply, DefDef, ModuleDef, Template, UntypedNode};
+use dotty_core::ast::{Apply, DefDef, ModuleDef, New, Template, UntypedNode};
 use dotty_core::{NameInterner, SourceId, SourceText, TextRange, TreeKind};
 use dotty_lexer::ContextualScanner;
 use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
@@ -58,6 +58,13 @@ fn missing_argument_after_indented_new_template_does_not_swallow_later_argument(
             result.diagnostics
         );
     };
+    let TreeKind::New(New { tpt }) = &result.ast.get(args[0]).kind else {
+        panic!("expected the first argument to remain the anonymous new expression");
+    };
+    let TreeKind::Template(template) = &result.ast.get(*tpt).kind else {
+        panic!("expected the first argument to retain its anonymous template");
+    };
+    assert_eq!(template.body.len(), 1);
     let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = &result.ast.get(*next).kind else {
         panic!(
             "expected the incomplete next argument to remain an infix expression, got {:?}",
