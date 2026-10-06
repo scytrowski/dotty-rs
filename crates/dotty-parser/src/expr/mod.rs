@@ -267,7 +267,11 @@ where
         }
         if self.current_is_ascription_colon() {
             self.advance();
-            return self.parse_ascription(lhs);
+            let mut ascribed = self.parse_ascription(lhs);
+            while self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Match) {
+                ascribed = self.parse_match_clause(ascribed);
+            }
+            return ascribed;
         }
         if self.current().kind == TokenKind::ColonEol {
             let application = self.parse_colon_argument(lhs);
