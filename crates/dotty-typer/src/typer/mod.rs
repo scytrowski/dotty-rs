@@ -10772,17 +10772,11 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_block_declaration_statements_are_deferred_explicitly() {
-        let sources = [
-            (
-                "class C { def use: Int = { 1; type Local = Int; 3 } }",
-                "type definition",
-            ),
-            (
-                "class C { def use: Int = { val (a, b) = pair; 3 } }",
-                "pattern definition",
-            ),
-        ];
+    fn unsupported_type_declaration_statements_are_deferred_explicitly() {
+        let sources = [(
+            "class C { def use: Int = { 1; type Local = Int; 3 } }",
+            "type definition",
+        )];
 
         for (source_text, expected_kind) in sources {
             let (parsed, mut store, packages, definitions, index, source) =
@@ -14161,6 +14155,374 @@ mod tests {
             typer.local_symbol_at(source, binder_tree),
             Some(final_symbol)
         );
+    }
+
+    #[test]
+    fn multi_binding_tuple_patdef_extracts_once_and_emits_final_locals_in_order() {
+        let source_text = "package scala { trait Product; class Tuple2[A, B](val _1: A, val _2: B) extends Product; class MaybeTuple2[A, B](val value: Tuple2[A, B]) { def isEmpty: Boolean = false; def get: Tuple2[A, B] = value }; object Tuple2 { def unapply[A, B](value: Tuple2[A, B]): MaybeTuple2[A, B] = new MaybeTuple2(value); def apply[A, B](first: A, second: B): Tuple2[A, B] = new Tuple2(first, second) } }; package app { class C { def use(value: scala.Tuple2[Int, Boolean]): Boolean = { val (first, second) = value; second } } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Block(source_block) = &parsed.ast.get(rhs).kind else {
+            panic!("method body should be a block");
+        };
+        let source_patdef = source_block.stats[0];
+        let (source_rhs, first_tree, second_tree) = match &parsed.ast.get(source_patdef).kind {
+            TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
+                let TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) =
+                    &parsed.ast.get(definition.patterns[0]).kind
+                else {
+                    panic!("PatDef pattern should be a tuple");
+                };
+                (
+                    definition.rhs.unwrap(),
+                    tuple.elements[0],
+                    tuple.elements[1],
+                )
+            }
+            _ => panic!("first block statement should be a PatDef"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed).kind else {
+            panic!("method body should type to a block");
+        };
+        assert_eq!(block.stats.len(), 3);
+        let aggregate_anchor = block.stats[0];
+        let TreeKind::ValDef(aggregate) = &typer.typed_ast().get(aggregate_anchor).kind else {
+            panic!("PatDef anchor should be its synthetic aggregate ValDef");
+        };
+        assert_eq!(
+            typer.source_typed_index().get(source, source_patdef),
+            Some(aggregate_anchor)
+        );
+        let aggregate_match = aggregate.rhs.unwrap();
+        let TreeKind::Match(matched) = &typer.typed_ast().get(aggregate_match).kind else {
+            panic!("aggregate ValDef RHS should be the synthetic Match");
+        };
+        let aggregate_type = typer.typed_ast().get(aggregate_match).ty;
+        assert_eq!(
+            matched.selector,
+            typer.source_typed_index().get(source, source_rhs).unwrap()
+        );
+        let Type::Applied { tycon, args } = typer.store.types.get(aggregate_type) else {
+            panic!("aggregate should have a canonical applied TupleN type");
+        };
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(tuple_class),
+            ..
+        } = typer.store.types.get(*tycon)
+        else {
+            panic!("aggregate tuple should refer to its canonical class");
+        };
+        assert_eq!(
+            typer
+                .store
+                .names
+                .resolve(typer.store.symbols.get(*tuple_class).name.text()),
+            "Tuple2"
+        );
+        assert_eq!(args, &[definitions.int, definitions.boolean]);
+        assert_eq!(typer.typed_ast().get(aggregate_anchor).ty, aggregate_type);
+        let TreeKind::CaseDef(case) = &typer.typed_ast().get(matched.cases[0]).kind else {
+            panic!("synthetic Match should contain one case");
+        };
+        assert_eq!(typer.typed_ast().get(case.body).ty, aggregate_type);
+        assert!(matches!(
+            typer.typed_ast().get(case.body).kind,
+            TreeKind::Apply(_)
+        ));
+        let TreeKind::Apply(aggregate_apply) = &typer.typed_ast().get(case.body).kind else {
+            unreachable!();
+        };
+        let TreeKind::TypeApply(type_apply) = &typer.typed_ast().get(aggregate_apply.function).kind
+        else {
+            panic!("canonical TupleN.apply should retain explicit inferred type arguments");
+        };
+        let TreeKind::Select(apply_selection) = &typer.typed_ast().get(type_apply.function).kind
+        else {
+            panic!("tuple constructor should be selected from its companion");
+        };
+        assert_eq!(
+            typer.store.names.resolve(apply_selection.name.text()),
+            "apply"
+        );
+        assert_eq!(type_apply.args.len(), 2);
+        let final_symbols =
+            [first_tree, second_tree].map(|binder| typer.local_symbol_at(source, binder).unwrap());
+        let temporary_symbols = [first_tree, second_tree]
+            .map(|binder| typer.pattern_bindings.by_tree[&(source, binder)]);
+        assert_ne!(final_symbols[0], temporary_symbols[0]);
+        assert_ne!(final_symbols[1], temporary_symbols[1]);
+        assert_ne!(final_symbols[0], final_symbols[1]);
+        assert_eq!(
+            typer.store.symbols.get(final_symbols[0]).info,
+            SymbolInfo::Complete(definitions.int)
+        );
+        assert_eq!(
+            typer.store.symbols.get(final_symbols[1]).info,
+            SymbolInfo::Complete(definitions.boolean)
+        );
+        assert_eq!(
+            typer
+                .patdef_expansion_at(source, source_patdef)
+                .unwrap()
+                .emitted,
+            block.stats
+        );
+        for (component_index, final_stat) in block.stats[1..].iter().copied().enumerate() {
+            let TreeKind::ValDef(value) = &typer.typed_ast().get(final_stat).kind else {
+                panic!("each extracted binder should be a ValDef");
+            };
+            let TreeKind::Select(selection) = &typer.typed_ast().get(value.rhs.unwrap()).kind
+            else {
+                panic!("each final binder should select its aggregate tuple component");
+            };
+            assert_eq!(
+                typer.store.names.resolve(selection.name.text()),
+                if component_index == 0 { "_1" } else { "_2" }
+            );
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(selector),
+                ..
+            } = typer
+                .store
+                .types
+                .get(typer.typed_ast().get(value.rhs.unwrap()).ty)
+            else {
+                panic!("tuple component selection should retain its canonical member");
+            };
+            assert_eq!(
+                typer
+                    .store
+                    .names
+                    .resolve(typer.store.symbols.get(*selector).name.text()),
+                if component_index == 0 { "_1" } else { "_2" }
+            );
+        }
+        let first_pattern = typer.source_typed_index().get(source, first_tree).unwrap();
+        let second_pattern = typer.source_typed_index().get(source, second_tree).unwrap();
+        assert!(matches!(
+            typer.typed_ast().get(first_pattern).kind,
+            TreeKind::Bind(_)
+        ));
+        assert!(matches!(
+            typer.typed_ast().get(second_pattern).kind,
+            TreeKind::Bind(_)
+        ));
+        assert_eq!(
+            typer.store.symbols.get(final_symbols[0]).owner,
+            Some(context.owner)
+        );
+        assert_eq!(
+            typer.store.symbols.get(final_symbols[1]).owner,
+            Some(context.owner)
+        );
+        assert!(
+            typer
+                .patdef_expansion_at(source, source_patdef)
+                .unwrap()
+                .synthetic_symbols
+                .iter()
+                .any(|symbol| {
+                    let synthetic = typer.store.symbols.get(*symbol);
+                    synthetic.origin == SymbolOrigin::Synthetic
+                        && synthetic.flags.contains(SymbolFlags::SYNTHETIC)
+                        && synthetic.kind == SymbolKind::Local
+                        && !typer.local_symbols.values().any(|local| local == symbol)
+                })
+        );
+        assert!(matches!(
+            typer
+                .store
+                .types
+                .get(typer.typed_ast().get(block.expr).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if symbol == &final_symbols[1]
+        ));
+        let prior_local_symbols = typer.local_symbols.len();
+        let prior_pattern_bindings = typer.pattern_bindings.by_tree.len();
+        let first_stats = block.stats.clone();
+        let repeated = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Block(repeated_block) = &typer.typed_ast().get(repeated).kind else {
+            panic!("repeated method body should type to a block");
+        };
+        assert_eq!(repeated_block.stats, first_stats);
+        assert_eq!(typer.local_symbols.len(), prior_local_symbols);
+        assert_eq!(typer.pattern_bindings.by_tree.len(), prior_pattern_bindings);
+    }
+
+    #[test]
+    fn nested_extractor_multi_binding_patdef_reuses_one_pattern_and_aggregate_match() {
+        let source_text = "package scala { trait Product; class Tuple2[A, B](val _1: A, val _2: B) extends Product; class MaybeTuple2[A, B](val value: Tuple2[A, B]) { def isEmpty: Boolean = false; def get: Tuple2[A, B] = value }; object Tuple2 { def unapply[A, B](value: Tuple2[A, B]): MaybeTuple2[A, B] = new MaybeTuple2(value); def apply[A, B](first: A, second: B): Tuple2[A, B] = new Tuple2(first, second) } }; package app { object Extractor { def unapply(value: scala.Tuple2[Int, Boolean]): scala.MaybeTuple2[Int, Boolean] = new scala.MaybeTuple2(value) }; class C { def use(value: scala.Tuple2[Int, Boolean]): Boolean = { val Extractor((first, second)) = value; second } } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let source_patdef = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("method body should be a block"),
+        };
+        let source_pattern = match &parsed.ast.get(source_patdef).kind {
+            TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => definition.patterns[0],
+            _ => panic!("first block statement should be a PatDef"),
+        };
+        let mut pending = vec![source_pattern];
+        let mut binder_trees = std::collections::HashMap::new();
+        while let Some(tree) = pending.pop() {
+            match &parsed.ast.get(tree).kind {
+                TreeKind::Ident(ident) => {
+                    let name = store.names.resolve(ident.name.text());
+                    if name == "first" || name == "second" {
+                        binder_trees.insert(name.to_owned(), tree);
+                    }
+                }
+                TreeKind::Bind(binding) => {
+                    let name = store.names.resolve(binding.name.text());
+                    if name == "first" || name == "second" {
+                        binder_trees.insert(name.to_owned(), tree);
+                    }
+                    pending.push(binding.body);
+                }
+                TreeKind::NamedArg(argument) => pending.push(argument.arg),
+                TreeKind::Typed(typed) => pending.push(typed.expr),
+                TreeKind::Apply(application) => {
+                    pending.extend(application.args.iter().rev().copied());
+                }
+                TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => pending.push(parens.inner),
+                TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+                    pending.extend(tuple.elements.iter().rev().copied());
+                }
+                TreeKind::UnApply(unapply) => {
+                    pending.extend(unapply.patterns.iter().rev().copied());
+                }
+                _ => {}
+            }
+        }
+        let first_tree = binder_trees["first"];
+        let second_tree = binder_trees["second"];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed).kind else {
+            panic!("method body should type to a block");
+        };
+        assert_eq!(block.stats.len(), 3);
+        let patdef = typer.patdef_expansion_at(source, source_patdef).unwrap();
+        assert_eq!(patdef.emitted, block.stats);
+        let TreeKind::ValDef(aggregate) = &typer.typed_ast().get(patdef.anchor).kind else {
+            panic!("nested PatDef should anchor at its aggregate ValDef");
+        };
+        let TreeKind::Match(matched) = &typer.typed_ast().get(aggregate.rhs.unwrap()).kind else {
+            panic!("aggregate RHS should retain the pattern check");
+        };
+        let TreeKind::CaseDef(case) = &typer.typed_ast().get(matched.cases[0]).kind else {
+            panic!("synthetic Match should contain one case");
+        };
+        let TreeKind::UnApply(_) = &typer.typed_ast().get(case.pattern).kind else {
+            panic!("nested extractor pattern should reuse recursive pattern typing");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(case.body).kind,
+            TreeKind::Apply(_)
+        ));
+        assert_eq!(
+            typer
+                .store
+                .symbols
+                .get(typer.local_symbol_at(source, first_tree).unwrap())
+                .info,
+            SymbolInfo::Complete(definitions.int)
+        );
+        assert_eq!(
+            typer
+                .store
+                .symbols
+                .get(typer.local_symbol_at(source, second_tree).unwrap())
+                .info,
+            SymbolInfo::Complete(definitions.boolean)
+        );
+    }
+
+    #[test]
+    fn multi_binding_patdef_rolls_back_when_a_later_tuple_selector_is_ambiguous() {
+        let source_text = "package scala { trait Product; class Tuple2[A, B](val _1: A, val _2: B) extends Product { def _2(index: Int): B = _2 }; class PairResult[A, B](val _1: A, val _2: B) extends Product; object Tuple2 { def unapply[A, B](value: Tuple2[A, B]): PairResult[A, B] = new PairResult(value._1, value._2); def apply[A, B](first: A, second: B): Tuple2[A, B] = new Tuple2(first, second) } }; class C { def use(value: scala.Tuple2[Int, Boolean]): Boolean = { val (first, second) = value; second } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let source_patdef = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("method body should be a block"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let checkpoint = typer.store.checkpoint();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::LocalBlockDeclarationDeferred {
+                kind: "pattern definition aggregate tuple selector",
+                ..
+            })
+        ));
+        assert_eq!(typer.store.checkpoint(), checkpoint);
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().is_empty());
+        assert!(typer.patdef_expansion_at(source, source_patdef).is_none());
+        assert!(typer.local_symbols.is_empty());
+        assert!(typer.pattern_bindings.by_tree.is_empty());
+    }
+
+    #[test]
+    fn multi_binding_patdef_reports_the_supported_aggregate_arity_bound() {
+        let names = (0..23)
+            .map(|index| format!("binder{index}"))
+            .collect::<Vec<_>>();
+        let source_text = format!(
+            "class C {{ def use(value: Any): Int = {{ val ({}) = value; 1 }} }}",
+            names.join(", ")
+        );
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(&source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::PatDefAggregateArityDeferred {
+                arity: 23,
+                max_supported: 22,
+                ..
+            })
+        ));
     }
 
     #[test]
