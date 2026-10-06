@@ -2052,10 +2052,15 @@ fn audit_source_inner(
         }));
     }
     let mut root_failures = Vec::new();
-    let method_ranges = root_methods
+    let mut method_ranges = root_methods
         .iter()
         .map(|(_, _, range)| *range)
         .collect::<Vec<_>>();
+    method_ranges.extend(parsed.ast.iter().filter_map(|(_, node)| {
+        matches!(&node.kind, TreeKind::DefDef(definition) if definition.rhs.is_some())
+            .then(|| node.position.map(|position| position.span().range()))
+            .flatten()
+    }));
     for (method, rhs, range) in root_methods {
         let outcome = typer
             .expression_context_for(method)
@@ -3122,6 +3127,22 @@ fn print_local_patdefs(profile: &PatDefProfile) {
     print_patdef_counts("modifiers", &profile.modifiers);
     print_patdef_counts("explicit_tpt", &profile.explicit_tpt);
     print_patdef_counts("rhs", &profile.rhs_states);
+    let mut outcome_totals = BTreeMap::<String, (usize, BTreeSet<String>)>::new();
+    for (key, bucket) in &profile.typing_outcomes {
+        let status_end = ["::lazy val::", "::val::", "::var::"]
+            .iter()
+            .filter_map(|marker| key.find(marker))
+            .min()
+            .unwrap_or(key.len());
+        let status = &key[..status_end];
+        let total = outcome_totals.entry(status.to_owned()).or_default();
+        total.0 += bucket.count;
+        total.1.extend(bucket.files.iter().cloned());
+    }
+    println!("  typing_outcome_totals:");
+    for (outcome, (count, files)) in outcome_totals {
+        println!("    {outcome}={count} files={}", files.len());
+    }
     println!("  typing_outcomes:");
     for (outcome, bucket) in &profile.typing_outcomes {
         println!(
