@@ -96,19 +96,21 @@ temporary symbols are recorded as PatDef expansion metadata and do not receive
 source-tree mappings. Expansion metadata, semantic symbols, and typed mappings
 participate in the enclosing expression transaction.
 
-The current typer increment supports immutable, strict, inferred local `val`
+The current typer increment supports strict, inferred local `val` and `var`
 PatDefs with exactly one source pattern and zero, one, or multiple visible
 binders. The RHS is typed once and reused as the synthetic `Match` selector,
 so refutable patterns retain their runtime failure behavior. A zero-binder
-match returns canonical Unit and is emitted as the only statement. A
-one-binder match returns its temporary case binder as the final `ValDef` RHS.
-For multiple binders, recursive pattern typing runs once in a temporary case
-scope; the case body constructs a canonical `TupleN` through its companion's
-`apply`, and a synthetic aggregate local stores the one `Match`. Final locals
-are emitted in source binder order by selecting canonical `_1` through `_N`
-members from that aggregate. Tuple arities through 22 are supported when the
-canonical class, companion constructor, and component selectors resolve with
-the expected types; larger arities return `PatDefAggregateArityDeferred`.
+match returns canonical Unit and is emitted as the only statement; this also
+applies to non-lazy `var` patterns, matching Scala 3.9's `Desugar.makePatDef`
+zero-variable branch. A one-binder match returns its temporary case binder as
+the final `ValDef` RHS. For multiple binders, recursive pattern typing runs
+once in a temporary case scope; the case body constructs a canonical `TupleN`
+through its companion's `apply`, and a synthetic aggregate local stores the
+one `Match`. Final locals are emitted in source binder order by selecting
+canonical `_1` through `_N` members from that aggregate. Tuple arities through
+22 are supported when the canonical class, companion constructor, and
+component selectors resolve with the expected types; larger arities return
+`PatDefAggregateArityDeferred`.
 
 Temporary pattern symbols, the synthetic aggregate symbol, and final
 user-visible local symbols have separate identities. The synthetic aggregate
@@ -118,10 +120,14 @@ binder remains mapped to its typed pattern `Bind`, while
 The PatDef root maps to the synthetic aggregate `ValDef` for multiple binders,
 to the final `ValDef` for one binder, or to the synthetic `Match` for zero
 binders. Final symbols enter the block scope only after RHS and pattern typing
-succeed. The statement expansion, synthetic symbols, mappings, and final
+succeed. `var` final symbols carry `SymbolFlags::MUTABLE`, so assignments use
+the existing local assignment path and target the source binder's final
+symbol. Temporary case symbols and aggregate symbols remain separate and
+immutable. The statement expansion, synthetic symbols, mappings, and final
 locals roll back together on failure, including failure while constructing a
-later tuple selector. Modifier-bearing, explicitly typed, missing-RHS,
-mutable, and lazy forms remain deferred.
+later tuple selector. Lazy and explicitly typed PatDefs have focused
+`LocalPatDefDeferred` categories; unsupported pattern shapes preserve their
+own pattern or extractor errors.
 
 ## Scope
 
@@ -129,5 +135,4 @@ The fixtures cover extractor and tuple roots, zero/one/multiple binders,
 wildcards, aliases, `var`, `lazy val`, a PatDef-wide annotation, `@unchecked`
 and `.runtimeChecked` RHSes, and binder visibility. They pin the inputs and
 normalized lowering contract; the typer supports the bounded
-zero-/one-/multiple-binder
-inferred-`val` slice described above.
+zero-/one-/multiple-binder inferred `val` and `var` slice described above.
