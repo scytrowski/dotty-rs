@@ -208,13 +208,13 @@ local_patdefs:
     failure::TypeNameNotFound=24 files=5
     failure::UnsupportedExpression=35 files=22
     failure::UnsupportedTypeTree=8 files=6
-    not_attempted=639 files=172
+    not_attempted=635 files=171
   typing_attempt_statuses:
-    profiled=792
+    profiled=788
     outside_typed_method_ranges_or_without_source_range=0
     success=0 files=0
     failure=153 files=79
-    not_attempted=639 files=172
+    not_attempted=635 files=171
   typing_outcomes:
     failure::ApplicationCalleeNotMethod::val::binders=3+::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala]
     failure::ImportQualifierNotFound::val::binders=2::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=16 files=14 [compiler/src/dotty/tools/backend/jvm/PostProcessor.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/reporting/messages.scala]
@@ -251,7 +251,6 @@ local_patdefs:
     not_attempted::lazy val::binders=1::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala]
     not_attempted::lazy val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/typer/Migrations.scala]
     not_attempted::val::binders=0::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/transform/Memoize.scala]
-    not_attempted::val::binders=0::root=Ident::tpt=synthetic inferred TypeTree=2 files=2 [compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala, compiler/src/dotty/tools/dotc/typer/Checking.scala]
     not_attempted::val::binders=1::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=41 files=29 [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BackendUtils.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/ast/TreeInfo.scala]
     not_attempted::val::binders=1::root=Bind::tpt=synthetic inferred TypeTree=4 files=4 [compiler/src/dotty/tools/dotc/transform/ElimByName.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/transform/Recheck.scala, library/src/scala/quoted/Quotes.scala]
     not_attempted::val::binders=1::root=InfixOp::tpt=synthetic inferred TypeTree=6 files=6 [compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Synthetics.scala, compiler/src/dotty/tools/dotc/transform/Bridges.scala, compiler/src/dotty/tools/dotc/transform/ContextFunctionResults.scala]
@@ -267,9 +266,9 @@ local_patdefs:
     not_attempted::val::binders=3+::root=Ident::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala]
     not_attempted::val::binders=3+::root=InfixOp::tpt=synthetic inferred TypeTree=2 files=2 [compiler/src/dotty/tools/dotc/core/OrderingConstraint.scala, compiler/src/dotty/tools/dotc/transform/ElimRepeated.scala]
     not_attempted::val::binders=3+::root=Tuple::tpt=synthetic inferred TypeTree=43 files=29 [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala, compiler/src/dotty/tools/backend/jvm/PostProcessor.scala, compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala, compiler/src/dotty/tools/backend/jvm/opt/LocalOpt.scala]
-    not_attempted::var::binders=2::root=Ident::tpt=synthetic inferred TypeTree=12 files=6 [library/src/scala/collection/Seq.scala, library/src/scala/collection/immutable/Map.scala, library/src/scala/collection/immutable/RedBlackTree.scala, library/src/scala/collection/mutable/AnyRefMap.scala, library/src/scala/collection/mutable/ArrayDeque.scala]
+    not_attempted::var::binders=2::root=Ident::tpt=synthetic inferred TypeTree=11 files=5 [library/src/scala/collection/Seq.scala, library/src/scala/collection/immutable/Map.scala, library/src/scala/collection/mutable/AnyRefMap.scala, library/src/scala/collection/mutable/ArrayDeque.scala, library/src/scala/collection/mutable/LongMap.scala]
     not_attempted::var::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=6 files=4 [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala, compiler/src/dotty/tools/dotc/plugins/Plugins.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala]
-    not_attempted::var::binders=3+::root=Ident::tpt=synthetic inferred TypeTree=3 files=3 [library/src/scala/collection/immutable/Map.scala, library/src/scala/collection/immutable/RedBlackTree.scala, library/src/scala/util/hashing/MurmurHash3.scala]
+    not_attempted::var::binders=3+::root=Ident::tpt=synthetic inferred TypeTree=2 files=2 [library/src/scala/collection/immutable/Map.scala, library/src/scala/collection/immutable/RedBlackTree.scala]
   representative_files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala]
 unsupported_expression_total=102
 UnsupportedTypeTree=30 files=13

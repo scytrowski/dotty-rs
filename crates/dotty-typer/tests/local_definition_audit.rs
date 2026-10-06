@@ -269,6 +269,7 @@ impl Default for Audit {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PatDefProfile {
     total: usize,
+    structural_patdef_ids: HashSet<u32>,
     root_shapes: BTreeMap<String, usize>,
     root_shape_files: BTreeMap<String, BTreeSet<String>>,
     source_pattern_counts: BTreeMap<String, usize>,
@@ -284,6 +285,7 @@ impl Default for PatDefProfile {
     fn default() -> Self {
         Self {
             total: 0,
+            structural_patdef_ids: HashSet::new(),
             root_shapes: [
                 "Tuple",
                 "Apply / extractor-looking",
@@ -1249,6 +1251,23 @@ fn local_patdef_audit_distinguishes_missing_and_recovered_rhs() {
 }
 
 #[test]
+fn local_patdef_attempts_exclude_fields_inside_method_spans() {
+    let audit = audit_source(
+        "object Audit { def outer: Unit = { class Local { val (field, other) = (1, 2) }; val (left, right) = (1, 2); () } }",
+        "LocalField.scala",
+    );
+    let profiled = audit
+        .patdef_profile
+        .typing_outcomes
+        .values()
+        .map(|bucket| bucket.count)
+        .sum::<usize>();
+
+    assert_eq!(audit.patdef_profile.total, 1, "{audit:?}");
+    assert_eq!(profiled, 1, "{audit:?}");
+}
+
+#[test]
 fn local_expression_audit_types_infix_calls_and_counts_them_structurally() {
     let source = "class Box { def combine(other: Box): Box = this }; object Audit { def outer(left: Box, right: Box): Box = { def local: Box = left `combine` right; local } }";
     let audit = audit_source(source, "Infix.scala");
@@ -2159,6 +2178,13 @@ fn audit_source_inner(
         let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &node.kind else {
             continue;
         };
+        if !audit
+            .patdef_profile
+            .structural_patdef_ids
+            .contains(&tree.index())
+        {
+            continue;
+        }
         let Some(range) = node.position.map(|position| position.span().range()) else {
             continue;
         };
@@ -2959,6 +2985,7 @@ fn collect_local_patdefs(
             };
             if let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &node.kind {
                 profile.total += 1;
+                profile.structural_patdef_ids.insert(tree.index());
                 *profile
                     .source_pattern_counts
                     .entry(definition.patterns.len().to_string())
