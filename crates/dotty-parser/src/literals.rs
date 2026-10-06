@@ -180,11 +180,21 @@ fn parse_long_literal(spelling: &str) -> Option<i64> {
         .unwrap_or(digits);
     let value = u64::from_str_radix(digits, radix).ok()?;
     if negative {
-        if value == 1_u64 << 63 {
+        if radix != 10 {
+            // Non-decimal Long spellings represent a signed 64-bit bit
+            // pattern. Apply the source minus sign to that value with the
+            // same wrapping arithmetic used by the JVM Long representation.
+            Some((value as i64).wrapping_neg())
+        } else if value == 1_u64 << 63 {
             Some(i64::MIN)
         } else {
             i64::try_from(value).ok()?.checked_neg()
         }
+    } else if radix != 10 {
+        // Scala accepts a full-width non-decimal Long bit pattern and
+        // interprets it as a signed two's-complement value (e.g. the
+        // hexadecimal spelling 0xFFFFFFFFFFFFFFFFL denotes -1).
+        Some(value as i64)
     } else {
         i64::try_from(value).ok()
     }
@@ -447,6 +457,38 @@ mod tests {
                 value: Constant::Long(255)
             })
         ));
+    }
+
+    #[test]
+    fn decodes_a_full_width_hexadecimal_long_as_a_signed_bit_pattern() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "0xFFFFFFFFFFFFFFFFL",
+            vec![
+                token(TokenKind::LongLiteral, 0, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let id = parser.simple_expr();
+
+        assert!(matches!(
+            parser.ast().get(id).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Long(-1)
+            })
+        ));
+    }
+
+    #[test]
+    fn decodes_a_negative_full_width_hexadecimal_long() {
+        assert_eq!(parse_long_literal("-0xFFFFFFFFFFFFFFFFL"), Some(1));
+    }
+
+    #[test]
+    fn decodes_the_non_decimal_long_sign_bit_boundary() {
+        assert_eq!(parse_long_literal("0x8000000000000000L"), Some(i64::MIN));
     }
 
     #[test]
