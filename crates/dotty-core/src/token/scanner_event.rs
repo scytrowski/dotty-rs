@@ -48,6 +48,11 @@ pub enum ScannerEvent {
     /// Closes a parser-requested indentation region using a grammar delimiter
     /// without exposing an `Outdent` token to the parser.
     OutdentedByDelimiter,
+    /// Closes parser feedback for a region whose `Outdent` was already present
+    /// in the token stream and consumed by the parser.
+    OutdentedByExistingOutdent {
+        indent_offset: u32,
+    },
     ArrowIndented,
     SelfArrow,
 }
