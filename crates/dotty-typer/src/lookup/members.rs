@@ -62,6 +62,8 @@ pub enum MemberLookupError {
     },
     /// Source completion for a current-unit class failed before lookup.
     SourceClassCompletion { symbol: SymbolId, error: TyperError },
+    /// Source completion for a current-unit receiver alias failed before lookup.
+    SourceAliasCompletion { symbol: SymbolId, error: TyperError },
     /// A source class's declared parent view could not be instantiated.
     ParentTypeAdaptation { symbol: SymbolId, error: TyperError },
     /// A parent path revisits a class already on that path.
@@ -146,9 +148,7 @@ impl SourceTyper<'_> {
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
         include_hidden_inherited: bool,
     ) -> Result<Vec<MemberCandidate>, MemberLookupError> {
-        let receiver_view = TypeNormalizer::new(self.store)
-            .normalize_for_lookup(receiver)
-            .map_err(MemberLookupError::TypeNormalization)?;
+        let receiver_view = self.normalize_member_receiver(receiver, journal)?;
         let class = class_symbol_for_type(self.store, receiver_view, false)?;
         let mut queue = VecDeque::from([PendingClass {
             symbol: class,
@@ -225,6 +225,32 @@ impl SourceTyper<'_> {
         let mut seen_candidates = HashSet::new();
         candidates.retain(|candidate| seen_candidates.insert(candidate.symbol));
         Ok(candidates)
+    }
+
+    fn normalize_member_receiver(
+        &mut self,
+        receiver: TypeId,
+        journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, MemberLookupError> {
+        for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            match TypeNormalizer::new(self.store).normalize_for_lookup(receiver) {
+                Ok(normalized) => return Ok(normalized),
+                Err(TypeNormalizeError::AliasInfoIncomplete {
+                    symbol,
+                    state: SymbolInfoState::Missing,
+                }) if self.index.definition_of(symbol).is_some() => {
+                    self.complete_symbol_inner(symbol, journal)
+                        .map_err(|error| MemberLookupError::SourceAliasCompletion {
+                            symbol,
+                            error,
+                        })?;
+                }
+                Err(error) => return Err(MemberLookupError::TypeNormalization(error)),
+            }
+        }
+        Err(MemberLookupError::TypeNormalization(
+            TypeNormalizeError::TooDeep,
+        ))
     }
 
     fn class_info(

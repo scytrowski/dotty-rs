@@ -1279,6 +1279,38 @@ fn local_expression_audit_types_infix_calls_and_counts_them_structurally() {
 }
 
 #[test]
+fn local_expression_audit_types_supported_prefix_calls() {
+    let source = "class Box { def unary_! : Int = 1 }; object Audit { def outer(value: Box): Int = { def local: Int = !value; local } }";
+    let audit = audit_source(source, "Prefix.scala");
+
+    assert_eq!(audit.expression_forms.get("PrefixOp"), Some(&1));
+    assert_eq!(audit.local_defdefs, 1);
+    assert_eq!(audit.typed_local_defdefs, 1, "{audit:?}");
+    assert!(audit.failures.is_empty(), "{audit:?}");
+}
+
+#[test]
+fn local_expression_audit_reports_prefix_member_failure_by_actual_error() {
+    let source = "class Box; object Audit { def outer(value: Box): Box = { def local: Box = !value; local } }";
+    let audit = audit_source(source, "PrefixMissingMember.scala");
+
+    assert_eq!(audit.expression_forms.get("PrefixOp"), Some(&1));
+    assert_eq!(
+        audit
+            .failures
+            .get("MemberNotFound")
+            .map(|failure| failure.count),
+        Some(1),
+        "{audit:?}"
+    );
+    assert!(
+        !audit
+            .failures
+            .contains_key("UnsupportedExpression::PrefixOp")
+    );
+}
+
+#[test]
 fn match_readiness_counts_unsupported_case_shapes_for_match_first_blockers() {
     let source = "object Audit { def outer(value: Int): Int = { def local: Int = value match { case Extractor(_) if true => 1; case _ => 2 }; local } }";
     let audit = audit_source(source, "Match.scala");
