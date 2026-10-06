@@ -21,6 +21,10 @@ pub struct ContextualScanner {
     /// Synthetic indent tokens whose regions ended at a delimiter. They stay
     /// in the consumed stream but must not be reused by a later outdent scan.
     delimiter_closed_indents: Vec<u32>,
+    /// Regions already closed by a parser-inserted Outdent. Their eager
+    /// matching Outdent is removed, and repeated feedback must not close them
+    /// a second time.
+    synthetic_closed_regions: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +70,7 @@ impl ContextualScanner {
             diagnostics,
             feedback_regions: Vec::new(),
             delimiter_closed_indents: Vec::new(),
+            synthetic_closed_regions: Vec::new(),
         })
     }
 
@@ -623,6 +628,11 @@ impl ContextualScanner {
         feedback_indent_offset: Option<u32>,
     ) -> bool {
         let index = self.current_index();
+        if feedback_indent_offset
+            .is_some_and(|offset| self.synthetic_closed_regions.contains(&offset))
+        {
+            return false;
+        }
         // A parser-feedback indent is added after eager layout tokens already
         // exist. If one of those tokens is the current outdent, the feedback
         // region still needs its own delimiter in front of it.
@@ -634,6 +644,8 @@ impl ContextualScanner {
         {
             return false;
         }
+        let mut matching_indent_index = None;
+        let mut closed_region_offset = None;
         if self.tokens[index].kind != TokenKind::Eof {
             let mut closed_regions = 0usize;
             let mut indent_index = None;
@@ -656,6 +668,7 @@ impl ContextualScanner {
                 return false;
             };
             let indent_offset = self.tokens[indent_index].span.start();
+            matching_indent_index = Some(indent_index);
             let region_offset = feedback_indent_offset.unwrap_or_else(|| {
                 self.feedback_regions
                     .iter()
@@ -664,6 +677,7 @@ impl ContextualScanner {
                     .and_then(|region| region.case_offset)
                     .unwrap_or(indent_offset)
             });
+            closed_region_offset = Some(region_offset);
             let region_indent = line_indentation(&self.source, region_offset);
             let current_offset = if is_layout_token(self.tokens[index].kind) {
                 next_real_token(&self.tokens, index)
@@ -690,6 +704,17 @@ impl ContextualScanner {
             return false;
         }
         let offset = self.tokens[index].span.start();
+        let closes_same_indent_else = self.current().kind == TokenKind::Keyword(HardKeyword::Else)
+            || (self.current().kind == TokenKind::Punctuation(Punctuation::Semicolon)
+                && next_real_token(&self.tokens, index)
+                    .is_some_and(|token| token.kind == TokenKind::Keyword(HardKeyword::Else)));
+        if closes_same_indent_else
+            && let Some(indent_index) = matching_indent_index
+            && let Some(outdent_index) = self.matching_eager_outdent_index(indent_index)
+            && outdent_index > index
+        {
+            self.tokens.remove(outdent_index);
+        }
         self.tokens.insert(
             index,
             Token::new(
@@ -697,7 +722,28 @@ impl ContextualScanner {
                 TextRange::new(offset, offset).expect("synthetic range is valid"),
             ),
         );
+        if closes_same_indent_else
+            && let Some(region_offset) = closed_region_offset
+            && !self.synthetic_closed_regions.contains(&region_offset)
+        {
+            self.synthetic_closed_regions.push(region_offset);
+        }
         true
+    }
+
+    fn matching_eager_outdent_index(&self, indent_index: usize) -> Option<usize> {
+        let mut nested_indents = 0usize;
+        for index in indent_index + 1..self.tokens.len() {
+            match self.tokens[index].kind {
+                TokenKind::Indent => nested_indents += 1,
+                TokenKind::Outdent if nested_indents == 0 => {
+                    return Some(index);
+                }
+                TokenKind::Outdent => nested_indents -= 1,
+                _ => {}
+            }
+        }
+        None
     }
 
     fn innermost_open_indent_offset(&self, before: usize) -> Option<u32> {
@@ -5513,6 +5559,61 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn same_indent_else_closes_the_eager_then_region_only_once() {
+        let source = "if cond then\n  yes\n  else\n    no\nnext";
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        let yes_index = scanner
+            .tokens
+            .iter()
+            .position(|token| {
+                scanner
+                    .source
+                    .get(token.span.start() as usize..token.span.end() as usize)
+                    == Some("yes")
+            })
+            .expect("then body token");
+        let indent_offset = scanner.tokens[..yes_index]
+            .iter()
+            .rev()
+            .find(|token| token.kind == TokenKind::Indent)
+            .expect("then body indent")
+            .span
+            .start();
+        while scanner.current().kind != TokenKind::Keyword(HardKeyword::Else) {
+            scanner.advance();
+        }
+
+        scanner.observe(ScannerEvent::OutdentedLayoutRegion { indent_offset });
+        assert_eq!(scanner.current().kind, TokenKind::Outdent);
+        scanner.advance();
+        assert_eq!(
+            scanner.current().kind,
+            TokenKind::Keyword(HardKeyword::Else)
+        );
+
+        // Nested parser layers may report the same region closure. It must not
+        // insert another Outdent before `else` or leave a duplicate eager one
+        // before the following statement.
+        scanner.observe(ScannerEvent::OutdentedLayoutRegion { indent_offset });
+        assert_eq!(
+            scanner.current().kind,
+            TokenKind::Keyword(HardKeyword::Else)
+        );
+        let no_end = source.find("no").expect("else body").saturating_add(2) as u32;
+        let next_start = source.find("next").expect("following statement") as u32;
+        let outdents_between = scanner
+            .tokens
+            .iter()
+            .filter(|token| {
+                token.kind == TokenKind::Outdent
+                    && token.span.start() >= no_end
+                    && token.span.start() <= next_start
+            })
+            .count();
+        assert_eq!(outdents_between, 1);
     }
 
     #[test]
