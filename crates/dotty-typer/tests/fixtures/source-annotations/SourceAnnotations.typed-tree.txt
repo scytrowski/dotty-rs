@@ -11,6 +11,12 @@ package <empty> {
     val first: Int
     val second: Int
   }
+  class Triple(first: Int, second: Int, third: Int) extends
+    scala.annotation.Annotation(), scala.annotation.StaticAnnotation {
+    val first: Int
+    val second: Int
+    val third: Int
+  }
   final lazy module val SourceAnnotations: SourceAnnotations =
     new SourceAnnotations()
   final module class SourceAnnotations() extends Object() {
@@ -22,6 +28,8 @@ package <empty> {
     def mixed(value: Int): Int = value:(value : Int) @Multi(1, second = 2)
     def mixedAfterNamed(value: Int): Int =
       value:(value : Int) @Multi(first = 1, 2)
+    def reorderedNamedThenPositional(value: Int): Int =
+      value:(value : Int) @Triple(first = 1, second = 2, 3)
   }
 }
 

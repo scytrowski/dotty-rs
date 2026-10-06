@@ -19479,7 +19479,7 @@ mod tests {
 
     #[test]
     fn source_annotation_constructor_shapes_are_explicit() {
-        let source_text = "package scala.annotation { abstract class Annotation }; class unchecked extends scala.annotation.Annotation; class EmptyAnnot extends scala.annotation.Annotation; class Annot(val n: Int) extends scala.annotation.Annotation; class Multi(val first: Int, val second: Int) extends scala.annotation.Annotation; class Use { def bare(x: Int): Int = x: @unchecked; def empty(x: Int): Int = x: @EmptyAnnot(); def positional(x: Int): Int = x: @Annot(1); def named(x: Int): Int = x: @Annot(n = 1); def mixed(x: Int): Int = x: @Multi(1, second = 2); def mixedAfterNamed(x: Int): Int = x: @Multi(first = 1, 2) }";
+        let source_text = "package scala.annotation { abstract class Annotation }; class unchecked extends scala.annotation.Annotation; class EmptyAnnot extends scala.annotation.Annotation; class Annot(val n: Int) extends scala.annotation.Annotation; class Multi(val first: Int, val second: Int) extends scala.annotation.Annotation; class Triple(val first: Int, val second: Int, val third: Int) extends scala.annotation.Annotation; class Use { def bare(x: Int): Int = x: @unchecked; def empty(x: Int): Int = x: @EmptyAnnot(); def positional(x: Int): Int = x: @Annot(1); def named(x: Int): Int = x: @Annot(n = 1); def mixed(x: Int): Int = x: @Multi(1, second = 2); def mixedAfterNamed(x: Int): Int = x: @Multi(first = 1, 2); def reorderedNamedThenPositional(x: Int): Int = x: @Triple(second = 2, first = 1, 3) }";
         let (parsed, store, _, _, index, source) = parse_and_name(source_text);
 
         for (method, expected_args) in [
@@ -19489,6 +19489,7 @@ mod tests {
             ("named", 1),
             ("mixed", 2),
             ("mixedAfterNamed", 2),
+            ("reorderedNamedThenPositional", 3),
         ] {
             let (_, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, method);
             let TreeKind::Annotated(annotated) = &parsed.ast.get(rhs).kind else {
@@ -19529,7 +19530,7 @@ mod tests {
 
     #[test]
     fn source_annotation_projection_preserves_class_and_constant_arguments() {
-        let source_text = "package scala.annotation { abstract class Annotation }; class unchecked extends scala.annotation.Annotation; class EmptyAnnot extends scala.annotation.Annotation; class Annot(val n: Int) extends scala.annotation.Annotation; class Multi(val first: Int, val second: Int) extends scala.annotation.Annotation; class Use { def bare(x: Int): Int = x: @unchecked; def empty(x: Int): Int = x: @EmptyAnnot(); def positional(x: Int): Int = x: @Annot(1); def named(x: Int): Int = x: @Annot(n = 1); def mixed(x: Int): Int = x: @Multi(1, second = 2); def mixedAfterNamed(x: Int): Int = x: @Multi(first = 1, 2) }";
+        let source_text = "package scala.annotation { abstract class Annotation }; class unchecked extends scala.annotation.Annotation; class EmptyAnnot extends scala.annotation.Annotation; class Annot(val n: Int) extends scala.annotation.Annotation; class Multi(val first: Int, val second: Int) extends scala.annotation.Annotation; class Triple(val first: Int, val second: Int, val third: Int) extends scala.annotation.Annotation; class Use { def bare(x: Int): Int = x: @unchecked; def empty(x: Int): Int = x: @EmptyAnnot(); def positional(x: Int): Int = x: @Annot(1); def named(x: Int): Int = x: @Annot(n = 1); def mixed(x: Int): Int = x: @Multi(1, second = 2); def mixedAfterNamed(x: Int): Int = x: @Multi(first = 1, 2); def reorderedNamedThenPositional(x: Int): Int = x: @Triple(second = 2, first = 1, 3) }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let cases = [
             ("bare", "unchecked", 0),
@@ -19538,6 +19539,7 @@ mod tests {
             ("named", "Annot", 1),
             ("mixed", "Multi", 2),
             ("mixedAfterNamed", "Multi", 2),
+            ("reorderedNamedThenPositional", "Triple", 3),
         ];
         let methods = cases.map(|(method, class, count)| {
             let (owner, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, method);
@@ -19580,17 +19582,19 @@ mod tests {
                 else {
                     panic!("source literal should remain an integer constant");
                 };
-                let expected_value =
-                    if index == 1 && (method == "mixed" || method == "mixedAfterNamed") {
-                        2
-                    } else {
-                        1
-                    };
+                let expected_value = match (method, index) {
+                    ("mixed", 1) | ("mixedAfterNamed", 1) => 2,
+                    ("reorderedNamedThenPositional", 0) => 2,
+                    ("reorderedNamedThenPositional", 2) => 3,
+                    _ => 1,
+                };
                 assert_eq!(*value, expected_value);
                 let expected_name = match (method, index) {
                     ("named", 0) => Some("n"),
                     ("mixed", 1) => Some("second"),
                     ("mixedAfterNamed", 0) => Some("first"),
+                    ("reorderedNamedThenPositional", 0) => Some("second"),
+                    ("reorderedNamedThenPositional", 1) => Some("first"),
                     _ => None,
                 };
                 assert_eq!(
