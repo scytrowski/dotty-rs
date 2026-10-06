@@ -1102,3 +1102,58 @@ Recreate the report from the pinned checkout with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-697-scala3-3.9.0.json
 ```
+
+## Corpus rerun after PRs #709 and #711
+
+Issue #712 measured `main` at merge revision
+`4cadbf009c90a01ff3387e2fa35dcb785b919126`. The same pinned Scala 3.9.0
+source revision and sorted 1,236-file corpus were used as in #697. Two
+complete runs produced byte-identical JSON (SHA-256
+`dc2f2a281c16ecb39ecd912b06ce81422079809446a6ea67e9e6de701445bc1e`). The
+immutable report is
+[`parser-post-issue-712-scala3-3.9.0.json`](../tools/parser-corpus-report/parser-post-issue-712-scala3-3.9.0.json).
+
+| Measure | After #695 (#697 report) | After #711 | Change |
+| --- | ---: | ---: | ---: |
+| Files attempted | 1,236 | 1,236 | 0 |
+| Clean parses | 1,192 (96.44%) | 1,180 (95.47%) | -12 (-0.97 pp) |
+| Recoverable files | 44 (3.56%) | 56 (4.53%) | +12 |
+| Hard parser failures / process failures / panics / hangs | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | unchanged |
+| Scanner diagnostics | 10 | 10 | unchanged |
+| Scala oracle files / failures | 1,236 / 0 | 1,236 / 0 | unchanged |
+
+Diagnostic occurrences rose from 267 to 664 (+397, or 148.7%). This is a
+count of all diagnostics emitted across the corpus, not a count of newly
+failing files; the number of recoverable files rose by 12. The largest
+changes were `ExpectedExpression` (+141, 149 → 290), `UnexpectedToken` (+126,
+60 → 186), and `UnsupportedSyntax` (+139, 19 → 158), while `ExpectedToken`
+fell by 9 (39 → 30). The added diagnostics warrant follow-up rather than being
+treated as improved coverage.
+
+First-failure counts changed from 22 to 22 for `ExpectedExpression`, 4 to 8
+for `ExpectedToken`, 17 to 22 for `UnexpectedToken`, and 1 to 2 for scanner
+diagnostics. Two files now first fail with the normalized unsupported
+extension-member diagnostic. Representative paths in the current samples include
+`compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala`,
+`compiler/src/dotty/tools/dotc/parsing/Parsers.scala`,
+`compiler/src/dotty/tools/dotc/ast/tpd.scala`,
+`compiler/src/dotty/tools/dotc/cc/SepCheck.scala`, and
+`compiler/src/dotty/tools/dotc/semanticdb/Scala3.scala`. The `ExpectedToken`
+examples now include `compiler/src/dotty/tools/dotc/core/tasty/CommentPickler.scala`
+and `compiler/src/dotty/tools/dotc/quoted/PickledQuotes.scala`.
+
+The capture-checking-disabled cohort fell from 951/994 to 941/994 clean
+files; the enabled cohort fell from 241/242 to 239/242. These are aggregate
+changes across `main` since #697 and cannot be attributed to PRs #709 and
+#711 alone. Next, inspect representative files from the growing
+`ExpectedExpression` and `UnexpectedToken` buckets and distinguish genuinely
+new parse failures from additional recovery diagnostics inside files that
+were already recoverable. Do not infer grammar coverage from diagnostic
+volume alone.
+
+Recreate the report from the pinned checkout with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-712-scala3-3.9.0.json
+```
