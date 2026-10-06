@@ -91,6 +91,7 @@ where
 
         while self.current().kind != TokenKind::Eof
             && self.current().kind != TokenKind::Punctuation(Punctuation::RightBracket)
+            && !self.type_param_recovery_definition_boundary()
             && !(self.context.enum_body
                 && matches!(
                     self.current().kind,
@@ -137,6 +138,14 @@ where
                 break;
             }
 
+            if self.type_param_recovery_definition_boundary() {
+                self.report(
+                    ParseDiagnosticKind::ExpectedToken,
+                    "expected `,` or `]` after a type parameter",
+                );
+                break;
+            }
+
             self.report(
                 ParseDiagnosticKind::ExpectedToken,
                 "expected `,` or `]` after a type parameter",
@@ -149,6 +158,21 @@ where
 
         self.expect(TokenKind::Punctuation(Punctuation::RightBracket));
         params
+    }
+
+    fn type_param_recovery_definition_boundary(&mut self) -> bool {
+        let mut offset = 0;
+        while matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            offset += 1;
+        }
+        if offset > 0 && is_recovery_definition_keyword(self.cursor.lookahead(offset).kind) {
+            return true;
+        }
+        (crate::modifiers::is_hard_modifier(self.current().kind) && self.starts_definition_prefix())
+            || is_recovery_definition_keyword(self.current().kind)
     }
 
     fn type_param(&mut self) -> TreeId<Untyped> {
@@ -570,6 +594,26 @@ fn context_bounds_are_allowed(owner: Option<ParamOwner>) -> bool {
                 | ParamOwner::Given
                 | ParamOwner::ExtensionPrefix
                 | ParamOwner::ExtensionFollow
+        )
+    )
+}
+
+pub(crate) fn is_recovery_definition_keyword(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Keyword(
+            dotty_core::HardKeyword::Given
+                | dotty_core::HardKeyword::Val
+                | dotty_core::HardKeyword::Var
+                | dotty_core::HardKeyword::Def
+                | dotty_core::HardKeyword::Type
+                | dotty_core::HardKeyword::Enum
+                | dotty_core::HardKeyword::Class
+                | dotty_core::HardKeyword::Trait
+                | dotty_core::HardKeyword::Object
+                | dotty_core::HardKeyword::Package
+                | dotty_core::HardKeyword::Import
+                | dotty_core::HardKeyword::Export
         )
     )
 }

@@ -73,6 +73,28 @@ where
         } else {
             Vec::new()
         };
+        if !type_params.is_empty() && self.type_param_clause_followed_by_definition() {
+            let tpt = self.error_type(self.zero_width_span(self.current().span.start()));
+            let mut metadata = prefix.metadata;
+            if !metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Given)
+            {
+                metadata.modifiers.push(dotty_core::ast::Modifier::Given);
+            }
+            return self.alloc_given_definition(
+                mark,
+                GivenSignature {
+                    name,
+                    type_params,
+                    value_param_clauses: Vec::new(),
+                    method_like: true,
+                    tpt,
+                    rhs: None,
+                    metadata,
+                },
+            );
+        }
         let mut value_param_clauses = Vec::new();
         let mut num_lead_params = 0;
         let mut has_explicit_parameter_clause = false;
@@ -538,6 +560,17 @@ where
                 self.advance();
             }
         }
+    }
+
+    fn type_param_clause_followed_by_definition(&mut self) -> bool {
+        let mut offset = 0;
+        while matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            offset += 1;
+        }
+        crate::type_params::is_recovery_definition_keyword(self.cursor.lookahead(offset).kind)
     }
 
     fn starts_named_given(&mut self) -> bool {

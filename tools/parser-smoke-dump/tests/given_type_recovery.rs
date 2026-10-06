@@ -5,7 +5,7 @@ use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
 
 #[test]
 fn incomplete_named_given_type_parameters_report_error_and_preserve_next_member() {
-    let source = "object O:\n  given g: [T <: ] = value\n  def after = 1";
+    let source = "object O:\n  given g: [T\n  def after = 1";
     let scanner = ContextualScanner::new(source).expect("source scans");
     let mut names = NameInterner::new();
     let result = parse_compilation_unit(
@@ -15,18 +15,23 @@ fn incomplete_named_given_type_parameters_report_error_and_preserve_next_member(
         &mut names,
     );
 
-    let malformed_bound = result
+    let missing_close = result
         .diagnostics
         .iter()
         .find(|diagnostic| {
-            diagnostic.kind() == ParseDiagnosticKind::ExpectedType
-                && diagnostic.message() == "expected a type operand"
+            diagnostic.kind() == ParseDiagnosticKind::ExpectedToken
+                && diagnostic.message() == "expected Punctuation(RightBracket), found Newline"
         })
-        .expect("the missing type bound should be diagnosed");
-    let closing_bracket = source.find(']').unwrap() as u32;
+        .unwrap_or_else(|| {
+            panic!(
+                "the unterminated type parameter clause should be diagnosed: {:?}",
+                result.diagnostics
+            )
+        });
+    let line_break = source.find("\n  def after").unwrap() as u32;
     assert_eq!(
-        malformed_bound.span(),
-        TextRange::new(closing_bracket, closing_bracket + 1).unwrap()
+        missing_close.span(),
+        TextRange::new(line_break, line_break + 3).unwrap()
     );
 
     let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
