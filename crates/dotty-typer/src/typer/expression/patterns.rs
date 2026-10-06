@@ -14,6 +14,12 @@ use dotty_core::{
 
 const MAX_REIFIABLE_TYPE_PREFIX_DEPTH: usize = 64;
 
+#[derive(Clone, Copy)]
+pub(super) struct CanonicalTupleSymbols {
+    pub(super) class: SymbolId,
+    pub(super) companion: SymbolId,
+}
+
 /// Resolved extractor metadata retained for later result-protocol and nested
 /// pattern typing increments.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -328,36 +334,11 @@ impl SourceTyper<'_> {
         }
     }
 
-    fn type_tuple_pattern(
+    pub(super) fn resolve_canonical_tuple_symbols(
         &mut self,
         pattern: TreeId<Untyped>,
-        tuple: &dotty_core::ast::Tuple,
-        selector_type: TypeId,
-        context: ExpressionContext,
-        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
-        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
-    ) -> Result<TreeId<Typed>, TyperError> {
-        let arity = tuple.elements.len();
-        if arity == 0 {
-            let literal = self.type_literal_expression(
-                pattern,
-                dotty_core::ast::Literal {
-                    value: dotty_core::Constant::Unit,
-                },
-                self.arena.get(pattern).position,
-            )?;
-            let literal_type = self.typed_arena.get(literal).ty;
-            let widened_type =
-                self.widen_expression_type_journaled(literal_type, info_journal, 0)?;
-            self.require_literal_pattern_compatible(
-                literal_type,
-                widened_type,
-                selector_type,
-                pattern.index(),
-            )?;
-            return Ok(literal);
-        }
-
+        arity: usize,
+    ) -> Result<CanonicalTupleSymbols, TyperError> {
         let tree_index = pattern.index();
         let tuple_name_text = format!("Tuple{arity}");
         let tuple_type_name = Name::new(self.store.names.intern(&tuple_name_text), Namespace::Type);
@@ -374,7 +355,6 @@ impl SourceTyper<'_> {
             )
         })?;
         let package_prefix = self.package_type_prefix(scala_package);
-
         let local_type_candidates = self
             .packages
             .scope_of(scala_package)
@@ -425,7 +405,6 @@ impl SourceTyper<'_> {
                 ));
             }
         };
-
         let linked_companion = self.store.symbols.get(tuple_class).links.companion;
         let scoped_companion = linked_companion
             .filter(|symbol| {
@@ -449,7 +428,7 @@ impl SourceTyper<'_> {
                     }
                 })
             });
-        let tuple_object = match scoped_companion {
+        let companion = match scoped_companion {
             Some(object) => object,
             None => {
                 let request = dotty_core::MemberRequest {
@@ -478,6 +457,46 @@ impl SourceTyper<'_> {
                     })?
             }
         };
+        Ok(CanonicalTupleSymbols {
+            class: tuple_class,
+            companion,
+        })
+    }
+
+    fn type_tuple_pattern(
+        &mut self,
+        pattern: TreeId<Untyped>,
+        tuple: &dotty_core::ast::Tuple,
+        selector_type: TypeId,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let arity = tuple.elements.len();
+        if arity == 0 {
+            let literal = self.type_literal_expression(
+                pattern,
+                dotty_core::ast::Literal {
+                    value: dotty_core::Constant::Unit,
+                },
+                self.arena.get(pattern).position,
+            )?;
+            let literal_type = self.typed_arena.get(literal).ty;
+            let widened_type =
+                self.widen_expression_type_journaled(literal_type, info_journal, 0)?;
+            self.require_literal_pattern_compatible(
+                literal_type,
+                widened_type,
+                selector_type,
+                pattern.index(),
+            )?;
+            return Ok(literal);
+        }
+
+        let tree_index = pattern.index();
+        let tuple_symbols = self.resolve_canonical_tuple_symbols(pattern, arity)?;
+        let tuple_class = tuple_symbols.class;
+        let tuple_object = tuple_symbols.companion;
 
         let type_arguments = match self.store.types.try_get(selector_type) {
             Some(Type::Applied { tycon, args }) => {
