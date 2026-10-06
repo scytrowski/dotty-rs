@@ -14405,8 +14405,12 @@ mod tests {
             .iter()
             .map(|binder| typer.local_symbol_at(source, *binder).unwrap())
             .collect::<Vec<_>>();
+        let temporary_symbols = binders
+            .iter()
+            .map(|binder| typer.pattern_bindings.by_tree[&(source, *binder)])
+            .collect::<Vec<_>>();
         assert_eq!(final_symbols.len(), 2);
-        for symbol in &final_symbols {
+        for (symbol, temporary) in final_symbols.iter().zip(&temporary_symbols) {
             assert!(
                 typer
                     .store
@@ -14415,6 +14419,15 @@ mod tests {
                     .flags
                     .contains(SymbolFlags::MUTABLE)
             );
+            assert!(
+                !typer
+                    .store
+                    .symbols
+                    .get(*temporary)
+                    .flags
+                    .contains(SymbolFlags::MUTABLE)
+            );
+            assert_ne!(symbol, temporary);
         }
         assert_eq!(
             typer.store.symbols.get(final_symbols[0]).info,
