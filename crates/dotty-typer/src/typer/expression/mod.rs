@@ -16,6 +16,65 @@ mod references;
 pub(super) use blocks::LocalMethodIndex;
 
 impl SourceTyper<'_> {
+    pub(super) fn type_prefix_expression(
+        &mut self,
+        tree: TreeId<Untyped>,
+        prefix: dotty_core::ast::PrefixOp,
+        position: Option<SourceSpan>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let unary_name = match self.store.names.resolve(prefix.op.text()) {
+            "!" => "unary_!",
+            "~" => "unary_~",
+            "+" => "unary_+",
+            "-" => "unary_-",
+            _ => {
+                return Err(TyperError::UnsupportedPrefixOperator {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    operator: prefix.op,
+                });
+            }
+        };
+        if !prefix.op.is_term() {
+            return Err(TyperError::UnsupportedPrefixOperator {
+                source: self.source,
+                tree_index: tree.index(),
+                operator: prefix.op,
+            });
+        }
+        let unary_name = Name::new(self.store.names.intern(unary_name), Namespace::Term);
+        let operand =
+            self.type_value_expression_inner(prefix.operand, context, info_journal, new_mappings)?;
+        let receiver_type = self.typed_arena.get(operand).ty;
+        self.require_stable_selection_prefix(receiver_type, tree.index())?;
+        let selected = self.type_selected_member_on_qualifier(
+            tree.index(),
+            operand,
+            unary_name,
+            false,
+            position,
+            info_journal,
+        )?;
+        let selected_type = self.typed_arena.get(selected).ty;
+        let callable = self.widen_expression_type_journaled(selected_type, info_journal, 0)?;
+        match self.store.types.try_get(callable) {
+            Some(Type::Method(_)) => Err(TyperError::PrefixMethodNeedsArgumentList {
+                source: self.source,
+                tree_index: tree.index(),
+                name: unary_name,
+            }),
+            Some(Type::Poly(_)) => Err(TyperError::PrefixPolymorphicDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                name: unary_name,
+            }),
+            _ => Ok(selected),
+        }
+    }
+
     pub(super) fn type_infix_expression(
         &mut self,
         tree: TreeId<Untyped>,
