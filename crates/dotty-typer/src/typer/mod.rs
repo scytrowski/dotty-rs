@@ -19681,6 +19681,10 @@ mod tests {
                     "Plain()" =>
                         matches!(error, TyperError::SourceAnnotationNotAnnotationClass { .. }),
                     "Missing()" => matches!(error, TyperError::TypeNameNotFound { .. }),
+                    "Annot()" => matches!(
+                        error,
+                        TyperError::SourceAnnotationConstructorDeferred { .. }
+                    ),
                     _ => matches!(
                         error,
                         TyperError::SourceAnnotationConstructorArgumentMismatch { .. }

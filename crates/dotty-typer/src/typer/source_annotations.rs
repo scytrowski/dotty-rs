@@ -179,11 +179,9 @@ impl SourceTyper<'_> {
             return Err(deferred());
         }
         if method.params.len() != arguments.len() {
-            return Err(TyperError::SourceAnnotationConstructorArgumentMismatch {
-                source: self.source,
-                tree_index,
-                class,
-            });
+            // MethodType does not record parameter defaults. An omitted
+            // argument may be legal, so arity alone cannot reject the call.
+            return Err(deferred());
         }
         let mut assigned = vec![false; method.params.len()];
         let mut positional = 0;

@@ -379,8 +379,9 @@ annotation class, and preserves supported literal arguments in source order as
 `AnnotationArguments::Known`. The class must derive from the session's resolved
 `scala.annotation.Annotation` symbol; missing ancestry is deferred, while a
 known unrelated class is rejected. The first slice checks one plain constructor
-against numeric and boolean constants and defers unsupported overloads or
-argument types. It attaches no fabricated typed constructor tree, so
+against numeric and boolean constants and defers unsupported overloads,
+argument types, or arity differences where parameter defaults are unknown. It
+attaches no fabricated typed constructor tree, so
 `Annotation.tree` is `None`; the annotation type is cached in the source type
 index and no annotation child is inserted into `SourceTypedIndex`. Projection
 is transactional and repeated requests reuse one `AnnotationId`. Typing the
