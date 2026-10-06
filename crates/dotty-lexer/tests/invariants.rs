@@ -140,6 +140,39 @@ fn unterminated_xml_recovery_keeps_the_public_scanner_terminating() {
     assert_diagnostics_are_bounded(source, scanner.diagnostics(), 0);
 }
 
+#[test]
+fn raw_regex_interpolators_do_not_report_string_escape_diagnostics() {
+    let source = r#"val splitter = raw"([^=]+)=(.+)".r
+val errorId = raw"E?(\d+)".r"#;
+    let scanner = ContextualScanner::new(source).expect("raw regex source scans");
+
+    assert!(scanner.diagnostics().is_empty());
+    assert_eq!(
+        scanner
+            .tokens()
+            .iter()
+            .filter(|token| token.kind == TokenKind::InterpolationId)
+            .count(),
+        2
+    );
+    assert_eq!(
+        scanner
+            .tokens()
+            .iter()
+            .filter(|token| token.kind == TokenKind::StringPart)
+            .count(),
+        2
+    );
+
+    let ordinary = ContextualScanner::new(r#"s"\d+""#)
+        .expect("ordinary interpolated string scans with diagnostics");
+    assert_eq!(ordinary.diagnostics().len(), 1);
+    assert_eq!(
+        ordinary.diagnostics()[0].message(),
+        "invalid escape character"
+    );
+}
+
 fn assert_reaches_eof(source: &str) {
     let mut lexer = RawLexer::new(source).expect("source is valid UTF-8");
     let mut saw_eof = false;
