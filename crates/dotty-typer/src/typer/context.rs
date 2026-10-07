@@ -142,7 +142,6 @@ impl SourceTyper<'_> {
             return Ok(context.lexical);
         };
         let extension_type_parameter = self
-            .index
             .extension_prefix_clauses(context.owner)
             .into_iter()
             .flatten()

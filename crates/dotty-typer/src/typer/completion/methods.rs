@@ -66,8 +66,7 @@ impl SourceTyper<'_> {
         let mut clauses = Vec::new();
         let prefix_clauses = if is_extension {
             Some(
-                self.index
-                    .extension_prefix_clauses(method)
+                self.extension_prefix_clauses(method)
                     .ok_or(TyperError::ExtensionPrefixClausesMissing { method })?
                     .to_vec(),
             )
@@ -425,7 +424,12 @@ impl SourceTyper<'_> {
         derived: bool,
     ) -> Result<SymbolId, TyperError> {
         let symbol = if derived {
-            self.index.derived_symbol_at(method, self.source, tree)
+            self.index
+                .derived_symbol_at(method, self.source, tree)
+                .or_else(|| {
+                    self.local_methods
+                        .extension_receiver_parameter_symbol(method, tree)
+                })
         } else {
             self.local_methods
                 .type_parameter_symbol_at(self.source, tree)

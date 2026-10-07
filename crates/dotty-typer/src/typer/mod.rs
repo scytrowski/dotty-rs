@@ -521,6 +521,15 @@ impl<'a> SourceTyper<'a> {
         self.local_methods.type_parameter_symbol_at(source, tree)
     }
 
+    pub(super) fn extension_prefix_clauses(
+        &self,
+        method: SymbolId,
+    ) -> Option<&[Vec<TreeId<Untyped>>]> {
+        self.index
+            .extension_prefix_clauses(method)
+            .or_else(|| self.local_methods.extension_prefix_clauses(method))
+    }
+
     /// Exposes the package registry used by this driver.
     pub fn packages(&self) -> &Packages {
         self.packages
@@ -11401,6 +11410,343 @@ mod tests {
         let method_frame = &typer.expression_scopes[method_context.local_scopes.unwrap().index()];
         assert_eq!(method_frame.scope, method_scope);
         assert_eq!(method_frame.parent, block_context.local_scopes);
+    }
+
+    #[test]
+    fn local_extension_method_is_preindexed_with_stable_identity_and_prefix_trees() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { extension (receiver: Int) { def choose(argument: Int): Int = receiver }; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let extension_tree = block.stats[0];
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+            &parsed.ast.get(extension_tree).kind
+        else {
+            panic!("first block statement should be a local extension group")
+        };
+        let method_tree = extension.methods[0];
+        let expected_prefix = extension.param_clauses.clone();
+        let method_position = parsed.ast.get(method_tree).position;
+        let method_name = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => *definition.name.as_name(),
+            _ => panic!("extension method should be a DefDef"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let outer_context = typer.expression_context_for(outer).unwrap();
+        let (block_scope, block_context) =
+            preindex_block_for_test(&mut typer, block_tree, outer_context);
+
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        let method_scope = typer.local_method_scope(method).unwrap();
+        assert_eq!(
+            typer.local_method_definition(method),
+            Some((source, method_tree))
+        );
+        assert_eq!(typer.store().symbols.get(method).kind, SymbolKind::Method);
+        assert_eq!(typer.store().symbols.get(method).name, method_name);
+        assert_eq!(typer.store().symbols.get(method).owner, Some(outer));
+        assert_eq!(typer.store().symbols.get(method).position, method_position);
+        assert_eq!(
+            typer.store().symbols.get(method).origin,
+            SymbolOrigin::Source(source)
+        );
+        assert!(
+            typer
+                .store()
+                .symbols
+                .get(method)
+                .flags
+                .contains(SymbolFlags::EXTENSION)
+        );
+        assert_eq!(typer.store().symbols.info(method), &SymbolInfo::Missing);
+        assert_eq!(typer.store().scopes.get(method_scope).owner, Some(method));
+        let receiver_tree = expected_prefix[0][0];
+        let receiver = typer
+            .local_methods
+            .extension_receiver_parameter_symbol(method, receiver_tree)
+            .unwrap();
+        assert_eq!(
+            typer.store().symbols.get(receiver).kind,
+            SymbolKind::Parameter
+        );
+        assert_eq!(typer.store().symbols.get(receiver).owner, Some(method));
+        assert_eq!(
+            typer.store().symbols.get(receiver).origin,
+            SymbolOrigin::Source(source)
+        );
+        assert_eq!(typer.store().symbols.info(receiver), &SymbolInfo::Missing);
+        assert_eq!(
+            typer
+                .store()
+                .scopes
+                .get(method_scope)
+                .lookup_all(&typer.store().symbols.get(receiver).name),
+            &[receiver]
+        );
+        assert_eq!(
+            typer
+                .store()
+                .scopes
+                .get(block_scope)
+                .lookup_all(&method_name),
+            &[method]
+        );
+        assert_eq!(
+            typer.local_method_declaration_context(method),
+            Some(block_context)
+        );
+        assert_eq!(
+            typer.extension_prefix_clauses(method),
+            Some(expected_prefix.as_slice())
+        );
+        assert_eq!(
+            typer.extension_prefix_clauses(method).unwrap()[0],
+            expected_prefix[0]
+        );
+        assert!(index.definition_of(method).is_none());
+
+        let first_scope = method_scope;
+        let (second_block_scope, _) =
+            preindex_block_for_test(&mut typer, block_tree, outer_context);
+
+        assert_ne!(first_scope, second_block_scope);
+        assert_eq!(
+            typer.local_method_symbol_at(source, method_tree),
+            Some(method)
+        );
+        assert_eq!(typer.local_method_scope(method), Some(first_scope));
+        assert_eq!(
+            typer
+                .local_methods
+                .extension_receiver_parameter_symbol(method, receiver_tree),
+            Some(receiver)
+        );
+        assert_eq!(
+            typer
+                .store()
+                .scopes
+                .get(second_block_scope)
+                .lookup_all(&method_name),
+            &[method]
+        );
+        assert_eq!(
+            typer.extension_prefix_clauses(method),
+            Some(expected_prefix.as_slice())
+        );
+    }
+
+    #[test]
+    fn local_extensions_in_nested_blocks_with_same_name_get_distinct_identities() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { { extension (left: Int) { def choose: Int = left }; 0 }; { extension (right: Int) { def choose: Int = right }; 0 }; 0 } }",
+        );
+        let (outer, outer_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(outer_block) = &parsed.ast.get(outer_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let nested_blocks = [outer_block.stats[0], outer_block.stats[1]];
+        let nested_extension_methods = nested_blocks.map(|nested_tree| {
+            let TreeKind::Block(nested) = &parsed.ast.get(nested_tree).kind else {
+                panic!("nested statement should be a block")
+            };
+            let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+                &parsed.ast.get(nested.stats[0]).kind
+            else {
+                panic!("nested block should contain an extension group")
+            };
+            (extension.methods[0], extension.param_clauses[0][0])
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let outer_context = typer.expression_context_for(outer).unwrap();
+        let (_, outer_context) = preindex_block_for_test(&mut typer, outer_tree, outer_context);
+        let mut methods = Vec::new();
+        for (block, (method_tree, _)) in nested_blocks.into_iter().zip(nested_extension_methods) {
+            preindex_block_for_test(&mut typer, block, outer_context);
+            methods.push(typer.local_method_symbol_at(source, method_tree).unwrap());
+        }
+
+        assert_ne!(methods[0], methods[1]);
+        assert_eq!(
+            typer.local_method_definition(methods[0]),
+            Some((source, nested_extension_methods[0].0))
+        );
+        assert_eq!(
+            typer.local_method_definition(methods[1]),
+            Some((source, nested_extension_methods[1].0))
+        );
+        let receivers = nested_extension_methods
+            .iter()
+            .zip(&methods)
+            .map(|((_, receiver_tree), method)| {
+                let receiver = typer
+                    .local_methods
+                    .extension_receiver_parameter_symbol(*method, *receiver_tree)
+                    .unwrap();
+                assert_eq!(typer.store().symbols.get(receiver).owner, Some(*method));
+                receiver
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(receivers[0], receivers[1]);
+        assert_eq!(
+            typer.store().symbols.get(methods[0]).name,
+            typer.store().symbols.get(methods[1]).name
+        );
+        assert_ne!(
+            typer.local_method_scope(methods[0]),
+            typer.local_method_scope(methods[1])
+        );
+    }
+
+    #[test]
+    fn unsupported_local_extension_shapes_are_left_unindexed_and_deferred() {
+        for source_text in [
+            "class C { def outer: Int = { extension (using context: Int) (receiver: Int) { def choose: Int = receiver }; 0 } }",
+            "class C { def outer: Int = { extension [A](receiver: A) { def choose: A = receiver }; 0 } }",
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (outer, block_tree) =
+                method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+            let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+                panic!("outer body should be a block")
+            };
+            let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+                &parsed.ast.get(block.stats[0]).kind
+            else {
+                panic!("first block statement should be an extension group")
+            };
+            let method_trees = extension.methods.clone();
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let outer_context = typer.expression_context_for(outer).unwrap();
+            preindex_block_for_test(&mut typer, block_tree, outer_context);
+
+            assert!(
+                method_trees
+                    .iter()
+                    .all(|tree| typer.local_method_symbol_at(source, *tree).is_none())
+            );
+            assert!(matches!(
+                typer.type_expression(block_tree, outer_context),
+                Err(TyperError::LocalBlockDeclarationDeferred {
+                    kind: "extension methods",
+                    ..
+                })
+            ));
+        }
+
+        let (mut parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { extension (receiver: Int) { def choose: Int = receiver }; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let extension_tree = block.stats[0];
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+            &parsed.ast.get(extension_tree).kind
+        else {
+            panic!("first block statement should be an extension group")
+        };
+        let mut extension = extension.clone();
+        extension.methods.push(extension.methods[0]);
+        parsed.ast.get_mut(extension_tree).kind =
+            TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension.clone()));
+        let method_trees = extension.methods;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let outer_context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, outer_context);
+
+        assert!(
+            method_trees
+                .iter()
+                .all(|tree| typer.local_method_symbol_at(source, *tree).is_none())
+        );
+        assert!(matches!(
+            typer.type_expression(block_tree, outer_context),
+            Err(TyperError::LocalBlockDeclarationDeferred {
+                kind: "extension methods",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn failed_local_extension_typing_rolls_back_preindex_for_deterministic_retry() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { extension (receiver: Int) { def choose: Int = receiver }; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+            &parsed.ast.get(block.stats[0]).kind
+        else {
+            panic!("first block statement should be an extension group")
+        };
+        let method_tree = extension.methods[0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+        let typed_checkpoint = typer.typed_ast().checkpoint();
+        let scope_checkpoint = typer.expression_scopes.len();
+
+        for _ in 0..2 {
+            assert!(matches!(
+                typer.type_expression(block_tree, context),
+                Err(TyperError::LocalBlockDeclarationDeferred {
+                    kind: "extension methods",
+                    ..
+                })
+            ));
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+            assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
+            assert_eq!(typer.expression_scopes.len(), scope_checkpoint);
+            assert!(typer.local_method_symbol_at(source, method_tree).is_none());
+            assert!(typer.local_methods.definitions.is_empty());
+        }
     }
 
     #[test]
