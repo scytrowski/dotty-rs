@@ -86,8 +86,9 @@ The pinned release contributes 916 source files
 across 102 roots. The runner validates that the checkout is clean and exactly
 at the recorded release revision before including it.
 
-`parser-post-issue-809-kyo.json` records the expanded baseline at dotty-rs
-commit `2398c40` (main after PR #808), using the pinned Scala 3.9.0 oracle.
+`parser-post-issue-809-kyo.json` records the expanded baseline using the
+pinned Scala 3.9.0 oracle. Its `parser_revision` field identifies the exact
+dotty-rs revision measured.
 Across 2,966 files, 2,849 parse without diagnostics and 117 have recoverable
 diagnostics; there are no hard failures, hangs, panics, scanner diagnostics,
 or Scala-oracle failures. All 117 diagnostic-bearing files are in Kyo: 799
