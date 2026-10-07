@@ -1,5 +1,7 @@
 //! Pattern typing entry points and pattern-specific type adaptation.
 
+use std::collections::HashSet;
+
 use super::{ExpressionContext, SourceTyper, TyperError};
 use crate::typer::{
     ExtractorMethodShapeIssue, ExtractorPatternArgumentIssue, ExtractorProductIssue,
@@ -2353,6 +2355,45 @@ impl SourceTyper<'_> {
         selector_type: TypeId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        let mut selector_type = selector_type;
+        let mut seen = HashSet::new();
+        for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            if !seen.insert(selector_type) {
+                return Err(TyperError::TypeNormalization(
+                    crate::types::TypeNormalizeError::NormalizationCycle { ty: selector_type },
+                ));
+            }
+            let Some(selector_node) = self.store.types.try_get(selector_type) else {
+                return Err(TyperError::TypeNormalization(
+                    if self.store.types.contains(selector_type) {
+                        crate::types::TypeNormalizeError::UnfilledType { ty: selector_type }
+                    } else {
+                        crate::types::TypeNormalizeError::InvalidType { ty: selector_type }
+                    },
+                ));
+            };
+            match selector_node {
+                Type::Annotated { underlying, .. } | Type::Flexible { underlying } => {
+                    selector_type = *underlying;
+                }
+                _ => break,
+            }
+        }
+        if self
+            .store
+            .types
+            .try_get(selector_type)
+            .is_some_and(|selector_node| {
+                matches!(
+                    selector_node,
+                    Type::Annotated { .. } | Type::Flexible { .. }
+                )
+            })
+        {
+            return Err(TyperError::TypeNormalization(
+                crate::types::TypeNormalizeError::TooDeep,
+            ));
+        }
         match self.store.types.try_get(selector_type) {
             Some(Type::Constant(_)) => Ok(selector_type),
             _ => self.widen_expression_type_journaled(selector_type, info_journal, 0),

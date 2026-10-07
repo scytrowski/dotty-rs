@@ -19871,6 +19871,220 @@ mod tests {
     }
 
     #[test]
+    fn annotated_match_selector_and_method_argument_use_shared_annotation_identity() {
+        let source_text = "package scala.annotation { abstract class Annotation }; package scala { class unchecked extends scala.annotation.Annotation }; class Use { import scala.unchecked; def take(value: Int): Int = value; def choose: Int = (1: @unchecked) match { case _ => take(1: @unchecked) } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let unchecked = class_symbol(&parsed, &store, &index, source, "unchecked");
+        let (owner, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "choose");
+        let TreeKind::Match(match_expr) = &parsed.ast.get(rhs).kind else {
+            panic!(
+                "annotated selector should reach Match typing, got {:?}",
+                parsed.ast.get(rhs).kind
+            );
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(selector_parens)) =
+            &parsed.ast.get(match_expr.selector).kind
+        else {
+            panic!("expected parenthesized annotated selector");
+        };
+        let selector_tree = selector_parens.inner;
+        let TreeKind::Annotated(selector_annotation) = &parsed.ast.get(selector_tree).kind else {
+            panic!("expected annotated Match selector");
+        };
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(owner).unwrap(),
+            owner,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let typed_match = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Match(typed_match_expr) = &typer.typed_ast().get(typed_match).kind else {
+            panic!("annotated selector should lower to a typed Match");
+        };
+        let TreeKind::CaseDef(typed_case) = &typer.typed_ast().get(typed_match_expr.cases[0]).kind
+        else {
+            panic!("Match should retain its typed CaseDef");
+        };
+
+        let selector_annotation_id = typer
+            .source_annotations
+            .get(&selector_annotation.annotation)
+            .copied()
+            .expect("selector annotation should be projected");
+        let selector_typed = typer
+            .source_typed_index()
+            .get(source, selector_tree)
+            .expect("annotated selector should have a typed mapping");
+        let selector_type = typer.typed_ast().get(selector_typed).ty;
+        assert_eq!(
+            typer.typed_ast().get(typed_case.pattern).ty,
+            definitions.int,
+            "pattern adaptation should look through the annotation wrapper"
+        );
+        assert!(matches!(
+            typer.store().types.get(selector_type),
+            Type::Annotated { annotation, .. } if *annotation == selector_annotation_id
+        ));
+        assert!(
+            typer
+                .store()
+                .has_annotation(selector_type, &["scala", "unchecked"])
+        );
+        assert_eq!(
+            typer
+                .store()
+                .annotation_class(typer.store().annotations.get(selector_annotation_id)),
+            Some(unchecked)
+        );
+
+        let call_annotation_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| {
+                let TreeKind::Annotated(annotated) = &node.kind else {
+                    return None;
+                };
+                (annotated.annotation != selector_annotation.annotation)
+                    .then_some(annotated.annotation)
+            })
+            .expect("method argument annotation should be present");
+        let call_annotation_id = typer
+            .source_annotations
+            .get(&call_annotation_tree)
+            .copied()
+            .expect("method argument annotation should be projected");
+        assert_ne!(selector_annotation_id, call_annotation_id);
+    }
+
+    #[test]
+    fn annotated_match_selector_preserves_unopened_source_aliases() {
+        let source_text = "package scala.annotation { abstract class Annotation }; package scala { class unchecked extends scala.annotation.Annotation }; class Use { type Alias = Int; opaque type Hidden = Int; import scala.unchecked; def plain(value: Alias): Int = (value: @unchecked) match { case _ => 1 }; def opaque(value: Hidden): Int = (value: @unchecked) match { case _ => 1 } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Alias");
+        let hidden = type_alias_symbol(&parsed, &store, &index, source, "Hidden");
+        let methods = ["plain", "opaque"]
+            .map(|method| method_definition_and_rhs(&parsed, &store, &index, source, method));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for (method, (owner, rhs)) in ["plain", "opaque"].into_iter().zip(methods) {
+            let context = typer.expression_context_for(owner).unwrap();
+            let typed = typer.type_expression(rhs, context);
+            assert!(
+                typed.is_ok(),
+                "annotated selector with {method} alias should type without opening the alias: {typed:?}"
+            );
+        }
+        assert_eq!(typer.store().symbols.info(alias), &SymbolInfo::Missing);
+        assert_eq!(typer.store().symbols.info(hidden), &SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn annotated_local_assignment_and_branch_flows_keep_expression_support() {
+        let source_text = "package scala.annotation { abstract class Annotation }; class TermAnnotation extends scala.annotation.Annotation; class Use { var slot: Int = 0; def inferred = { val local = 1: @TermAnnotation; val matched = (2: @TermAnnotation) match { case _ => 3 }; local }; def assigned = { slot = 2: @TermAnnotation; slot }; def joined = if (true) 3: @TermAnnotation else 4 }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let methods = ["inferred", "assigned", "joined"]
+            .map(|method| method_definition_and_rhs(&parsed, &store, &index, source, method));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for (method, (owner, rhs)) in ["inferred", "assigned", "joined"].into_iter().zip(methods) {
+            let context = typer.expression_context_for(owner).unwrap();
+            let typed = typer.type_expression(rhs, context);
+            assert!(
+                typed.is_ok(),
+                "{method} should accept annotated expression: {typed:?}"
+            );
+        }
+        assert_eq!(typer.source_annotations.len(), 4);
+    }
+
+    #[test]
+    fn annotated_expression_projects_constant_arguments_and_focused_errors() {
+        let source_text = "package scala.annotation { abstract class Annotation }; class TermAnnotation(val n: Int) extends scala.annotation.Annotation; class Use { def constant: Int = 1: @TermAnnotation(7); def unsupported(value: Int): Int = value: @TermAnnotation(value) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (constant_owner, constant_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "constant");
+        let (unsupported_owner, unsupported_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "unsupported");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let constant_context = typer.expression_context_for(constant_owner).unwrap();
+        let constant_typed = typer
+            .type_expression(constant_rhs, constant_context)
+            .unwrap();
+        let TreeKind::Annotated(constant_source) = &typer.arena.get(constant_rhs).kind else {
+            panic!("constant method should retain its source annotation");
+        };
+        let annotation_id = typer
+            .source_annotations
+            .get(&constant_source.annotation)
+            .copied()
+            .expect("constant annotation should be projected");
+        let annotation = typer.store().annotations.get(annotation_id);
+        assert!(matches!(
+            &annotation.arguments,
+            dotty_core::types::AnnotationArguments::Known(arguments)
+                if arguments.len() == 1
+                    && matches!(
+                        arguments[0].value,
+                        dotty_core::types::AnnotationValue::Constant(dotty_core::Constant::Int(7))
+                    )
+        ));
+        assert_eq!(annotation.tree, None);
+        let TreeKind::Typed(wrapper) = &typer.typed_ast().get(constant_typed).kind else {
+            panic!("constant annotation should reify to a Typed wrapper");
+        };
+        assert_eq!(
+            typer.typed_ast().get(constant_typed).position,
+            typer.arena.get(constant_rhs).position
+        );
+        assert_eq!(
+            typer.typed_ast().get(wrapper.tpt).position,
+            typer.arena.get(constant_source.annotation).position
+        );
+        assert_eq!(
+            typer.typed_ast().get(wrapper.expr).position,
+            typer.arena.get(constant_source.expr).position
+        );
+
+        let unsupported_context = typer.expression_context_for(unsupported_owner).unwrap();
+        let error = typer
+            .type_expression(unsupported_rhs, unsupported_context)
+            .unwrap_err();
+        assert!(
+            matches!(error, TyperError::SourceAnnotationArgumentNotConstant { source: error_source, .. }
+                if error_source == source),
+            "unsupported annotation arguments should stay focused: {error:?}"
+        );
+    }
+
+    #[test]
     fn annotated_term_annotation_failure_precedes_child_typing() {
         let source_text = "package scala.annotation { abstract class Annotation }; class Plain; class Use { def invalid: Int = missing: @Plain }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
