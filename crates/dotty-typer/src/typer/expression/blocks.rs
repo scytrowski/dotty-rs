@@ -84,6 +84,9 @@ pub(in crate::typer) struct LocalMethodIndex {
         HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
     pub(in crate::typer) type_parameter_definitions: HashMap<SymbolId, (SourceId, TreeId<Untyped>)>,
     pub(in crate::typer) type_parameter_contexts: HashMap<SymbolId, SourceContextId>,
+    extension_prefix_clauses_by_method: HashMap<SymbolId, Vec<Vec<TreeId<Untyped>>>>,
+    extension_receiver_parameters_by_method_and_tree:
+        HashMap<(SymbolId, TreeId<Untyped>), SymbolId>,
 }
 
 impl LocalMethodIndex {
@@ -94,12 +97,17 @@ impl LocalMethodIndex {
         symbol: SymbolId,
         scope: ScopeId,
         declaration_context: ExpressionContext,
+        extension_prefix_clauses: Option<&[Vec<TreeId<Untyped>>]>,
     ) {
         self.symbols_by_tree.insert((source, tree), symbol);
         self.definitions.insert(symbol, (source, tree));
         self.scopes.insert(symbol, scope);
         self.declaration_contexts
             .insert(symbol, declaration_context);
+        if let Some(clauses) = extension_prefix_clauses {
+            self.extension_prefix_clauses_by_method
+                .insert(symbol, clauses.to_vec());
+        }
     }
 
     pub(in crate::typer) fn symbol_at(
@@ -126,6 +134,39 @@ impl LocalMethodIndex {
         symbol: SymbolId,
     ) -> Option<ExpressionContext> {
         self.declaration_contexts.get(&symbol).copied()
+    }
+
+    pub(in crate::typer) fn extension_prefix_clauses(
+        &self,
+        method: SymbolId,
+    ) -> Option<&[Vec<TreeId<Untyped>>]> {
+        self.extension_prefix_clauses_by_method
+            .get(&method)
+            .map(Vec::as_slice)
+    }
+
+    pub(in crate::typer) fn insert_extension_receiver_parameter(
+        &mut self,
+        source: SourceId,
+        method: SymbolId,
+        tree: TreeId<Untyped>,
+        symbol: SymbolId,
+        context: SourceContextId,
+    ) {
+        self.extension_receiver_parameters_by_method_and_tree
+            .insert((method, tree), symbol);
+        self.parameter_definitions.insert(symbol, (source, tree));
+        self.parameter_contexts.insert(symbol, context);
+    }
+
+    pub(in crate::typer) fn extension_receiver_parameter_symbol(
+        &self,
+        method: SymbolId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        self.extension_receiver_parameters_by_method_and_tree
+            .get(&(method, tree))
+            .copied()
     }
 
     pub(in crate::typer) fn contains_symbol(&self, symbol: SymbolId) -> bool {
@@ -914,36 +955,151 @@ impl SourceTyper<'_> {
                     tree_index: tree.index(),
                 });
             };
-            let TreeKind::DefDef(definition) = &source_tree.kind else {
-                continue;
-            };
-            let name = *definition.name.as_name();
-            let symbol = self.store.symbols.alloc(dotty_core::Symbol {
-                name,
-                owner: Some(declaration_context.owner),
-                kind: SymbolKind::Method,
-                flags: source_method_flags(&definition.metadata.modifiers),
-                visibility: dotty_core::Visibility::Public,
-                info: SymbolInfo::Missing,
-                origin: SymbolOrigin::Source(self.source),
-                annotations: Vec::new(),
-                position: source_tree.position,
-                links: dotty_core::SymbolLinks::default(),
-            });
-            let method_scope = self
-                .store
-                .scopes
-                .alloc(dotty_core::Scope::new(Some(symbol)));
-            self.store.scopes.get_mut(block_scope).enter(name, symbol);
-            self.local_methods.insert(
-                self.source,
-                *tree,
-                symbol,
-                method_scope,
-                declaration_context,
-            );
+            match &source_tree.kind {
+                TreeKind::DefDef(definition) => self.preindex_local_method(
+                    *tree,
+                    definition,
+                    source_tree.position,
+                    declaration_context,
+                    block_scope,
+                    None,
+                ),
+                TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
+                    if extension.methods.len() != 1 || extension.param_clauses.len() != 1 {
+                        continue;
+                    }
+                    let method_tree = extension.methods[0];
+                    let Some(method_node) = self.arena.try_get(method_tree) else {
+                        return Err(TyperError::TreeOutsideArena {
+                            source: self.source,
+                            tree_index: method_tree.index(),
+                        });
+                    };
+                    let TreeKind::DefDef(definition) = &method_node.kind else {
+                        continue;
+                    };
+                    let receiver_clause = &extension.param_clauses[0];
+                    let supported_receiver_clause = if receiver_clause.len() == 1 {
+                        let parameter_tree = receiver_clause[0];
+                        let Some(parameter_node) = self.arena.try_get(parameter_tree) else {
+                            return Err(TyperError::TreeOutsideArena {
+                                source: self.source,
+                                tree_index: parameter_tree.index(),
+                            });
+                        };
+                        matches!(
+                            &parameter_node.kind,
+                            TreeKind::ValDef(parameter)
+                                if !parameter.metadata.modifiers.iter().any(|modifier| {
+                                    matches!(modifier, Modifier::Given | Modifier::Implicit)
+                                })
+                        )
+                    } else {
+                        false
+                    };
+                    if !supported_receiver_clause
+                        || !definition.type_params.is_empty()
+                        || definition.rhs.is_none()
+                        || self
+                            .store
+                            .names
+                            .resolve(definition.name.as_name().text())
+                            .ends_with(':')
+                    {
+                        continue;
+                    }
+                    self.preindex_local_method(
+                        method_tree,
+                        definition,
+                        method_node.position,
+                        declaration_context,
+                        block_scope,
+                        Some(&extension.param_clauses),
+                    );
+                }
+                _ => {}
+            }
         }
         Ok(())
+    }
+
+    fn preindex_local_method(
+        &mut self,
+        tree: TreeId<Untyped>,
+        definition: &dotty_core::ast::DefDef<Untyped>,
+        position: Option<SourceSpan>,
+        declaration_context: ExpressionContext,
+        block_scope: ScopeId,
+        extension_prefix_clauses: Option<&[Vec<TreeId<Untyped>>]>,
+    ) {
+        let name = *definition.name.as_name();
+        if let Some(symbol) = self.local_methods.symbol_at(self.source, tree) {
+            self.store.scopes.get_mut(block_scope).enter(name, symbol);
+            return;
+        }
+        let mut flags = source_method_flags(&definition.metadata.modifiers);
+        if extension_prefix_clauses.is_some() {
+            flags = flags | SymbolFlags::EXTENSION;
+        }
+        let symbol = self.store.symbols.alloc(dotty_core::Symbol {
+            name,
+            owner: Some(declaration_context.owner),
+            kind: SymbolKind::Method,
+            flags,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Source(self.source),
+            annotations: Vec::new(),
+            position,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        let method_scope = self
+            .store
+            .scopes
+            .alloc(dotty_core::Scope::new(Some(symbol)));
+        self.store.scopes.get_mut(block_scope).enter(name, symbol);
+        self.local_methods.insert(
+            self.source,
+            tree,
+            symbol,
+            method_scope,
+            declaration_context,
+            extension_prefix_clauses,
+        );
+        if let Some(clauses) = extension_prefix_clauses {
+            for parameter_tree in clauses.iter().flatten().copied() {
+                let Some(parameter_node) = self.arena.try_get(parameter_tree) else {
+                    continue;
+                };
+                let TreeKind::ValDef(parameter) = &parameter_node.kind else {
+                    continue;
+                };
+                let parameter_name = *parameter.name.as_name();
+                let parameter = self.store.symbols.alloc(dotty_core::Symbol {
+                    name: parameter_name,
+                    owner: Some(symbol),
+                    kind: SymbolKind::Parameter,
+                    flags: source_method_flags(&parameter.metadata.modifiers),
+                    visibility: dotty_core::Visibility::Public,
+                    info: SymbolInfo::Missing,
+                    origin: SymbolOrigin::Source(self.source),
+                    annotations: Vec::new(),
+                    position: parameter_node.position,
+                    links: dotty_core::SymbolLinks::default(),
+                });
+                self.store
+                    .scopes
+                    .get_mut(method_scope)
+                    .enter(parameter_name, parameter);
+                self.local_methods.insert_extension_receiver_parameter(
+                    self.source,
+                    symbol,
+                    parameter_tree,
+                    parameter,
+                    declaration_context.lexical,
+                );
+            }
+        }
     }
 
     pub(in crate::typer) fn type_local_value(
