@@ -11547,6 +11547,203 @@ mod tests {
     }
 
     #[test]
+    fn local_extension_method_signature_completes_receiver_and_regular_clauses() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { class Token; def outer: Int = { extension (receiver: Token) { def choose(argument: Int): Token = receiver }; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+            &parsed.ast.get(block.stats[0]).kind
+        else {
+            panic!("first statement should be an extension group")
+        };
+        let method_tree = extension.methods[0];
+        let receiver_tree = extension.param_clauses[0][0];
+        let argument_tree = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+            _ => panic!("extension method should be a DefDef"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        let receiver = typer
+            .local_methods
+            .extension_receiver_parameter_symbol(method, receiver_tree)
+            .unwrap();
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Method(receiver_clause) = typer.store().types.get(signature) else {
+            panic!("extension signature should start with its receiver clause")
+        };
+        assert_eq!(receiver_clause.params.len(), 1);
+        assert_eq!(
+            receiver_clause.params[0].name,
+            match &parsed.ast.get(receiver_tree).kind {
+                TreeKind::ValDef(parameter) => parameter.name,
+                _ => unreachable!(),
+            }
+        );
+        let token = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let symbol = index.symbol_at(source, tree)?;
+                (matches!(node.kind, TreeKind::TypeDef(_))
+                    && typer.store().symbols.get(symbol).kind == SymbolKind::Class
+                    && typer
+                        .store()
+                        .names
+                        .resolve(typer.store().symbols.get(symbol).name.text())
+                        == "Token")
+                    .then_some(symbol)
+            })
+            .expect("Token class should be named");
+        assert!(matches!(
+            typer.store().types.get(receiver_clause.params[0].ty),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == token
+        ));
+        let Type::Method(argument_clause) = typer.store().types.get(receiver_clause.result) else {
+            panic!("ordinary method clause should follow the receiver clause")
+        };
+        assert_eq!(argument_clause.params.len(), 1);
+        assert_eq!(argument_clause.params[0].ty, definitions.int);
+        assert!(matches!(
+            typer.store().types.get(argument_clause.result),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == token
+        ));
+        let argument = typer
+            .local_method_parameter_symbol_at(source, argument_tree)
+            .unwrap();
+        assert_eq!(typer.store().symbols.get(argument).owner, Some(method));
+        assert_eq!(typer.store().symbols.get(receiver).owner, Some(method));
+        assert!(matches!(
+            typer.store().symbols.info(receiver),
+            SymbolInfo::Complete(ty) if *ty == receiver_clause.params[0].ty
+        ));
+        let checkpoint = typer.store().checkpoint();
+        assert_eq!(typer.complete_symbol(method).unwrap(), signature);
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+    }
+
+    #[test]
+    fn local_extension_method_infers_result_from_receiver() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { extension (receiver: Int) { def identity = receiver }; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+            &parsed.ast.get(block.stats[0]).kind
+        else {
+            panic!("first statement should be an extension group")
+        };
+        let method_tree = extension.methods[0];
+        let receiver_tree = extension.param_clauses[0][0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        let receiver = typer
+            .local_methods
+            .extension_receiver_parameter_symbol(method, receiver_tree)
+            .unwrap();
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Method(signature) = typer.store().types.get(signature) else {
+            panic!("extension signature should contain its receiver clause")
+        };
+        assert_eq!(signature.params.len(), 1);
+        assert_eq!(signature.params[0].ty, definitions.int);
+        assert_eq!(signature.result, definitions.int);
+        assert!(matches!(
+            typer.store().symbols.info(receiver),
+            SymbolInfo::Complete(ty) if *ty == definitions.int
+        ));
+    }
+
+    #[test]
+    fn failed_local_extension_signature_rolls_back_receiver_completion() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { extension (receiver: Missing) { def choose: Int = 1 }; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+            &parsed.ast.get(block.stats[0]).kind
+        else {
+            panic!("first statement should be an extension group")
+        };
+        let method_tree = extension.methods[0];
+        let receiver_tree = extension.param_clauses[0][0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        let receiver = typer
+            .local_methods
+            .extension_receiver_parameter_symbol(method, receiver_tree)
+            .unwrap();
+        let method_scope = typer.local_method_scope(method).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+        let scope_symbols = typer
+            .store()
+            .scopes
+            .get(method_scope)
+            .entered_symbols()
+            .collect::<Vec<_>>();
+
+        for _ in 0..2 {
+            assert!(typer.complete_symbol(method).is_err());
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+            assert_eq!(
+                typer
+                    .store()
+                    .scopes
+                    .get(method_scope)
+                    .entered_symbols()
+                    .collect::<Vec<_>>(),
+                scope_symbols
+            );
+            assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+            assert_eq!(*typer.store().symbols.info(receiver), SymbolInfo::Missing);
+        }
+    }
+
+    #[test]
     fn local_extensions_in_nested_blocks_with_same_name_get_distinct_identities() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def outer: Int = { { extension (left: Int) { def choose: Int = left }; 0 }; { extension (right: Int) { def choose: Int = right }; 0 }; 0 } }",

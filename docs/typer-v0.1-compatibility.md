@@ -323,9 +323,12 @@ one explicit receiver parameter, no type parameters, and a `DefDef` body.
 Before statement typing, it allocates a typer-owned `EXTENSION` method symbol,
 a method-owned scope, and an uncompleted receiver parameter symbol owned by
 that method. The original receiver parameter tree remains available through
-the same extension-prefix metadata accessor used for namer-owned methods. This
-does not complete receiver types or the extension signature/body, and local
-extension statements and calls remain deferred.
+the same extension-prefix metadata accessor used for namer-owned methods. Local
+method completion reuses the preindexed receiver symbol, completes its declared
+type, and builds the extension signature from the receiver clause followed by
+the method's ordinary clauses. Inferred results are typed in the method scope,
+so the receiver is available to the body. Local extension statements and calls
+remain deferred.
 
 For the tested subset, source Typer completion currently supports:
 
@@ -521,7 +524,10 @@ enclosing block expression context without modifying `SourceSemanticIndex`.
 This makes forward references and same-name overload buckets visible during
 name lookup. Local methods with explicit result types complete generic,
 curried, ordinary, implicit, and contextual parameter clauses through the
-shared method-signature builder. Type parameters and term parameters receive
+shared method-signature builder. The bounded local extension subset supports
+one non-contextual receiver clause and methods without extension type
+parameters or right-associative names; its receiver is completed through the
+same builder. Type parameters and term parameters receive
 typer-owned symbols in the method's distinct scope, with source-tree identity
 and the declaration site's lexical type context retained without changing
 `SourceSemanticIndex`. Forward calls can complete and use these signatures on
