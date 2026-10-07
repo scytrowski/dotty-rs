@@ -370,7 +370,7 @@ top_gap_implementation_scope_notes:
   UnsupportedExpression::Function (13 occurrences, 2 files): first_slice=lower one reported expression node through existing expression typing; owner=dotty-typer/src/typer/expression; prerequisites=the parsed AST node and its child typing rules; non_goals=control-flow or inference redesign
   UnsupportedTypeTree::FunctionWithMods (13 occurrences, 2 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
   UnsupportedTypeTree::Function (12 occurrences, 8 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
-next_typer_increment_recommendation: implement a focused slice for MissingDeclaredType (34 occurrences in 15 files); keep classpath materialization as a separate gate because the pinned audit resolved no external members
+highest_ranked_semantic_gap: MissingDeclaredType (34 occurrences in 15 files); count ranks the audit only and does not select a sprint increment; keep classpath materialization as a separate gate because the pinned audit resolved no external members
 match_readiness:
   first_blocker_methods=275
   structural_matches_in_first_blocker_methods=306

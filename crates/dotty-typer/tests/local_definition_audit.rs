@@ -918,11 +918,27 @@ fn print_ranked_gaps(failures: &BTreeMap<String, FailureBucket>) {
     }
     if let Some((name, bucket)) = ranked.first() {
         println!(
-            "next_typer_increment_recommendation: implement a focused slice for {name} ({} occurrences in {} files); keep classpath materialization as a separate gate because the pinned audit resolved no external members",
-            bucket.count,
-            bucket.files.len()
+            "{}; keep classpath materialization as a separate gate because the pinned audit resolved no external members",
+            highest_ranked_semantic_gap(name, bucket.count, bucket.files.len())
         );
     }
+}
+
+fn highest_ranked_semantic_gap(name: &str, count: usize, files: usize) -> String {
+    format!(
+        "highest_ranked_semantic_gap: {name} ({count} occurrences in {files} files); count ranks the audit only and does not select a sprint increment"
+    )
+}
+
+#[test]
+fn highest_ranked_gap_output_does_not_claim_to_recommend_a_sprint() {
+    let summary = highest_ranked_semantic_gap("MissingDeclaredType", 34, 15);
+
+    assert_eq!(
+        summary,
+        "highest_ranked_semantic_gap: MissingDeclaredType (34 occurrences in 15 files); count ranks the audit only and does not select a sprint increment"
+    );
+    assert!(!summary.contains("recommendation"));
 }
 
 fn scope_note_for_bucket(bucket: &str) -> (&'static str, &'static str, &'static str, &'static str) {
