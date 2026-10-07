@@ -19964,6 +19964,35 @@ mod tests {
     }
 
     #[test]
+    fn annotated_match_selector_preserves_unopened_source_aliases() {
+        let source_text = "package scala.annotation { abstract class Annotation }; package scala { class unchecked extends scala.annotation.Annotation }; class Use { type Alias = Int; opaque type Hidden = Int; import scala.unchecked; def plain(value: Alias): Int = (value: @unchecked) match { case _ => 1 }; def opaque(value: Hidden): Int = (value: @unchecked) match { case _ => 1 } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Alias");
+        let hidden = type_alias_symbol(&parsed, &store, &index, source, "Hidden");
+        let methods = ["plain", "opaque"]
+            .map(|method| method_definition_and_rhs(&parsed, &store, &index, source, method));
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for (method, (owner, rhs)) in ["plain", "opaque"].into_iter().zip(methods) {
+            let context = typer.expression_context_for(owner).unwrap();
+            let typed = typer.type_expression(rhs, context);
+            assert!(
+                typed.is_ok(),
+                "annotated selector with {method} alias should type without opening the alias: {typed:?}"
+            );
+        }
+        assert_eq!(typer.store().symbols.info(alias), &SymbolInfo::Missing);
+        assert_eq!(typer.store().symbols.info(hidden), &SymbolInfo::Missing);
+    }
+
+    #[test]
     fn annotated_local_assignment_and_branch_flows_keep_expression_support() {
         let source_text = "package scala.annotation { abstract class Annotation }; class TermAnnotation extends scala.annotation.Annotation; class Use { var slot: Int = 0; def inferred = { val local = 1: @TermAnnotation; val matched = (2: @TermAnnotation) match { case _ => 3 }; local }; def assigned = { slot = 2: @TermAnnotation; slot }; def joined = if (true) 3: @TermAnnotation else 4 }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
