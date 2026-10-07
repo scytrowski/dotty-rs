@@ -649,6 +649,12 @@ fn discover_production_roots(project_root: &Path) -> io::Result<Vec<PathBuf>> {
                         | "examples"
                         | "bench"
                         | "benchmarks"
+                        | "fixture"
+                        | "fixtures"
+                        | "it"
+                        | "kyo-bench"
+                        | "kyo-examples"
+                        | "sbt-test"
                         | "scalafix"
                 ) || component.ends_with("-example")
             })
@@ -2498,6 +2504,11 @@ mod tests {
             "benchmarks/src/main/scala",
             "scalafix/rules/src/main/scala",
             "core/target/generated/src/main/scala",
+            "project/sbt-test/sample/src/main/scala",
+            "core/fixtures/shared/src/main/scala",
+            "core/it/shared/src/main/scala",
+            "kyo-bench/src/main/scala",
+            "kyo-examples/src/main/scala",
         ];
         for relative in included.into_iter().chain(excluded) {
             fs::create_dir_all(root.join(relative)).expect("create source root fixture");
