@@ -946,6 +946,85 @@ mod tests {
     }
 
     #[test]
+    fn typed_var_placeholder_inside_application_remains_an_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "var x: T = f(_)",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Var), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::ColonFollow, 5, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Operator, 9, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 12, 13),
+                token(TokenKind::Identifier, 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a mutable value definition");
+        };
+        parser.report_escaping_placeholders();
+
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected ValDef");
+        };
+        let rhs = definition.rhs.expect("the initializer should be retained");
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(rhs).kind
+        else {
+            panic!("the placeholder should be represented by an expression lambda");
+        };
+        assert!(matches!(
+            parser.ast().get(function.body).kind,
+            TreeKind::Apply(_)
+        ));
+        assert!(parser.placeholder_params.is_empty());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn typed_var_placeholder_in_selection_remains_an_expression() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "var x: T = _.foo",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Var), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::ColonFollow, 5, 6),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Operator, 9, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Punctuation(Punctuation::Dot), 12, 13),
+                token(TokenKind::Identifier, 13, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a mutable value definition");
+        };
+        parser.report_escaping_placeholders();
+
+        let TreeKind::ValDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected ValDef");
+        };
+        let rhs = definition.rhs.expect("the initializer should be retained");
+        assert!(matches!(
+            parser.ast().get(rhs).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+        ));
+        assert!(parser.placeholder_params.is_empty());
+        assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
     fn val_underscore_rhs_remains_an_expression_placeholder() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
