@@ -277,7 +277,11 @@ and Cats Effect
 The runner shallow-clones the corresponding release tags into
 `target/parser-corpus-sources` (or `DOTTY_PARSER_CORPUS_CACHE`) and verifies
 the full SHA before use. A tag that no longer resolves to the pinned commit
-fails the run; cached checkouts are verified the same way.
+fails the run; cached checkouts are verified the same way. Before corpus
+discovery, each checkout must also have no tracked changes and no additional
+Scala files under the selected production roots, including ignored files. This
+keeps the measured corpus content tied to the pinned commit rather than just
+its `HEAD` value.
 
 For Cats and Cats Effect, roots are discovered deterministically from
 `src/main/scala` and `src/main/scala-3*`, including shared and platform-specific
