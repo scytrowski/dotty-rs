@@ -259,6 +259,63 @@ tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-506-scala3-3.9.0.json
 ```
 
+## Expanded Typelevel corpus
+
+The runner now keeps the pinned Scala 3.9.0 corpus as its own comparable
+source set and adds production sources from Cats v2.13.0 and Cats Effect
+v3.7.1. Every source set records its repository, release, full commit SHA,
+selected roots, parser outcomes, diagnostic histogram, and Scala oracle counts.
+The legacy top-level `source_version` and `source_revision` still identify
+Scala 3.9; the top-level file/diagnostic/oracle counters aggregate all source
+sets. Compare Scala 3.9 parser progress using `source_sets.scala3`, not the
+expanded aggregate.
+
+The Typelevel revisions are pinned to Cats
+[`32a50dcfad9d897459bb755c4b5a22b4c7bc745c`](https://github.com/typelevel/cats/commit/32a50dcfad9d897459bb755c4b5a22b4c7bc745c)
+and Cats Effect
+[`eb0cc258fc732fc37f22f117c2e81d5554d67024`](https://github.com/typelevel/cats-effect/commit/eb0cc258fc732fc37f22f117c2e81d5554d67024).
+The runner shallow-clones the corresponding release tags into
+`target/parser-corpus-sources` (or `DOTTY_PARSER_CORPUS_CACHE`) and verifies
+the full SHA before use. A tag that no longer resolves to the pinned commit
+fails the run; cached checkouts are verified the same way. Before corpus
+discovery, each checkout must also have no tracked changes and no additional
+Scala files under the selected production roots, including ignored files. This
+keeps the measured corpus content tied to the pinned commit rather than just
+its `HEAD` value.
+
+For Cats and Cats Effect, roots are discovered deterministically from
+`src/main/scala` and `src/main/scala-3*`, including shared and platform-specific
+production modules. Scala 2-only roots, test trees, `scalafix` migration
+fixtures, documentation, examples, benchmarks, and generated `target` trees
+are excluded. Repeated roots/files within a source set are deduplicated;
+including the same physical file in two source sets is an error. The original
+Scala 3 cohort remains exactly `library/src` plus `compiler/src` at the pinned
+Scala 3.9.0 revision.
+
+Cats v2.13.0 was published for Scala 3.3 ([release notes](https://github.com/typelevel/cats/releases/tag/v2.13.0));
+the pinned Cats Effect v3.7.1 build selects Scala 3.3.4
+([build definition](https://github.com/typelevel/cats-effect/blob/v3.7.1/build.sbt)),
+not Scala 3.9. Their source files are used here as an additional syntax
+corpus, parsed by the pinned Scala 3.9 oracle and dotty-rs; this report does
+not claim that these libraries compile against Scala 3.9.
+
+Recreate the expanded report with a checkout of the pinned Scala 3.9.0 tree:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-787-expanded.json
+```
+
+The report stores per-project counts so recoverable diagnostics in Cats or
+Cats Effect cannot obscure a regression in the original Scala 3 cohort.
+The checked-in measurement contains 2,050 files: Scala 3 has 1,236 clean
+parses; Cats has 464 clean and 84 recoverable files; Cats Effect has 245 clean
+and 21 recoverable files. All three cohorts have zero hard parser failures,
+panics, or hangs, and the Dotty oracle returned all 2,050 results without an
+oracle exception. The report records 897 parser diagnostics in the Typelevel
+cohorts. Two complete runs produced byte-identical JSON (SHA-256
+`e91e94f2e51d4073409a03e0544ded1cfcbf8f212529ba097e043d4fe0e17a80`).
+
 `parser-post-issue-516-scala3-3.9.0.json` reruns the same corpus after PR #510 at parser revision `c08a2f4880fa687167f288fc50bbc5e94a98de6a`. It records 1,127 clean parses (91.18%), 109 recoverable files, and zero hard failures, process failures, panics, or hangs. The oracle emitted all 1,236 files with zero failures. Diagnostic occurrences increased by 86 while clean/recoverable counts and first-failure bucket counts stayed unchanged; `SafeRefs.scala` is now clean, so the aggregate points to an offsetting newly diagnostic file. The exact comparison is documented in [`parser-v0.1-compatibility.md`](../../docs/parser-v0.1-compatibility.md).
 
 Recreate this report at merge revision c08a2f4880fa687167f288fc50bbc5e94a98de6a with:
