@@ -979,6 +979,7 @@ mod tests {
         else {
             panic!("the placeholder should be represented by an expression lambda");
         };
+        assert_eq!(function.params.len(), 1);
         assert!(matches!(
             parser.ast().get(function.body).kind,
             TreeKind::Apply(_)
@@ -1016,9 +1017,14 @@ mod tests {
             panic!("expected ValDef");
         };
         let rhs = definition.rhs.expect("the initializer should be retained");
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(rhs).kind
+        else {
+            panic!("the placeholder should be represented by an expression lambda");
+        };
+        assert_eq!(function.params.len(), 1);
         assert!(matches!(
-            parser.ast().get(rhs).kind,
-            TreeKind::PhaseSpecific(UntypedNode::Function(_))
+            parser.ast().get(function.body).kind,
+            TreeKind::Select(_)
         ));
         assert!(parser.placeholder_params.is_empty());
         assert!(parser.diagnostics().is_empty());
