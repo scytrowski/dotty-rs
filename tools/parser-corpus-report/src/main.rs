@@ -83,6 +83,31 @@ struct Report {
     deferred_features: Option<BTreeMap<String, DeferredFeatureBucket>>,
 }
 
+impl Report {
+    fn oracle_count_mismatches(&self) -> Vec<String> {
+        let mut mismatches = Vec::new();
+        if let Some(oracle_files) = self.scala_oracle_files
+            && oracle_files != self.files_attempted
+        {
+            mismatches.push(format!(
+                "aggregate has {} Rust files but {oracle_files} Scala oracle results",
+                self.files_attempted
+            ));
+        }
+        for (name, source_set) in &self.source_sets {
+            if let Some(oracle_files) = source_set.scala_oracle_files
+                && oracle_files != source_set.files_attempted
+            {
+                mismatches.push(format!(
+                    "source set {name} has {} Rust files but {oracle_files} Scala oracle results",
+                    source_set.files_attempted
+                ));
+            }
+        }
+        mismatches
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct SourceSetReport {
     source_version: String,
@@ -381,6 +406,14 @@ fn main() {
             collect_namer: options.namer,
         },
     );
+
+    let oracle_count_mismatches = report.oracle_count_mismatches();
+    if !oracle_count_mismatches.is_empty() {
+        for mismatch in oracle_count_mismatches {
+            eprintln!("corpus/oracle count mismatch: {mismatch}");
+        }
+        std::process::exit(1);
+    }
 
     if let Some(output) = options.output
         && let Err(error) = write_report(&output, &report)
@@ -2652,6 +2685,42 @@ mod tests {
         assert_eq!(set.diagnostics, 2);
         assert_eq!(set.diagnostic_histogram["ExpectedType"], 1);
         assert_eq!(set.diagnostic_histogram["Panic"], 1);
+    }
+
+    #[test]
+    fn oracle_file_count_mismatches_are_reported_per_source_set_and_aggregate() {
+        let source_set = SourceSetOptions {
+            name: "cats".to_owned(),
+            version: "v2.13.0".to_owned(),
+            revision: "a".repeat(40),
+            repository: "https://github.com/typelevel/cats".to_owned(),
+            roots: vec![PathBuf::from("/tmp/cats/core/src/main/scala")],
+            oracle_files: Some(3),
+            oracle_failures: Some(0),
+        };
+        let mut report = build_report(
+            &[],
+            ReportMetadata {
+                roots: &source_set.roots,
+                source_sets: std::slice::from_ref(&source_set),
+                source_version: None,
+                source_revision: None,
+                parser_revision: None,
+                oracle_files: Some(5),
+                oracle_failures: Some(0),
+                collect_namer: false,
+            },
+        );
+        report.files_attempted = 4;
+        report.source_sets.get_mut("cats").unwrap().files_attempted = 2;
+
+        assert_eq!(
+            report.oracle_count_mismatches(),
+            vec![
+                "aggregate has 4 Rust files but 5 Scala oracle results",
+                "source set cats has 2 Rust files but 3 Scala oracle results",
+            ]
+        );
     }
 
     #[test]
