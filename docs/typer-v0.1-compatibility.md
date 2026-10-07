@@ -373,7 +373,7 @@ members, applied receiver adaptation, and transparent source aliases. Expected
 typing checks the resulting value type after selection; no expected-result
 inference is added for overloaded or polymorphic unary members.
 Source annotation projection is available as an internal semantic helper for
-the next expression-typing increment. It recognizes the parser's
+term expression typing. It recognizes the parser's
 `Apply(Select(New(type), <init>), arguments)` shape, resolves the exact
 annotation class, and preserves supported literal arguments in source order as
 `AnnotationArguments::Known`. The class must derive from the session's resolved
@@ -384,8 +384,13 @@ argument types, or arity differences where parameter defaults are unknown. It
 attaches no fabricated typed constructor tree, so
 `Annotation.tree` is `None`; the annotation type is cached in the source type
 index and no annotation child is inserted into `SourceTypedIndex`. Projection
-is transactional and repeated requests reuse one `AnnotationId`. Typing the
-enclosing `Annotated` expression remains for #770.
+is transactional and repeated requests reuse one `AnnotationId`. Term-mode
+`Annotated(expr, annotation)` now lowers to an ordinary typed ascription whose
+`Type::Annotated` carries that exact ID. Stable term references retain their
+singleton type; literals and parameters use the existing expression widening
+path. Nested annotations retain source order, and failures roll back annotation,
+type, and typed-tree state. Source type-tree annotations and capture-checking
+wrappers remain unsupported.
 Right-associative infix calls (operators ending in `:`) remain explicitly
 deferred because they require Scala's operand rewrite.
 It also supports expected-type conformance checks, source type ascriptions, direct

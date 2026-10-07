@@ -316,6 +316,14 @@ impl<'a> SourceTyper<'a> {
                 info_journal,
                 new_mappings,
             ),
+            TreeKind::Annotated(annotated) => self.type_annotated_expression(
+                tree,
+                annotated,
+                source_tree.position,
+                context,
+                info_journal,
+                new_mappings,
+            ),
             TreeKind::If(if_expr) => self.type_if_expression(
                 tree,
                 if_expr,
@@ -19746,6 +19754,193 @@ mod tests {
         ));
         assert_eq!(typer.store().checkpoint(), checkpoint);
         assert!(typer.source_annotations.is_empty());
+    }
+
+    #[test]
+    fn annotated_term_expressions_preserve_typed_shape_and_result_types() {
+        let source_text = "package scala.annotation { abstract class Annotation }; class TermAnnotation extends scala.annotation.Annotation; object StableTerm; object Use { val stableAlias: StableTerm.type = StableTerm; def literal: Int = 1: @TermAnnotation; def stableReference = stableAlias: @TermAnnotation; def unstableParameter(value: Int): Int = value: @TermAnnotation; def nested(value: Int) = (value: @TermAnnotation): @TermAnnotation }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let annotation_class = class_symbol(&parsed, &store, &index, source, "TermAnnotation");
+        let (stable_alias, _, _) =
+            val_definition_and_rhs(&parsed, &store, &index, source, "stableAlias");
+        let cases = ["literal", "stableReference", "unstableParameter", "nested"];
+        let methods = cases.map(|method| {
+            let (owner, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, method);
+            let TreeKind::Annotated(annotated) = &parsed.ast.get(rhs).kind else {
+                panic!("{method} should be a source Annotated term");
+            };
+            (method, owner, rhs, annotated.expr)
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for (method, owner, rhs, source_expr) in methods {
+            let context = typer.expression_context_for(owner).unwrap();
+            let typed = typer.type_expression(rhs, context).unwrap();
+            assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed));
+            assert_eq!(
+                typer.source_typed_index().get(source, source_expr),
+                match &typer.typed_ast().get(typed).kind {
+                    TreeKind::Typed(wrapper) => Some(wrapper.expr),
+                    other => panic!("{method} should lower to Typed, got {other:?}"),
+                }
+            );
+            let TreeKind::Typed(wrapper) = &typer.typed_ast().get(typed).kind else {
+                panic!("{method} should lower to an ordinary Typed wrapper");
+            };
+            assert_eq!(
+                typer.typed_ast().get(wrapper.tpt).ty,
+                typer.typed_ast().get(typed).ty
+            );
+            let Type::Annotated {
+                underlying,
+                annotation,
+            } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+            else {
+                panic!("{method} result type should retain its annotation");
+            };
+            assert_eq!(
+                typer
+                    .store()
+                    .annotation_class(typer.store().annotations.get(*annotation)),
+                Some(annotation_class)
+            );
+            match method {
+                "literal" | "unstableParameter" => assert_eq!(*underlying, definitions.int),
+                "stableReference" => {
+                    assert_eq!(*underlying, typer.typed_ast().get(wrapper.expr).ty);
+                    assert!(matches!(
+                        typer.store().types.get(*underlying),
+                        Type::TermRef {
+                            target: TermRefTarget::Symbol(symbol),
+                            ..
+                        } if *symbol == stable_alias
+                    ));
+                }
+                "nested" => {
+                    let Type::Annotated {
+                        annotation: inner_annotation,
+                        ..
+                    } = typer.store().types.get(*underlying)
+                    else {
+                        panic!("nested annotations should retain the inner wrapper");
+                    };
+                    assert_ne!(*annotation, *inner_annotation);
+                    let TreeKind::Annotated(outer_source) = &typer.arena.get(rhs).kind else {
+                        panic!("outer source tree should remain annotated");
+                    };
+                    let inner_source_tree = match &typer.arena.get(source_expr).kind {
+                        TreeKind::Annotated(_) => source_expr,
+                        TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => parens.inner,
+                        other => panic!("expected nested source annotation, got {other:?}"),
+                    };
+                    let TreeKind::Annotated(inner_source) =
+                        &typer.arena.get(inner_source_tree).kind
+                    else {
+                        panic!("inner source tree should remain annotated");
+                    };
+                    assert_eq!(
+                        typer.source_annotations.get(&outer_source.annotation),
+                        Some(annotation)
+                    );
+                    assert_eq!(
+                        typer.source_annotations.get(&inner_source.annotation),
+                        Some(inner_annotation)
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let typed_count = typer.typed_ast().iter().count();
+            assert_eq!(typer.type_expression(rhs, context).unwrap(), typed);
+            assert_eq!(typer.typed_ast().iter().count(), typed_count);
+            if method == "literal" {
+                assert_eq!(
+                    typer
+                        .type_expression_expected(rhs, context, definitions.int)
+                        .unwrap(),
+                    typed
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn annotated_term_annotation_failure_precedes_child_typing() {
+        let source_text = "package scala.annotation { abstract class Annotation }; class Plain; class Use { def invalid: Int = missing: @Plain }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (owner, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "invalid");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(owner).unwrap(),
+            owner,
+            local_scopes: None,
+        };
+        let checkpoint = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let result = typer.type_expression(rhs, context);
+        assert!(
+            matches!(
+                result,
+                Err(TyperError::SourceAnnotationNotAnnotationClass { source: error_source, .. })
+                    if error_source == source
+            ),
+            "{result:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.source_annotations.is_empty());
+        assert_eq!(typer.typed_ast().iter().count(), 0);
+        assert_eq!(typer.source_typed_index().len(), 0);
+    }
+
+    #[test]
+    fn annotated_term_expected_type_failure_rolls_back_child_and_annotation() {
+        let source_text = "package scala.annotation { abstract class Annotation }; class TermAnnotation extends scala.annotation.Annotation; class Use { def invalid: Boolean = 1: @TermAnnotation }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (owner, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "invalid");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(owner).unwrap(),
+            owner,
+            local_scopes: None,
+        };
+        let checkpoint = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let result = typer.type_expression_expected(rhs, context, definitions.boolean);
+        assert!(
+            matches!(
+                result,
+            Err(TyperError::ExpectedExpressionTypeMismatch {
+                source: error_source,
+                expected,
+                ..
+            }) if error_source == source && expected == definitions.boolean
+            ),
+            "{result:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.source_annotations.is_empty());
+        assert_eq!(typer.typed_ast().iter().count(), 0);
+        assert_eq!(typer.source_typed_index().len(), 0);
     }
 
     #[test]

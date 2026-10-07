@@ -1,0 +1,22 @@
+[[syntax trees at end of                     typer]] // crates/dotty-typer/tests/fixtures/annotated-terms/AnnotatedTerms.scala
+package <empty> {
+  class TermAnnotation() extends scala.annotation.Annotation(), scala.annotation
+    .StaticAnnotation {}
+  final lazy module val StableTerm: StableTerm = new StableTerm()
+  final module class StableTerm() extends Object() { this: StableTerm.type =>}
+  final lazy module val AnnotatedTerms: AnnotatedTerms = new AnnotatedTerms()
+  final module class AnnotatedTerms() extends Object() {
+    this: AnnotatedTerms.type =>
+    def literal: Int = 1:(1 : Int) @TermAnnotation
+    val stableAlias: StableTerm.type = StableTerm
+    def stableReference: StableTerm.type =
+      AnnotatedTerms.stableAlias:
+        (AnnotatedTerms.stableAlias : StableTerm.type) @TermAnnotation
+    def unstableParameter(value: Int): Int = value:(value : Int) @TermAnnotation
+    def unstableCall(value: Int): Int @TermAnnotation =
+      identity[Int](value):Int @TermAnnotation
+    def nested(value: Int): Int =
+      value:(value : Int) @TermAnnotation @TermAnnotation
+  }
+}
+
