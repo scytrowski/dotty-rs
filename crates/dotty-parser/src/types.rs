@@ -1377,12 +1377,29 @@ where
         } else {
             self.parse_annotated_type()
         };
-        if !stop_at_legacy_with {
-            tree = self.parse_legacy_with_type(mark, tree);
-        }
+        let mut legacy_with_indent = if stop_at_legacy_with {
+            false
+        } else {
+            let (parsed, indented_refinement) = self.parse_legacy_with_type(mark, tree);
+            tree = parsed;
+            indented_refinement
+        };
 
-        while self.current().kind == TokenKind::Punctuation(Punctuation::LeftBrace) {
-            let refinements = self.parse_refinement_body();
+        loop {
+            let refinements = if legacy_with_indent && self.accept(TokenKind::Indent) {
+                legacy_with_indent = false;
+                if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBrace) {
+                    let refinements = self.parse_refinement_body();
+                    self.accept(TokenKind::Outdent);
+                    refinements
+                } else {
+                    self.parse_indented_refinement_body()
+                }
+            } else if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBrace) {
+                self.parse_refinement_body()
+            } else {
+                break;
+            };
             tree = self.alloc_from(
                 mark,
                 TreeKind::RefinedTypeTree(RefinedTypeTree {
@@ -1415,37 +1432,48 @@ where
         &mut self,
         mark: crate::Mark,
         left: TreeId<Untyped>,
-    ) -> TreeId<Untyped> {
-        if self.current().kind != TokenKind::Keyword(HardKeyword::With) {
-            return left;
+    ) -> (TreeId<Untyped>, bool) {
+        let mut operands = vec![(mark, left)];
+        let mut indented_refinement = false;
+        while self.accept(TokenKind::Keyword(HardKeyword::With)) {
+            while matches!(
+                self.current().kind,
+                TokenKind::Newline | TokenKind::Newlines
+            ) {
+                self.advance();
+            }
+            if matches!(
+                self.current().kind,
+                TokenKind::Indent | TokenKind::Punctuation(Punctuation::LeftBrace)
+            ) {
+                // Dotty leaves `with { ... }` and `with INDENT ...` for
+                // refinedTypeRest rather than treating them as a compound type.
+                indented_refinement = self.current().kind == TokenKind::Indent;
+                break;
+            }
+            if !self.can_start_type_operand(self.current()) {
+                self.report(
+                    ParseDiagnosticKind::ExpectedType,
+                    "expected a type after `with`",
+                );
+                break;
+            }
+            let operand_mark = self.mark();
+            operands.push((operand_mark, self.parse_annotated_type()));
         }
 
-        self.advance();
-        if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBrace) {
-            // `A with { ... }` is Dotty's refinement form, not a missing
-            // right operand for the deprecated compound-type operator.
-            return left;
-        }
-
-        if !self.can_start_type_operand(self.current()) {
-            self.report(
-                ParseDiagnosticKind::ExpectedType,
-                "expected a type after `with`",
+        let mut right = operands.pop().expect("left operand is always present").1;
+        while let Some((operand_mark, left)) = operands.pop() {
+            let function = self.synthetic_type_tree_at(operand_mark.start());
+            right = self.alloc_from(
+                operand_mark,
+                TreeKind::AppliedTypeTree(AppliedTypeTree {
+                    tpt: function,
+                    args: vec![left, right],
+                }),
             );
-            return left;
         }
-
-        let right_mark = self.mark();
-        let right = self.parse_annotated_type();
-        let right = self.parse_legacy_with_type(right_mark, right);
-        let function = self.synthetic_type_tree_at(mark.start());
-        self.alloc_from(
-            mark,
-            TreeKind::AppliedTypeTree(AppliedTypeTree {
-                tpt: function,
-                args: vec![left, right],
-            }),
-        )
+        (right, indented_refinement)
     }
 
     /// Mirrors Dotty 3.9's `isCaptureUpArrow`: a caret starts a capture
@@ -1834,12 +1862,20 @@ where
     fn parse_refinement_body(&mut self) -> Vec<TreeId<Untyped>> {
         self.advance();
         self.consume_refinement_separators();
+        self.parse_refinement_members(TokenKind::Punctuation(Punctuation::RightBrace))
+    }
 
+    fn parse_indented_refinement_body(&mut self) -> Vec<TreeId<Untyped>> {
+        self.consume_refinement_separators();
+        self.parse_refinement_members(TokenKind::Outdent)
+    }
+
+    fn parse_refinement_members(&mut self, end: TokenKind) -> Vec<TreeId<Untyped>> {
         let mut refinements = Vec::new();
-        while !matches!(
-            self.current().kind,
-            TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Outdent | TokenKind::Eof
-        ) {
+        while self.current().kind != end
+            && self.current().kind != TokenKind::Outdent
+            && self.current().kind != TokenKind::Eof
+        {
             let checkpoint = self.cursor.checkpoint();
             let member = self.with_block_end(
                 Some(TokenKind::Punctuation(Punctuation::RightBrace)),
@@ -1865,7 +1901,7 @@ where
             self.consume_refinement_separators();
         }
 
-        self.expect(TokenKind::Punctuation(Punctuation::RightBrace));
+        self.expect(end);
         refinements
     }
 
@@ -9615,6 +9651,37 @@ mod tests {
         assert_eq!(tree_name(outer.args[0], &parser), Some("A"));
         assert_eq!(tree_name(inner.args[0], &parser), Some("B"));
         assert_eq!(tree_name(inner.args[1], &parser), Some("C"));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_long_legacy_with_chain_without_recursive_descent() {
+        let count = 2_000;
+        let mut source = String::from("A");
+        let mut tokens = vec![token(TokenKind::Identifier, 0, 1)];
+        for _ in 1..count {
+            let start = source.len() as u32;
+            source.push_str(" with A");
+            tokens.push(token(
+                TokenKind::Keyword(HardKeyword::With),
+                start + 1,
+                start + 5,
+            ));
+            tokens.push(token(TokenKind::Identifier, start + 6, start + 7));
+        }
+        let end = source.len() as u32;
+        tokens.push(token(TokenKind::Eof, end, end));
+
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(&source, tokens, &mut names);
+        let mut tree = parser.type_expr();
+        let mut compounds = 0;
+        while let TreeKind::AppliedTypeTree(compound) = &parser.ast().get(tree).kind {
+            compounds += 1;
+            tree = compound.args[1];
+        }
+        assert_eq!(compounds, count - 1);
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
