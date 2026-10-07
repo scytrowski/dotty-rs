@@ -933,6 +933,14 @@ placeholder function inside `bar(_)`, rather than wrapping the outer call.
 Generated names and the Scala compiler's `WildcardFunction` kind are
 normalized by the differential oracle.
 
+There is one definition-specific exception: Dotty parses the deprecated
+`var name: T = _` spelling as an uninitialized mutable-variable initializer,
+not as an escaping expression placeholder. The parser normalizes that bare
+typed-`var` RHS to the source wildcard identifier. This does not reclassify
+ordinary expression placeholders, immutable `val` initializers, or untyped
+`var` initializers; Dotty's migration warning is outside the parser diagnostic
+policy.
+
 An `if` without an `else` uses a zero-width synthetic
 `Literal(Constant::Unit)` in the shared `If<P>::else_branch` slot. This is the
 smallest representation compatible with the current AST contract for Dotty's
