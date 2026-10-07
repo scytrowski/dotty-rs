@@ -35,8 +35,8 @@ where
         loop {
             let token = self.cursor.lookahead(offset);
             match token.kind {
-                TokenKind::Eof
-                | TokenKind::Newline
+                TokenKind::Eof => return false,
+                TokenKind::Newline
                 | TokenKind::Newlines
                 | TokenKind::Indent
                 | TokenKind::Outdent

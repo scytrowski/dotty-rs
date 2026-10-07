@@ -1531,6 +1531,18 @@ mod tests {
     }
 
     #[test]
+    fn stops_legacy_implicit_lambda_lookahead_at_eof_inside_a_type() {
+        const SOURCE: &str = "def malformed = { implicit ec: List[Foo";
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
     fn if_branch_can_start_with_a_quote() {
         const SOURCE: &str = "def quoted(x: Boolean) = if x then 1 else '{ 2 }";
         let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
