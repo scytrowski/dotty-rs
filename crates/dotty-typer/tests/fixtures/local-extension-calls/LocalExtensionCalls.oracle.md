@@ -5,7 +5,7 @@ single local extension with one explicit receiver and one plain argument
 clause. The pinned reference revision is
 `777528f19a58e794c9954a42f433373472ec57f8`.
 
-The source call has the shape `Apply(Select(this, choose), [2])`. In the pinned
+The source call has the shape `Apply(Select(value, choose), [1])`. In the pinned
 Scala implementation, `Typer.tryExtensionOrConversion` finds the extension
 method and calls `extMethodApply` with the typed qualifier. `Applications.extMethodApply`
 builds an `Apply` that supplies the receiver, and the source argument clause is
@@ -19,7 +19,7 @@ upstream implementation references establish the receiver-first tree shape:
 That shape is:
 
 ```text
-Apply(Apply(Ident(choose), [this]), [2])
+Apply(Apply(Ident(choose), [value]), [1])
 ```
 
 The source sets the receiver and method name spans; the focused typer

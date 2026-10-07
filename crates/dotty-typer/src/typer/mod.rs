@@ -12006,6 +12006,12 @@ mod tests {
             typer.typed_ast().get(typed_apply.args[0]).position,
             parsed.ast.get(call.args[0]).position
         );
+        assert_eq!(typer.typed_ast().get(typed_call).ty, definitions.int);
+        assert_eq!(
+            typer.source_typed_index().get(source, selection.qualifier),
+            Some(receiver_apply.args[0])
+        );
+        let receiver_argument_type = typer.typed_ast().get(receiver_apply.args[0]).ty;
         let method = typer.local_method_symbol_at(source, method_tree).unwrap();
         assert!(matches!(
             typer
@@ -12018,9 +12024,35 @@ mod tests {
             } if *prefix == definitions.no_prefix && *target == method
         ));
         assert_eq!(
+            typer.widen_expression_type(receiver_argument_type).unwrap(),
+            definitions.int
+        );
+        assert_eq!(
             typer.type_expression(block_tree, context).unwrap(),
             typed_block_id
         );
+    }
+
+    #[test]
+    fn builtin_missing_class_info_stays_visible_without_a_local_extension() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def outer(value: Int): Int = value.choose(1) }");
+        let (outer, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::MemberLookup(error))
+                if matches!(*error, MemberLookupError::ClassInfoUnavailable { .. })
+        ));
     }
 
     #[test]
@@ -12109,6 +12141,186 @@ mod tests {
             Err(TyperError::MemberNotFound { name, .. })
                 if typer.store().names.resolve(name.text()) == "choose"
         ));
+    }
+
+    #[test]
+    fn local_extension_call_is_visible_before_its_declaration() {
+        let source_text = "class C { def outer: Int = { this.choose(1); extension (receiver: C) { def choose(argument: Int): Int = argument }; 0 } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let call_tree = block.stats[0];
+        let extension_tree = block.stats[1];
+        let method_tree = match &parsed.ast.get(extension_tree).kind {
+            TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
+                extension.methods[0]
+            }
+            _ => panic!("second statement should be a local extension"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        let typed_block = typer.type_expression(block_tree, context).unwrap();
+
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        let typed_call = typer.source_typed_index().get(source, call_tree).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_call).kind else {
+            panic!("forward extension call should lower to an application");
+        };
+        let TreeKind::Apply(receiver_application) =
+            &typer.typed_ast().get(application.function).kind
+        else {
+            panic!("extension receiver should be the leading application");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(receiver_application.function).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(typer.typed_ast().get(typed_call).ty, definitions.int);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(receiver_application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == method
+        ));
+        assert!(matches!(
+            typer.typed_ast().get(typed_block).kind,
+            TreeKind::Block(_)
+        ));
+    }
+
+    #[test]
+    fn same_name_ordinary_and_extension_locals_select_extension_only() {
+        let source_text = "class C { def outer: Int = { def choose(argument: Int): Int = 9; extension (receiver: C) { def choose(argument: Int): Int = argument }; this.choose(1) } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let ordinary_tree = block.stats[0];
+        let extension_tree = block.stats[1];
+        let extension_method_tree = match &parsed.ast.get(extension_tree).kind {
+            TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
+                extension.methods[0]
+            }
+            _ => panic!("second statement should be a local extension"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        typer.type_expression(block_tree, context).unwrap();
+
+        let ordinary = typer.local_method_symbol_at(source, ordinary_tree).unwrap();
+        let extension = typer
+            .local_method_symbol_at(source, extension_method_tree)
+            .unwrap();
+        let TreeKind::Block(typed_block) = &typer
+            .typed_ast()
+            .get(typer.source_typed_index().get(source, block_tree).unwrap())
+            .kind
+        else {
+            panic!("typed outer body should remain a block");
+        };
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_block.expr).kind else {
+            panic!("selected local extension should lower to an application");
+        };
+        let TreeKind::Apply(receiver_application) =
+            &typer.typed_ast().get(application.function).kind
+        else {
+            panic!("extension receiver should be applied first");
+        };
+        let TreeKind::Ident(function) = &typer.typed_ast().get(receiver_application.function).kind
+        else {
+            panic!("extension callee should be an Ident");
+        };
+        assert_eq!(function.name, typer.store().symbols.get(extension).name);
+        assert_ne!(ordinary, extension);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(receiver_application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == extension
+        ));
+    }
+
+    #[test]
+    fn multiple_viable_local_extensions_return_a_focused_error() {
+        let source_text = "class C { def outer: Int = { extension (left: C) { def choose(argument: Int): Int = 1 }; extension (right: C) { def choose(argument: Int): Int = 2 }; this.choose(1) } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(block_tree, context),
+            Err(TyperError::OverloadedSelectionDeferred { name, .. })
+                if typer.store().names.resolve(name.text()) == "choose"
+        ));
+    }
+
+    #[test]
+    fn failed_local_extension_receiver_and_argument_checks_roll_back_block_state() {
+        for source_text in [
+            "class D {}; class C { def outer: Int = { extension (receiver: D) { def choose(argument: Int): Int = argument }; this.choose(1) } }",
+            "class C { def outer: Int = { extension (receiver: C) { def choose(argument: Int): Int = argument }; this.choose(false) } }",
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (outer, block_tree) =
+                method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+            let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+                panic!("outer body should be a block");
+            };
+            let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+                &parsed.ast.get(block.stats[0]).kind
+            else {
+                panic!("first statement should be a local extension");
+            };
+            let method_tree = extension.methods[0];
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(outer).unwrap();
+            let store_checkpoint = typer.store().checkpoint();
+            let typed_checkpoint = typer.typed_ast().checkpoint();
+            let typed_index_len = typer.source_typed_index().len();
+
+            assert!(matches!(
+                typer.type_expression(block_tree, context),
+                Err(TyperError::MemberNotFound { .. })
+            ));
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+            assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
+            assert_eq!(typer.source_typed_index().len(), typed_index_len);
+            assert!(typer.local_method_symbol_at(source, method_tree).is_none());
+        }
     }
 
     #[test]
