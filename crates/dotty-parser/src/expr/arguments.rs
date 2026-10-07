@@ -205,6 +205,116 @@ mod tests {
     }
 
     #[test]
+    fn parses_legacy_wildcard_splice_ascription_in_final_argument_position() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "f(args: _*)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+                token(TokenKind::Identifier, 2, 6),
+                token(TokenKind::ColonFollow, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 9, 10),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 10, 11),
+                token(TokenKind::Eof, 11, 11),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+            panic!("expected an application");
+        };
+        let [argument] = application.args.as_slice() else {
+            panic!("expected one argument");
+        };
+        let TreeKind::Typed(typed) = &parser.ast().get(*argument).kind else {
+            panic!("expected a typed wildcard-star splice");
+        };
+        let TreeKind::Ident(marker) = &parser.ast().get(typed.tpt).kind else {
+            panic!("expected the wildcard-star marker");
+        };
+        assert_eq!(parser.names.resolve(marker.name.text()), "_*");
+        assert_eq!(
+            parser.ast().get(typed.tpt).position.unwrap().span().range(),
+            dotty_core::TextRange::new(8, 10).unwrap()
+        );
+        assert_eq!(
+            parser.ast().get(*argument).position.unwrap().span().range(),
+            dotty_core::TextRange::new(2, 10).unwrap()
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn diagnoses_legacy_wildcard_splice_ascriptions_outside_final_argument_position() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "f(args: _*, tail)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+                token(TokenKind::Identifier, 2, 6),
+                token(TokenKind::ColonFollow, 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 9, 10),
+                token(TokenKind::Punctuation(Punctuation::Comma), 10, 11),
+                token(TokenKind::Identifier, 12, 16),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+            panic!("expected an application");
+        };
+        assert_eq!(application.args.len(), 2);
+        assert!(matches!(
+            parser.ast().get(application.args[0]).kind,
+            TreeKind::Typed(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(application.args[1]).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            crate::ParseDiagnosticKind::UnexpectedToken
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn diagnoses_legacy_wildcard_splice_ascription_outside_an_argument_list() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "args: _*",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::ColonFollow, 4, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Operator, 7, 8),
+                token(TokenKind::Eof, 8, 8),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        assert!(matches!(parser.ast().get(tree).kind, TreeKind::Typed(_)));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            crate::ParseDiagnosticKind::UnexpectedToken
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn parses_a_splice_after_earlier_arguments() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
