@@ -604,6 +604,9 @@ mod tests {
     use dotty_namer::name_compilation_unit;
     use std::{cell::RefCell, rc::Rc};
 
+    const LOCAL_EXTENSION_CALL_SOURCE: &str =
+        include_str!("../../tests/fixtures/local-extension-calls/LocalExtensionCalls.scala");
+
     struct ScriptedResolver {
         member: Option<SymbolId>,
         package: Option<SymbolId>,
@@ -11946,9 +11949,8 @@ mod tests {
 
     #[test]
     fn local_extension_call_lowers_receiver_as_first_argument() {
-        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class C { def outer: Int = { extension (receiver: C) { def choose(argument: Int): Int = 1 }; this.choose(2) } }",
-        );
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(LOCAL_EXTENSION_CALL_SOURCE);
         let (outer, block_tree) =
             method_definition_and_rhs(&parsed, &store, &index, source, "outer");
         let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
@@ -12087,6 +12089,66 @@ mod tests {
     fn inapplicable_local_extension_reports_member_not_found() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def outer: Int = { extension (receiver: C) { def choose(argument: Int): Int = 1 }; this.choose(true) } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        assert!(matches!(
+            typer.type_expression(block_tree, context),
+            Err(TyperError::MemberNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "choose"
+        ));
+    }
+
+    #[test]
+    fn inner_local_extension_shadows_outer_same_name_candidate() {
+        let source_text = "class C { def outer: Boolean = { extension (receiver: C) { def choose(argument: Boolean): Boolean = false }; { extension (receiver: C) { def choose(argument: Int): Boolean = true }; this.choose(1) } } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        let typed_block = typer.type_expression(block_tree, context).unwrap();
+        let TreeKind::Block(outer_block) = &typer.typed_ast().get(typed_block).kind else {
+            panic!("outer body should remain a block");
+        };
+        let TreeKind::Block(inner_block) = &typer.typed_ast().get(outer_block.expr).kind else {
+            panic!("nested extension scope should remain a block");
+        };
+        let TreeKind::Apply(application) = &typer.typed_ast().get(inner_block.expr).kind else {
+            panic!("inner extension call should be an application");
+        };
+        let TreeKind::Apply(_) = &typer.typed_ast().get(application.function).kind else {
+            panic!("inner extension receiver should be applied first");
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty),
+            Type::Method(method) if method.params[0].ty == definitions.int
+        ));
+    }
+
+    #[test]
+    fn ordinary_local_method_is_not_an_extension_candidate() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def choose(argument: Int): Int = 1; this.choose(2) } }",
         );
         let (outer, block_tree) =
             method_definition_and_rhs(&parsed, &store, &index, source, "outer");
