@@ -1527,7 +1527,69 @@ mod tests {
         let result =
             parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
 
-        assert!(!result.diagnostics.is_empty());
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            dotty_parser::ParseDiagnosticKind::ExpectedToken
+        );
+        assert_eq!(
+            result.diagnostics[0].message(),
+            "expected `=>` after legacy implicit lambda parameter"
+        );
+        assert_eq!(
+            result.diagnostics[0].span(),
+            dotty_core::TextRange::new(30, 33).unwrap()
+        );
+
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let [method_id] = package.stats.as_slice() else {
+            panic!("expected one method");
+        };
+        let TreeKind::DefDef(method) = &result.ast.get(*method_id).kind else {
+            panic!("expected method definition");
+        };
+        let TreeKind::Block(block) = &result.ast.get(method.rhs.unwrap()).kind else {
+            panic!("expected method body block");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) =
+            &result.ast.get(block.expr).kind
+        else {
+            panic!("expected recovered legacy implicit Function");
+        };
+        assert_eq!(function.params.len(), 1);
+        let TreeKind::ValDef(parameter) = &result.ast.get(function.params[0]).kind else {
+            panic!("expected implicit function parameter");
+        };
+        assert!(
+            parameter
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Implicit)
+        );
+        let TreeKind::Block(lambda_body) = &result.ast.get(function.body).kind else {
+            panic!("expected lambda body block");
+        };
+        assert!(lambda_body.stats.is_empty());
+        assert!(matches!(
+            &result.ast.get(lambda_body.expr).kind,
+            TreeKind::Literal(literal) if literal.value == dotty_core::Constant::Unit
+        ));
+        assert_eq!(
+            result
+                .ast
+                .get(function.body)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            dotty_core::TextRange::new(29, 29).unwrap()
+        );
+        assert_eq!(
+            result.ast.get(block.expr).position.unwrap().span().range(),
+            dotty_core::TextRange::new(18, 37).unwrap()
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
-use dotty_core::ast::{Function, Modifiers, UntypedNode, ValDef};
+use dotty_core::ast::{Block, Function, Literal, Modifiers, UntypedNode, ValDef};
 use dotty_core::{
-    Punctuation, SourceSpan, Span, TermName, TextRange, TokenKind, TreeId, TreeKind, Untyped,
+    Constant, Punctuation, SourceSpan, Span, TermName, TextRange, TokenKind, TreeId, TreeKind,
+    Untyped,
 };
 
 use super::can_start_expr;
@@ -11,64 +12,11 @@ where
     S: dotty_core::TokenSource,
 {
     pub(crate) fn starts_legacy_implicit_block_lambda(&mut self) -> bool {
-        if self.current().kind != TokenKind::Keyword(dotty_core::HardKeyword::Implicit)
-            || !matches!(
+        self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Implicit)
+            && matches!(
                 self.cursor.lookahead(1).kind,
                 TokenKind::Identifier | TokenKind::BackquotedIdentifier
             )
-        {
-            return false;
-        }
-
-        if self.lookahead_is_arrow(2) {
-            return true;
-        }
-        if !matches!(
-            self.cursor.lookahead(2).kind,
-            TokenKind::ColonOp | TokenKind::ColonFollow | TokenKind::ColonEol
-        ) {
-            return false;
-        }
-
-        let mut nesting = [0u32; 3];
-        let mut offset = 3usize;
-        loop {
-            let token = self.cursor.lookahead(offset);
-            match token.kind {
-                TokenKind::Eof => return false,
-                TokenKind::Newline
-                | TokenKind::Newlines
-                | TokenKind::Indent
-                | TokenKind::Outdent
-                | TokenKind::Punctuation(Punctuation::Semicolon | Punctuation::Comma)
-                    if nesting == [0, 0, 0] =>
-                {
-                    return false;
-                }
-                TokenKind::Operator if nesting == [0, 0, 0] => {
-                    if self.lookahead_is_arrow(offset) {
-                        return true;
-                    }
-                }
-                TokenKind::Punctuation(Punctuation::LeftParen) => nesting[0] += 1,
-                TokenKind::Punctuation(Punctuation::RightParen) => {
-                    nesting[0] = nesting[0].saturating_sub(1)
-                }
-                TokenKind::Punctuation(Punctuation::LeftBracket) => nesting[1] += 1,
-                TokenKind::Punctuation(Punctuation::RightBracket) => {
-                    nesting[1] = nesting[1].saturating_sub(1)
-                }
-                TokenKind::Punctuation(Punctuation::LeftBrace) => nesting[2] += 1,
-                TokenKind::Punctuation(Punctuation::RightBrace) => {
-                    if nesting[2] == 0 {
-                        return false;
-                    }
-                    nesting[2] -= 1;
-                }
-                _ => {}
-            }
-            offset = offset.saturating_add(1);
-        }
     }
 
     pub(crate) fn parse_legacy_implicit_block_lambda(
@@ -84,19 +32,52 @@ where
                 .push(dotty_core::ast::Modifier::Implicit);
         }
 
-        if self.current_is_arrow() {
+        let body = if self.current_is_arrow() {
             if self.arrow_starts_indented_body() {
                 self.observe_arrow_indented();
             }
             self.advance();
+            self.parse_lambda_body()
         } else {
             self.report(
                 ParseDiagnosticKind::ExpectedToken,
                 "expected `=>` after legacy implicit lambda parameter",
             );
-        }
-
-        let body = self.parse_lambda_body();
+            let parameter_end = self
+                .ast
+                .get(parameter)
+                .position
+                .map(|position| position.span().range().end())
+                .unwrap_or_else(|| self.current().span.start());
+            while !matches!(
+                self.current().kind,
+                TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Outdent
+                    | TokenKind::Punctuation(Punctuation::RightBrace | Punctuation::Semicolon)
+                    | TokenKind::Eof
+            ) {
+                let checkpoint = self.cursor.checkpoint();
+                self.advance();
+                if !self.cursor.progressed_since(checkpoint) {
+                    break;
+                }
+            }
+            let span = self.zero_width_span(parameter_end);
+            let unit = self.alloc(
+                TreeKind::Literal(Literal {
+                    value: Constant::Unit,
+                }),
+                Some(span),
+            );
+            self.alloc(
+                TreeKind::Block(Block {
+                    stats: Vec::new(),
+                    expr: unit,
+                }),
+                Some(span),
+            )
+        };
         self.alloc_from(
             mark,
             TreeKind::PhaseSpecific(UntypedNode::Function(Function {
