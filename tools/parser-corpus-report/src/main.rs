@@ -23,6 +23,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 #[derive(Debug)]
 struct Options {
     roots: Vec<PathBuf>,
+    source_sets: Vec<SourceSetOptions>,
     output: Option<PathBuf>,
     timeout: Duration,
     source_version: Option<String>,
@@ -33,8 +34,20 @@ struct Options {
     namer: bool,
 }
 
+#[derive(Debug, Clone)]
+struct SourceSetOptions {
+    name: String,
+    version: String,
+    revision: String,
+    repository: String,
+    roots: Vec<PathBuf>,
+    oracle_files: Option<usize>,
+    oracle_failures: Option<usize>,
+}
+
 struct ReportMetadata<'a> {
     roots: &'a [PathBuf],
+    source_sets: &'a [SourceSetOptions],
     source_version: Option<String>,
     source_revision: Option<String>,
     parser_revision: Option<String>,
@@ -49,6 +62,7 @@ struct Report {
     corpus_roots: Vec<String>,
     source_version: Option<String>,
     source_revision: Option<String>,
+    source_sets: BTreeMap<String, SourceSetReport>,
     parser_revision: Option<String>,
     scala_oracle_files: Option<usize>,
     scala_oracle_failures: Option<usize>,
@@ -67,6 +81,84 @@ struct Report {
     namer: Option<NamerReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deferred_features: Option<BTreeMap<String, DeferredFeatureBucket>>,
+}
+
+#[derive(Debug, Serialize)]
+struct SourceSetReport {
+    source_version: String,
+    source_revision: String,
+    repository: String,
+    corpus_roots: Vec<String>,
+    scala_oracle_files: Option<usize>,
+    scala_oracle_failures: Option<usize>,
+    files_attempted: usize,
+    files_parsed_without_diagnostics: usize,
+    files_parsed_with_recoverable_diagnostics: usize,
+    hard_parser_failures: usize,
+    scanner_diagnostics: usize,
+    diagnostics: usize,
+    diagnostic_histogram: BTreeMap<String, usize>,
+    first_failure_histogram: BTreeMap<String, FailureBucket>,
+}
+
+impl SourceSetReport {
+    fn from_options(options: &SourceSetOptions) -> Self {
+        Self {
+            source_version: options.version.clone(),
+            source_revision: options.revision.clone(),
+            repository: options.repository.clone(),
+            corpus_roots: options.roots.iter().map(|root| root_label(root)).collect(),
+            scala_oracle_files: options.oracle_files,
+            scala_oracle_failures: options.oracle_failures,
+            files_attempted: 0,
+            files_parsed_without_diagnostics: 0,
+            files_parsed_with_recoverable_diagnostics: 0,
+            hard_parser_failures: 0,
+            scanner_diagnostics: 0,
+            diagnostics: 0,
+            diagnostic_histogram: BTreeMap::new(),
+            first_failure_histogram: BTreeMap::new(),
+        }
+    }
+
+    fn record(&mut self, outcome: &FileOutcome) {
+        self.files_attempted += 1;
+        self.scanner_diagnostics += outcome.scanner_diagnostics;
+        self.diagnostics += outcome.diagnostics.len();
+        match outcome.status {
+            Status::Clean => self.files_parsed_without_diagnostics += 1,
+            Status::RecoverableDiagnostics => self.files_parsed_with_recoverable_diagnostics += 1,
+            Status::ScannerFailure | Status::ProcessFailure | Status::Panic | Status::Hang => {
+                self.hard_parser_failures += 1;
+            }
+        }
+        for diagnostic in &outcome.diagnostics {
+            *self
+                .diagnostic_histogram
+                .entry(diagnostic.kind.clone())
+                .or_default() += 1;
+        }
+        let failure = outcome
+            .diagnostics
+            .first()
+            .map(first_failure_bucket)
+            .or_else(|| {
+                (outcome.scanner_diagnostics != 0).then(|| "ScannerDiagnostics".to_owned())
+            });
+        if let Some(failure) = failure {
+            let bucket = self
+                .first_failure_histogram
+                .entry(failure)
+                .or_insert_with(|| FailureBucket {
+                    count: 0,
+                    examples: Vec::new(),
+                });
+            bucket.count += 1;
+            if bucket.examples.len() < 5 {
+                bucket.examples.push(outcome.path.clone());
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -166,6 +258,7 @@ struct FailureBucket {
 #[derive(Debug)]
 struct FileOutcome {
     path: String,
+    source_set: Option<String>,
     status: Status,
     diagnostics: Vec<DiagnosticSummary>,
     scanner_diagnostics: usize,
@@ -209,6 +302,27 @@ fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     if arguments
         .first()
+        .is_some_and(|argument| argument == "--list-production-roots")
+    {
+        let Some(root) = arguments.get(1) else {
+            eprintln!("--list-production-roots requires a project root");
+            std::process::exit(2);
+        };
+        match discover_production_roots(Path::new(root)) {
+            Ok(roots) => {
+                for root in roots {
+                    println!("{}", root.display());
+                }
+            }
+            Err(error) => {
+                eprintln!("failed to discover production roots: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if arguments
+        .first()
         .is_some_and(|argument| argument == "--worker")
     {
         if let Err(error) = run_worker(
@@ -226,7 +340,7 @@ fn main() {
         Err(error) => {
             eprintln!("{error}");
             eprintln!(
-                "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--parser-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]"
+                "usage: dotty-parser-corpus-report [--source-set <name@version@revision@repository-url> --root <dir>...]... [--root <dir>...] [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--parser-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]"
             );
             std::process::exit(2);
         }
@@ -240,11 +354,25 @@ fn main() {
         }
     };
 
-    let outcomes = parse_files(&files, &options.roots, options.timeout, options.namer);
+    let source_set_names = match source_set_names_for_files(&files, &options.source_sets) {
+        Ok(names) => names,
+        Err(error) => {
+            eprintln!("invalid source-set roots: {error}");
+            std::process::exit(2);
+        }
+    };
+    let outcomes = parse_files(
+        &files,
+        &options.roots,
+        &source_set_names,
+        options.timeout,
+        options.namer,
+    );
     let report = build_report(
         &outcomes,
         ReportMetadata {
             roots: &options.roots,
+            source_sets: &options.source_sets,
             source_version: options.source_version,
             source_revision: options.source_revision,
             parser_revision: options.parser_revision,
@@ -269,6 +397,8 @@ fn main() {
 
 fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut roots = Vec::new();
+    let mut source_sets: Vec<SourceSetOptions> = Vec::new();
+    let mut active_source_set: Option<usize> = None;
     let mut output = None;
     let mut timeout = Duration::from_millis(DEFAULT_TIMEOUT_MS);
     let mut source_version = None;
@@ -281,7 +411,46 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
 
     while let Some(argument) = args.next() {
         match argument.as_str() {
-            "--root" => roots.push(PathBuf::from(next_argument(&mut args, "--root")?)),
+            "--root" => {
+                let root = PathBuf::from(next_argument(&mut args, "--root")?);
+                roots.push(root.clone());
+                if let Some(index) = active_source_set {
+                    source_sets[index].roots.push(root);
+                }
+            }
+            "--source-set" => {
+                let value = next_argument(&mut args, "--source-set")?;
+                let mut fields = value.splitn(4, '@');
+                let name = fields.next().unwrap_or_default();
+                let version = fields.next().unwrap_or_default();
+                let revision = fields.next().unwrap_or_default();
+                let repository = fields.next().unwrap_or_default();
+                if name.is_empty()
+                    || version.is_empty()
+                    || revision.is_empty()
+                    || repository.is_empty()
+                {
+                    return Err(format!(
+                        "invalid source set {value:?}; expected <name>@<version>@<revision>@<repository-url>"
+                    ));
+                }
+                if source_sets
+                    .iter()
+                    .any(|source_set: &SourceSetOptions| source_set.name == name)
+                {
+                    return Err(format!("duplicate source-set name: {name}"));
+                }
+                source_sets.push(SourceSetOptions {
+                    name: name.to_owned(),
+                    version: version.to_owned(),
+                    revision: revision.to_owned(),
+                    repository: repository.to_owned(),
+                    roots: Vec::new(),
+                    oracle_files: None,
+                    oracle_failures: None,
+                });
+                active_source_set = Some(source_sets.len() - 1);
+            }
             "--output" => output = Some(PathBuf::from(next_argument(&mut args, "--output")?)),
             "--timeout-ms" => {
                 let value = next_argument(&mut args, "--timeout-ms")?;
@@ -304,24 +473,30 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
             }
             "--oracle-files" => {
                 let value = next_argument(&mut args, "--oracle-files")?;
-                oracle_files = Some(
-                    value
-                        .parse::<usize>()
-                        .map_err(|_| format!("invalid oracle file count: {value}"))?,
-                );
+                let count = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid oracle file count: {value}"))?;
+                if let Some(index) = active_source_set {
+                    source_sets[index].oracle_files = Some(count);
+                } else {
+                    oracle_files = Some(count);
+                }
             }
             "--oracle-failures" => {
                 let value = next_argument(&mut args, "--oracle-failures")?;
-                oracle_failures = Some(
-                    value
-                        .parse::<usize>()
-                        .map_err(|_| format!("invalid oracle failure count: {value}"))?,
-                );
+                let count = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid oracle failure count: {value}"))?;
+                if let Some(index) = active_source_set {
+                    source_sets[index].oracle_failures = Some(count);
+                } else {
+                    oracle_failures = Some(count);
+                }
             }
             "--namer" => namer = true,
             "--help" | "-h" => {
                 return Err(
-                    "usage: dotty-parser-corpus-report --root <dir>... [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--parser-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]".to_owned(),
+                    "usage: dotty-parser-corpus-report [--source-set <name@version@revision@repository-url> --root <dir>...]... [--root <dir>...] [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--parser-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]".to_owned(),
                 );
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -331,8 +506,31 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
     if roots.is_empty() {
         return Err("at least one --root is required".to_owned());
     }
+    for source_set in &source_sets {
+        if source_set.roots.is_empty() {
+            return Err(format!("source set {} has no --root", source_set.name));
+        }
+    }
+    let roots = roots
+        .into_iter()
+        .map(|root| fs::canonicalize(&root).map_err(|error| format!("{}: {error}", root.display())))
+        .collect::<Result<Vec<_>, _>>()?;
+    let source_sets = source_sets
+        .into_iter()
+        .map(|mut source_set| {
+            source_set.roots = source_set
+                .roots
+                .into_iter()
+                .map(|root| {
+                    fs::canonicalize(&root).map_err(|error| format!("{}: {error}", root.display()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(source_set)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(Options {
         roots,
+        source_sets,
         output,
         timeout,
         source_version,
@@ -354,9 +552,103 @@ fn discover_files(roots: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
     for root in roots {
         collect_scala_files(root, &mut files)?;
     }
+    for file in &mut files {
+        *file = fs::canonicalize(&*file)?;
+    }
     files.sort();
     files.dedup();
     Ok(files)
+}
+
+fn discover_production_roots(project_root: &Path) -> io::Result<Vec<PathBuf>> {
+    fn walk(project_root: &Path, path: &Path, roots: &mut Vec<PathBuf>) -> io::Result<()> {
+        let metadata = fs::metadata(path)?;
+        if !metadata.is_dir() {
+            return Ok(());
+        }
+        if path != project_root && excluded_production_path(project_root, path) {
+            return Ok(());
+        }
+        let is_scala_source_root = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "scala" || name.starts_with("scala-3"))
+            && path
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "main")
+            && path
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "src");
+        if is_scala_source_root {
+            roots.push(fs::canonicalize(path)?);
+            return Ok(());
+        }
+        let mut entries = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
+            walk(project_root, &entry.path(), roots)?;
+        }
+        Ok(())
+    }
+
+    fn excluded_production_path(project_root: &Path, path: &Path) -> bool {
+        path.strip_prefix(project_root)
+            .ok()
+            .into_iter()
+            .flat_map(Path::components)
+            .filter_map(|component| component.as_os_str().to_str())
+            .any(|component| {
+                matches!(
+                    component,
+                    ".git"
+                        | "target"
+                        | "test"
+                        | "tests"
+                        | "docs"
+                        | "documentation"
+                        | "example"
+                        | "examples"
+                        | "bench"
+                        | "benchmarks"
+                        | "scalafix"
+                ) || component.ends_with("-example")
+            })
+    }
+
+    let project_root = fs::canonicalize(project_root)?;
+    let mut roots = Vec::new();
+    walk(&project_root, &project_root, &mut roots)?;
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
+fn source_set_names_for_files(
+    files: &[PathBuf],
+    source_sets: &[SourceSetOptions],
+) -> Result<Vec<Option<String>>, String> {
+    files
+        .iter()
+        .map(|file| {
+            let matching_sets = source_sets
+                .iter()
+                .filter(|source_set| source_set.roots.iter().any(|root| file.starts_with(root)))
+                .map(|source_set| source_set.name.as_str())
+                .collect::<Vec<_>>();
+            match matching_sets.as_slice() {
+                [] => Ok(None),
+                [name] => Ok(Some((*name).to_owned())),
+                _ => Err(format!(
+                    "{} is included in multiple source sets: {}",
+                    file.display(),
+                    matching_sets.join(", ")
+                )),
+            }
+        })
+        .collect()
 }
 
 fn collect_scala_files(path: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
@@ -385,6 +677,7 @@ fn collect_scala_files(path: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> 
 fn parse_files(
     files: &[PathBuf],
     roots: &[PathBuf],
+    source_set_names: &[Option<String>],
     timeout: Duration,
     namer: bool,
 ) -> Vec<FileOutcome> {
@@ -399,11 +692,13 @@ fn parse_files(
     let (job_sender, job_receiver) = mpsc::channel::<(usize, PathBuf)>();
     let (result_sender, result_receiver) = mpsc::channel::<(usize, FileOutcome)>();
     let job_receiver = Arc::new(Mutex::new(job_receiver));
+    let source_set_names = Arc::new(source_set_names.to_vec());
     let mut workers = Vec::with_capacity(worker_count);
 
     for _ in 0..worker_count {
         let job_receiver = Arc::clone(&job_receiver);
         let result_sender = result_sender.clone();
+        let source_set_names = Arc::clone(&source_set_names);
         let roots = roots.to_vec();
         workers.push(thread::spawn(move || {
             loop {
@@ -411,7 +706,8 @@ fn parse_files(
                 let Ok((index, path)) = job else {
                     break;
                 };
-                let outcome = parse_one(&path, &roots, timeout, namer);
+                let mut outcome = parse_one(&path, &roots, timeout, namer);
+                outcome.source_set = source_set_names[index].clone();
                 if result_sender.send((index, outcome)).is_err() {
                     break;
                 }
@@ -458,6 +754,7 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration, namer: bool) -> 
         }) => match serde_json::from_slice::<WorkerResult>(&stdout) {
             Ok(outcome) => FileOutcome {
                 path: display_path,
+                source_set: None,
                 status: outcome.status,
                 diagnostics: outcome.diagnostics,
                 scanner_diagnostics: outcome.scanner_diagnostics,
@@ -477,6 +774,7 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration, namer: bool) -> 
         ),
         Ok(CommandResult::TimedOut) => FileOutcome {
             path: display_path,
+            source_set: None,
             status: Status::Hang,
             diagnostics: vec![DiagnosticSummary {
                 kind: "Hang".to_owned(),
@@ -497,6 +795,7 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration, namer: bool) -> 
 fn process_failure(path: String, kind: &str, message: impl Into<String>) -> FileOutcome {
     FileOutcome {
         path,
+        source_set: None,
         status: Status::ProcessFailure,
         diagnostics: vec![DiagnosticSummary {
             kind: kind.to_owned(),
@@ -1506,10 +1805,39 @@ fn display_path(path: &Path, roots: &[PathBuf]) -> String {
 }
 
 fn root_label(root: &Path) -> String {
+    let components = root
+        .components()
+        .filter_map(|part| part.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    if let Some(index) = components
+        .iter()
+        .rposition(|part| part.starts_with("cats-v") || part.starts_with("cats-effect-v"))
+    {
+        return components[index + 1..].join("/");
+    }
     let name = root
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("root");
+    if root
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|part| part == "main")
+        && root
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .is_some_and(|part| part == "src")
+    {
+        let mut components = root
+            .components()
+            .rev()
+            .take(5)
+            .map(|part| part.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        components.reverse();
+        return components.join("/");
+    }
     if name == "src"
         && let Some(parent) = root.parent().and_then(|parent| parent.file_name())
     {
@@ -1520,10 +1848,20 @@ fn root_label(root: &Path) -> String {
 
 fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Report {
     let mut report = Report {
-        schema_version: 5,
+        schema_version: 6,
         corpus_roots: metadata.roots.iter().map(|root| root_label(root)).collect(),
         source_version: metadata.source_version,
         source_revision: metadata.source_revision,
+        source_sets: metadata
+            .source_sets
+            .iter()
+            .map(|source_set| {
+                (
+                    source_set.name.clone(),
+                    SourceSetReport::from_options(source_set),
+                )
+            })
+            .collect(),
         parser_revision: metadata.parser_revision,
         scala_oracle_files: metadata.oracle_files,
         scala_oracle_failures: metadata.oracle_failures,
@@ -1565,6 +1903,11 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
     };
 
     for outcome in outcomes {
+        if let Some(source_set) = &outcome.source_set
+            && let Some(source_set_report) = report.source_sets.get_mut(source_set)
+        {
+            source_set_report.record(outcome);
+        }
         let cohort_name = match outcome.capture_checking_enabled {
             Some(true) => "enabled",
             Some(false) => "disabled",
@@ -1920,6 +2263,24 @@ fn print_summary(report: &Report) {
     if let Some(failures) = report.scala_oracle_failures {
         println!("  Scala oracle failures: {failures}");
     }
+    for (name, source_set) in &report.source_sets {
+        println!(
+            "  source set {name} {} @ {}: {} files ({} clean, {} recoverable, {} hard failures, {} diagnostics)",
+            source_set.source_version,
+            source_set.source_revision,
+            source_set.files_attempted,
+            source_set.files_parsed_without_diagnostics,
+            source_set.files_parsed_with_recoverable_diagnostics,
+            source_set.hard_parser_failures,
+            source_set.diagnostics,
+        );
+        if let Some(files) = source_set.scala_oracle_files {
+            println!("    Scala oracle files: {files}");
+        }
+        if let Some(failures) = source_set.scala_oracle_failures {
+            println!("    Scala oracle failures: {failures}");
+        }
+    }
     if !report.diagnostic_histogram.is_empty() {
         println!("  diagnostic histogram:");
         for (kind, count) in &report.diagnostic_histogram {
@@ -2056,6 +2417,7 @@ mod tests {
     fn test_report_metadata(collect_namer: bool) -> ReportMetadata<'static> {
         ReportMetadata {
             roots: &[],
+            source_sets: &[],
             source_version: None,
             source_revision: None,
             parser_revision: None,
@@ -2079,6 +2441,217 @@ mod tests {
             vec![root.join("nested/a.scala"), root.join("z.scala")]
         );
         fs::remove_dir_all(root).expect("remove temp corpus");
+    }
+
+    #[test]
+    fn discovers_shared_and_scala3_production_roots_only() {
+        let root = unique_temp_dir("production-roots");
+        let included = [
+            "core/shared/src/main/scala",
+            "core/src/main/scala-3",
+            "testkit/src/main/scala",
+        ];
+        let excluded = [
+            "core/src/main/scala-2.13",
+            "tests/src/main/scala",
+            "docs/src/main/scala",
+            "graalvm-example/src/main/scala",
+            "benchmarks/src/main/scala",
+            "scalafix/rules/src/main/scala",
+            "core/target/generated/src/main/scala",
+        ];
+        for relative in included.into_iter().chain(excluded) {
+            fs::create_dir_all(root.join(relative)).expect("create source root fixture");
+        }
+
+        let roots = discover_production_roots(&root).expect("discover production roots");
+        let relatives = roots
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&root)
+                    .expect("root is under fixture")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            relatives,
+            included.into_iter().map(PathBuf::from).collect::<Vec<_>>()
+        );
+
+        fs::remove_dir_all(root).expect("remove temp root");
+    }
+
+    #[test]
+    fn repeated_roots_do_not_duplicate_files_and_source_sets_are_disjoint() {
+        let root = unique_temp_dir("source-sets");
+        fs::create_dir_all(&root).expect("create temp corpus");
+        fs::write(root.join("one.scala"), "object One").expect("write source");
+
+        let roots = vec![root.clone(), root.clone()];
+        let files = discover_files(&roots).expect("discover files");
+        assert_eq!(files.len(), 1);
+
+        let source_set = SourceSetOptions {
+            name: "cats".to_owned(),
+            version: "2.13.0".to_owned(),
+            revision: "a".repeat(40),
+            repository: "https://github.com/typelevel/cats".to_owned(),
+            roots: vec![root.clone()],
+            oracle_files: None,
+            oracle_failures: None,
+        };
+        assert_eq!(
+            source_set_names_for_files(&files, std::slice::from_ref(&source_set))
+                .expect("assign source set"),
+            vec![Some("cats".to_owned())]
+        );
+        let overlapping = [
+            source_set.clone(),
+            SourceSetOptions {
+                name: "cats-effect".to_owned(),
+                ..source_set
+            },
+        ];
+        assert!(
+            source_set_names_for_files(&files, &overlapping)
+                .expect_err("overlapping source sets must be rejected")
+                .contains("multiple source sets")
+        );
+
+        fs::remove_dir_all(root).expect("remove temp corpus");
+    }
+
+    #[test]
+    fn source_set_cli_metadata_is_scoped_to_the_active_set() {
+        let root = unique_temp_dir("source-set-cli");
+        fs::create_dir_all(&root).expect("create temp root");
+        let options = parse_options(
+            [
+                "--source-version".to_owned(),
+                "3.9.0".to_owned(),
+                "--source-revision".to_owned(),
+                "scala-revision".to_owned(),
+                "--oracle-files".to_owned(),
+                "10".to_owned(),
+                "--source-set".to_owned(),
+                "cats@v2.13.0@cats-revision@https://github.com/typelevel/cats".to_owned(),
+                "--root".to_owned(),
+                root.to_string_lossy().into_owned(),
+                "--oracle-files".to_owned(),
+                "20".to_owned(),
+                "--oracle-failures".to_owned(),
+                "2".to_owned(),
+            ]
+            .into_iter(),
+        )
+        .expect("parse source set arguments");
+
+        assert_eq!(options.source_version.as_deref(), Some("3.9.0"));
+        assert_eq!(options.source_revision.as_deref(), Some("scala-revision"));
+        assert_eq!(options.oracle_files, Some(10));
+        assert_eq!(options.source_sets.len(), 1);
+        assert_eq!(options.source_sets[0].name, "cats");
+        assert_eq!(options.source_sets[0].version, "v2.13.0");
+        assert_eq!(options.source_sets[0].revision, "cats-revision");
+        assert_eq!(
+            options.source_sets[0].repository,
+            "https://github.com/typelevel/cats"
+        );
+        assert_eq!(options.source_sets[0].oracle_files, Some(20));
+        assert_eq!(options.source_sets[0].oracle_failures, Some(2));
+        assert_eq!(
+            options.source_sets[0].roots,
+            vec![fs::canonicalize(&root).unwrap()]
+        );
+
+        fs::remove_dir_all(root).expect("remove temp root");
+    }
+
+    #[test]
+    fn source_set_report_keeps_provenance_and_aggregates_diagnostics() {
+        let source_set = SourceSetOptions {
+            name: "cats".to_owned(),
+            version: "2.13.0".to_owned(),
+            revision: "a".repeat(40),
+            repository: "https://github.com/typelevel/cats".to_owned(),
+            roots: vec![PathBuf::from("/tmp/cats/core/src/main/scala")],
+            oracle_files: Some(2),
+            oracle_failures: Some(1),
+        };
+        let outcomes = [
+            FileOutcome {
+                path: "cats/core/src/main/scala/clean.scala".to_owned(),
+                source_set: Some("cats".to_owned()),
+                status: Status::Clean,
+                diagnostics: Vec::new(),
+                scanner_diagnostics: 0,
+                namer: None,
+                deferred_features: BTreeMap::new(),
+                capture_checking_enabled: None,
+                has_raw_caret_character: false,
+                has_caret_operator_token: false,
+                has_parser_capture_syntax: false,
+            },
+            FileOutcome {
+                path: "cats/core/src/main/scala/recovered.scala".to_owned(),
+                source_set: Some("cats".to_owned()),
+                status: Status::RecoverableDiagnostics,
+                diagnostics: vec![DiagnosticSummary {
+                    kind: "ExpectedType".to_owned(),
+                    message: "expected a type".to_owned(),
+                }],
+                scanner_diagnostics: 0,
+                namer: None,
+                deferred_features: BTreeMap::new(),
+                capture_checking_enabled: None,
+                has_raw_caret_character: false,
+                has_caret_operator_token: false,
+                has_parser_capture_syntax: false,
+            },
+            FileOutcome {
+                path: "cats/core/src/main/scala/hard.scala".to_owned(),
+                source_set: Some("cats".to_owned()),
+                status: Status::Panic,
+                diagnostics: vec![DiagnosticSummary {
+                    kind: "Panic".to_owned(),
+                    message: "parser worker panicked".to_owned(),
+                }],
+                scanner_diagnostics: 0,
+                namer: None,
+                deferred_features: BTreeMap::new(),
+                capture_checking_enabled: None,
+                has_raw_caret_character: false,
+                has_caret_operator_token: false,
+                has_parser_capture_syntax: false,
+            },
+        ];
+        let report = build_report(
+            &outcomes,
+            ReportMetadata {
+                roots: &source_set.roots,
+                source_sets: std::slice::from_ref(&source_set),
+                source_version: None,
+                source_revision: None,
+                parser_revision: None,
+                oracle_files: None,
+                oracle_failures: None,
+                collect_namer: false,
+            },
+        );
+
+        let set = &report.source_sets["cats"];
+        assert_eq!(set.source_version, "2.13.0");
+        assert_eq!(set.source_revision, "a".repeat(40));
+        assert_eq!(set.repository, "https://github.com/typelevel/cats");
+        assert_eq!(set.scala_oracle_files, Some(2));
+        assert_eq!(set.scala_oracle_failures, Some(1));
+        assert_eq!(set.files_attempted, 3);
+        assert_eq!(set.files_parsed_without_diagnostics, 1);
+        assert_eq!(set.files_parsed_with_recoverable_diagnostics, 1);
+        assert_eq!(set.hard_parser_failures, 1);
+        assert_eq!(set.diagnostics, 2);
+        assert_eq!(set.diagnostic_histogram["ExpectedType"], 1);
+        assert_eq!(set.diagnostic_histogram["Panic"], 1);
     }
 
     #[test]
@@ -2420,6 +2993,7 @@ mod tests {
         let outcomes = [
             FileOutcome {
                 path: "clean.scala".to_owned(),
+                source_set: None,
                 status: Status::Clean,
                 diagnostics: Vec::new(),
                 scanner_diagnostics: 0,
@@ -2434,6 +3008,7 @@ mod tests {
             },
             FileOutcome {
                 path: "recovered.scala".to_owned(),
+                source_set: None,
                 status: Status::RecoverableDiagnostics,
                 diagnostics: Vec::new(),
                 scanner_diagnostics: 0,
@@ -2448,6 +3023,7 @@ mod tests {
             },
             FileOutcome {
                 path: "failed.scala".to_owned(),
+                source_set: None,
                 status: Status::RecoverableDiagnostics,
                 diagnostics: Vec::new(),
                 scanner_diagnostics: 0,
@@ -2502,6 +3078,7 @@ mod tests {
         let outcomes = [
             FileOutcome {
                 path: "enabled.scala".to_owned(),
+                source_set: None,
                 status: Status::Clean,
                 diagnostics: Vec::new(),
                 scanner_diagnostics: 0,
@@ -2514,6 +3091,7 @@ mod tests {
             },
             FileOutcome {
                 path: "candidate.scala".to_owned(),
+                source_set: None,
                 status: Status::RecoverableDiagnostics,
                 diagnostics: vec![DiagnosticSummary {
                     kind: "ExpectedType".to_owned(),
@@ -2529,6 +3107,7 @@ mod tests {
             },
             FileOutcome {
                 path: "comment.scala".to_owned(),
+                source_set: None,
                 status: Status::Clean,
                 diagnostics: Vec::new(),
                 scanner_diagnostics: 0,
@@ -2613,6 +3192,7 @@ mod tests {
     fn parser_panic_is_counted_separately_from_process_failure() {
         let outcome = FileOutcome {
             path: "panic.scala".to_owned(),
+            source_set: None,
             status: Status::Panic,
             diagnostics: vec![DiagnosticSummary {
                 kind: "Panic".to_owned(),
@@ -2639,6 +3219,7 @@ mod tests {
             &[],
             ReportMetadata {
                 roots: &roots,
+                source_sets: &[],
                 source_version: Some("3.9.0".to_owned()),
                 source_revision: Some("revision".to_owned()),
                 parser_revision: Some("parser revision".to_owned()),
