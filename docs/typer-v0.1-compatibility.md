@@ -327,8 +327,11 @@ the same extension-prefix metadata accessor used for namer-owned methods. Local
 method completion reuses the preindexed receiver symbol, completes its declared
 type, and builds the extension signature from the receiver clause followed by
 the method's ordinary clauses. Inferred results are typed in the method scope,
-so the receiver is available to the body. Local extension statements and calls
-remain deferred.
+so the receiver is available to the body. During block lowering, a supported
+`ExtensionMethods` wrapper becomes one ordinary typed `DefDef` with the
+receiver as its first value-parameter clause. The source extension root and
+method definition map to the same typed node, and the receiver source tree
+maps to its typed parameter. Local extension calls remain deferred.
 
 For the tested subset, source Typer completion currently supports:
 

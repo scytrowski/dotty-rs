@@ -1274,6 +1274,12 @@ impl SourceTyper<'_> {
             }
             SymbolInfo::Error => return Err(TyperError::SymbolAlreadyErrored { symbol: method }),
         };
+        let is_extension = self
+            .store
+            .symbols
+            .get(method)
+            .flags
+            .contains(SymbolFlags::EXTENSION);
         let mut result = signature;
         if !definition.type_params.is_empty() {
             result = match self.store.types.try_get(result) {
@@ -1289,7 +1295,8 @@ impl SourceTyper<'_> {
                 }
             };
         }
-        for _ in &definition.value_param_clauses {
+        let extension_prefix_count = usize::from(is_extension);
+        for _ in 0..extension_prefix_count + definition.value_param_clauses.len() {
             result = match self.store.types.try_get(result) {
                 Some(Type::Method(method_type)) => method_type.result,
                 _ => {
@@ -1410,7 +1417,71 @@ impl SourceTyper<'_> {
             typed_type_params.push(typed_parameter);
         }
 
-        let mut typed_clauses = Vec::with_capacity(definition.value_param_clauses.len());
+        let mut typed_clauses =
+            Vec::with_capacity(definition.value_param_clauses.len() + extension_prefix_count);
+        if is_extension {
+            let receiver_tree = self
+                .extension_prefix_clauses(method)
+                .and_then(|clauses| {
+                    (clauses.len() == 1 && clauses[0].len() == 1).then_some(clauses[0][0])
+                })
+                .ok_or(TyperError::LocalBlockDeclarationDeferred {
+                    source: self.source,
+                    tree_index: tree.index(),
+                    kind: "extension methods",
+                })?;
+            let Some(receiver_node) = self.arena.try_get(receiver_tree).cloned() else {
+                return Err(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: receiver_tree.index(),
+                });
+            };
+            let TreeKind::ValDef(receiver) = receiver_node.kind else {
+                return Err(TyperError::LocalBlockDeclarationDeferred {
+                    source: self.source,
+                    tree_index: receiver_tree.index(),
+                    kind: "extension receiver",
+                });
+            };
+            let receiver_symbol = self
+                .local_methods
+                .extension_receiver_parameter_symbol(method, receiver_tree)
+                .ok_or(TyperError::MethodParameterSymbolMissing {
+                    method,
+                    parameter_tree_index: receiver_tree.index(),
+                })?;
+            let receiver_type = match *self.store.symbols.info(receiver_symbol) {
+                SymbolInfo::Complete(ty) => ty,
+                _ => {
+                    return Err(TyperError::MethodParameterSymbolMissing {
+                        method,
+                        parameter_tree_index: receiver_tree.index(),
+                    });
+                }
+            };
+            let typed_tpt =
+                self.reify_constructor_type_tree(receiver.tpt, receiver_type, new_mappings)?;
+            let typed_receiver = self.typed_arena.alloc(Tree {
+                kind: TreeKind::ValDef(ValDef {
+                    name: receiver.name,
+                    tpt: typed_tpt,
+                    rhs: None,
+                    metadata: (),
+                }),
+                position: receiver_node.position,
+                ty: receiver_type,
+            });
+            self.typed_index
+                .insert(self.source, receiver_tree, typed_receiver)
+                .map_err(|error| TyperError::ConflictingTypedExpression {
+                    source: error.source,
+                    tree_index: error.untyped.index(),
+                    existing: error.existing.index(),
+                    attempted: error.attempted.index(),
+                })?;
+            new_mappings.push((self.source, receiver_tree));
+            typed_clauses.push(vec![typed_receiver]);
+        }
         for clause in &definition.value_param_clauses {
             let mut typed_parameters = Vec::with_capacity(clause.len());
             for parameter_tree in clause {
@@ -1527,12 +1598,28 @@ impl SourceTyper<'_> {
             prefix: self.definitions.no_prefix,
             target: TermRefTarget::Symbol(method),
         });
+        let source_param_clause_order =
+            definition.source_param_clause_order.as_ref().map(|order| {
+                let mut lowered = Vec::with_capacity(order.len() + extension_prefix_count);
+                if is_extension {
+                    lowered.push(DefParamClauseOrder::ValueParams(0));
+                }
+                lowered.extend(order.iter().map(|entry| match entry {
+                    DefParamClauseOrder::TypeParams(range) => {
+                        DefParamClauseOrder::TypeParams(range.clone())
+                    }
+                    DefParamClauseOrder::ValueParams(index) => {
+                        DefParamClauseOrder::ValueParams(index + extension_prefix_count)
+                    }
+                }));
+                lowered
+            });
         let typed = self.typed_arena.alloc(Tree {
             kind: TreeKind::DefDef(DefDef {
                 name: definition.name,
                 type_params: typed_type_params,
                 value_param_clauses: typed_clauses,
-                source_param_clause_order: definition.source_param_clause_order.clone(),
+                source_param_clause_order,
                 tpt: typed_result,
                 rhs: Some(typed_rhs),
                 metadata: (),
@@ -1660,6 +1747,71 @@ impl SourceTyper<'_> {
             return Ok(TypedStatExpansion::one(typed));
         }
 
+        if let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) = &source_stat.kind
+        {
+            if extension.methods.len() != 1
+                || extension.param_clauses.len() != 1
+                || extension.param_clauses[0].len() != 1
+            {
+                return Err(TyperError::LocalBlockDeclarationDeferred {
+                    source: self.source,
+                    tree_index: stat.index(),
+                    kind: "extension methods",
+                });
+            }
+            let method_tree = extension.methods[0];
+            let Some(method_node) = self.arena.try_get(method_tree).cloned() else {
+                return Err(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: method_tree.index(),
+                });
+            };
+            let TreeKind::DefDef(definition) = method_node.kind else {
+                return Err(TyperError::LocalBlockDeclarationDeferred {
+                    source: self.source,
+                    tree_index: stat.index(),
+                    kind: "extension methods",
+                });
+            };
+            let Some(method) = self.local_methods.symbol_at(self.source, method_tree) else {
+                return Err(TyperError::LocalBlockDeclarationDeferred {
+                    source: self.source,
+                    tree_index: stat.index(),
+                    kind: "extension methods",
+                });
+            };
+            if !self
+                .store
+                .symbols
+                .get(method)
+                .flags
+                .contains(SymbolFlags::EXTENSION)
+            {
+                return Err(TyperError::LocalBlockDeclarationDeferred {
+                    source: self.source,
+                    tree_index: stat.index(),
+                    kind: "extension methods",
+                });
+            }
+            let typed = self.type_local_method_definition(
+                method_tree,
+                &definition,
+                method_node.position,
+                info_journal,
+                new_mappings,
+            )?;
+            self.typed_index
+                .insert(self.source, stat, typed)
+                .map_err(|error| TyperError::ConflictingTypedExpression {
+                    source: error.source,
+                    tree_index: error.untyped.index(),
+                    existing: error.existing.index(),
+                    attempted: error.attempted.index(),
+                })?;
+            new_mappings.push((self.source, stat));
+            return Ok(TypedStatExpansion::one(typed));
+        }
+
         if let Some(kind) = local_block_declaration_kind(&source_stat.kind) {
             if let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &source_stat.kind {
                 return self.type_local_patdef(
@@ -1723,9 +1875,12 @@ impl SourceTyper<'_> {
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         let contains_local_method = block.stats.iter().any(|stat| {
-            self.arena
-                .try_get(*stat)
-                .is_some_and(|node| matches!(node.kind, TreeKind::DefDef(_)))
+            self.arena.try_get(*stat).is_some_and(|node| {
+                matches!(
+                    node.kind,
+                    TreeKind::DefDef(_) | TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(_))
+                )
+            })
         });
         let block_scope = self
             .store
