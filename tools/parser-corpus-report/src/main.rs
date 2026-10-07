@@ -595,7 +595,10 @@ fn discover_files(roots: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
 
 fn discover_production_roots(project_root: &Path) -> io::Result<Vec<PathBuf>> {
     fn walk(project_root: &Path, path: &Path, roots: &mut Vec<PathBuf>) -> io::Result<()> {
-        let metadata = fs::metadata(path)?;
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() {
+            return Ok(());
+        }
         if !metadata.is_dir() {
             return Ok(());
         }
@@ -685,7 +688,10 @@ fn source_set_names_for_files(
 }
 
 fn collect_scala_files(path: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
-    let metadata = fs::metadata(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
     if metadata.is_file() {
         if path
             .extension()
@@ -2512,6 +2518,39 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("remove temp root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_discovery_does_not_follow_symlinks_outside_the_checkout() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_temp_dir("source-symlink");
+        let external = unique_temp_dir("source-symlink-external");
+        fs::create_dir_all(root.join("core/src/main/scala")).expect("create project root");
+        fs::create_dir_all(external.join("escaped/src/main/scala")).expect("create external root");
+        fs::write(
+            external.join("escaped/src/main/scala/Outside.scala"),
+            "object Outside",
+        )
+        .expect("write external source");
+        symlink(external.join("escaped"), root.join("linked-module")).expect("create symlink");
+        symlink(
+            external.join("escaped/src/main/scala/Outside.scala"),
+            root.join("core/src/main/scala/Outside.scala"),
+        )
+        .expect("create source symlink");
+
+        assert_eq!(
+            discover_production_roots(&root).expect("discover production roots"),
+            vec![fs::canonicalize(root.join("core/src/main/scala")).unwrap()]
+        );
+        let files =
+            discover_files(&[root.join("core/src/main/scala")]).expect("discover source files");
+        assert!(files.is_empty());
+
+        fs::remove_dir_all(root).expect("remove project root");
+        fs::remove_dir_all(external).expect("remove external root");
     }
 
     #[test]

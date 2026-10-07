@@ -109,7 +109,7 @@ for name, root in (("scala3", scala3_root), ("cats", cats_root), ("cats-effect",
     for source_root in source_roots:
         path = pathlib.Path(source_root)
         for source in path.rglob("*.scala"):
-            if not source.is_file():
+            if source.is_symlink() or not source.is_file():
                 continue
             canonical = source.resolve()
             if not canonical.is_relative_to(root.resolve()):
