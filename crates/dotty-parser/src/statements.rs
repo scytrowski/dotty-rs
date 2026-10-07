@@ -251,6 +251,7 @@ where
                 if !self.consume_end_marker(last) {
                     return self.finish_statement_sequence(statements);
                 }
+                self.observe_sequence_outdent_after_end_marker(boundary);
                 self.consume_sequence_separators(boundary);
                 continue;
             }
@@ -346,6 +347,7 @@ where
                 if !self.consume_end_marker(last) {
                     return self.finish_statement_sequence(statements);
                 }
+                self.observe_sequence_outdent_after_end_marker(boundary);
                 self.consume_sequence_separators(boundary);
             }
         }
@@ -370,6 +372,22 @@ where
         }
 
         self.current().kind == TokenKind::EndMarker && self.consume_end_marker(last)
+    }
+
+    fn observe_sequence_outdent_after_end_marker(&mut self, boundary: StatementSequenceBoundary) {
+        // Consuming an end marker advances past it before the scanner has
+        // seen a dedent to the enclosing sequence; close any active feedback
+        // region at this new token boundary before resuming the sequence.
+        match boundary {
+            StatementSequenceBoundary::FeedbackRegionBlock { indent_offset, .. } => {
+                self.observe_outdented_region(indent_offset);
+            }
+            StatementSequenceBoundary::LayoutRegionBlock { indent_offset, .. } => {
+                self.observe_outdented_layout_region(indent_offset);
+            }
+            StatementSequenceBoundary::Block(TokenKind::Outdent) => self.observe_outdented(),
+            StatementSequenceBoundary::Block(_) | StatementSequenceBoundary::CompilationUnit => {}
+        }
     }
 
     /// Parses a compilation-unit or package statement sequence without the
