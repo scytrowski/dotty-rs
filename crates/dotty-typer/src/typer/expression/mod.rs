@@ -8,6 +8,7 @@ use dotty_core::ast::*;
 use dotty_core::types::*;
 use dotty_core::*;
 
+mod annotated;
 mod assignment;
 pub(super) mod blocks;
 mod control_flow;
