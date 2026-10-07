@@ -1,5 +1,7 @@
-use dotty_core::ast::{Annotated, Assign, Function, TypedExpr, UntypedNode};
-use dotty_core::{Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
+use dotty_core::ast::{Annotated, Assign, Function, Ident, TypedExpr, UntypedNode};
+use dotty_core::{
+    Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped,
+};
 
 use crate::{Location, ParseKind, Parser};
 
@@ -378,6 +380,34 @@ where
             .map(|position| position.span().range().start())
             .unwrap_or_else(|| self.mark().start());
 
+        if self.current_starts_legacy_wildcard_splice() {
+            let marker_start = self.mark();
+            let valid_argument_splice =
+                self.context.location == Location::InArgs && self.is_final_legacy_vararg_splice();
+            self.advance(); // `_`
+            self.advance(); // `*`
+
+            if !valid_argument_splice {
+                self.report(
+                    crate::ParseDiagnosticKind::UnexpectedToken,
+                    "legacy `_*` is only allowed as a final application argument",
+                );
+            }
+
+            let wildcard_star = TypeName::new(self.names.intern("_*"));
+            let tpt = self.alloc_from(
+                marker_start,
+                TreeKind::Ident(Ident {
+                    name: *wildcard_star.as_name(),
+                    backquoted: false,
+                }),
+            );
+            return self.alloc_from(
+                crate::Mark { start },
+                TreeKind::Typed(TypedExpr { expr, tpt }),
+            );
+        }
+
         if self.current().kind == TokenKind::Operator && self.current_text_is("@") {
             let mut tree = expr;
             while self.current().kind == TokenKind::Operator && self.current_text_is("@") {
@@ -399,6 +429,25 @@ where
             crate::Mark { start },
             TreeKind::Typed(TypedExpr { expr, tpt }),
         )
+    }
+
+    fn is_final_legacy_vararg_splice(&mut self) -> bool {
+        match self.cursor.lookahead(2).kind {
+            TokenKind::Punctuation(Punctuation::RightParen) => true,
+            TokenKind::Punctuation(Punctuation::Comma) => matches!(
+                self.cursor.lookahead(3).kind,
+                TokenKind::Punctuation(Punctuation::RightParen) | TokenKind::Eof
+            ),
+            _ => false,
+        }
+    }
+
+    fn current_starts_legacy_wildcard_splice(&mut self) -> bool {
+        if self.current().kind != TokenKind::Identifier || !self.current_text_is("_") {
+            return false;
+        }
+        let star = self.cursor.lookahead(1).clone();
+        star.kind == TokenKind::Operator && self.token_text(&star).ok() == Some("*")
     }
 
     fn update_active_placeholder_type(&mut self, expr: TreeId<Untyped>, tpt: TreeId<Untyped>) {
