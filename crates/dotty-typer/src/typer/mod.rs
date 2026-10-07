@@ -11945,6 +11945,168 @@ mod tests {
     }
 
     #[test]
+    fn local_extension_call_lowers_receiver_as_first_argument() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { extension (receiver: C) { def choose(argument: Int): Int = 1 }; this.choose(2) } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let extension_tree = block.stats[0];
+        let call_tree = block.expr;
+        let TreeKind::Apply(call) = &parsed.ast.get(call_tree).kind else {
+            panic!("block result should be an application");
+        };
+        let TreeKind::Select(selection) = &parsed.ast.get(call.function).kind else {
+            panic!("extension call should select its method from the receiver");
+        };
+        let method_tree = match &parsed.ast.get(extension_tree).kind {
+            TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => {
+                extension.methods[0]
+            }
+            _ => panic!("first block statement should be an extension group"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        let typed_block_id = typer.type_expression(block_tree, context).unwrap();
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_block_id).kind else {
+            panic!("typed outer body should remain a block");
+        };
+        let typed_call = typed_block.expr;
+        let TreeKind::Apply(typed_apply) = &typer.typed_ast().get(typed_call).kind else {
+            panic!("extension call should lower to Apply");
+        };
+        assert_eq!(typed_apply.args.len(), 1);
+        let TreeKind::Apply(receiver_apply) = &typer.typed_ast().get(typed_apply.function).kind
+        else {
+            panic!("extension receiver should be applied as the first method clause");
+        };
+        assert_eq!(receiver_apply.args.len(), 1);
+        let TreeKind::Ident(typed_function) = &typer.typed_ast().get(receiver_apply.function).kind
+        else {
+            panic!("local extension call should target its local method identifier");
+        };
+        assert_eq!(typed_function.name, selection.name);
+        assert_eq!(
+            typer.typed_ast().get(receiver_apply.args[0]).position,
+            parsed.ast.get(selection.qualifier).position
+        );
+        assert_eq!(
+            typer.typed_ast().get(typed_apply.args[0]).position,
+            parsed.ast.get(call.args[0]).position
+        );
+        assert!(typer.local_method_symbol_at(source, method_tree).is_some());
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(receiver_apply.function).ty),
+            Type::Method(_)
+        ));
+        assert_eq!(
+            typer.type_expression(block_tree, context).unwrap(),
+            typed_block_id
+        );
+    }
+
+    #[test]
+    fn applicable_ordinary_member_takes_precedence_over_local_extension() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def choose(argument: Int): Int = argument; def outer: Int = { extension (receiver: C) { def choose(argument: Int): Int = 1 }; this.choose(2) } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        let typed_block = typer.type_expression(block_tree, context).unwrap();
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed_block).kind else {
+            panic!("typed method body should remain a block");
+        };
+        let TreeKind::Apply(application) = &typer.typed_ast().get(block.expr).kind else {
+            panic!("ordinary method call should remain an application");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(application.function).kind,
+            TreeKind::Select(_)
+        ));
+    }
+
+    #[test]
+    fn local_extension_is_used_when_ordinary_member_is_inapplicable() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def choose(argument: Boolean): Int = 0; def outer: Int = { extension (receiver: C) { def choose(argument: Int): Int = 1 }; this.choose(2) } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        let typed_block = typer.type_expression(block_tree, context).unwrap();
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed_block).kind else {
+            panic!("typed method body should remain a block");
+        };
+        let TreeKind::Apply(application) = &typer.typed_ast().get(block.expr).kind else {
+            panic!("extension call should remain an application");
+        };
+        let TreeKind::Apply(receiver_application) =
+            &typer.typed_ast().get(application.function).kind
+        else {
+            panic!("extension receiver should be supplied in its own method clause");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(receiver_application.function).kind,
+            TreeKind::Ident(_)
+        ));
+        assert_eq!(application.args.len(), 1);
+        assert_eq!(receiver_application.args.len(), 1);
+    }
+
+    #[test]
+    fn inapplicable_local_extension_reports_member_not_found() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { extension (receiver: C) { def choose(argument: Int): Int = 1 }; this.choose(true) } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        assert!(matches!(
+            typer.type_expression(block_tree, context),
+            Err(TyperError::MemberNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "choose"
+        ));
+    }
+
+    #[test]
     fn same_name_local_methods_share_an_overload_bucket_in_source_order() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def outer: Int = { def same(value: Int): Int = value; def same(value: Boolean): Int = 1; 0 } }",

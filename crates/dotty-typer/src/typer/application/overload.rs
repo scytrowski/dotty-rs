@@ -150,6 +150,7 @@ impl SourceTyper<'_> {
             typed: function,
             callable: winner.callable,
             arguments: arguments.into(),
+            argument_trees: None,
         })
     }
 
@@ -226,7 +227,20 @@ impl SourceTyper<'_> {
                 let members = self
                     .lookup_overload_members_journaled(receiver_view, selection.name, info_journal)
                     .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
-                if members.len() <= 1 {
+                if members.is_empty() {
+                    if let Some(resolved) = self.resolve_local_extension_application(
+                        selection,
+                        qualifier,
+                        argument_trees,
+                        application_kind,
+                        context,
+                        function_tree,
+                        application_tree_index,
+                        info_journal,
+                        new_mappings,
+                    )? {
+                        return Ok(Some(resolved));
+                    }
                     return Ok(None);
                 }
                 if members
@@ -306,13 +320,38 @@ impl SourceTyper<'_> {
 
         self.remove_overridden_overload_candidates(&mut candidates, application_tree_index)?;
 
-        let winner = self.choose_method_overload_candidate(
+        let winner = match self.choose_method_overload_candidate(
             &mut candidates,
             &arguments,
             application_tree_index,
             application_kind,
             info_journal,
-        )?;
+        ) {
+            Ok(winner) => winner,
+            Err(error @ TyperError::OverloadApplicationNoApplicable { .. }) => {
+                if let ApplicationFunctionShape::Select {
+                    selection,
+                    qualifier,
+                    ..
+                } = function_shape
+                    && let Some(resolved) = self.resolve_local_extension_application(
+                        selection,
+                        qualifier,
+                        argument_trees,
+                        application_kind,
+                        context,
+                        function_tree,
+                        application_tree_index,
+                        info_journal,
+                        new_mappings,
+                    )?
+                {
+                    return Ok(Some(resolved));
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let function_type = match function_shape {
             ApplicationFunctionShape::Ident(ident) => {
                 let ty = self.expression_type_of_symbol(
@@ -364,6 +403,162 @@ impl SourceTyper<'_> {
             typed: function_type,
             callable: winner.callable,
             arguments,
+            argument_trees: None,
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_local_extension_application(
+        &mut self,
+        selection: dotty_core::ast::Select<Untyped>,
+        qualifier: TreeId<Typed>,
+        argument_trees: &[TreeId<Untyped>],
+        application_kind: ApplyKind,
+        context: ExpressionContext,
+        function_tree: TreeId<Untyped>,
+        application_tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<Option<ResolvedApplicationFunction>, TyperError> {
+        let names = self.expression_term_candidates(
+            selection.name,
+            context,
+            function_tree.index(),
+            self.arena.get(function_tree).position,
+        )?;
+        let mut extensions = names.into_iter().filter(|symbol| {
+            self.local_methods.contains_symbol(*symbol)
+                && self
+                    .store
+                    .symbols
+                    .get(*symbol)
+                    .flags
+                    .contains(SymbolFlags::EXTENSION)
+        });
+        let Some(symbol) = extensions.next() else {
+            return Ok(None);
+        };
+        if extensions.next().is_some() {
+            return Err(TyperError::OverloadedSelectionDeferred {
+                source: self.source,
+                tree_index: application_tree_index,
+                name: selection.name,
+            });
+        }
+        let Some(prefix_clauses) = self.local_methods.extension_prefix_clauses(symbol) else {
+            return Ok(None);
+        };
+        if prefix_clauses.len() != 1 || prefix_clauses[0].len() != 1 {
+            return Ok(None);
+        }
+        if application_kind != ApplyKind::Regular {
+            return Ok(None);
+        }
+        let signature = self.completed_expression_symbol_info(symbol, info_journal)?;
+        let Some(Type::Method(receiver_clause)) = self.store.types.try_get(signature).cloned()
+        else {
+            return Ok(None);
+        };
+        if receiver_clause.kind != MethodKind::Plain || receiver_clause.params.len() != 1 {
+            return Ok(None);
+        }
+        let Some(Type::Method(method)) = self.store.types.try_get(receiver_clause.result).cloned()
+        else {
+            return Ok(None);
+        };
+        if !supported_override_signature(&method, self.store)
+            || self.type_contains_param_ref(method.result, receiver_clause.result)?
+            || matches!(
+                self.store.types.try_get(method.result),
+                Some(Type::Method(_) | Type::Poly(_))
+            )
+            || argument_trees.len() != method.params.len()
+        {
+            return Ok(None);
+        }
+        let receiver_parameter = receiver_clause.params[0];
+        let receiver_own_type = self.typed_arena.get(qualifier).ty;
+        let receiver_widened_type =
+            self.widen_expression_type_journaled(receiver_own_type, info_journal, 0)?;
+        match self.conforms(receiver_widened_type, receiver_parameter.ty) {
+            Ok(true) => {}
+            Ok(false) => return Ok(None),
+            Err(error) => {
+                return Err(TyperError::ApplicationArgumentConformanceUnsupported {
+                    source: self.source,
+                    tree_index: application_tree_index,
+                    argument_index: 0,
+                    actual: receiver_widened_type,
+                    expected: receiver_parameter.ty,
+                    error: Box::new(error),
+                });
+            }
+        }
+        let receiver = TypedArgument {
+            typed: qualifier,
+            own_type: receiver_own_type,
+            widened_type: receiver_widened_type,
+        };
+        let mut arguments = Vec::with_capacity(argument_trees.len());
+        for argument_tree in argument_trees {
+            let typed = self.type_value_expression_inner(
+                *argument_tree,
+                context,
+                info_journal,
+                new_mappings,
+            )?;
+            let own_type = self.typed_arena.get(typed).ty;
+            let widened_type = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+            arguments.push(TypedArgument {
+                typed,
+                own_type,
+                widened_type,
+            });
+        }
+        for (index, argument) in arguments.iter().enumerate() {
+            match self.conforms(argument.widened_type, method.params[index].ty) {
+                Ok(true) => {}
+                Ok(false) => return Ok(None),
+                Err(error) => {
+                    return Err(TyperError::ApplicationArgumentConformanceUnsupported {
+                        source: self.source,
+                        tree_index: application_tree_index,
+                        argument_index: index,
+                        actual: argument.widened_type,
+                        expected: method.params[index].ty,
+                        error: Box::new(error),
+                    });
+                }
+            }
+        }
+        let typed_ident = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .ident_with_backquoted(
+                selection.name,
+                selection.backquoted,
+                signature,
+                self.arena.get(function_tree).position,
+            );
+        let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
+            typed_ident,
+            vec![receiver.typed],
+            ApplyKind::Regular,
+            receiver_clause.result,
+            self.arena.get(function_tree).position,
+        );
+        self.typed_index
+            .insert(self.source, function_tree, typed)
+            .map_err(|error| TyperError::ConflictingTypedExpression {
+                source: error.source,
+                tree_index: error.untyped.index(),
+                existing: error.existing.index(),
+                attempted: error.attempted.index(),
+            })?;
+        new_mappings.push((self.source, function_tree));
+        Ok(Some(ResolvedApplicationFunction {
+            typed,
+            callable: receiver_clause.result,
+            arguments,
+            argument_trees: None,
         }))
     }
 
