@@ -306,7 +306,8 @@ where
         };
 
         let type_start = self.last_real_token_end;
-        let has_explicit_type = is_definition_colon(self);
+        let has_explicit_type =
+            is_definition_colon(self) || self.consume_newlines_before_value_type_ascription();
         let tpt = if has_explicit_type {
             self.advance();
             self.with_location(location, |parser| {
@@ -447,6 +448,24 @@ where
             self.advance();
         }
         ParsedStatement::Expression(self.error_expr(position))
+    }
+
+    fn consume_newlines_before_value_type_ascription(&mut self) -> bool {
+        let mut newline_count = 0;
+        while matches!(
+            self.cursor.lookahead(newline_count).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            newline_count += 1;
+        }
+        if newline_count == 0 || !is_definition_colon_at(self, newline_count) {
+            return false;
+        }
+
+        for _ in 0..newline_count {
+            self.advance();
+        }
+        true
     }
 }
 
@@ -869,6 +888,43 @@ mod tests {
         );
         assert!(definition.rhs.is_none());
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn accepts_a_newline_before_a_value_type_ascription() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val x\n: Value = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Newline, 5, 6),
+                token(TokenKind::ColonFollow, 6, 7),
+                token(TokenKind::Identifier, 8, 13),
+                token(TokenKind::Operator, 14, 15),
+                token(TokenKind::IntegerLiteral, 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a value definition");
+        };
+        let TreeKind::ValDef(value) = &parser.ast().get(id).kind else {
+            panic!("expected ValDef");
+        };
+        assert!(matches!(
+            parser.ast().get(value.tpt).kind,
+            TreeKind::Ident(ident) if ident.name.is_type()
+        ));
+        assert!(matches!(
+            parser.ast().get(value.rhs.unwrap()).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
