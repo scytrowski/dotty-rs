@@ -74,9 +74,11 @@ if ! sbt --server --error "${run_command}" >"${sbt_output}" 2>&1; then
 fi
 
 if [[ -n "${batch_manifest}" ]]; then
-  json=$(grep '^{' "${sbt_output}" || true)
+  # SBT can emit JSON-looking lines of its own. Only the explicit batch marker
+  # identifies records written by the parser oracle.
+  json=$(grep -a '^__DOTTY_PARSER_ORACLE_RECORD__' "${sbt_output}" | sed 's/^__DOTTY_PARSER_ORACLE_RECORD__//' || true)
 else
-  json=$(grep '^{' "${sbt_output}" | tail -n 1 || true)
+  json=$(grep -a '^{"kind":' "${sbt_output}" | tail -n 1 || true)
 fi
 if [[ -z "${json}" ]]; then
   cat "${sbt_output}" >&2

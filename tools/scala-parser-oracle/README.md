@@ -20,6 +20,10 @@ The batch manifest contains one tab-separated `mode` and absolute source path
 per line. `compare.sh` uses this mode automatically: Scala parses the whole
 corpus in one JVM, while the Rust dump tool is built and run once. This avoids
 restarting sbt, Scala, Cargo, and Python for every fixture.
+The wrapper extracts only explicitly marked oracle records, not JSON-looking
+lines from SBT diagnostics. Its JSONL consumer splits on the physical `\n`
+record delimiter, so Unicode line separators inside source-derived strings do
+not create phantom records.
 Fixtures named `capture-checking-*.scala` in `fixtures/compilation/` use the
 `compilation-capture` mode, which enables Scala 3.9's capture-checking language
 setting for the reference parser and the matching `ParserFeatures` policy for
