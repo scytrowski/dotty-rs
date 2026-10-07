@@ -1617,6 +1617,34 @@ fn local_extension_audit_splits_group_shape_and_receiver_type_failures() {
 }
 
 #[test]
+fn local_extension_audit_separates_nonapplicable_and_ambiguous_calls() {
+    let nonapplicable = audit_source(
+        "class Audit { def outer: Int = { extension (receiver: Audit) { def choose(argument: Int): Int = argument }; this.choose(false); def marker: Int = 1; 0 } }",
+        "NonapplicableExtension.scala",
+    );
+    let failure = nonapplicable
+        .failures
+        .get("LocalExtensionNotApplicable")
+        .expect("inapplicable local extensions should be classified separately");
+    assert_eq!(failure.count, 1);
+    assert_eq!(
+        failure.files,
+        BTreeSet::from(["NonapplicableExtension.scala".to_owned()])
+    );
+
+    let ambiguous = audit_source(
+        "class Audit { def outer: Int = { extension (left: Audit) { def choose(argument: Int): Int = 1 }; extension (right: Audit) { def choose(argument: Int): Int = 2 }; this.choose(1); def marker: Int = 1; 0 } }",
+        "AmbiguousExtension.scala",
+    );
+    assert!(
+        ambiguous
+            .failures
+            .contains_key("LocalExtensionAmbiguityDeferred"),
+        "{ambiguous:?}"
+    );
+}
+
+#[test]
 fn local_expression_audit_classifies_missing_names_as_resolution_failures() {
     let audit = audit_source(
         "object Audit { def outer: Int = { def local: Missing = 1; local } }",
@@ -3639,6 +3667,27 @@ fn classify_typer_error(
                 family: FailureFamily::ResolutionClasspathEnvironment,
             }
         }
+        TyperError::MemberNotFound {
+            tree_index, name, ..
+        } if has_lexical_extension_candidate(arena, *tree_index, *name) => FailureClassification {
+            bucket: "LocalExtensionNotApplicable".to_owned(),
+            family: FailureFamily::LocalDeclarationDeferral,
+        },
+        TyperError::OverloadedSelectionDeferred {
+            tree_index, name, ..
+        } if has_lexical_extension_candidate(arena, *tree_index, *name) => FailureClassification {
+            bucket: "LocalExtensionAmbiguityDeferred".to_owned(),
+            family: FailureFamily::LocalDeclarationDeferral,
+        },
+        TyperError::ApplicationArgumentConformanceUnsupported { tree_index, .. }
+            if selected_name(arena, *tree_index)
+                .is_some_and(|name| has_lexical_extension_candidate(arena, *tree_index, name)) =>
+        {
+            FailureClassification {
+                bucket: "LocalExtensionConformanceUnsupported".to_owned(),
+                family: FailureFamily::TypeRelationInferenceCompletion,
+            }
+        }
         TyperError::UnsupportedExpression { tree_index, .. } => {
             let node = arena
                 .iter()
@@ -3724,6 +3773,98 @@ fn is_extension_receiver_tree(arena: &dotty_core::AstArena<Untyped>, tree_index:
                 )
         })
     })
+}
+
+fn selected_name(
+    arena: &dotty_core::AstArena<Untyped>,
+    tree_index: u32,
+) -> Option<dotty_core::Name> {
+    let tree = arena
+        .iter()
+        .find_map(|(tree, _)| (tree.index() == tree_index).then_some(tree))?;
+    let function = match &arena.get(tree).kind {
+        TreeKind::Apply(application) => application.function,
+        TreeKind::Select(_) => tree,
+        _ => return None,
+    };
+    match &arena.try_get(function)?.kind {
+        TreeKind::Select(selection) => Some(selection.name),
+        _ => None,
+    }
+}
+
+fn has_lexical_extension_candidate(
+    arena: &dotty_core::AstArena<Untyped>,
+    tree_index: u32,
+    name: dotty_core::Name,
+) -> bool {
+    let Some(selection_tree) = arena
+        .iter()
+        .find_map(|(tree, _)| (tree.index() == tree_index).then_some(tree))
+    else {
+        return false;
+    };
+    let selection_tree = match &arena.get(selection_tree).kind {
+        TreeKind::Apply(application) => application.function,
+        TreeKind::Select(_) => selection_tree,
+        _ => return false,
+    };
+    let Some(selection_node) = arena.try_get(selection_tree) else {
+        return false;
+    };
+    let TreeKind::Select(selection) = &selection_node.kind else {
+        return false;
+    };
+    if selection.name != name {
+        return false;
+    }
+    let Some(selection_range) = selection_node
+        .position
+        .map(|position| position.span().range())
+    else {
+        return false;
+    };
+
+    let mut containing_blocks = arena
+        .iter()
+        .filter_map(|(_, node)| {
+            let TreeKind::Block(block) = &node.kind else {
+                return None;
+            };
+            let range = node.position?.span().range();
+            (range.start() <= selection_range.start() && selection_range.end() <= range.end())
+                .then(|| (range.end() - range.start(), block.stats.clone()))
+        })
+        .collect::<Vec<_>>();
+    containing_blocks.sort_by_key(|(length, _)| *length);
+
+    for (_, statements) in containing_blocks {
+        let mut has_extension = false;
+        let mut has_ordinary_method = false;
+        for statement in statements {
+            match arena.try_get(statement).map(|node| &node.kind) {
+                Some(TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension))) => {
+                    has_extension |= extension.methods.iter().any(|method| {
+                        matches!(
+                            arena.try_get(*method).map(|node| &node.kind),
+                            Some(TreeKind::DefDef(definition)) if *definition.name.as_name() == name
+                        )
+                    });
+                }
+                Some(TreeKind::DefDef(definition)) => {
+                    has_ordinary_method |= *definition.name.as_name() == name;
+                }
+                _ => {}
+            }
+        }
+        if has_extension {
+            return true;
+        }
+        if has_ordinary_method {
+            return false;
+        }
+    }
+    false
 }
 
 fn source_operator_spellings(
