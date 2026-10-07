@@ -114,13 +114,26 @@ where
             TokenKind::Keyword(dotty_core::HardKeyword::Super) => self.parse_super(mark, None),
             TokenKind::Keyword(dotty_core::HardKeyword::New) => self.parse_new(mark),
             TokenKind::Keyword(dotty_core::HardKeyword::Macro) => {
-                self.advance();
+                // Consume nested macro prefixes iteratively: source is untrusted,
+                // and a long `macro macro ...` chain must not consume Rust stack.
+                let mut macro_count = 0usize;
+                while self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Macro) {
+                    let checkpoint = self.cursor.checkpoint();
+                    self.advance();
+                    if !self.cursor.progressed_since(checkpoint) {
+                        return self.unexpected_expression();
+                    }
+                    macro_count += 1;
+                }
                 let body_mark = self.mark();
-                let expr = self.simple_expr();
-                self.alloc_from(
-                    body_mark,
-                    TreeKind::PhaseSpecific(UntypedNode::MacroTree(MacroTree { expr })),
-                )
+                let mut expr = self.simple_expr();
+                for _ in 0..macro_count {
+                    expr = self.alloc_from(
+                        body_mark,
+                        TreeKind::PhaseSpecific(UntypedNode::MacroTree(MacroTree { expr })),
+                    );
+                }
+                expr
             }
             TokenKind::Quote => self.parse_quote(mark),
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_parens_or_tuple(mark),
