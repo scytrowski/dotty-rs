@@ -1016,6 +1016,55 @@ mod tests {
     }
 
     #[test]
+    fn leaves_a_declaration_newline_unconsumed_without_a_following_colon() {
+        let mut names = NameInterner::new();
+        let result = parser_for(
+            "val x\nval y = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Newline, 5, 6),
+                token(TokenKind::Keyword(HardKeyword::Val), 6, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Operator, 12, 13),
+                token(TokenKind::IntegerLiteral, 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        )
+        .compilation_unit();
+
+        let TreeKind::Block(block) = &result.ast.get(result.root).kind else {
+            panic!("expected compilation-unit block");
+        };
+        assert_eq!(block.stats.len(), 2);
+        assert!(matches!(
+            result.ast.get(block.stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        let TreeKind::ValDef(second) = &result.ast.get(block.stats[1]).kind else {
+            panic!("second declaration should remain a ValDef");
+        };
+        assert!(second.rhs.is_some());
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
+        assert_eq!(result.diagnostics[0].span(), TextRange::new(5, 6).unwrap());
+        assert_eq!(
+            result
+                .ast
+                .get(block.stats[0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(0, 5).unwrap()
+        );
+    }
+
+    #[test]
     fn parses_a_method_result_type_colon_on_the_following_line() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
