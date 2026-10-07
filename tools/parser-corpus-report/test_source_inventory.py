@@ -5,7 +5,7 @@ import unittest
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from source_inventory import tracked_scala_sources
+from source_inventory import kyo_scala3_production_roots, tracked_scala_sources
 
 
 class TrackedScalaSourcesTests(unittest.TestCase):
@@ -77,6 +77,20 @@ class TrackedScalaSourcesTests(unittest.TestCase):
         self.assertEqual(
             tracked_scala_sources(self.repository, [self.source_root]), [self.source.resolve()]
         )
+
+    def test_kyo_plugin_exclusions_work_when_checkout_path_is_a_symlink(self):
+        production = self.repository / "kyo-core" / "shared" / "src" / "main" / "scala"
+        scala_2_plugin = self.repository / "kyo-test" / "sbt" / "src" / "main" / "scala"
+        production.mkdir(parents=True)
+        scala_2_plugin.mkdir(parents=True)
+        checkout_link = self.repository / "checkout-link"
+        checkout_link.symlink_to(".", target_is_directory=True)
+
+        roots = kyo_scala3_production_roots(
+            checkout_link, [production.resolve(), scala_2_plugin.resolve()]
+        )
+
+        self.assertEqual(roots, [production.resolve()])
 
 
 if __name__ == "__main__":

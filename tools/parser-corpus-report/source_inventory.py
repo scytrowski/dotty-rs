@@ -5,6 +5,35 @@ from __future__ import annotations
 import pathlib
 import subprocess
 
+KYO_SCALA_2_12_PLUGIN_PREFIXES = (
+    ("kyo-compat", "plugin"),
+    ("kyo-doctest", "plugin"),
+    ("kyo-ffi", "plugin"),
+    ("kyo-test", "sbt"),
+    ("kyo-test", "sbt-publish"),
+)
+
+
+def kyo_scala3_production_roots(
+    repository: pathlib.Path, source_roots: list[pathlib.Path]
+) -> list[pathlib.Path]:
+    """Exclude known Scala 2.12 sbt plugins from Kyo's Scala 3 source roots."""
+    repository = repository.resolve(strict=True)
+    selected = []
+    for root in source_roots:
+        root = root.resolve(strict=True)
+        try:
+            relative = root.relative_to(repository)
+        except ValueError as error:
+            raise ValueError(f"source root is outside Kyo checkout: {root}") from error
+        if any(
+            relative.parts[: len(prefix)] == prefix
+            for prefix in KYO_SCALA_2_12_PLUGIN_PREFIXES
+        ):
+            continue
+        selected.append(root)
+    return selected
+
 
 def tracked_scala_sources(
     repository: pathlib.Path, source_roots: list[pathlib.Path]

@@ -12,6 +12,8 @@ import dotty.tools.dotc.util.SourceFile
 import scala.util.control.NonFatal
 
 object Main:
+  private val BatchRecordPrefix = "__DOTTY_PARSER_ORACLE_RECORD__"
+
   private lazy val initialContext =
     val base = new ContextBase
     val context = base.initialCtx.fresh
@@ -44,8 +46,8 @@ object Main:
         val fields = line.split("\\t", -1)
         if fields.length != 2 then
           throw IllegalArgumentException(s"invalid oracle manifest entry: $line")
-        try println(parseAndRender(fields(0), fields(1)))
-        catch case NonFatal(error) => println(renderOracleFailure(fields(1), error))
+        try println(BatchRecordPrefix + parseAndRender(fields(0), fields(1)))
+        catch case NonFatal(error) => println(BatchRecordPrefix + renderOracleFailure(fields(1), error))
 
   private def renderOracleFailure(path: String, error: Throwable): String =
     val message = Option(error.getMessage).getOrElse(error.getClass.getSimpleName)
@@ -587,5 +589,6 @@ object Main:
       case '\n' => "\\n"
       case '\r' => "\\r"
       case '\t' => "\\t"
+      case char if char < ' ' => f"\\u${char.toInt}%04x"
       case char => char.toString
     s"\"$escaped\""

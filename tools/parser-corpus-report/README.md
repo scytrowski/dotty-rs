@@ -41,7 +41,7 @@ corpus; exact normalized tree equality remains the job of
 building its source tree; the batch keeps going so those failures remain
 visible instead of truncating the corpus measurement.
 
-Schema version 5 records the parser commit as `parser_revision`, partitions
+Schema version 6 records the parser commit as `parser_revision`, partitions
 outcomes into `capture_checking_cohorts`
 (`enabled`, `disabled`, and `unknown`) using the parser's effective
 `ParserFeatures` after compilation-unit imports have been processed. Each
@@ -72,6 +72,29 @@ The convenience runner verifies the pinned Scala checkout revision before
 parsing and records both version and revision in the report. This keeps a
 checked-in baseline reproducible rather than silently measuring a newer
 compiler tree.
+
+The convenience runner also includes the pinned Kyo release
+[`v1.0.0-RC4`](https://github.com/getkyo/kyo/tree/v1.0.0-RC4), commit
+`e03b76f98796ba8cd94d39fbb7fa2ffd70409987`. That release declares Scala
+`3.8.3`; its source set is still parsed against the pinned Scala 3.9.0 oracle
+and is identified separately in the report. Production roots are discovered
+from tracked `src/main/scala*` directories, excluding tests, integration
+projects, scripted sbt fixtures, benchmarks, examples, and the five sbt
+plugins (`kyo-compat/plugin`, `kyo-doctest/plugin`, `kyo-ffi/plugin`,
+`kyo-test/sbt`, and `kyo-test/sbt-publish`) that are built with Scala 2.12.
+The pinned release contributes 916 source files
+across 102 roots. The runner validates that the checkout is clean and exactly
+at the recorded release revision before including it.
+
+`parser-post-issue-809-kyo.json` records the expanded baseline using the
+pinned Scala 3.9.0 oracle. Its `parser_revision` field identifies the exact
+dotty-rs revision measured.
+Across 2,966 files, 2,849 parse without diagnostics and 117 have recoverable
+diagnostics; there are no hard failures, hangs, panics, scanner diagnostics,
+or Scala-oracle failures. All 117 diagnostic-bearing files are in Kyo: 799
+Kyo files parse cleanly and 117 produce 971 diagnostics. Cats (548 files),
+Cats Effect (266), and Scala 3 (1,236) all parse cleanly. This is a new
+corpus baseline, not a before/after parser improvement claim.
 
 Pass `--namer` to run source naming in the same isolated workers and add
 Namer outcomes and deferred-feature counts to the report. `--skip-oracle`

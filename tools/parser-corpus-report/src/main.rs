@@ -649,6 +649,12 @@ fn discover_production_roots(project_root: &Path) -> io::Result<Vec<PathBuf>> {
                         | "examples"
                         | "bench"
                         | "benchmarks"
+                        | "fixture"
+                        | "fixtures"
+                        | "it"
+                        | "kyo-bench"
+                        | "kyo-examples"
+                        | "sbt-test"
                         | "scalafix"
                 ) || component.ends_with("-example")
             })
@@ -1848,10 +1854,9 @@ fn root_label(root: &Path) -> String {
         .components()
         .filter_map(|part| part.as_os_str().to_str())
         .collect::<Vec<_>>();
-    if let Some(index) = components
-        .iter()
-        .rposition(|part| part.starts_with("cats-v") || part.starts_with("cats-effect-v"))
-    {
+    if let Some(index) = components.iter().rposition(|part| {
+        part.starts_with("cats-v") || part.starts_with("cats-effect-v") || part.starts_with("kyo-v")
+    }) {
         return components[index + 1..].join("/");
     }
     let name = root
@@ -2467,6 +2472,16 @@ mod tests {
     }
 
     #[test]
+    fn kyo_root_label_does_not_include_the_local_checkout_directory() {
+        assert_eq!(
+            root_label(Path::new(
+                "/tmp/cache/kyo-v1.0.0-RC4/kyo-caliban/src/main/scala",
+            )),
+            "kyo-caliban/src/main/scala"
+        );
+    }
+
+    #[test]
     fn discovers_scala_files_in_sorted_order() {
         let root = unique_temp_dir("discover");
         fs::create_dir_all(root.join("nested")).expect("create temp corpus");
@@ -2498,6 +2513,11 @@ mod tests {
             "benchmarks/src/main/scala",
             "scalafix/rules/src/main/scala",
             "core/target/generated/src/main/scala",
+            "project/sbt-test/sample/src/main/scala",
+            "core/fixtures/shared/src/main/scala",
+            "core/it/shared/src/main/scala",
+            "kyo-bench/src/main/scala",
+            "kyo-examples/src/main/scala",
         ];
         for relative in included.into_iter().chain(excluded) {
             fs::create_dir_all(root.join(relative)).expect("create source root fixture");
