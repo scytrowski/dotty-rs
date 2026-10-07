@@ -11448,6 +11448,7 @@ mod tests {
             preindex_block_for_test(&mut typer, block_tree, outer_context);
 
         let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        assert_eq!(typer.source_typed_index().get(source, method_tree), None);
         let method_scope = typer.local_method_scope(method).unwrap();
         assert_eq!(
             typer.local_method_definition(method),
@@ -11902,7 +11903,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_local_extension_typing_rolls_back_preindex_for_deterministic_retry() {
+    fn local_extension_typing_completes_preindex_and_records_mapping() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def outer: Int = { extension (receiver: Int) { def choose: Int = receiver }; 0 } }",
         );
@@ -11926,24 +11927,21 @@ mod tests {
             &packages,
         );
         let context = typer.expression_context_for(outer).unwrap();
-        let store_checkpoint = typer.store().checkpoint();
-        let typed_checkpoint = typer.typed_ast().checkpoint();
-        let scope_checkpoint = typer.expression_scopes.len();
-
-        for _ in 0..2 {
-            assert!(matches!(
-                typer.type_expression(block_tree, context),
-                Err(TyperError::LocalBlockDeclarationDeferred {
-                    kind: "extension methods",
-                    ..
-                })
-            ));
-            assert_eq!(typer.store().checkpoint(), store_checkpoint);
-            assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
-            assert_eq!(typer.expression_scopes.len(), scope_checkpoint);
-            assert!(typer.local_method_symbol_at(source, method_tree).is_none());
-            assert!(typer.local_methods.definitions.is_empty());
-        }
+        let typed_block = typer.type_expression(block_tree, context).unwrap();
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        let typed_method = typer.source_typed_index().get(source, method_tree).unwrap();
+        assert_eq!(
+            typer.source_typed_index().get(source, block.stats[0]),
+            Some(typed_method)
+        );
+        assert!(matches!(
+            typer.store().symbols.info(method),
+            SymbolInfo::Complete(_)
+        ));
+        assert_eq!(
+            typer.type_expression(block_tree, context).unwrap(),
+            typed_block
+        );
     }
 
     #[test]
@@ -13120,6 +13118,260 @@ mod tests {
             typer.source_typed_index().get(source, method_tree),
             Some(typed_method)
         );
+    }
+
+    #[test]
+    fn local_extension_group_lowers_to_ordered_typed_method_with_receiver_identity() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { val before: Int = 0; extension (receiver: Int) { def choose(argument: Int): Int = receiver }; val after: Int = 1; after } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let (extension_tree, before_tree, after_tree) = {
+            let extension_tree = block.stats[1];
+            let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(_)) =
+                &parsed.ast.get(extension_tree).kind
+            else {
+                panic!("second block statement should be an extension group");
+            };
+            (extension_tree, block.stats[0], block.stats[2])
+        };
+        let (method_tree, receiver_tree, argument_tree, rhs_tree) = {
+            let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+                &parsed.ast.get(extension_tree).kind
+            else {
+                unreachable!();
+            };
+            let method_tree = extension.methods[0];
+            let TreeKind::DefDef(definition) = &parsed.ast.get(method_tree).kind else {
+                panic!("extension member should be a DefDef");
+            };
+            (
+                method_tree,
+                extension.param_clauses[0][0],
+                definition.value_param_clauses[0][0],
+                definition.rhs.unwrap(),
+            )
+        };
+        let (source_method_name, source_method_position) = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => (definition.name, parsed.ast.get(method_tree).position),
+            _ => unreachable!(),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        let typed_block = typer.type_expression(block_tree, context).unwrap();
+
+        let typed_method = typer.source_typed_index().get(source, method_tree).unwrap();
+        assert_eq!(
+            typer.source_typed_index().get(source, extension_tree),
+            Some(typed_method)
+        );
+        let TreeKind::DefDef(typed_definition) = &typer.typed_ast().get(typed_method).kind else {
+            panic!("local extension should lower to an ordinary typed DefDef");
+        };
+        assert_eq!(typed_definition.name, source_method_name);
+        assert_eq!(
+            typer.typed_ast().get(typed_method).position,
+            source_method_position
+        );
+        assert_eq!(typed_definition.value_param_clauses.len(), 2);
+        assert_eq!(typed_definition.value_param_clauses[0].len(), 1);
+        assert_eq!(typed_definition.value_param_clauses[1].len(), 1);
+        let typed_receiver = typer
+            .source_typed_index()
+            .get(source, receiver_tree)
+            .unwrap();
+        assert_eq!(typed_definition.value_param_clauses[0][0], typed_receiver);
+        assert_eq!(
+            typed_definition.value_param_clauses[1][0],
+            typer
+                .source_typed_index()
+                .get(source, argument_tree)
+                .unwrap()
+        );
+        assert_eq!(
+            typer.typed_ast().get(typed_receiver).position,
+            parsed.ast.get(receiver_tree).position
+        );
+        let receiver_symbol = typer
+            .local_methods
+            .extension_receiver_parameter_symbol(
+                typer.local_method_symbol_at(source, method_tree).unwrap(),
+                receiver_tree,
+            )
+            .unwrap();
+        let method_symbol = typer.local_method_symbol_at(source, method_tree).unwrap();
+        let SymbolInfo::Complete(signature) = *typer.store().symbols.info(method_symbol) else {
+            panic!("typed extension method should have a completed signature");
+        };
+        let Type::Method(receiver_signature) = typer.store().types.get(signature) else {
+            panic!("extension signature should begin with its receiver clause");
+        };
+        assert_eq!(receiver_signature.params.len(), 1);
+        assert_eq!(
+            receiver_signature.params[0].ty,
+            typer.typed_ast().get(typed_receiver).ty
+        );
+        assert_eq!(
+            typer
+                .store()
+                .scopes
+                .get(
+                    typer
+                        .local_method_scope(
+                            typer.local_method_symbol_at(source, method_tree).unwrap()
+                        )
+                        .unwrap()
+                )
+                .lookup_all(&typer.store().symbols.get(receiver_symbol).name),
+            &[receiver_symbol]
+        );
+        let method_context = typer
+            .local_method_declaration_context(
+                typer.local_method_symbol_at(source, method_tree).unwrap(),
+            )
+            .unwrap();
+        let block_scope = typer
+            .expression_scopes
+            .get(method_context.local_scopes.unwrap().index())
+            .unwrap()
+            .scope;
+        assert!(
+            !typer
+                .store()
+                .scopes
+                .get(block_scope)
+                .lookup_all(&typer.store().symbols.get(receiver_symbol).name)
+                .contains(&receiver_symbol)
+        );
+        let typed_rhs = typer.source_typed_index().get(source, rhs_tree).unwrap();
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == receiver_symbol
+        ));
+        let typed_block_id = typed_block;
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_block_id).kind else {
+            panic!("outer body should remain a typed block");
+        };
+        assert_eq!(typed_block.stats.len(), 3);
+        assert_eq!(
+            typed_block.stats[0],
+            typer.source_typed_index().get(source, before_tree).unwrap()
+        );
+        assert_eq!(typed_block.stats[1], typed_method);
+        assert_eq!(
+            typed_block.stats[2],
+            typer.source_typed_index().get(source, after_tree).unwrap()
+        );
+        assert_eq!(
+            typer.type_expression(block_tree, context).unwrap(),
+            typed_block_id
+        );
+    }
+
+    #[test]
+    fn failed_local_extension_body_rolls_back_typed_state_for_retry() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { extension (receiver: Int) { def invalid: Int = true }; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let extension_tree = block.stats[0];
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+            &parsed.ast.get(extension_tree).kind
+        else {
+            panic!("first block statement should be an extension group");
+        };
+        let method_tree = extension.methods[0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+        let typed_checkpoint = typer.typed_ast().checkpoint();
+        let typed_index_len = typer.source_typed_index().len();
+        let scope_count = typer.expression_scopes.len();
+
+        for _ in 0..2 {
+            assert!(typer.type_expression(block_tree, context).is_err());
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+            assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
+            assert_eq!(typer.source_typed_index().len(), typed_index_len);
+            assert_eq!(typer.expression_scopes.len(), scope_count);
+            assert!(typer.local_method_symbol_at(source, method_tree).is_none());
+        }
+    }
+
+    #[test]
+    fn conflicting_local_extension_receiver_mapping_rolls_back_the_lowering() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { extension (receiver: Int) { def choose: Int = receiver }; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+            &parsed.ast.get(block.stats[0]).kind
+        else {
+            panic!("first block statement should be an extension group");
+        };
+        let method_tree = extension.methods[0];
+        let receiver_tree = extension.param_clauses[0][0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        let conflicting_type = typer.store.types.alloc(Type::NoType);
+        let conflicting_mapping = TypedAstBuilder::new(&mut typer.typed_arena, &typer.store.types)
+            .type_tree(conflicting_type, None);
+        typer
+            .typed_index
+            .insert(source, receiver_tree, conflicting_mapping)
+            .unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+        let typed_checkpoint = typer.typed_ast().checkpoint();
+        let typed_index_len = typer.source_typed_index().len();
+
+        assert!(matches!(
+            typer.type_expression(block_tree, context),
+            Err(TyperError::ConflictingTypedExpression { tree_index, .. })
+                if tree_index == receiver_tree.index()
+        ));
+
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
+        assert_eq!(typer.source_typed_index().len(), typed_index_len);
+        assert_eq!(
+            typer.source_typed_index().get(source, receiver_tree),
+            Some(conflicting_mapping)
+        );
+        assert!(typer.local_method_symbol_at(source, method_tree).is_none());
     }
 
     #[test]
