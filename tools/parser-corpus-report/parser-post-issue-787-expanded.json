@@ -1,0 +1,430 @@
+{
+  "schema_version": 6,
+  "corpus_roots": [
+    "library/src",
+    "compiler/src",
+    "algebra-core/src/main/scala",
+    "algebra-laws/js/src/main/scala",
+    "algebra-laws/jvm/src/main/scala",
+    "algebra-laws/native/src/main/scala",
+    "algebra-laws/shared/src/main/scala",
+    "alleycats-core/src/main/scala",
+    "alleycats-laws/shared/src/main/scala",
+    "core/src/main/scala",
+    "core/src/main/scala-3",
+    "free/src/main/scala",
+    "free/src/main/scala-3",
+    "kernel/src/main/scala",
+    "kernel-laws/js/src/main/scala",
+    "kernel-laws/jvm/src/main/scala",
+    "kernel-laws/native/src/main/scala",
+    "kernel-laws/shared/src/main/scala",
+    "laws/src/main/scala",
+    "testkit/src/main/scala",
+    "core/js/src/main/scala",
+    "core/js-native/src/main/scala",
+    "core/jvm/src/main/scala",
+    "core/jvm-native/src/main/scala",
+    "core/native/src/main/scala",
+    "core/shared/src/main/scala",
+    "kernel/js/src/main/scala",
+    "kernel/jvm/src/main/scala",
+    "kernel/jvm-native/src/main/scala",
+    "kernel/native/src/main/scala",
+    "kernel/shared/src/main/scala",
+    "kernel/shared/src/main/scala-3",
+    "kernel-testkit/shared/src/main/scala",
+    "laws/shared/src/main/scala",
+    "std/js/src/main/scala",
+    "std/js-native/src/main/scala",
+    "std/jvm/src/main/scala",
+    "std/jvm-native/src/main/scala",
+    "std/native/src/main/scala",
+    "std/shared/src/main/scala",
+    "testkit/shared/src/main/scala"
+  ],
+  "source_version": "3.9.0",
+  "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "source_sets": {
+    "cats": {
+      "source_version": "v2.13.0",
+      "source_revision": "32a50dcfad9d897459bb755c4b5a22b4c7bc745c",
+      "repository": "https://github.com/typelevel/cats",
+      "corpus_roots": [
+        "algebra-core/src/main/scala",
+        "algebra-laws/js/src/main/scala",
+        "algebra-laws/jvm/src/main/scala",
+        "algebra-laws/native/src/main/scala",
+        "algebra-laws/shared/src/main/scala",
+        "alleycats-core/src/main/scala",
+        "alleycats-laws/shared/src/main/scala",
+        "core/src/main/scala",
+        "core/src/main/scala-3",
+        "free/src/main/scala",
+        "free/src/main/scala-3",
+        "kernel/src/main/scala",
+        "kernel-laws/js/src/main/scala",
+        "kernel-laws/jvm/src/main/scala",
+        "kernel-laws/native/src/main/scala",
+        "kernel-laws/shared/src/main/scala",
+        "laws/src/main/scala",
+        "testkit/src/main/scala"
+      ],
+      "scala_oracle_files": 548,
+      "scala_oracle_failures": 0,
+      "files_attempted": 548,
+      "files_parsed_without_diagnostics": 464,
+      "files_parsed_with_recoverable_diagnostics": 84,
+      "hard_parser_failures": 0,
+      "scanner_diagnostics": 0,
+      "diagnostics": 666,
+      "diagnostic_histogram": {
+        "ExpectedExpression": 323,
+        "ExpectedToken": 312,
+        "ExpectedType": 14,
+        "UnexpectedToken": 16,
+        "UnsupportedSyntax": 1
+      },
+      "first_failure_histogram": {
+        "ExpectedExpression": {
+          "count": 65,
+          "examples": [
+            "alleycats-laws/shared/src/main/scala/alleycats/laws/discipline/FlatMapRecTests.scala",
+            "alleycats-laws/shared/src/main/scala/alleycats/laws/discipline/ReferentialEqTests.scala",
+            "alleycats-laws/shared/src/main/scala/alleycats/laws/discipline/SystemIdentityHashTests.scala",
+            "core/src/main/scala/cats/ApplicativeError.scala",
+            "core/src/main/scala/cats/MonadError.scala"
+          ]
+        },
+        "ExpectedToken": {
+          "count": 10,
+          "examples": [
+            "algebra-core/src/main/scala/algebra/Priority.scala",
+            "algebra-core/src/main/scala/algebra/ring/Signed.scala",
+            "algebra-laws/shared/src/main/scala/algebra/laws/LatticeLaws.scala",
+            "algebra-laws/shared/src/main/scala/algebra/laws/LatticePartialOrderLaws.scala",
+            "core/src/main/scala/cats/data/Chain.scala"
+          ]
+        },
+        "ExpectedType": {
+          "count": 9,
+          "examples": [
+            "algebra-laws/shared/src/main/scala/algebra/laws/OrderLaws.scala",
+            "algebra-laws/shared/src/main/scala/algebra/laws/RingLaws.scala",
+            "core/src/main/scala/cats/Show.scala",
+            "core/src/main/scala/cats/data/NonEmptyChain.scala",
+            "core/src/main/scala/cats/data/NonEmptyList.scala"
+          ]
+        }
+      }
+    },
+    "cats-effect": {
+      "source_version": "v3.7.1",
+      "source_revision": "eb0cc258fc732fc37f22f117c2e81d5554d67024",
+      "repository": "https://github.com/typelevel/cats-effect",
+      "corpus_roots": [
+        "core/js/src/main/scala",
+        "core/js-native/src/main/scala",
+        "core/jvm/src/main/scala",
+        "core/jvm-native/src/main/scala",
+        "core/native/src/main/scala",
+        "core/shared/src/main/scala",
+        "kernel/js/src/main/scala",
+        "kernel/jvm/src/main/scala",
+        "kernel/jvm-native/src/main/scala",
+        "kernel/native/src/main/scala",
+        "kernel/shared/src/main/scala",
+        "kernel/shared/src/main/scala-3",
+        "kernel-testkit/shared/src/main/scala",
+        "laws/shared/src/main/scala",
+        "std/js/src/main/scala",
+        "std/js-native/src/main/scala",
+        "std/jvm/src/main/scala",
+        "std/jvm-native/src/main/scala",
+        "std/native/src/main/scala",
+        "std/shared/src/main/scala",
+        "testkit/shared/src/main/scala"
+      ],
+      "scala_oracle_files": 266,
+      "scala_oracle_failures": 0,
+      "files_attempted": 266,
+      "files_parsed_without_diagnostics": 245,
+      "files_parsed_with_recoverable_diagnostics": 21,
+      "hard_parser_failures": 0,
+      "scanner_diagnostics": 0,
+      "diagnostics": 231,
+      "diagnostic_histogram": {
+        "ExpectedExpression": 83,
+        "ExpectedToken": 94,
+        "ExpectedType": 1,
+        "UnboundPlaceholderParameter": 6,
+        "UnexpectedToken": 28,
+        "UnsupportedSyntax": 19
+      },
+      "first_failure_histogram": {
+        "ExpectedExpression": {
+          "count": 7,
+          "examples": [
+            "core/shared/src/main/scala/cats/effect/IO.scala",
+            "laws/shared/src/main/scala/cats/effect/laws/AsyncTests.scala",
+            "laws/shared/src/main/scala/cats/effect/laws/GenSpawnTests.scala",
+            "laws/shared/src/main/scala/cats/effect/laws/GenTemporalTests.scala",
+            "laws/shared/src/main/scala/cats/effect/laws/MonadCancelTests.scala"
+          ]
+        },
+        "ExpectedToken": {
+          "count": 8,
+          "examples": [
+            "core/js/src/main/scala/cats/effect/unsafe/WorkStealingThreadPool.scala",
+            "core/jvm/src/main/scala/cats/effect/unsafe/IORuntimeCompanionPlatform.scala",
+            "core/jvm-native/src/main/scala/cats/effect/unsafe/TimerHeap.scala",
+            "core/jvm-native/src/main/scala/cats/effect/unsafe/WorkStealingThreadPool.scala",
+            "core/jvm-native/src/main/scala/cats/effect/unsafe/WorkerThread.scala"
+          ]
+        },
+        "ExpectedType": {
+          "count": 1,
+          "examples": [
+            "kernel-testkit/shared/src/main/scala/cats/effect/kernel/testkit/Generators.scala"
+          ]
+        },
+        "UnboundPlaceholderParameter": {
+          "count": 4,
+          "examples": [
+            "core/jvm-native/src/main/scala/cats/effect/CallbackStack.scala",
+            "core/shared/src/main/scala/cats/effect/ContState.scala",
+            "core/shared/src/main/scala/cats/effect/IOFiber.scala",
+            "core/shared/src/main/scala/cats/effect/unsafe/WeakList.scala"
+          ]
+        },
+        "UnexpectedToken": {
+          "count": 1,
+          "examples": [
+            "core/native/src/main/scala/cats/effect/unsafe/EpollSystem.scala"
+          ]
+        }
+      }
+    },
+    "scala3": {
+      "source_version": "3.9.0",
+      "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+      "repository": "https://github.com/scala/scala3",
+      "corpus_roots": [
+        "library/src",
+        "compiler/src"
+      ],
+      "scala_oracle_files": 1236,
+      "scala_oracle_failures": 0,
+      "files_attempted": 1236,
+      "files_parsed_without_diagnostics": 1236,
+      "files_parsed_with_recoverable_diagnostics": 0,
+      "hard_parser_failures": 0,
+      "scanner_diagnostics": 0,
+      "diagnostics": 0,
+      "diagnostic_histogram": {},
+      "first_failure_histogram": {}
+    }
+  },
+  "parser_revision": "57c8bf9951a7a52ae7bab20a98f3b06d51f5d6cf",
+  "scala_oracle_files": 2050,
+  "scala_oracle_failures": 0,
+  "files_attempted": 2050,
+  "files_parsed_without_diagnostics": 1945,
+  "files_parsed_with_recoverable_diagnostics": 105,
+  "hard_parser_failures": 0,
+  "process_failures": 0,
+  "panics": 0,
+  "hangs": 0,
+  "scanner_diagnostics": 0,
+  "diagnostic_histogram": {
+    "ExpectedExpression": 406,
+    "ExpectedToken": 406,
+    "ExpectedType": 15,
+    "UnboundPlaceholderParameter": 6,
+    "UnexpectedToken": 44,
+    "UnsupportedSyntax": 20
+  },
+  "first_failure_histogram": {
+    "ExpectedExpression": {
+      "count": 72,
+      "examples": [
+        "core/shared/src/main/scala/cats/effect/IO.scala",
+        "laws/shared/src/main/scala/cats/effect/laws/AsyncTests.scala",
+        "laws/shared/src/main/scala/cats/effect/laws/GenSpawnTests.scala",
+        "laws/shared/src/main/scala/cats/effect/laws/GenTemporalTests.scala",
+        "laws/shared/src/main/scala/cats/effect/laws/MonadCancelTests.scala"
+      ]
+    },
+    "ExpectedToken": {
+      "count": 18,
+      "examples": [
+        "core/js/src/main/scala/cats/effect/unsafe/WorkStealingThreadPool.scala",
+        "core/jvm/src/main/scala/cats/effect/unsafe/IORuntimeCompanionPlatform.scala",
+        "core/jvm-native/src/main/scala/cats/effect/unsafe/TimerHeap.scala",
+        "core/jvm-native/src/main/scala/cats/effect/unsafe/WorkStealingThreadPool.scala",
+        "core/jvm-native/src/main/scala/cats/effect/unsafe/WorkerThread.scala"
+      ]
+    },
+    "ExpectedType": {
+      "count": 10,
+      "examples": [
+        "kernel-testkit/shared/src/main/scala/cats/effect/kernel/testkit/Generators.scala",
+        "algebra-laws/shared/src/main/scala/algebra/laws/OrderLaws.scala",
+        "algebra-laws/shared/src/main/scala/algebra/laws/RingLaws.scala",
+        "core/src/main/scala/cats/Show.scala",
+        "core/src/main/scala/cats/data/NonEmptyChain.scala"
+      ]
+    },
+    "UnboundPlaceholderParameter": {
+      "count": 4,
+      "examples": [
+        "core/jvm-native/src/main/scala/cats/effect/CallbackStack.scala",
+        "core/shared/src/main/scala/cats/effect/ContState.scala",
+        "core/shared/src/main/scala/cats/effect/IOFiber.scala",
+        "core/shared/src/main/scala/cats/effect/unsafe/WeakList.scala"
+      ]
+    },
+    "UnexpectedToken": {
+      "count": 1,
+      "examples": [
+        "core/native/src/main/scala/cats/effect/unsafe/EpollSystem.scala"
+      ]
+    }
+  },
+  "capture_checking_cohorts": {
+    "disabled": {
+      "files": 1808,
+      "clean": 1703,
+      "recoverable": 105,
+      "hard_failures": 0,
+      "scanner_diagnostics": 0,
+      "diagnostic_histogram": {
+        "ExpectedExpression": 406,
+        "ExpectedToken": 406,
+        "ExpectedType": 15,
+        "UnboundPlaceholderParameter": 6,
+        "UnexpectedToken": 44,
+        "UnsupportedSyntax": 20
+      },
+      "first_failure_histogram": {
+        "ExpectedExpression": {
+          "count": 72,
+          "examples": [
+            "core/shared/src/main/scala/cats/effect/IO.scala",
+            "laws/shared/src/main/scala/cats/effect/laws/AsyncTests.scala",
+            "laws/shared/src/main/scala/cats/effect/laws/GenSpawnTests.scala",
+            "laws/shared/src/main/scala/cats/effect/laws/GenTemporalTests.scala",
+            "laws/shared/src/main/scala/cats/effect/laws/MonadCancelTests.scala"
+          ]
+        },
+        "ExpectedToken": {
+          "count": 18,
+          "examples": [
+            "core/js/src/main/scala/cats/effect/unsafe/WorkStealingThreadPool.scala",
+            "core/jvm/src/main/scala/cats/effect/unsafe/IORuntimeCompanionPlatform.scala",
+            "core/jvm-native/src/main/scala/cats/effect/unsafe/TimerHeap.scala",
+            "core/jvm-native/src/main/scala/cats/effect/unsafe/WorkStealingThreadPool.scala",
+            "core/jvm-native/src/main/scala/cats/effect/unsafe/WorkerThread.scala"
+          ]
+        },
+        "ExpectedType": {
+          "count": 10,
+          "examples": [
+            "kernel-testkit/shared/src/main/scala/cats/effect/kernel/testkit/Generators.scala",
+            "algebra-laws/shared/src/main/scala/algebra/laws/OrderLaws.scala",
+            "algebra-laws/shared/src/main/scala/algebra/laws/RingLaws.scala",
+            "core/src/main/scala/cats/Show.scala",
+            "core/src/main/scala/cats/data/NonEmptyChain.scala"
+          ]
+        },
+        "UnboundPlaceholderParameter": {
+          "count": 4,
+          "examples": [
+            "core/jvm-native/src/main/scala/cats/effect/CallbackStack.scala",
+            "core/shared/src/main/scala/cats/effect/ContState.scala",
+            "core/shared/src/main/scala/cats/effect/IOFiber.scala",
+            "core/shared/src/main/scala/cats/effect/unsafe/WeakList.scala"
+          ]
+        },
+        "UnexpectedToken": {
+          "count": 1,
+          "examples": [
+            "core/native/src/main/scala/cats/effect/unsafe/EpollSystem.scala"
+          ]
+        }
+      },
+      "files_with_raw_caret_character": 96,
+      "files_with_caret_operator_token": 25,
+      "files_with_parser_capture_syntax": 0,
+      "raw_caret_without_operator_examples": [
+        "core/jvm-native/src/main/scala/cats/effect/CallbackStack.scala",
+        "core/native/src/main/scala/cats/effect/unsafe/LocalQueuePadding.scala",
+        "algebra-core/src/main/scala/algebra/instances/StaticMethods.scala",
+        "core/src/main/scala/cats/FlatMap.scala",
+        "core/src/main/scala/cats/syntax/flatMap.scala",
+        "kernel/src/main/scala/cats/kernel/instances/MapInstances.scala",
+        "kernel/src/main/scala/cats/kernel/instances/SortedMapInstances.scala",
+        "kernel/src/main/scala/cats/kernel/instances/SortedSetInstances.scala",
+        "laws/src/main/scala/cats/laws/discipline/ExhaustiveCheck.scala",
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/ScalaPrimitivesOps.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatureVisitor.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala",
+        "compiler/src/dotty/tools/backend/jvm/analysis/package.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/CopyProp.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/InlinerHeuristics.scala",
+        "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        "compiler/src/dotty/tools/dotc/cc/Capability.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureOps.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala"
+      ],
+      "operator_without_capture_ast_examples": [
+        "algebra-core/src/main/scala/algebra/instances/bitSet.scala",
+        "algebra-core/src/main/scala/algebra/instances/boolean.scala",
+        "laws/src/main/scala/cats/laws/discipline/TraverseFilterTests.scala",
+        "testkit/src/main/scala/cats/tests/Helpers.scala",
+        "compiler/src/dotty/tools/dotc/core/Flags.scala",
+        "compiler/src/dotty/tools/dotc/core/Periods.scala",
+        "compiler/src/dotty/tools/dotc/core/TypeEval.scala",
+        "compiler/src/dotty/tools/dotc/core/tasty/TastyPickler.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/internal/SemanticdbInputStream.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/internal/SemanticdbOutputStream.scala",
+        "compiler/src/dotty/tools/dotc/transform/sjs/JSSymUtils.scala",
+        "compiler/src/dotty/tools/dotc/typer/ConstFold.scala",
+        "compiler/src/dotty/tools/dotc/typer/Typer.scala",
+        "compiler/src/dotty/tools/dotc/util/HashMap.scala",
+        "compiler/src/dotty/tools/dotc/util/HashSet.scala",
+        "compiler/src/dotty/tools/dotc/util/PerfectHashing.scala",
+        "library/src/scala/Boolean.scala",
+        "library/src/scala/Byte.scala",
+        "library/src/scala/Char.scala",
+        "library/src/scala/Int.scala"
+      ]
+    },
+    "enabled": {
+      "files": 242,
+      "clean": 242,
+      "recoverable": 0,
+      "hard_failures": 0,
+      "scanner_diagnostics": 0,
+      "diagnostic_histogram": {},
+      "first_failure_histogram": {},
+      "files_with_raw_caret_character": 113,
+      "files_with_caret_operator_token": 109,
+      "files_with_parser_capture_syntax": 104,
+      "raw_caret_without_operator_examples": [
+        "library/src/scala/annotation/retains.scala",
+        "library/src/scala/caps/package.scala",
+        "library/src/scala/quoted/Quotes.scala",
+        "library/src/scala/util/Either.scala"
+      ],
+      "operator_without_capture_ast_examples": [
+        "library/src/scala/collection/Hashing.scala",
+        "library/src/scala/collection/generic/BitOperations.scala",
+        "library/src/scala/compiletime/ops/boolean.scala",
+        "library/src/scala/compiletime/ops/int.scala",
+        "library/src/scala/compiletime/ops/long.scala"
+      ]
+    }
+  }
+}
