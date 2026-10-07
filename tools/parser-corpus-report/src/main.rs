@@ -3345,6 +3345,29 @@ mod tests {
         assert_eq!(report.scala_oracle_failures, Some(1));
     }
 
+    #[test]
+    fn report_preserves_primary_source_metadata_without_oracle_results() {
+        let roots = vec![PathBuf::from("/tmp/scala3/library/src")];
+        let report = build_report(
+            &[],
+            ReportMetadata {
+                roots: &roots,
+                source_sets: &[],
+                source_version: Some("3.9.0".to_owned()),
+                source_revision: Some("revision".to_owned()),
+                parser_revision: Some("parser revision".to_owned()),
+                oracle_files: None,
+                oracle_failures: None,
+                collect_namer: false,
+            },
+        );
+
+        assert_eq!(report.source_version.as_deref(), Some("3.9.0"));
+        assert_eq!(report.source_revision.as_deref(), Some("revision"));
+        assert_eq!(report.scala_oracle_files, None);
+        assert_eq!(report.scala_oracle_failures, None);
+    }
+
     fn unique_temp_dir(name: &str) -> PathBuf {
         env::temp_dir().join(format!(
             "dotty-parser-corpus-report-{name}-{}",
