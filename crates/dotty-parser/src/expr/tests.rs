@@ -4651,6 +4651,39 @@ fn parses_legacy_eta_expansion_after_a_simple_expression() {
 }
 
 #[test]
+fn parses_eta_expansion_after_a_selection_with_the_full_span() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "obj.f _",
+        vec![
+            token(TokenKind::Identifier, 0, 3),
+            token(TokenKind::Punctuation(Punctuation::Dot), 3, 4),
+            token(TokenKind::Identifier, 4, 5),
+            token(TokenKind::Identifier, 6, 7),
+            token(TokenKind::Eof, 7, 7),
+        ],
+        &mut names,
+    );
+
+    let expression = parser.expr();
+    let TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) =
+        parser.ast().get(expression).kind
+    else {
+        panic!("expected postfix eta-expansion tree");
+    };
+    assert!(matches!(
+        parser.ast().get(postfix.operand).kind,
+        TreeKind::Select(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+    assert_eq!(
+        parser.ast().get(expression).position.unwrap().span().range(),
+        TextRange::new(0, 7).unwrap()
+    );
+}
+
+#[test]
 fn eta_expansion_follows_type_application_without_becoming_a_placeholder() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
