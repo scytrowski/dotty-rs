@@ -1,5 +1,7 @@
 //! Source term annotation lowering.
 
+use std::collections::HashSet;
+
 use super::super::{ExpressionContext, SourceTyper, TyperError};
 use dotty_core::ast::*;
 use dotty_core::types::*;
@@ -22,7 +24,7 @@ impl SourceTyper<'_> {
             new_mappings,
         )?;
         let expr =
-            self.type_expression_inner(annotated.expr, context, info_journal, new_mappings)?;
+            self.type_value_expression_inner(annotated.expr, context, info_journal, new_mappings)?;
         let expr_type = self.typed_arena.get(expr).ty;
         let underlying =
             if self.is_stable_annotated_expression_type(expr_type, annotated.expr.index())? {
@@ -48,21 +50,40 @@ impl SourceTyper<'_> {
         ty: TypeId,
         tree_index: u32,
     ) -> Result<bool, TyperError> {
-        match self.store.types.try_get(ty) {
-            Some(Type::ThisType { .. }) => Ok(true),
-            Some(Type::TermRef {
-                target: TermRefTarget::Symbol(symbol),
-                ..
-            }) => {
-                if !self.store.symbols.contains(*symbol) {
-                    return Err(TyperError::UnknownSymbol { symbol: *symbol });
-                }
-                if self.store.symbols.get(*symbol).kind == SymbolKind::Parameter {
-                    return Ok(false);
-                }
-                Ok(self.require_stable_selection_prefix(ty, tree_index).is_ok())
+        let mut current = ty;
+        let mut visited = HashSet::new();
+        for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            if !visited.insert(current) {
+                return Err(TyperError::TypeNormalization(
+                    crate::types::TypeNormalizeError::NormalizationCycle { ty: current },
+                ));
             }
-            _ => Ok(false),
+            match self.store.types.try_get(current) {
+                Some(Type::ThisType { .. }) => return Ok(true),
+                Some(Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(symbol),
+                }) => {
+                    if !self.store.symbols.contains(*symbol) {
+                        return Err(TyperError::UnknownSymbol { symbol: *symbol });
+                    }
+                    if self.store.symbols.get(*symbol).kind == SymbolKind::Parameter
+                        || self
+                            .require_stable_selection_prefix(current, tree_index)
+                            .is_err()
+                    {
+                        return Ok(false);
+                    }
+                    if *prefix == self.definitions.no_prefix {
+                        return Ok(true);
+                    }
+                    current = *prefix;
+                }
+                _ => return Ok(false),
+            }
         }
+        Err(TyperError::TypeNormalization(
+            crate::types::TypeNormalizeError::TooDeep,
+        ))
     }
 }
