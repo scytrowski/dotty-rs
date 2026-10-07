@@ -857,7 +857,9 @@ pattern rather than an escaping expression placeholder. Interpolator expansion
 and pattern semantics remain outside the parser.
 XML patterns, remaining refined-type forms, remaining definition forms and full
 template semantics, other legacy given migration syntax, remaining control flow (`do`/`while`),
-macros, and staging semantics remain follow-up increments.
+and staging semantics remain follow-up increments. Legacy `macro expr` syntax
+is retained in the untyped AST as a `MacroTree`; macro expansion and semantic
+desugaring are not performed by the parser.
 
 The initial match layer parses braced and indented `case` regions, including
 patterns, optional guards (including line breaks between a pattern and its

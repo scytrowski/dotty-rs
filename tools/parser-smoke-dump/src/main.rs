@@ -979,6 +979,7 @@ fn kind_name(kind: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::Throw(_)) => "Throw",
         TreeKind::PhaseSpecific(UntypedNode::InlineIf(_)) => "InlineIf",
         TreeKind::PhaseSpecific(UntypedNode::InlineMatch(_)) => "InlineMatch",
+        TreeKind::PhaseSpecific(UntypedNode::MacroTree(_)) => "MacroTree",
         TreeKind::PhaseSpecific(UntypedNode::ParsedTry(_)) => "ParsedTry",
         TreeKind::Return(_) => "Return",
         TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) if tuple.elements.is_empty() => {
@@ -1077,6 +1078,7 @@ fn child_ids(kind: &TreeKind<Untyped>, arena: &AstArena<Untyped>) -> Vec<TreeId<
             children
         }
         TreeKind::NamedArg(named) => vec![named.arg],
+        TreeKind::PhaseSpecific(UntypedNode::MacroTree(macro_tree)) => vec![macro_tree.expr],
         TreeKind::Bind(bind) => vec![bind.body],
         TreeKind::Alternative(alternative) => alternative.alternatives.clone(),
         TreeKind::Annotated(annotated) => vec![annotated.expr, annotated.annotation],

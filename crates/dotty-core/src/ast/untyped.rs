@@ -271,6 +271,12 @@ pub struct InlineMatch {
     pub cases: Vec<TreeId<Untyped>>,
 }
 
+/// `macro expr`, before the macro implementation is expanded or desugared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MacroTree {
+    pub expr: TreeId<Untyped>,
+}
+
 /// Surface-syntax-only constructs. This set mirrors Dotty's actual
 /// `untpd`-only node types; it is not arbitrary.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -312,6 +318,7 @@ pub enum UntypedNode {
 
     InlineIf(InlineIf),
     InlineMatch(InlineMatch),
+    MacroTree(MacroTree),
 
     ParsedTry(ParsedTry),
 }

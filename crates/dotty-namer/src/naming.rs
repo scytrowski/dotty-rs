@@ -277,6 +277,7 @@ fn given_type_tree_kind(tree: &TreeKind<Untyped>) -> &'static str {
         TreeKind::PhaseSpecific(UntypedNode::Throw(_)) => "Throw",
         TreeKind::PhaseSpecific(UntypedNode::InlineIf(_)) => "InlineIf",
         TreeKind::PhaseSpecific(UntypedNode::InlineMatch(_)) => "InlineMatch",
+        TreeKind::PhaseSpecific(UntypedNode::MacroTree(_)) => "MacroTree",
         TreeKind::PhaseSpecific(UntypedNode::ParsedTry(_)) => "ParsedTry",
         TreeKind::PhaseSpecific(UntypedNode::Function(_)) => "Function",
         TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_)) => "FunctionWithMods",

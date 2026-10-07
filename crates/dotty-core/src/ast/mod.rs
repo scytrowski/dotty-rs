@@ -24,7 +24,7 @@ pub use typed::{TypedAst, TypedAstBuilder, TypedTree, TypedTreeId};
 pub use untyped::{
     CapturesAndResult, ContextBoundTypeTree, ContextBounds, ErrorNode, ErrorNodeKind,
     ExtensionMethods, ForDo, ForYield, Function, FunctionWithMods, GenAlias, GenCheckMode, GenFrom,
-    InfixOp, InlineIf, InlineMatch, InterpolatedString, ModuleDef, NumberKind, NumberLiteral,
-    Parens, ParsedTry, PatDef, PolyFunction, PostfixOp, PrefixOp, Throw, Tuple, UntypedNode,
-    UntypedTemplateMetadata, UseRef,
+    InfixOp, InlineIf, InlineMatch, InterpolatedString, MacroTree, ModuleDef, NumberKind,
+    NumberLiteral, Parens, ParsedTry, PatDef, PolyFunction, PostfixOp, PrefixOp, Throw, Tuple,
+    UntypedNode, UntypedTemplateMetadata, UseRef,
 };

@@ -11,6 +11,131 @@ use dotty_core::{
 };
 
 #[test]
+fn nested_macro_expressions_preserve_each_body_span() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "macro macro x",
+        vec![
+            token(TokenKind::Keyword(HardKeyword::Macro), 0, 5),
+            token(TokenKind::Keyword(HardKeyword::Macro), 6, 11),
+            token(TokenKind::Identifier, 12, 13),
+            token(TokenKind::Eof, 13, 13),
+        ],
+        &mut names,
+    );
+
+    let root = parser.simple_expr();
+    let TreeKind::PhaseSpecific(UntypedNode::MacroTree(outer)) = &parser.ast().get(root).kind
+    else {
+        panic!("expected outer macro tree");
+    };
+    assert_eq!(
+        parser.ast().get(root).position.unwrap().span().range(),
+        TextRange::new(12, 13).unwrap()
+    );
+    let TreeKind::PhaseSpecific(UntypedNode::MacroTree(inner)) = &parser.ast().get(outer.expr).kind
+    else {
+        panic!("expected inner macro tree");
+    };
+    assert_eq!(
+        parser
+            .ast()
+            .get(outer.expr)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(12, 13).unwrap()
+    );
+    assert!(matches!(
+        parser.ast().get(inner.expr).kind,
+        TreeKind::Ident(_)
+    ));
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn deeply_nested_macro_prefixes_do_not_recurse_on_the_rust_stack() {
+    const DEPTH: usize = 20_000;
+
+    let mut source = "macro ".repeat(DEPTH);
+    source.push('x');
+    let mut tokens = Vec::with_capacity(DEPTH + 2);
+    for index in 0..DEPTH {
+        let start = (index * 6) as u32;
+        tokens.push(token(
+            TokenKind::Keyword(HardKeyword::Macro),
+            start,
+            start + 5,
+        ));
+    }
+    let body_start = (DEPTH * 6) as u32;
+    tokens.push(token(TokenKind::Identifier, body_start, body_start + 1));
+    tokens.push(token(TokenKind::Eof, body_start + 1, body_start + 1));
+
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(&source, tokens, &mut names);
+    let mut tree = parser.simple_expr();
+    let mut parsed_macros = 0;
+    while let TreeKind::PhaseSpecific(UntypedNode::MacroTree(macro_tree)) =
+        &parser.ast().get(tree).kind
+    {
+        parsed_macros += 1;
+        tree = macro_tree.expr;
+    }
+
+    assert_eq!(parsed_macros, DEPTH);
+    assert!(matches!(parser.ast().get(tree).kind, TreeKind::Ident(_)));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn a_stuck_token_source_does_not_loop_while_reading_macro_prefixes() {
+    struct StuckMacroSource(Token);
+
+    impl TokenSource for StuckMacroSource {
+        fn current(&self) -> &Token {
+            &self.0
+        }
+
+        fn position(&self) -> usize {
+            0
+        }
+
+        fn advance(&mut self) {}
+
+        fn lookahead(&mut self, _n: usize) -> &Token {
+            &self.0
+        }
+
+        fn observe(&mut self, _event: ScannerEvent) {}
+    }
+
+    let source = "macro";
+    let macro_token = Token {
+        kind: TokenKind::Keyword(HardKeyword::Macro),
+        span: TextRange::new(0, 5).unwrap(),
+        value: dotty_core::TokenValue::None,
+    };
+    let mut names = NameInterner::new();
+    let mut parser = Parser::new(
+        SourceText::new(source).unwrap(),
+        SourceId::from_index(1),
+        StuckMacroSource(macro_token),
+        &mut names,
+    );
+
+    let tree = parser.simple_expr();
+
+    assert!(matches!(
+        parser.ast().get(tree).kind,
+        TreeKind::PhaseSpecific(UntypedNode::Error(_))
+    ));
+    assert_eq!(parser.diagnostics().len(), 1);
+}
+
+#[test]
 fn parses_an_identifier_with_its_source_span() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
