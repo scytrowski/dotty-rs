@@ -28,6 +28,10 @@ where
         let mut offset = 1;
         while offset <= 8 {
             let kind = self.cursor.lookahead(offset).kind;
+            if matches!(kind, TokenKind::Newline | TokenKind::Newlines) {
+                offset += 1;
+                continue;
+            }
             if matches!(
                 kind,
                 TokenKind::Keyword(
