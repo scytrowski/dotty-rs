@@ -10,6 +10,102 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    pub(crate) fn starts_legacy_implicit_block_lambda(&mut self) -> bool {
+        if self.current().kind != TokenKind::Keyword(dotty_core::HardKeyword::Implicit)
+            || !matches!(
+                self.cursor.lookahead(1).kind,
+                TokenKind::Identifier | TokenKind::BackquotedIdentifier
+            )
+        {
+            return false;
+        }
+
+        if self.lookahead_is_arrow(2) {
+            return true;
+        }
+        if !matches!(
+            self.cursor.lookahead(2).kind,
+            TokenKind::ColonOp | TokenKind::ColonFollow | TokenKind::ColonEol
+        ) {
+            return false;
+        }
+
+        let mut nesting = [0u32; 3];
+        let mut offset = 3usize;
+        loop {
+            let token = self.cursor.lookahead(offset);
+            match token.kind {
+                TokenKind::Eof
+                | TokenKind::Newline
+                | TokenKind::Newlines
+                | TokenKind::Indent
+                | TokenKind::Outdent
+                | TokenKind::Punctuation(Punctuation::Semicolon | Punctuation::Comma)
+                    if nesting == [0, 0, 0] =>
+                {
+                    return false;
+                }
+                TokenKind::Operator if nesting == [0, 0, 0] => {
+                    if self.lookahead_is_arrow(offset) {
+                        return true;
+                    }
+                }
+                TokenKind::Punctuation(Punctuation::LeftParen) => nesting[0] += 1,
+                TokenKind::Punctuation(Punctuation::RightParen) => {
+                    nesting[0] = nesting[0].saturating_sub(1)
+                }
+                TokenKind::Punctuation(Punctuation::LeftBracket) => nesting[1] += 1,
+                TokenKind::Punctuation(Punctuation::RightBracket) => {
+                    nesting[1] = nesting[1].saturating_sub(1)
+                }
+                TokenKind::Punctuation(Punctuation::LeftBrace) => nesting[2] += 1,
+                TokenKind::Punctuation(Punctuation::RightBrace) => {
+                    if nesting[2] == 0 {
+                        return false;
+                    }
+                    nesting[2] -= 1;
+                }
+                _ => {}
+            }
+            offset = offset.saturating_add(1);
+        }
+    }
+
+    pub(crate) fn parse_legacy_implicit_block_lambda(
+        &mut self,
+        mark: crate::Mark,
+    ) -> TreeId<Untyped> {
+        self.advance(); // `implicit`
+        let parameter = self.parse_binding_with_infix_type();
+        if let TreeKind::ValDef(definition) = &mut self.ast.get_mut(parameter).kind {
+            definition
+                .metadata
+                .modifiers
+                .push(dotty_core::ast::Modifier::Implicit);
+        }
+
+        if self.current_is_arrow() {
+            if self.arrow_starts_indented_body() {
+                self.observe_arrow_indented();
+            }
+            self.advance();
+        } else {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `=>` after legacy implicit lambda parameter",
+            );
+        }
+
+        let body = self.parse_lambda_body();
+        self.alloc_from(
+            mark,
+            TreeKind::PhaseSpecific(UntypedNode::Function(Function {
+                params: vec![parameter],
+                body,
+            })),
+        )
+    }
+
     pub(super) fn starts_lambda(&mut self) -> bool {
         match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
@@ -145,6 +241,14 @@ where
     }
 
     fn parse_binding(&mut self) -> TreeId<Untyped> {
+        self.parse_binding_with_type(false)
+    }
+
+    fn parse_binding_with_infix_type(&mut self) -> TreeId<Untyped> {
+        self.parse_binding_with_type(true)
+    }
+
+    fn parse_binding_with_type(&mut self, infix_type: bool) -> TreeId<Untyped> {
         let mark = self.mark();
         let name = if self.current().kind != TokenKind::BackquotedIdentifier
             && self.current().kind == TokenKind::Identifier
@@ -172,7 +276,13 @@ where
         };
 
         let type_tree = if self.accept_lambda_colon() {
-            self.with_parse_kind(ParseKind::Type, |parser| parser.type_expr())
+            self.with_parse_kind(ParseKind::Type, |parser| {
+                if infix_type {
+                    parser.parse_infix_type()
+                } else {
+                    parser.type_expr()
+                }
+            })
         } else {
             self.synthetic_type_tree_at(mark.start())
         };

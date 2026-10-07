@@ -1474,6 +1474,63 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_legacy_implicit_parameter_in_a_braced_lambda_argument() {
+        const SOURCE: &str = concat!(
+            "def fromFuture = flatMap(executionContext) {\n",
+            "  implicit ec: ExecutionContext & Executor =>\n",
+            "    val result = 1\n",
+            "    use(ec, result)\n",
+            "}\n",
+            "def fromFutureUntyped = flatMap(executionContext) { implicit ec => use(ec) }\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let implicit_block_lambdas = result
+            .ast
+            .iter()
+            .filter_map(|(_, tree)| match &tree.kind {
+                TreeKind::PhaseSpecific(UntypedNode::Function(function))
+                    if function.params.first().is_some_and(|parameter| {
+                        matches!(
+                            &result.ast.get(*parameter).kind,
+                            TreeKind::ValDef(value)
+                                if value.metadata.modifiers.contains(
+                                    &dotty_core::ast::Modifier::Implicit
+                                )
+                        )
+                    }) =>
+                {
+                    Some(function.body)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(implicit_block_lambdas.len(), 2);
+        assert!(
+            implicit_block_lambdas
+                .iter()
+                .all(|body| matches!(result.ast.get(*body).kind, TreeKind::Block(_)))
+        );
+    }
+
+    #[test]
+    fn recovers_from_a_legacy_implicit_lambda_with_a_missing_arrow() {
+        const SOURCE: &str = "def malformed = { implicit ec use(ec) }";
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
     fn if_branch_can_start_with_a_quote() {
         const SOURCE: &str = "def quoted(x: Boolean) = if x then 1 else '{ 2 }";
         let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");

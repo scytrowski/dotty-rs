@@ -889,6 +889,7 @@ literal subset:
 Expr -> function literal | Expr1
 function literal -> FunParams `=>` Expr
                   | FunParams `?=>` Expr
+block-result -> `implicit` id [`:` InfixType] `=>` Block
 ```
 
 Single parameters may be written without parentheses; parenthesized parameter
@@ -903,7 +904,11 @@ existing block-body convention. Polyfunctions use the shared `TypeDef` and
 placeholders create synthetic `ValDef` parameters and lower to ordinary
 `Function` nodes when the enclosing expression is complete; Dotty's internal
 `WildcardFunction` node is not exposed by the Rust AST. Erased parameters in
-function literals and migration-only forms remain future work.
+function literals remain future work. The parser also recognizes Dotty's
+Scala-2-compatibility block-result form `implicit id [: InfixType] => Block`
+inside block statement sequences; it records `Modifier::Implicit` on the
+parameter and keeps the body as a `Block`. Migration warnings remain outside
+the parser's current diagnostic policy.
 
 The initial polymorphic and placeholder-function subset covers:
 
