@@ -318,6 +318,15 @@ limitation rather than treating it as successful adaptation.
 
 ## Supported source contract
 
+Block preindexing recognizes a bounded local extension shape: one method with
+one explicit receiver parameter, no type parameters, and a `DefDef` body.
+Before statement typing, it allocates a typer-owned `EXTENSION` method symbol,
+a method-owned scope, and an uncompleted receiver parameter symbol owned by
+that method. The original receiver parameter tree remains available through
+the same extension-prefix metadata accessor used for namer-owned methods. This
+does not complete receiver types or the extension signature/body, and local
+extension statements and calls remain deferred.
+
 For the tested subset, source Typer completion currently supports:
 
 - declared simple, qualified, and applied type references;
