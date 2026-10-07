@@ -1,6 +1,6 @@
 use dotty_core::ast::{
-    Apply, ApplyKind, Block, Ident, New, Parens, Quote, Select, SplicePattern, Super, This, Tuple,
-    UntypedNode, ValDef,
+    Apply, ApplyKind, Block, Ident, MacroTree, New, Parens, Quote, Select, SplicePattern, Super,
+    This, Tuple, UntypedNode, ValDef,
 };
 use dotty_core::{
     Constant, Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped,
@@ -113,6 +113,15 @@ where
             }
             TokenKind::Keyword(dotty_core::HardKeyword::Super) => self.parse_super(mark, None),
             TokenKind::Keyword(dotty_core::HardKeyword::New) => self.parse_new(mark),
+            TokenKind::Keyword(dotty_core::HardKeyword::Macro) => {
+                self.advance();
+                let body_mark = self.mark();
+                let expr = self.simple_expr();
+                self.alloc_from(
+                    body_mark,
+                    TreeKind::PhaseSpecific(UntypedNode::MacroTree(MacroTree { expr })),
+                )
+            }
             TokenKind::Quote => self.parse_quote(mark),
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_parens_or_tuple(mark),
             TokenKind::Punctuation(Punctuation::LeftBrace) => self.parse_block(mark),

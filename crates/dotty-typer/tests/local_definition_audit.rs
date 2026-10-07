@@ -4131,6 +4131,7 @@ fn tree_kind_label(kind: &TreeKind<Untyped>) -> &'static str {
             UntypedNode::Throw(_) => "Throw",
             UntypedNode::InlineIf(_) => "InlineIf",
             UntypedNode::InlineMatch(_) => "InlineMatch",
+            UntypedNode::MacroTree(_) => "MacroTree",
             UntypedNode::ParsedTry(_) => "ParsedTry",
         },
     }
@@ -4164,6 +4165,7 @@ fn expression_form(kind: &TreeKind<Untyped>) -> Option<&'static str> {
         TreeKind::PhaseSpecific(UntypedNode::ParsedTry(_)) => Some("ParsedTry"),
         TreeKind::PhaseSpecific(UntypedNode::InlineIf(_)) => Some("InlineIf"),
         TreeKind::PhaseSpecific(UntypedNode::InlineMatch(_)) => Some("InlineMatch"),
+        TreeKind::PhaseSpecific(UntypedNode::MacroTree(_)) => Some("MacroTree"),
         TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(_)) => Some("InterpolatedString"),
         _ => None,
     }
@@ -4518,6 +4520,7 @@ fn term_expression_children(kind: &TreeKind<Untyped>) -> Vec<dotty_core::TreeId<
             children.push(node.selector);
             children.extend(node.cases.iter().copied());
         }
+        TreeKind::PhaseSpecific(UntypedNode::MacroTree(node)) => children.push(node.expr),
         TreeKind::PhaseSpecific(UntypedNode::ParsedTry(node)) => {
             children.push(node.expr);
             children.extend(node.handler);
