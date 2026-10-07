@@ -1,0 +1,35 @@
+[[syntax trees at end of                     typer]] // crates/dotty-typer/tests/fixtures/source-annotations/SourceAnnotations.scala
+package <empty> {
+  class Annot(n: Int) extends scala.annotation.Annotation(), scala.annotation.
+    StaticAnnotation {
+    val n: Int
+  }
+  class EmptyAnnot() extends scala.annotation.Annotation(), scala.annotation.
+    StaticAnnotation {}
+  class Multi(first: Int, second: Int) extends scala.annotation.Annotation(),
+    scala.annotation.StaticAnnotation {
+    val first: Int
+    val second: Int
+  }
+  class Triple(first: Int, second: Int, third: Int) extends
+    scala.annotation.Annotation(), scala.annotation.StaticAnnotation {
+    val first: Int
+    val second: Int
+    val third: Int
+  }
+  final lazy module val SourceAnnotations: SourceAnnotations =
+    new SourceAnnotations()
+  final module class SourceAnnotations() extends Object() {
+    this: SourceAnnotations.type =>
+    def bare(value: Int): Int = value:(value : Int) @unchecked
+    def empty(value: Int): Int = value:(value : Int) @EmptyAnnot
+    def positional(value: Int): Int = value:(value : Int) @Annot(1)
+    def named(value: Int): Int = value:(value : Int) @Annot(n = 1)
+    def mixed(value: Int): Int = value:(value : Int) @Multi(1, second = 2)
+    def mixedAfterNamed(value: Int): Int =
+      value:(value : Int) @Multi(first = 1, 2)
+    def reorderedNamedThenPositional(value: Int): Int =
+      value:(value : Int) @Triple(first = 1, second = 2, 3)
+  }
+}
+

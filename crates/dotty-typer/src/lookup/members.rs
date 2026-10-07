@@ -253,7 +253,7 @@ impl SourceTyper<'_> {
         ))
     }
 
-    fn class_info(
+    pub(in crate::typer) fn class_info(
         &mut self,
         symbol: SymbolId,
         journal: &mut Vec<(SymbolId, SymbolInfo)>,
@@ -360,7 +360,7 @@ struct PendingClass {
     depth: usize,
 }
 
-fn class_symbol_for_type(
+pub(in crate::typer) fn class_symbol_for_type(
     store: &SemanticStore,
     ty: TypeId,
     is_parent: bool,

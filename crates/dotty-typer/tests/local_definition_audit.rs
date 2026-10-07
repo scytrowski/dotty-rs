@@ -3699,6 +3699,26 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::UnsupportedPrefixOperator { .. } => "UnsupportedPrefixOperator",
         TyperError::PrefixMethodNeedsArgumentList { .. } => "PrefixMethodNeedsArgumentList",
         TyperError::PrefixPolymorphicDeferred { .. } => "PrefixPolymorphicDeferred",
+        TyperError::MalformedSourceAnnotation { .. } => "MalformedSourceAnnotation",
+        TyperError::SourceAnnotationClassDeferred { .. } => "SourceAnnotationClassDeferred",
+        TyperError::SourceAnnotationNotAnnotationClass { .. } => {
+            "SourceAnnotationNotAnnotationClass"
+        }
+        TyperError::SourceAnnotationArgumentNotConstant { .. } => {
+            "SourceAnnotationArgumentNotConstant"
+        }
+        TyperError::SourceAnnotationDuplicateNamedArgument { .. } => {
+            "SourceAnnotationDuplicateNamedArgument"
+        }
+        TyperError::SourceAnnotationConstructorDeferred { .. } => {
+            "SourceAnnotationConstructorDeferred"
+        }
+        TyperError::SourceAnnotationConstructorArgumentMismatch { .. } => {
+            "SourceAnnotationConstructorArgumentMismatch"
+        }
+        TyperError::SourceAnnotationArgumentTypeDeferred { .. } => {
+            "SourceAnnotationArgumentTypeDeferred"
+        }
         TyperError::MethodParameterSymbolMissing { .. } => "MethodParameterSymbolMissing",
         TyperError::LocalMethodSignatureDeferred { .. } => "LocalMethodSignatureDeferred",
         TyperError::LocalMethodInferredResultDeferred { .. } => "LocalMethodInferredResultDeferred",
