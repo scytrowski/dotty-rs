@@ -52,17 +52,18 @@ cd "$repo_dir"
 scala3_roots=("${scala3_root}/library/src" "${scala3_root}/compiler/src")
 mapfile -t cats_roots < <(cargo run --quiet --locked -p dotty-parser-corpus-report -- --list-production-roots "$cats_root")
 mapfile -t cats_effect_roots < <(cargo run --quiet --locked -p dotty-parser-corpus-report -- --list-production-roots "$cats_effect_root")
-kyo_roots=()
-while IFS= read -r root; do
-  # These sbt plugins are built with Scala 2.12 and are not part of the Scala corpus.
-  if [[ "$root" != "$kyo_root/kyo-compat/plugin/"* \
-     && "$root" != "$kyo_root/kyo-doctest/plugin/"* \
-     && "$root" != "$kyo_root/kyo-ffi/plugin/"* \
-     && "$root" != "$kyo_root/kyo-test/sbt/"* \
-     && "$root" != "$kyo_root/kyo-test/sbt-publish/"* ]]; then
-    kyo_roots+=("$root")
-  fi
-done < <(cargo run --quiet --locked -p dotty-parser-corpus-report -- --list-production-roots "$kyo_root")
+mapfile -t kyo_discovered_roots < <(cargo run --quiet --locked -p dotty-parser-corpus-report -- --list-production-roots "$kyo_root")
+kyo_roots_output=$(PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "$kyo_root" "${kyo_discovered_roots[@]}" <<'PY'
+import pathlib
+import sys
+from source_inventory import kyo_scala3_production_roots
+
+roots = [pathlib.Path(root) for root in sys.argv[2:]]
+for root in kyo_scala3_production_roots(pathlib.Path(sys.argv[1]), roots):
+    print(root)
+PY
+)
+mapfile -t kyo_roots <<<"$kyo_roots_output"
 if [[ ${#cats_roots[@]} -eq 0 || ${#cats_effect_roots[@]} -eq 0 || ${#kyo_roots[@]} -eq 0 ]]; then
   echo "no production source roots found in a pinned corpus checkout" >&2
   exit 1
