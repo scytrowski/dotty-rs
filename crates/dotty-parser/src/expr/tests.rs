@@ -4678,8 +4678,64 @@ fn parses_eta_expansion_after_a_selection_with_the_full_span() {
     assert_eq!(parser.current().kind, TokenKind::Eof);
     assert!(parser.diagnostics().is_empty());
     assert_eq!(
-        parser.ast().get(expression).position.unwrap().span().range(),
+        parser
+            .ast()
+            .get(expression)
+            .position
+            .unwrap()
+            .span()
+            .range(),
         TextRange::new(0, 7).unwrap()
+    );
+}
+
+#[test]
+fn malformed_continuation_after_eta_expansion_keeps_tree_and_reports_its_position() {
+    let mut names = NameInterner::new();
+    let result = parser_for(
+        "f _ (",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Identifier, 2, 3),
+            token(TokenKind::Punctuation(Punctuation::LeftParen), 4, 5),
+            token(TokenKind::Eof, 5, 5),
+        ],
+        &mut names,
+    )
+    .parse_expression_fragment();
+
+    let TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) = result.ast.get(result.root).kind
+    else {
+        panic!("expected eta-expansion tree before malformed continuation");
+    };
+    assert!(matches!(
+        result.ast.get(postfix.operand).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(
+        result.ast.get(result.root).position.unwrap().span().range(),
+        TextRange::new(0, 3).unwrap()
+    );
+    assert_eq!(result.diagnostics.len(), 1);
+    assert_eq!(
+        result.diagnostics[0].kind(),
+        crate::ParseDiagnosticKind::UnexpectedToken
+    );
+    assert_eq!(
+        result.diagnostics[0].message(),
+        "expected end of expression fragment"
+    );
+    assert_eq!(result.diagnostics[0].span(), TextRange::new(4, 5).unwrap());
+    assert_eq!(
+        result
+            .ast
+            .get(result.root)
+            .position
+            .unwrap()
+            .span()
+            .range()
+            .end(),
+        3
     );
 }
 
