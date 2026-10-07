@@ -102,6 +102,7 @@ where
                 } else {
                     args.push(self.argument_expr());
                 }
+                self.consume_newlines_before_argument_delimiter();
                 if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                     self.expect(TokenKind::Punctuation(Punctuation::RightParen));
                     break;
@@ -130,6 +131,29 @@ where
             && self
                 .current_is_known_name(self.known_names().using)
                 .unwrap_or(false)
+    }
+
+    fn consume_newlines_before_argument_delimiter(&mut self) {
+        let mut offset = 0;
+        while matches!(
+            self.cursor.lookahead(offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            offset += 1;
+        }
+
+        if offset == 0
+            || !matches!(
+                self.cursor.lookahead(offset).kind,
+                TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightParen)
+            )
+        {
+            return;
+        }
+
+        for _ in 0..offset {
+            self.advance();
+        }
     }
 
     fn argument_expr(&mut self) -> TreeId<Untyped> {
@@ -374,6 +398,56 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn consumes_newline_before_a_closing_argument_delimiter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "f(a\n)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Newline, 3, 4),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        assert!(matches!(parser.ast().get(tree).kind, TreeKind::Apply(_)));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn keeps_newline_before_a_non_delimiter_significant_in_arguments() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "f(a\nb)",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+                token(TokenKind::Identifier, 2, 3),
+                token(TokenKind::Newline, 3, 4),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 5, 6),
+                token(TokenKind::Eof, 6, 6),
+            ],
+            &mut names,
+        );
+
+        parser.expr();
+
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message()
+                .contains("expected Punctuation(RightParen)")
+        }));
+        assert_eq!(parser.current().kind, TokenKind::Newline);
     }
 
     #[test]
