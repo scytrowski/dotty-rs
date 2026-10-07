@@ -1474,6 +1474,190 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_legacy_implicit_parameter_in_a_braced_lambda_argument() {
+        const SOURCE: &str = concat!(
+            "def fromFuture = flatMap(executionContext) {\n",
+            "  implicit ec: ExecutionContext & Executor =>\n",
+            "    val result = 1\n",
+            "    use(ec, result)\n",
+            "}\n",
+            "def fromFutureUntyped = flatMap(executionContext) { implicit ec => use(ec) }\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let implicit_block_lambdas = result
+            .ast
+            .iter()
+            .filter_map(|(_, tree)| match &tree.kind {
+                TreeKind::PhaseSpecific(UntypedNode::Function(function))
+                    if function.params.first().is_some_and(|parameter| {
+                        matches!(
+                            &result.ast.get(*parameter).kind,
+                            TreeKind::ValDef(value)
+                                if value.metadata.modifiers.contains(
+                                    &dotty_core::ast::Modifier::Implicit
+                                )
+                        )
+                    }) =>
+                {
+                    Some(function.body)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(implicit_block_lambdas.len(), 2);
+        assert!(
+            implicit_block_lambdas
+                .iter()
+                .all(|body| matches!(result.ast.get(*body).kind, TreeKind::Block(_)))
+        );
+    }
+
+    #[test]
+    fn recovers_from_a_legacy_implicit_lambda_with_a_missing_arrow() {
+        const SOURCE: &str = "def malformed = { implicit ec use(ec) }";
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            dotty_parser::ParseDiagnosticKind::ExpectedToken
+        );
+        assert_eq!(
+            result.diagnostics[0].message(),
+            "expected `=>` after legacy implicit lambda parameter"
+        );
+        assert_eq!(
+            result.diagnostics[0].span(),
+            dotty_core::TextRange::new(30, 33).unwrap()
+        );
+
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let [method_id] = package.stats.as_slice() else {
+            panic!("expected one method");
+        };
+        let TreeKind::DefDef(method) = &result.ast.get(*method_id).kind else {
+            panic!("expected method definition");
+        };
+        let TreeKind::Block(block) = &result.ast.get(method.rhs.unwrap()).kind else {
+            panic!("expected method body block");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) =
+            &result.ast.get(block.expr).kind
+        else {
+            panic!("expected recovered legacy implicit Function");
+        };
+        assert_eq!(function.params.len(), 1);
+        let TreeKind::ValDef(parameter) = &result.ast.get(function.params[0]).kind else {
+            panic!("expected implicit function parameter");
+        };
+        assert!(
+            parameter
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Implicit)
+        );
+        let TreeKind::Block(lambda_body) = &result.ast.get(function.body).kind else {
+            panic!("expected lambda body block");
+        };
+        assert!(lambda_body.stats.is_empty());
+        assert!(matches!(
+            &result.ast.get(lambda_body.expr).kind,
+            TreeKind::Literal(literal) if literal.value == dotty_core::Constant::Unit
+        ));
+        assert_eq!(
+            result
+                .ast
+                .get(function.body)
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            dotty_core::TextRange::new(29, 29).unwrap()
+        );
+        assert_eq!(
+            result.ast.get(block.expr).position.unwrap().span().range(),
+            dotty_core::TextRange::new(18, 37).unwrap()
+        );
+    }
+
+    fn assert_implicit_inline_local_definition(source: &str) {
+        let scanner = ContextualScanner::new(source).expect("source should scan cleanly");
+        let source_text = SourceText::new(source).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let [outer_id] = package.stats.as_slice() else {
+            panic!("expected one outer method");
+        };
+        let TreeKind::DefDef(outer) = &result.ast.get(*outer_id).kind else {
+            panic!("expected outer method definition");
+        };
+        let TreeKind::Block(body) = &result.ast.get(outer.rhs.unwrap()).kind else {
+            panic!("expected outer method body block");
+        };
+        assert_eq!(body.stats.len(), 1);
+        let TreeKind::DefDef(local) = &result.ast.get(body.stats[0]).kind else {
+            panic!("expected local DefDef instead of a recovered lambda");
+        };
+        assert!(
+            local
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Implicit)
+        );
+        assert!(
+            local
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Inline)
+        );
+        assert!(matches!(result.ast.get(body.expr).kind, TreeKind::Ident(_)));
+    }
+
+    #[test]
+    fn implicit_soft_modifier_before_local_definition_is_not_a_lambda() {
+        assert_implicit_inline_local_definition(
+            "def outer = { implicit inline def f: Int = 1; f }",
+        );
+    }
+
+    #[test]
+    fn implicit_soft_modifier_with_newline_before_local_definition_is_not_a_lambda() {
+        assert_implicit_inline_local_definition(
+            "def outer = {\n  implicit inline\n  def f: Int = 1\n  f\n}",
+        );
+    }
+
+    #[test]
+    fn stops_legacy_implicit_lambda_lookahead_at_eof_inside_a_type() {
+        const SOURCE: &str = "def malformed = { implicit ec: List[Foo";
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(!result.diagnostics.is_empty());
+    }
+
+    #[test]
     fn parses_prefix_operator_assignment_after_a_statement_in_a_block() {
         const SOURCE: &str = concat!(
             "def data_=(data: Data): Unit = {\n",

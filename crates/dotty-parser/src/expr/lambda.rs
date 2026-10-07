@@ -1,6 +1,7 @@
-use dotty_core::ast::{Function, Modifiers, UntypedNode, ValDef};
+use dotty_core::ast::{Block, Function, Literal, Modifiers, UntypedNode, ValDef};
 use dotty_core::{
-    Punctuation, SourceSpan, Span, TermName, TextRange, TokenKind, TreeId, TreeKind, Untyped,
+    Constant, Punctuation, SourceSpan, Span, TermName, TextRange, TokenKind, TreeId, TreeKind,
+    Untyped,
 };
 
 use super::can_start_expr;
@@ -10,6 +11,126 @@ impl<'src, 'names, S> Parser<'src, 'names, S>
 where
     S: dotty_core::TokenSource,
 {
+    pub(crate) fn starts_legacy_implicit_block_lambda(&mut self) -> bool {
+        self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Implicit)
+            && !self.implicit_prefix_starts_definition()
+            && matches!(
+                self.cursor.lookahead(1).kind,
+                TokenKind::Identifier | TokenKind::BackquotedIdentifier
+            )
+    }
+
+    /// `implicit` starts a legacy block lambda only if it is not followed by
+    /// additional definition modifiers and a local definition keyword. Soft
+    /// modifiers such as `inline` are lexed as identifiers, so the statement
+    /// parser must account for them before claiming the construct as a lambda.
+    fn implicit_prefix_starts_definition(&mut self) -> bool {
+        let mut offset = 1;
+        while offset <= 8 {
+            let kind = self.cursor.lookahead(offset).kind;
+            if matches!(kind, TokenKind::Newline | TokenKind::Newlines) {
+                offset += 1;
+                continue;
+            }
+            if matches!(
+                kind,
+                TokenKind::Keyword(
+                    dotty_core::HardKeyword::Val
+                        | dotty_core::HardKeyword::Var
+                        | dotty_core::HardKeyword::Def
+                        | dotty_core::HardKeyword::Type
+                        | dotty_core::HardKeyword::Class
+                        | dotty_core::HardKeyword::Trait
+                        | dotty_core::HardKeyword::Object
+                        | dotty_core::HardKeyword::Enum
+                        | dotty_core::HardKeyword::Given
+                ) | TokenKind::CaseClass
+                    | TokenKind::CaseObject
+            ) {
+                return true;
+            }
+
+            let is_soft_modifier = kind == TokenKind::Identifier
+                && ["inline", "transparent", "open", "infix", "opaque", "erased"]
+                    .iter()
+                    .any(|modifier| self.lookahead_text_is(offset, modifier));
+            if crate::modifiers::is_hard_modifier(kind) || is_soft_modifier {
+                offset += 1;
+            } else {
+                return false;
+            }
+        }
+        false
+    }
+
+    pub(crate) fn parse_legacy_implicit_block_lambda(
+        &mut self,
+        mark: crate::Mark,
+    ) -> TreeId<Untyped> {
+        self.advance(); // `implicit`
+        let parameter = self.parse_binding_with_infix_type();
+        if let TreeKind::ValDef(definition) = &mut self.ast.get_mut(parameter).kind {
+            definition
+                .metadata
+                .modifiers
+                .push(dotty_core::ast::Modifier::Implicit);
+        }
+
+        let body = if self.current_is_arrow() {
+            if self.arrow_starts_indented_body() {
+                self.observe_arrow_indented();
+            }
+            self.advance();
+            self.parse_lambda_body()
+        } else {
+            self.report(
+                ParseDiagnosticKind::ExpectedToken,
+                "expected `=>` after legacy implicit lambda parameter",
+            );
+            let parameter_end = self
+                .ast
+                .get(parameter)
+                .position
+                .map(|position| position.span().range().end())
+                .unwrap_or_else(|| self.current().span.start());
+            while !matches!(
+                self.current().kind,
+                TokenKind::Newline
+                    | TokenKind::Newlines
+                    | TokenKind::Outdent
+                    | TokenKind::Punctuation(Punctuation::RightBrace | Punctuation::Semicolon)
+                    | TokenKind::Eof
+            ) {
+                let checkpoint = self.cursor.checkpoint();
+                self.advance();
+                if !self.cursor.progressed_since(checkpoint) {
+                    break;
+                }
+            }
+            let span = self.zero_width_span(parameter_end);
+            let unit = self.alloc(
+                TreeKind::Literal(Literal {
+                    value: Constant::Unit,
+                }),
+                Some(span),
+            );
+            self.alloc(
+                TreeKind::Block(Block {
+                    stats: Vec::new(),
+                    expr: unit,
+                }),
+                Some(span),
+            )
+        };
+        self.alloc_from(
+            mark,
+            TreeKind::PhaseSpecific(UntypedNode::Function(Function {
+                params: vec![parameter],
+                body,
+            })),
+        )
+    }
+
     pub(super) fn starts_lambda(&mut self) -> bool {
         match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
@@ -145,6 +266,14 @@ where
     }
 
     fn parse_binding(&mut self) -> TreeId<Untyped> {
+        self.parse_binding_with_type(false)
+    }
+
+    fn parse_binding_with_infix_type(&mut self) -> TreeId<Untyped> {
+        self.parse_binding_with_type(true)
+    }
+
+    fn parse_binding_with_type(&mut self, infix_type: bool) -> TreeId<Untyped> {
         let mark = self.mark();
         let name = if self.current().kind != TokenKind::BackquotedIdentifier
             && self.current().kind == TokenKind::Identifier
@@ -172,7 +301,13 @@ where
         };
 
         let type_tree = if self.accept_lambda_colon() {
-            self.with_parse_kind(ParseKind::Type, |parser| parser.type_expr())
+            self.with_parse_kind(ParseKind::Type, |parser| {
+                if infix_type {
+                    parser.parse_infix_type()
+                } else {
+                    parser.type_expr()
+                }
+            })
         } else {
             self.synthetic_type_tree_at(mark.start())
         };

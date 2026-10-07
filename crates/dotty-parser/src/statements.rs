@@ -97,6 +97,13 @@ where
         {
             return self.parse_unsupported_enum_case();
         }
+        if location == Location::InBlock && self.starts_legacy_implicit_block_lambda() {
+            let mark = self.mark();
+            let lambda = self.with_location(location, |parser| {
+                parser.parse_legacy_implicit_block_lambda(mark)
+            });
+            return ParsedStatement::Expression(lambda);
+        }
         if self.starts_extension_definition() {
             return self.parse_extension_definition(location);
         }
