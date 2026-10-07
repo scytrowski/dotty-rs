@@ -20,6 +20,7 @@ pub(in crate::typer) struct ResolvedApplicationFunction {
     pub(in crate::typer) typed: TreeId<Typed>,
     pub(in crate::typer) callable: TypeId,
     pub(in crate::typer) arguments: Vec<TypedArgument>,
+    pub(in crate::typer) argument_trees: Option<Vec<TreeId<Untyped>>>,
 }
 
 pub(in crate::typer) struct ResolvedApplication {
@@ -124,28 +125,34 @@ impl SourceTyper<'_> {
         } else {
             self.resolve_overloaded_application_function(request, info_journal, new_mappings)?
         };
-        let (function, callable, typed_arguments) = if let Some((function, callable, arguments)) =
-            constructor_function
-        {
-            (function, callable, arguments)
-        } else if let Some(resolved) = resolved_function {
-            (resolved.typed, resolved.callable, Some(resolved.arguments))
-        } else {
-            let function = self.type_value_expression_inner(
-                application.function,
-                context,
-                info_journal,
-                new_mappings,
-            )?;
-            let function_type = self.typed_arena.get(function).ty;
-            let callable = self.widen_expression_type_journaled(function_type, info_journal, 0)?;
-            (function, callable, None)
-        };
+        let (function, callable, typed_arguments, resolved_argument_trees) =
+            if let Some((function, callable, arguments)) = constructor_function {
+                (function, callable, arguments, None)
+            } else if let Some(resolved) = resolved_function {
+                (
+                    resolved.typed,
+                    resolved.callable,
+                    Some(resolved.arguments),
+                    resolved.argument_trees,
+                )
+            } else {
+                let function = self.type_value_expression_inner(
+                    application.function,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )?;
+                let function_type = self.typed_arena.get(function).ty;
+                let callable =
+                    self.widen_expression_type_journaled(function_type, info_journal, 0)?;
+                (function, callable, None, None)
+            };
         self.type_resolved_application(
             ResolvedApplication {
                 tree_index: tree.index(),
                 application_kind: application.kind,
-                argument_trees: application.args,
+                argument_trees: resolved_argument_trees
+                    .unwrap_or_else(|| application.args.to_vec()),
                 position,
                 context,
                 function,
