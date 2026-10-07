@@ -233,6 +233,7 @@ struct Audit {
     typed_local_defdefs: usize,
     failures: BTreeMap<String, FailureBucket>,
     expression_forms: BTreeMap<String, usize>,
+    prefix_operator_forms: BTreeMap<String, usize>,
     type_tree_forms: BTreeMap<String, usize>,
     type_tree_form_files: BTreeMap<String, BTreeSet<String>>,
     parser_diagnostics: BTreeMap<String, usize>,
@@ -256,6 +257,7 @@ impl Default for Audit {
             typed_local_defdefs: 0,
             failures: BTreeMap::new(),
             expression_forms: empty_expression_histogram(),
+            prefix_operator_forms: BTreeMap::new(),
             type_tree_forms: empty_type_tree_histogram(),
             type_tree_form_files: empty_type_tree_form_files(),
             parser_diagnostics: BTreeMap::new(),
@@ -384,6 +386,7 @@ impl Audit {
         for (name, count) in other.expression_forms {
             *self.expression_forms.entry(name).or_default() += count;
         }
+        merge_counts(&mut self.prefix_operator_forms, other.prefix_operator_forms);
         for (name, count) in other.type_tree_forms {
             *self.type_tree_forms.entry(name).or_default() += count;
         }
@@ -596,6 +599,10 @@ fn pinned_scala39_local_definition_audit() {
     for (form, count) in expression_forms {
         println!("  {form}={count}");
     }
+    println!("prefix_operator_forms:");
+    for (operator, count) in &audit.prefix_operator_forms {
+        println!("  operator={operator:?} count={count}");
+    }
     println!("type_tree_forms:");
     for (form, count) in &audit.type_tree_forms {
         println!("  {form}={count}");
@@ -623,6 +630,66 @@ fn pinned_scala39_local_definition_audit() {
         "unsupported_expression_total={}",
         sum_buckets_with_prefix(&audit.failures, "UnsupportedExpression::")
     );
+    println!("expression_sprint_first_blockers:");
+    for (name, bucket) in [
+        (
+            "UnsupportedExpression::PrefixOp",
+            audit.failures.get("UnsupportedExpression::PrefixOp"),
+        ),
+        (
+            "UnsupportedExpression::Annotated",
+            audit.failures.get("UnsupportedExpression::Annotated"),
+        ),
+        ("MemberNotFound", audit.failures.get("MemberNotFound")),
+        ("MemberLookup", audit.failures.get("MemberLookup")),
+        ("TypeNameNotFound", audit.failures.get("TypeNameNotFound")),
+        (
+            "SourceAnnotationClassDeferred",
+            audit.failures.get("SourceAnnotationClassDeferred"),
+        ),
+        (
+            "SourceAnnotationNotAnnotationClass",
+            audit.failures.get("SourceAnnotationNotAnnotationClass"),
+        ),
+        (
+            "SourceAnnotationArgumentNotConstant",
+            audit.failures.get("SourceAnnotationArgumentNotConstant"),
+        ),
+        (
+            "SourceAnnotationConstructorDeferred",
+            audit.failures.get("SourceAnnotationConstructorDeferred"),
+        ),
+        (
+            "SourceAnnotationConstructorArgumentMismatch",
+            audit
+                .failures
+                .get("SourceAnnotationConstructorArgumentMismatch"),
+        ),
+        (
+            "SourceAnnotationArgumentTypeDeferred",
+            audit.failures.get("SourceAnnotationArgumentTypeDeferred"),
+        ),
+        (
+            "ExpressionTypeCannotBeWidened",
+            audit.failures.get("ExpressionTypeCannotBeWidened"),
+        ),
+        (
+            "ExpectedExpressionTypeMismatch",
+            audit.failures.get("ExpectedExpressionTypeMismatch"),
+        ),
+        (
+            "ExpectedExpressionConformanceUnsupported",
+            audit
+                .failures
+                .get("ExpectedExpressionConformanceUnsupported"),
+        ),
+    ] {
+        println!(
+            "  {name}={} files={}",
+            bucket.map_or(0, |bucket| bucket.count),
+            bucket.map_or(0, |bucket| bucket.files.len())
+        );
+    }
     let unsupported_type_tree_files = audit
         .failures
         .iter()
@@ -851,11 +918,27 @@ fn print_ranked_gaps(failures: &BTreeMap<String, FailureBucket>) {
     }
     if let Some((name, bucket)) = ranked.first() {
         println!(
-            "next_typer_increment_recommendation: implement a focused slice for {name} ({} occurrences in {} files); keep classpath materialization as a separate gate because the pinned audit resolved no external members",
-            bucket.count,
-            bucket.files.len()
+            "{}; keep classpath materialization as a separate gate because the pinned audit resolved no external members",
+            highest_ranked_semantic_gap(name, bucket.count, bucket.files.len())
         );
     }
+}
+
+fn highest_ranked_semantic_gap(name: &str, count: usize, files: usize) -> String {
+    format!(
+        "highest_ranked_semantic_gap: {name} ({count} occurrences in {files} files); count ranks the audit only and does not select a sprint increment"
+    )
+}
+
+#[test]
+fn highest_ranked_gap_output_does_not_claim_to_recommend_a_sprint() {
+    let summary = highest_ranked_semantic_gap("MissingDeclaredType", 34, 15);
+
+    assert_eq!(
+        summary,
+        "highest_ranked_semantic_gap: MissingDeclaredType (34 occurrences in 15 files); count ranks the audit only and does not select a sprint increment"
+    );
+    assert!(!summary.contains("recommendation"));
 }
 
 fn scope_note_for_bucket(bucket: &str) -> (&'static str, &'static str, &'static str, &'static str) {
@@ -1284,6 +1367,7 @@ fn local_expression_audit_types_supported_prefix_calls() {
     let audit = audit_source(source, "Prefix.scala");
 
     assert_eq!(audit.expression_forms.get("PrefixOp"), Some(&1));
+    assert_eq!(audit.prefix_operator_forms.get("!"), Some(&1));
     assert_eq!(audit.local_defdefs, 1);
     assert_eq!(audit.typed_local_defdefs, 1, "{audit:?}");
     assert!(audit.failures.is_empty(), "{audit:?}");
@@ -1307,6 +1391,42 @@ fn local_expression_audit_reports_prefix_member_failure_by_actual_error() {
         !audit
             .failures
             .contains_key("UnsupportedExpression::PrefixOp")
+    );
+}
+
+#[test]
+fn local_expression_audit_types_supported_term_annotations() {
+    let source = "package scala.annotation { abstract class Annotation }; package scala { class unchecked extends scala.annotation.Annotation }; class Audit { import scala.unchecked; def outer: Int = { def local: Int = 1: @unchecked; local } }";
+    let audit = audit_source(source, "Annotated.scala");
+
+    assert_eq!(audit.local_defdefs, 1);
+    assert_eq!(audit.typed_local_defdefs, 1, "{audit:?}");
+    assert_eq!(audit.expression_forms.get("Annotated"), Some(&1));
+    assert!(
+        !audit
+            .failures
+            .contains_key("UnsupportedExpression::Annotated")
+    );
+    assert!(audit.failures.is_empty(), "{audit:?}");
+}
+
+#[test]
+fn local_expression_audit_keeps_annotation_argument_errors_specific() {
+    let source = "package scala.annotation { abstract class Annotation }; class TermAnnotation(val value: Int) extends scala.annotation.Annotation; object Audit { def outer(value: Int): Int = { def local: Int = 1: @TermAnnotation(value); local } }";
+    let audit = audit_source(source, "AnnotatedArgument.scala");
+
+    assert_eq!(
+        audit
+            .failures
+            .get("SourceAnnotationArgumentNotConstant")
+            .map(|failure| failure.count),
+        Some(1),
+        "{audit:?}"
+    );
+    assert!(
+        !audit
+            .failures
+            .contains_key("UnsupportedExpression::Annotated")
     );
 }
 
@@ -2041,6 +2161,7 @@ fn audit_source_inner(
     audit.files_attempted = 1;
     audit.patdef_profile = collect_local_patdefs(&parsed.ast, &store.names, path);
     audit.expression_forms = collect_expression_histogram(&parsed.ast);
+    audit.prefix_operator_forms = collect_prefix_operator_histogram(&parsed.ast, &store.names);
     let (type_tree_forms, type_tree_form_names) =
         collect_declared_type_tree_inventory(&parsed.ast, &store.names);
     audit.type_tree_forms = type_tree_forms;
@@ -2114,7 +2235,11 @@ fn audit_source_inner(
         })
         .collect::<BTreeMap<_, _>>();
 
-    let typer_packages = Packages::new();
+    let (typer_packages, resolver_packages) = if classpath.is_some() {
+        (Packages::new(), Some(packages))
+    } else {
+        (packages, None)
+    };
     let type_operator_spellings = source_operator_spellings(&parsed.ast, &store.names);
     let mut typer = SourceTyper::new(
         &parsed.ast,
@@ -2124,7 +2249,7 @@ fn audit_source_inner(
         definitions,
         &typer_packages,
     );
-    if let Some((classpath, metrics)) = classpath {
+    if let (Some((classpath, metrics)), Some(packages)) = (classpath, resolver_packages) {
         let resolver = ClasspathSymbolResolver::new(
             classpath,
             definitions,
@@ -4165,6 +4290,7 @@ fn expression_form(kind: &TreeKind<Untyped>) -> Option<&'static str> {
         TreeKind::TypeApply(_) => Some("TypeApply"),
         TreeKind::New(_) => Some("New"),
         TreeKind::Typed(_) => Some("Typed"),
+        TreeKind::Annotated(_) => Some("Annotated"),
         TreeKind::Assign(_) => Some("Assign"),
         TreeKind::Block(_) => Some("Block"),
         TreeKind::If(_) => Some("If"),
@@ -4198,6 +4324,7 @@ const EXPRESSION_FORMS: &[&str] = &[
     "TypeApply",
     "New",
     "Typed",
+    "Annotated",
     "Assign",
     "Block",
     "If",
@@ -4251,6 +4378,42 @@ fn collect_expression_histogram(arena: &dotty_core::AstArena<Untyped>) -> BTreeM
                 }
                 pending.extend(term_expression_children(&node.kind));
             }
+        }
+    }
+    histogram
+}
+
+fn collect_prefix_operator_histogram(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::names::NameInterner,
+) -> BTreeMap<String, usize> {
+    let nodes = arena
+        .iter()
+        .map(|(tree, node)| (tree.index(), node))
+        .collect::<BTreeMap<_, _>>();
+    let mut histogram = BTreeMap::new();
+    for (_, node) in arena.iter() {
+        let TreeKind::DefDef(definition) = &node.kind else {
+            continue;
+        };
+        let Some(rhs) = definition.rhs else {
+            continue;
+        };
+        let mut visited = HashSet::new();
+        let mut pending = VecDeque::from([rhs]);
+        while let Some(tree) = pending.pop_front() {
+            if !visited.insert(tree) {
+                continue;
+            }
+            let Some(node) = nodes.get(&tree.index()) else {
+                continue;
+            };
+            if let TreeKind::PhaseSpecific(UntypedNode::PrefixOp(prefix)) = &node.kind {
+                *histogram
+                    .entry(names.resolve(prefix.op.text()).to_owned())
+                    .or_default() += 1;
+            }
+            pending.extend(term_expression_children(&node.kind));
         }
     }
     histogram
@@ -4480,6 +4643,7 @@ fn term_expression_children(kind: &TreeKind<Untyped>) -> Vec<dotty_core::TreeId<
         }
         TreeKind::TypeApply(node) => children.push(node.function),
         TreeKind::Typed(node) => children.push(node.expr),
+        TreeKind::Annotated(node) => children.push(node.expr),
         TreeKind::NamedArg(node) => children.push(node.arg),
         TreeKind::Assign(node) => children.extend([node.lhs, node.rhs]),
         TreeKind::Block(node) => {
@@ -4562,7 +4726,6 @@ fn term_expression_children(kind: &TreeKind<Untyped>) -> Vec<dotty_core::TreeId<
             children.extend(node.bindings.iter().copied());
             children.push(node.expansion);
         }
-        TreeKind::Annotated(node) => children.push(node.expr),
         TreeKind::Ident(_)
         | TreeKind::This(_)
         | TreeKind::Literal(_)

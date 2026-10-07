@@ -306,7 +306,8 @@ where
         };
 
         let type_start = self.last_real_token_end;
-        let has_explicit_type = is_definition_colon(self);
+        let has_explicit_type =
+            is_definition_colon(self) || self.consume_newlines_before_value_type_ascription();
         let tpt = if has_explicit_type {
             self.advance();
             self.with_location(location, |parser| {
@@ -447,6 +448,24 @@ where
             self.advance();
         }
         ParsedStatement::Expression(self.error_expr(position))
+    }
+
+    fn consume_newlines_before_value_type_ascription(&mut self) -> bool {
+        let mut newline_count = 0;
+        while matches!(
+            self.cursor.lookahead(newline_count).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            newline_count += 1;
+        }
+        if newline_count == 0 || !is_definition_colon_at(self, newline_count) {
+            return false;
+        }
+
+        for _ in 0..newline_count {
+            self.advance();
+        }
+        true
     }
 }
 
@@ -872,6 +891,43 @@ mod tests {
     }
 
     #[test]
+    fn accepts_a_newline_before_a_value_type_ascription() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val x\n: Value = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Newline, 5, 6),
+                token(TokenKind::ColonFollow, 6, 7),
+                token(TokenKind::Identifier, 8, 13),
+                token(TokenKind::Operator, 14, 15),
+                token(TokenKind::IntegerLiteral, 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_value_definition(Location::Elsewhere)
+        else {
+            panic!("expected a value definition");
+        };
+        let TreeKind::ValDef(value) = &parser.ast().get(id).kind else {
+            panic!("expected ValDef");
+        };
+        assert!(matches!(
+            parser.ast().get(value.tpt).kind,
+            TreeKind::Ident(ident) if ident.name.is_type()
+        ));
+        assert!(matches!(
+            parser.ast().get(value.rhs.unwrap()).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Number(_))
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn reports_a_missing_type_or_rhs_for_an_unannotated_declaration() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
@@ -957,6 +1013,59 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::Number(_))
         ));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn leaves_a_declaration_newline_unconsumed_without_a_following_colon() {
+        let mut names = NameInterner::new();
+        let result = parser_for(
+            "val x\nval y = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Newline, 5, 6),
+                token(TokenKind::Keyword(HardKeyword::Val), 6, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Operator, 12, 13),
+                token(TokenKind::IntegerLiteral, 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        )
+        .compilation_unit();
+
+        let TreeKind::Block(block) = &result.ast.get(result.root).kind else {
+            panic!("expected compilation-unit block");
+        };
+        assert_eq!(block.stats.len(), 2);
+        assert!(matches!(
+            result.ast.get(block.stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        let TreeKind::ValDef(second) = &result.ast.get(block.stats[1]).kind else {
+            panic!("second declaration should remain a ValDef");
+        };
+        assert!(second.rhs.is_some());
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
+        assert_eq!(
+            result.diagnostics[0].message(),
+            "expected `:` or `=` after a value definition name"
+        );
+        assert_eq!(result.diagnostics[0].span(), TextRange::new(5, 6).unwrap());
+        assert_eq!(
+            result
+                .ast
+                .get(block.stats[0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            TextRange::new(0, 5).unwrap()
+        );
     }
 
     #[test]

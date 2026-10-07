@@ -253,6 +253,13 @@ object Main:
           if child.getClass.getSimpleName.stripSuffix("$") == "Thicket" then childTrees(child)
           else child :: Nil
       else tree match
+        case applied: dotty.tools.dotc.ast.untpd.AppliedTypeTree
+            if slice(applied, source).contains(" with ") =>
+          val children = childTrees(tree)
+          children.headOption match
+            case Some(wrapper) if wrapper.getClass.getSimpleName.stripSuffix("$").isEmpty =>
+              childTrees(wrapper).headOption.toList ++ children.drop(1)
+            case _ => children
         case application: dotty.tools.dotc.ast.Trees.Apply[?] =>
           childTrees(tree).filterNot: child =>
             application.args.lastOption.contains(child) && isTrailingCommaPlaceholder(child, source)

@@ -1,59 +1,70 @@
 # Typer classpath corpus audit: Scala 3.9.0
 
-This normalized result was produced by two identical runs. It measures local-method typing reachability and isolated Match-case typing against pinned Scala 3.9.0; `NoSuccessfulEnclosingMethodTyping` is a downstream count and is excluded from the ranked semantic gaps. Parser recovery, parser/namer failures, classpath misses, and unsupported Typer semantics remain separate buckets. Match probes include alternatives, tuple patterns, infix patterns, and extractor-looking roots; outcomes report first errors and source files, while successes are grouped by supported extractor protocol. `local_patdefs` records each PatDef's own typing-attempt result (success, a PatDef-local failure bucket, or `not_attempted` when evaluation stopped earlier) rather than inferring it from the enclosing method's final result. `UnsupportedTypeTree` retains its aggregate total and is also split by source AST shape and operator. `type_tree_forms` counts type-tree nodes reachable from method signatures and local declared types, including explicit annotations on local pattern definitions; it excludes zero-width synthetic `TypeTree` placeholders for omitted source annotations. Traversal follows type children and does not count term-expression children. A reduction in one unsupported-type sub-bucket may expose a later failure, so interpret it as type-projection reachability movement rather than automatically as a semantic improvement. Other deltas are historical measurements, not a claim that moving a failure to a later bucket is a semantic improvement.
+The report is generated from two byte-identical runs of the pinned Scala 3.9.0 audit. It records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success. The source corpus, parser/namer setup, Scala revision, JDK 21, and classpath remain pinned.
 
 Run `tools/typer-classpath-corpus-audit/run` with the environment documented in `docs/typer-v0.1-compatibility.md` to regenerate this report.
 
-## PatDef sprint result (#743)
+## #767–#771 expression sprint
 
-The pre-sprint baseline had 87 `LocalBlockDeclarationDeferred::pattern definition` first blockers in 23 files. The current broad bucket is absent. The PatDef outcome table now counts actual local PatDef typing attempts: successful PatDefs, PatDef-local failure buckets, and PatDefs not reached because an earlier expression failed. The status totals cover source-ranged PatDefs inside typed method bodies; PatDefs outside those ranges or without source ranges are reported separately. Attempt observations survive a later rollback in the enclosing expression and do not inherit unrelated method errors. Focused fixtures verify mutable multi-binder assignment, single-binder extractor assignment, zero-binder effect checking, attempts across enclosing method failures, and lazy/explicit-type boundaries.
-
-## Type-projection deltas and next increment
-
-“Before” preserves the historical audit snapshot before #716–#719. “Current” is the latest normalized classpath audit on the branch. Counts are first blockers, so reaching a later error can increase a downstream bucket.
-
-| Unsupported type-tree family | Before (count / files) | Current (count / files) |
+| First blocker | Before #767 | Current |
 | --- | ---: | ---: |
-| `TypeBoundsTree` (including wildcard arguments) | 4 / 2 | 0 / 0 |
-| `InfixOp::|` | 55 / 26 | 0 / 0 |
-| `InfixOp::&` | 0 / 0 | 0 / 0 |
-| `SingletonTypeTree` | 22 / 1 | 0 / 0 |
-| `PostfixOp::*` | 0 / 0 | 0 / 0 |
-| `FunctionWithMods` | 13 / 2 | 13 / 2 |
-| `Function` | 11 / 7 | 12 / 8 |
-| `Annotated` | 2 / 1 | 3 / 2 |
-| **Total** | **107 / 36** | **28 / 12** |
+| `UnsupportedExpression::PrefixOp` | 66 / 23 files | 0 / 0 |
+| `UnsupportedExpression::Annotated` (term expressions) | 64 / 14 files | 0 / 0 |
+| `MissingDeclaredType` | 34 / 15 files | 34 / 15 |
+| Local extension methods | 25 / 5 files | 25 / 5 |
+| Anonymous class instantiation | 22 / 14 files | 32 / 15 |
+| `UnsupportedSingletonReference` | 22 / 1 file | 22 / 1 |
+| Local val/var definitions | 21 / 8 files | 21 / 8 |
+| `LocalMethodSignatureDeferred` | 14 / 3 files | 14 / 3 |
+| `RecursiveInferredMethodResult` | 13 / 1 file | 13 / 1 |
+| `UnsupportedExpression::Function` | 13 / 2 files | 13 / 2 |
 
-No arbitrary infix or postfix type operator remains in the failed type-tree buckets. Zero-count structural families are retained in `type_tree_forms`; `type_tree_form_files` reports the independent source-file inventory for every form, including forms whose files never become type-projection first blockers. Current unsupported families and deterministic representative paths are listed in `unsupported_type_tree_failures`.
+The two zero generic buckets are first-blocker counts, not successful-expression counts. The corpus audit attempted 3,297 local method definitions and fully typed zero; moved failures are not counted as semantic success. The focused audit fixtures separately prove supported unary and term-annotation lowering and retain deeper `MemberNotFound` and `SourceAnnotationArgumentNotConstant` failures.
 
-### Global Typer first-blocker comparison
+| Audit signal | Result | Interpretation |
+| --- | ---: | --- |
+| Term `Annotated` AST nodes | 401 | Syntax reachable in method bodies; not an isolated typing-success count. |
+| Prefix operators `!`, `+`, `-`, `~` | 4,327; 1; 104; 97 | Source syntax counts. The first-blocker audit cannot attribute successful lowering by operator. |
+| Annotation class, argument, and underlying-adaptation first-error buckets | 0 | No such error was the method's first blocker; this does not prove each annotation expression succeeded. `TypeNameNotFound` remains 80 / 31 files without annotation-specific attribution. |
+| `@unchecked`-like term annotation uses | Not classified | The audit does not associate term annotation nodes with resolved annotation class symbols. The focused typer test pins the `scala.unchecked` identity. |
+| Annotated type-tree failures | 3 / 2 files | Separate from term-expression annotations; see `UnsupportedTypeTree::Annotated`. |
 
-| First blocker | Before (count / files) | Current (count / files) |
-| --- | ---: | ---: |
-| `UnsupportedTypeTree` | 107 / 36 | 28 / 12 |
-| `LocalBlockDeclarationDeferred::pattern definition` | 87 / 23 | 0 / 0 (moved to focused PatDef/downstream buckets) |
-| `UnsupportedExpression::PrefixOp` | 62 / 21 | 0 / 0 |
-| `UnsupportedExpression::Function` | 58 / 8 | 13 / 2 |
-| `MissingDeclaredType` | 32 / 14 | 34 / 15 |
-| Anonymous class instantiation | 23 / 14 | 22 / 14 |
-| Local extension methods | 23 / 5 | 25 / 5 |
-| Local val/var definitions | 21 / 8 | 21 / 8 |
-| `LocalMethodSignatureDeferred` | 14 / 3 | 14 / 3 |
-| `RecursiveInferredMethodResult` | 13 / 1 | 13 / 1 |
+External member materialization remains zero, and no local method fully types in this environment. Therefore the corpus does not provide a sound count of successful annotated terms or operator-specific successful prefix lowering. The raw report retains `MemberNotFound` (1 / 1 file), `MemberLookup` (60 / 27 files), and `OverloadedTypeApplicationDeferred` (1 / 1 file) as method first blockers, but does not attribute them to a particular prefix expression. `prefix_operator_forms` and `expression_forms::Annotated` record syntax reachability only.
 
-Type projection reduced its aggregate first-blocker bucket by 79 (107 to 28); the remaining blockers cover three AST forms. The previous broad PatDef deferral and prefix-expression deferral no longer appear as first blockers. Annotated expressions are now the largest Typer-owned semantic gap at 64 occurrences in 14 files. Recommend the next main sprint focus on a narrow annotated-expression slice, based on this refreshed ranking. Keep classpath materialization as an independent gate because the audit resolved no external members.
+### Current top ten semantic blockers
 
-### Remaining type-family candidates
+The ranked list below excludes parser/namer and classpath-resolution failures, and excludes the downstream `NoSuccessfulEnclosingMethodTyping` counter. Counts and representative paths are in `top_semantic_gaps` in the raw report.
 
-| Candidate | Evidence and existing model | Smallest slice, prerequisites, and boundaries |
-| --- | --- | --- |
-| `Function` | 12 blockers / 8 files; representatives: `compiler/src/dotty/tools/backend/jvm/BTypes.scala`, `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala`, `compiler/src/dotty/tools/dotc/core/Denotations.scala`, `compiler/src/dotty/tools/dotc/core/Types.scala`, `compiler/src/dotty/tools/dotc/parsing/Parsers.scala`. Structural inventory: 1,281 nodes / 233 files. Existing model: `Type::Applied` can hold a class application, but there is no dedicated source function-type node or `FunctionN` identity in `Definitions`. | Source lowering only after resolving canonical `FunctionN` identities from definitions/classpath; first slice: one ordinary function type with explicit argument/result types. Prerequisite: class symbol identity. Non-goals: function expressions, subtyping, or inference changes. |
-| `FunctionWithMods` | 13 blockers / 2 files: `library/src/scala/collection/StringParsers.scala`, `library/src/scala/collection/convert/JavaCollectionWrappers.scala`. Structural inventory: 974 nodes / 128 files. `Type::Applied` can hold a class application, but there is no source `ContextFunctionN` identity or function modifier wrapper in `Definitions`. | Source lowering after modifier classification and canonical `ContextFunctionN` identity lookup; first slice: ordinary context-function signature. Prerequisites: distinguish contextual, erased, and capture-related modifiers. Non-goals: capture checking, erased-function semantics, and grouping capture wrappers with ordinary annotations. |
-| `RefinedTypeTree` | 22 structural nodes / 10 files [compiler/src/dotty/tools/dotc/core/Symbols.scala, compiler/src/dotty/tools/dotc/transform/CompleteJavaEnums.scala, compiler/src/dotty/tools/dotc/transform/MacroAnnotations.scala, library/src/scala/collection/MapView.scala, library/src/scala/collection/generic/IsIterable.scala]; no current unsupported bucket. Core already has `Type::Refined`, `Type::Recursive`, name-designed structural `TypeRef`s, and structural member lookup. | Source lowering over existing machinery if namer metadata suffices; first slice: one abstract type member over a parent. Prerequisites: source refinement member ownership and self-reference rebinding. Non-goals: general structural invocation, refinement subtyping, or new solver rules. |
-| `LambdaTypeTree` | 160 structural nodes / 49 files [library/src/scala/NamedTuple.scala, library/src/scala/Tuple.scala, library/src/scala/collection/BuildFrom.scala, library/src/scala/collection/Factory.scala, library/src/scala/collection/IndexedSeq.scala]; no current unsupported bucket. Core has `Type::TypeLambda`, `TypeParam`, `ParamRef`, and tested binder-rebinding operations. | Source binder lowering; first slice: one source type-lambda with ordinary bounds and rebound parameter references. Prerequisites: reliable source parameter symbols/bounds. Non-goals: broad higher-kinded alias completion, type-lambda unification, or variance solving. |
-| `MatchTypeTree` | 0 structural nodes in this corpus; core has `Type::Match`, `MatchCase`, and `TypeLambda` for case binders. | No corpus-backed first slice now. Later, construct one unbound case, then a binder-capturing case. Prerequisites are source case binder projection. Non-goals: match-type reduction or relation solver expansion. |
-| `Annotated` | 3 blockers / 2 files: `library/src/scala/collection/immutable/ArraySeq.scala`, `library/src/scala/collection/immutable/LazyListIterable.scala`. Structural inventory: 1,403 nodes / 115 files. Core `Type::Annotated` needs an `AnnotationId`; it does not establish source annotation identity. | Source lowering only after resolving the ordinary annotation symbol/ID; first slice: one ordinary annotation over a supported type. Prerequisites: source annotation payload and identity. Non-goals: capture checking, wildcard capture, and capture-only wrappers. |
-| Capture-related type syntax | No separately classified unsupported bucket; it is included in the structural `Annotated` / `FunctionWithMods` inventory. | Inventory and classify it separately before implementation. Prerequisites: syntax-to-modifier mapping. Non-goals: silently interpreting capture syntax as an ordinary annotation or enabling capture checking here. |
+| Rank | First blocker | Count / files |
+| ---: | --- | ---: |
+| 1 | `MissingDeclaredType` | 34 / 15 |
+| 2 | `AnonymousClassInstantiationDeferred` | 32 / 15 |
+| 3 | `LocalBlockDeclarationDeferred::extension methods` | 25 / 5 |
+| 4 | `UnsupportedSingletonReference` | 22 / 1 |
+| 5 | `LocalBlockDeclarationDeferred::val/var definition` | 21 / 8 |
+| 6 | `LocalMethodSignatureDeferred` | 14 / 3 |
+| 7 | `RecursiveInferredMethodResult` | 13 / 1 |
+| 8 | `UnsupportedExpression::Function` | 13 / 2 |
+| 9 | `UnsupportedTypeTree::FunctionWithMods` | 13 / 2 |
+| 10 | `UnsupportedTypeTree::Function` | 12 / 8 |
+
+### Next-sprint candidates
+
+| Candidate | Smallest useful slice and owner | Prerequisites / reuse | Non-goals |
+| --- | --- | --- | --- |
+| `MissingDeclaredType` (34 / 15) | Split the broad bucket by declaration owner and missing source type tree; start in `typer/type_projection.rs` or `completion/methods.rs` according to the resulting subprofile. | Existing source type-tree projection and declaration contexts; first add exact fixtures for each producer. | Do not infer arbitrary declaration types or combine local val, method, and class completion. |
+| Anonymous class instantiation (32 / 15) | Support one anonymous `new` whose template has one concrete parent, in `typer/expression/new.rs`. | Reuse class-instance typing and parent type projection; will need stable anonymous symbol ownership and class info. | Closure capture, refinement synthesis, and general anonymous-class members. |
+| Local extension methods (25 / 5) | Enter and call one local extension with a single explicit receiver and monomorphic method, in `typer/expression/blocks.rs` plus application lookup. | Reuse `extension_prefix_clauses`, existing local-method scopes, and selected-member application. | General extension search, overload inference, contextual receivers, and multiple receiver clauses. |
+| Local val/var definitions (21 / 8) | Further split `LocalBlockDeclarationDeferred::val/var definition` by PatDef shape before selecting a binder subset, in `typer/expression/blocks.rs`. | Reuse the transactional PatDef lowering and local binder machinery. | Reopening already supported PatDef forms or broad pattern semantics. |
+| Function expressions (13 / 2) | Lower one explicitly typed, single-parameter function expression in the expression typer. | Reuse `Type::Method`, local parameter scopes, and existing closure AST nodes. | Lambda inference, polymorphism, captures, and contextual functions. |
+| Function type trees (12 / 8) | Project one ordinary explicit `Function` type tree in `typer/type_projection.rs`. | Resolve canonical `FunctionN` class identity through definitions/classpath and reuse `Type::Applied`. | Lambda expressions, inference, relation changes, and arbitrary function modifiers. |
+| `FunctionWithMods` type trees (13 / 2) | Classify modifiers and project one ordinary context-function type tree in `typer/type_projection.rs`. | Resolve canonical `ContextFunctionN` identity and distinguish contextual, erased, and capture-related modifiers. | Capture checking, erased-function semantics, and treating modifiers as ordinary annotations. |
+
+Recommend a focused local extension slice: its 25 blockers form a coherent local declaration family and the typer already records extension receiver clauses and supports ordinary selected applications. Keep the broader `MissingDeclaredType` bucket in measurement until its producers are separated. The classpath gate remains independent: external class and non-class member materializations are both zero, so this corpus cannot yet demonstrate standard-library reachability.
+
+## Previous type projection snapshot
+
+The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.
 
 ```text
 scala_revision=777528f19a58e794c9954a42f433373472ec57f8
@@ -62,14 +73,14 @@ parser_failed_files=0
 namer_failed_files=0
 file_read_failed_files=0
 file_read_failed_paths=
-recovered_parser_files=8
+recovered_parser_files=0
 audit_v1_comparison:
   files_attempted=1236 (delta=+0)
   local_declarations=22713 (delta=-505)
-  local_methods=3296 (delta=-482)
+  local_methods=3297 (delta=-481)
   typed_local_methods=0 (delta=+0)
-  ImportQualifierNotFound=2716 (delta=+670)
-  UnsupportedExpression_total=102 (delta=-470)
+  ImportQualifierNotFound=2782 (delta=+736)
+  UnsupportedExpression_total=38 (delta=-534)
   LocalBlockDeclarationDeferred=66 (delta=-206)
   NoSuccessfulEnclosingMethodTyping=34 (delta=-449)
 audit_581_feature_comparison:
@@ -78,48 +89,55 @@ audit_581_feature_comparison:
   LocalBlockDeclarationDeferred::import=0 (baseline=139, delta=-139)
 local_definitions=22713
 local_val_defs=19067
-local_def_defs=3296
+local_def_defs=3297
 local_imports=227
 local_type_defs=35
 local_objects=34
-local_classes=29
+local_classes=28
 local_pattern_bindings=25
 expression_forms:
-  Ident=250461
-  Select=117710
-  Apply=87434
-  Block=42725
-  InfixOp=39425
-  If=16287
+  Ident=250524
+  Select=117733
+  Apply=87453
+  Block=42729
+  InfixOp=39420
+  If=16290
   Parens=15385
-  Match=7378
-  Assign=6003
-  Function=4922
+  Match=7379
+  Assign=6004
+  Function=4924
   New=4831
-  PrefixOp=4528
+  PrefixOp=4529
   TypeApply=4219
   InterpolatedString=3179
-  Tuple=1331
+  Tuple=1334
   While=1303
   Throw=792
   Return=693
-  ForDo=655
-  ParsedTry=506
+  ForDo=656
+  ParsedTry=507
+  Annotated=401
   Typed=372
   ForYield=161
   InlineIf=4
+  MacroTree=4
   InlineMatch=2
   PolyFunction=0
   PostfixOp=0
   Try=0
+prefix_operator_forms:
+  operator="!" count=4327
+  operator="+" count=1
+  operator="-" count=104
+  operator="~" count=97
 type_tree_forms:
   Annotated=1403
-  AppliedTypeTree=15681
+  AppliedTypeTree=15684
   ByNameTypeTree=456
   ContextBoundTypeTree=808
   Function=1262
   FunctionWithMods=971
-  Ident=100575
+  Ident=100586
   InfixOp::&=252
   InfixOp::<other>=71
   InfixOp::|=1087
@@ -129,10 +147,10 @@ type_tree_forms:
   PostfixOp::*=181
   PostfixOp::<other>=0
   RefinedTypeTree=22
-  Select=9912
+  Select=9913
   SingletonTypeTree=831
   Tuple=1345
-  TypeBoundsTree=7919
+  TypeBoundsTree=7921
   TypeTree=0
 type_tree_form_files:
   Annotated=115 [compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/printing/PlainPrinter.scala, compiler/src/dotty/tools/dotc/transform/Constructors.scala, compiler/src/dotty/tools/dotc/transform/init/Objects.scala]
@@ -157,71 +175,70 @@ type_tree_form_files:
   TypeBoundsTree=525 [compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala, compiler/src/dotty/tools/backend/jvm/BTypeLoader.scala, compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/BackendUtils.scala, compiler/src/dotty/tools/backend/jvm/GenericSignatureVisitor.scala]
   TypeTree=0 []
 parser_diagnostics:
-  ParserDiagnostic::ExpectedExpression=16
-  ParserDiagnostic::UnexpectedToken=13
-  ParserDiagnostic::UnsupportedSyntax=6
-  ParserDiagnostic::ExpectedToken=5
-local_defdefs=3296
+local_defdefs=3297
 typed_local_defdefs=0
 local_patdefs:
-  total=788
+  total=790
   root_shapes:
     Alternative=0 files=[]
     Apply / extractor-looking=178 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/BackendUtils.scala, compiler/src/dotty/tools/backend/jvm/PostProcessor.scala]
     Bind=24 files=[compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/ast/TreeMapWithTrackedStats.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/ConstraintHandling.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala]
     Ident=89 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/transform/Constructors.scala, compiler/src/dotty/tools/dotc/transform/FirstTransform.scala, compiler/src/dotty/tools/dotc/typer/Implicits.scala]
     InfixOp=42 files=[compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/debug/ExpressionCompiler.scala, compiler/src/dotty/tools/debug/ResolveReflectEval.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala]
-    Tuple=496 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
+    Tuple=498 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
     Typed=7 files=[compiler/src/dotty/tools/dotc/cc/Synthetics.scala, compiler/src/dotty/tools/dotc/transform/Recheck.scala]
     other=0 files=[]
     wildcard=0 files=[]
   source_pattern_counts:
-    1=747
+    1=749
     2=35
     3=5
     4=1
   binder_counts:
     0=1
-    1=88
-    2=572
+    1=89
+    2=573
     3+=127
   modifiers:
     lazy val=2
-    val=749
+    val=751
     var=37
   explicit_tpt:
     explicit PatDef-wide tpt=5
-    synthetic inferred TypeTree=783
+    synthetic inferred TypeTree=785
   rhs:
     missing=0
-    present=788
+    present=790
     recovery error=0
   typing_outcome_totals:
     failure::ApplicationCalleeNotMethod=1 files=1
-    failure::ImportQualifierNotFound=53 files=38
+    failure::ImportQualifierNotFound=86 files=49
     failure::LocalPatDefDeferred::multiple source patterns=23 files=13
     failure::MemberLookup=1 files=1
     failure::MissingDeclaredType=2 files=1
     failure::OverloadedTypeApplicationDeferred=1 files=1
     failure::SymbolResolution=2 files=2
     failure::TermNameNotFound=3 files=3
-    failure::TypeNameNotFound=24 files=5
-    failure::UnsupportedExpression=35 files=22
+    failure::TypeNameNotFound=26 files=7
     failure::UnsupportedTypeTree=8 files=6
-    not_attempted=635 files=171
+    not_attempted=637 files=171
   typing_attempt_statuses:
-    profiled=788
+    profiled=790
     outside_typed_method_ranges_or_without_source_range=0
     success=0 files=0
     failure=153 files=79
-    not_attempted=635 files=171
+    not_attempted=637 files=171
   typing_outcomes:
     failure::ApplicationCalleeNotMethod::val::binders=3+::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala]
-    failure::ImportQualifierNotFound::val::binders=2::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=16 files=14 [compiler/src/dotty/tools/backend/jvm/PostProcessor.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/reporting/messages.scala]
-    failure::ImportQualifierNotFound::val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=28 files=23 [compiler/src/dotty/tools/dotc/Bench.scala, compiler/src/dotty/tools/dotc/ast/untpd.scala, compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala, compiler/src/dotty/tools/dotc/core/Contexts.scala]
-    failure::ImportQualifierNotFound::val::binders=3+::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=5 files=5 [compiler/src/dotty/tools/dotc/ast/TreeTypeMap.scala, compiler/src/dotty/tools/dotc/printing/RefinedPrinter.scala, compiler/src/dotty/tools/dotc/transform/Erasure.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala]
-    failure::ImportQualifierNotFound::val::binders=3+::root=Bind::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/ast/Desugar.scala]
-    failure::ImportQualifierNotFound::val::binders=3+::root=Tuple::tpt=synthetic inferred TypeTree=3 files=3 [compiler/src/dotty/tools/dotc/ast/DesugarEnums.scala, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala, compiler/src/scala/quoted/runtime/impl/QuoteMatcher.scala]
+    failure::ImportQualifierNotFound::val::binders=1::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=11 files=8 [compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/core/TypeErasure.scala, compiler/src/dotty/tools/dotc/reporting/messages.scala, compiler/src/dotty/tools/dotc/transform/TreeChecker.scala, compiler/src/dotty/tools/dotc/transform/TupleOptimizations.scala]
+    failure::ImportQualifierNotFound::val::binders=1::root=Bind::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/typer/Deriving.scala]
+    failure::ImportQualifierNotFound::val::binders=1::root=InfixOp::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala]
+    failure::ImportQualifierNotFound::val::binders=2::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=23 files=19 [compiler/src/dotty/tools/backend/jvm/PostProcessor.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/printing/RefinedPrinter.scala]
+    failure::ImportQualifierNotFound::val::binders=2::root=InfixOp::tpt=synthetic inferred TypeTree=3 files=3 [compiler/src/dotty/tools/dotc/ast/tpd.scala, compiler/src/dotty/tools/dotc/transform/TupleOptimizations.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala]
+    failure::ImportQualifierNotFound::val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=29 files=24 [compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/Bench.scala, compiler/src/dotty/tools/dotc/ast/untpd.scala, compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala]
+    failure::ImportQualifierNotFound::val::binders=3+::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=8 files=8 [compiler/src/dotty/tools/dotc/ast/TreeTypeMap.scala, compiler/src/dotty/tools/dotc/printing/RefinedPrinter.scala, compiler/src/dotty/tools/dotc/reporting/messages.scala, compiler/src/dotty/tools/dotc/transform/Erasure.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala]
+    failure::ImportQualifierNotFound::val::binders=3+::root=Bind::tpt=synthetic inferred TypeTree=6 files=5 [compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/transform/Erasure.scala, compiler/src/dotty/tools/dotc/transform/SuperAccessors.scala, compiler/src/dotty/tools/dotc/transform/TreeChecker.scala, compiler/src/dotty/tools/dotc/typer/Dynamic.scala]
+    failure::ImportQualifierNotFound::val::binders=3+::root=Tuple::tpt=synthetic inferred TypeTree=4 files=4 [compiler/src/dotty/tools/dotc/ast/DesugarEnums.scala, compiler/src/dotty/tools/dotc/quoted/QuotePatterns.scala, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala, compiler/src/scala/quoted/runtime/impl/QuoteMatcher.scala]
     failure::LocalPatDefDeferred::multiple source patterns::val::binders=2::root=Ident::tpt=synthetic inferred TypeTree=5 files=4 [compiler/src/dotty/tools/dotc/transform/FirstTransform.scala, library/src/scala/collection/ArrayOps.scala, library/src/scala/collection/StrictOptimizedIterableOps.scala, library/src/scala/collection/StringOps.scala]
     failure::LocalPatDefDeferred::multiple source patterns::var::binders=2::root=Ident::tpt=explicit PatDef-wide tpt=4 files=4 [library/src/scala/collection/immutable/LazyList.scala, library/src/scala/collection/immutable/LazyListIterable.scala, library/src/scala/collection/immutable/Set.scala, library/src/scala/collection/immutable/Stream.scala]
     failure::LocalPatDefDeferred::multiple source patterns::var::binders=2::root=Ident::tpt=synthetic inferred TypeTree=11 files=6 [library/src/scala/collection/ArrayOps.scala, library/src/scala/collection/StringOps.scala, library/src/scala/collection/immutable/Map.scala, library/src/scala/collection/mutable/AnyRefMap.scala, library/src/scala/collection/mutable/Buffer.scala]
@@ -234,17 +251,9 @@ local_patdefs:
     failure::SymbolResolution::val::binders=3+::root=Tuple::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/core/TyperState.scala]
     failure::TermNameNotFound::val::binders=1::root=Tuple::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala]
     failure::TermNameNotFound::val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=2 files=2 [library/src/scala/collection/immutable/TreeMap.scala, library/src/scala/collection/immutable/TreeSet.scala]
+    failure::TypeNameNotFound::val::binders=2::root=InfixOp::tpt=synthetic inferred TypeTree=2 files=2 [compiler/src/dotty/tools/debug/ExpressionCompiler.scala, library/src/scala/concurrent/duration/Duration.scala]
     failure::TypeNameNotFound::val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=5 files=4 [compiler/src/dotty/tools/dotc/fromtasty/Debug.scala, compiler/src/dotty/tools/scripting/Main.scala, library/src/scala/collection/Iterator.scala, library/src/scala/collection/immutable/TreeSeqMap.scala]
     failure::TypeNameNotFound::val::binders=3+::root=Tuple::tpt=synthetic inferred TypeTree=19 files=2 [compiler/src/dotty/tools/scripting/Main.scala, library/src/scala/quoted/ToExpr.scala]
-    failure::UnsupportedExpression::val::binders=1::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=11 files=8 [compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/core/TypeErasure.scala, compiler/src/dotty/tools/dotc/reporting/messages.scala, compiler/src/dotty/tools/dotc/transform/TreeChecker.scala, compiler/src/dotty/tools/dotc/transform/TupleOptimizations.scala]
-    failure::UnsupportedExpression::val::binders=1::root=Bind::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/typer/Deriving.scala]
-    failure::UnsupportedExpression::val::binders=1::root=InfixOp::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala]
-    failure::UnsupportedExpression::val::binders=2::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=7 files=6 [compiler/src/dotty/tools/dotc/printing/RefinedPrinter.scala, compiler/src/dotty/tools/dotc/transform/ExpandSAMs.scala, compiler/src/dotty/tools/dotc/transform/TreeChecker.scala, compiler/src/dotty/tools/dotc/transform/TupleOptimizations.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala]
-    failure::UnsupportedExpression::val::binders=2::root=InfixOp::tpt=synthetic inferred TypeTree=5 files=5 [compiler/src/dotty/tools/debug/ExpressionCompiler.scala, compiler/src/dotty/tools/dotc/ast/tpd.scala, compiler/src/dotty/tools/dotc/transform/TupleOptimizations.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala, library/src/scala/concurrent/duration/Duration.scala]
-    failure::UnsupportedExpression::val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala]
-    failure::UnsupportedExpression::val::binders=3+::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=3 files=3 [compiler/src/dotty/tools/dotc/reporting/messages.scala, compiler/src/dotty/tools/dotc/transform/SuperAccessors.scala, compiler/src/dotty/tools/dotc/typer/TyperPhase.scala]
-    failure::UnsupportedExpression::val::binders=3+::root=Bind::tpt=synthetic inferred TypeTree=5 files=5 [compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/transform/Erasure.scala, compiler/src/dotty/tools/dotc/transform/SuperAccessors.scala, compiler/src/dotty/tools/dotc/transform/TreeChecker.scala, compiler/src/dotty/tools/dotc/typer/Dynamic.scala]
-    failure::UnsupportedExpression::val::binders=3+::root=Tuple::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/quoted/QuotePatterns.scala]
     failure::UnsupportedTypeTree::val::binders=1::root=Tuple::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/util/CommentParsing.scala]
     failure::UnsupportedTypeTree::val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=6 files=5 [compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/util/CommentParsing.scala, compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala, library/src/scala/collection/Iterator.scala, library/src/scala/collection/immutable/LazyList.scala]
     failure::UnsupportedTypeTree::val::binders=3+::root=Tuple::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/core/Names.scala]
@@ -254,13 +263,13 @@ local_patdefs:
     not_attempted::val::binders=1::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=41 files=29 [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BackendUtils.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/ast/TreeInfo.scala]
     not_attempted::val::binders=1::root=Bind::tpt=synthetic inferred TypeTree=4 files=4 [compiler/src/dotty/tools/dotc/transform/ElimByName.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/transform/Recheck.scala, library/src/scala/quoted/Quotes.scala]
     not_attempted::val::binders=1::root=InfixOp::tpt=synthetic inferred TypeTree=6 files=6 [compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Synthetics.scala, compiler/src/dotty/tools/dotc/transform/Bridges.scala, compiler/src/dotty/tools/dotc/transform/ContextFunctionResults.scala]
-    not_attempted::val::binders=1::root=Tuple::tpt=synthetic inferred TypeTree=14 files=11 [compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala, compiler/src/dotty/tools/backend/jvm/opt/CopyProp.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/classpath/DirectoryClassPath.scala]
+    not_attempted::val::binders=1::root=Tuple::tpt=synthetic inferred TypeTree=15 files=12 [compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala, compiler/src/dotty/tools/backend/jvm/opt/CopyProp.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/classpath/DirectoryClassPath.scala]
     not_attempted::val::binders=1::root=Typed::tpt=synthetic inferred TypeTree=7 files=2 [compiler/src/dotty/tools/dotc/cc/Synthetics.scala, compiler/src/dotty/tools/dotc/transform/Recheck.scala]
     not_attempted::val::binders=2::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=65 files=28 [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/BackendUtils.scala, compiler/src/dotty/tools/backend/jvm/opt/CopyProp.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala]
     not_attempted::val::binders=2::root=Bind::tpt=synthetic inferred TypeTree=2 files=2 [compiler/src/dotty/tools/dotc/core/tasty/TreePickler.scala, compiler/src/dotty/tools/dotc/transform/Constructors.scala]
     not_attempted::val::binders=2::root=Ident::tpt=synthetic inferred TypeTree=4 files=4 [compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/transform/Constructors.scala, compiler/src/dotty/tools/dotc/typer/Implicits.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala]
     not_attempted::val::binders=2::root=InfixOp::tpt=synthetic inferred TypeTree=28 files=22 [compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/debug/ResolveReflectEval.scala, compiler/src/dotty/tools/dotc/config/Settings.scala, compiler/src/dotty/tools/dotc/core/TypeComparer.scala]
-    not_attempted::val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=360 files=127 [compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
+    not_attempted::val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=361 files=127 [compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
     not_attempted::val::binders=3+::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=25 files=12 [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/config/PathResolver.scala, compiler/src/dotty/tools/dotc/core/SymDenotations.scala]
     not_attempted::val::binders=3+::root=Bind::tpt=synthetic inferred TypeTree=11 files=8 [compiler/src/dotty/tools/dotc/ast/TreeMapWithTrackedStats.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/ConstraintHandling.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/classfile/ClassfileParser.scala]
     not_attempted::val::binders=3+::root=Ident::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala]
@@ -270,7 +279,22 @@ local_patdefs:
     not_attempted::var::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=6 files=4 [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala, compiler/src/dotty/tools/dotc/plugins/Plugins.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala]
     not_attempted::var::binders=3+::root=Ident::tpt=synthetic inferred TypeTree=2 files=2 [library/src/scala/collection/immutable/Map.scala, library/src/scala/collection/immutable/RedBlackTree.scala]
   representative_files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala]
-unsupported_expression_total=102
+unsupported_expression_total=38
+expression_sprint_first_blockers:
+  UnsupportedExpression::PrefixOp=0 files=0
+  UnsupportedExpression::Annotated=0 files=0
+  MemberNotFound=1 files=1
+  MemberLookup=60 files=27
+  TypeNameNotFound=80 files=31
+  SourceAnnotationClassDeferred=0 files=0
+  SourceAnnotationNotAnnotationClass=0 files=0
+  SourceAnnotationArgumentNotConstant=0 files=0
+  SourceAnnotationConstructorDeferred=0 files=0
+  SourceAnnotationConstructorArgumentMismatch=0 files=0
+  SourceAnnotationArgumentTypeDeferred=0 files=0
+  ExpressionTypeCannotBeWidened=0 files=0
+  ExpectedExpressionTypeMismatch=0 files=0
+  ExpectedExpressionConformanceUnsupported=0 files=0
 UnsupportedTypeTree=30 files=13
 unsupported_type_tree_failures:
   UnsupportedTypeTree::FunctionWithMods: count=13, files=2 [library/src/scala/collection/StringParsers.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala]
@@ -279,19 +303,18 @@ unsupported_type_tree_failures:
   UnsupportedTypeTree::Tuple: count=2, files=1 [compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala]
 local_block_declaration_deferred=66
 no_successful_enclosing_method_typing=34
-import_qualifier_not_found=2716
-external_name_or_member_resolution_failures=190
+import_qualifier_not_found=2782
+external_name_or_member_resolution_failures=189
 failure_families:
-  resolution/classpath environment=2906
+  resolution/classpath environment=2971
   other=188
-  unsupported expression syntax/semantics=102
   local declaration deferral=68
+  unsupported expression syntax/semantics=38
   type relation/inference/completion=32
 local_defdef_failures:
-  ImportQualifierNotFound [resolution/classpath environment]: 2716 (270 files) [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
+  ImportQualifierNotFound [resolution/classpath environment]: 2782 (270 files) [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
   TypeNameNotFound [resolution/classpath environment]: 80 (31 files) [compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/dotc/core/Flags.scala, compiler/src/dotty/tools/dotc/core/tasty/CommentPickler.scala, compiler/src/dotty/tools/dotc/core/tasty/TreeBuffer.scala, compiler/src/dotty/tools/dotc/coverage/Serializer.scala]
-  UnsupportedExpression::Annotated [unsupported expression syntax/semantics]: 64 (14 files) [compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/ast/Positioned.scala, compiler/src/dotty/tools/dotc/ast/tpd.scala]
-  MemberLookup [resolution/classpath environment]: 61 (28 files) [compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/SymDenotations.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/core/classfile/ClassfileParser.scala]
+  MemberLookup [resolution/classpath environment]: 60 (27 files) [compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/SymDenotations.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/core/classfile/ClassfileParser.scala]
   MissingDeclaredType [other]: 34 (15 files) [compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/core/TypeErrors.scala, compiler/src/dotty/tools/dotc/inlines/Inliner.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala]
   NoSuccessfulEnclosingMethodTyping [other]: 34 (15 files) [compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/classpath/DirectoryClassPath.scala, compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala]
   AnonymousClassInstantiationDeferred [other]: 32 (15 files) [compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala]
@@ -326,18 +349,17 @@ local_defdef_failures:
   MemberNotFound [resolution/classpath environment]: 1 (1 files) [compiler/src/dotty/tools/backend/jvm/BTypes.scala]
   PatternTypeRelationDeferred [other]: 1 (1 files) [library/src/scala/collection/immutable/List.scala]
 top_semantic_gaps:
-  1. UnsupportedExpression::Annotated: count=64, files=14, category=expression typing, examples=compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/ast/Positioned.scala, compiler/src/dotty/tools/dotc/ast/tpd.scala
-  2. MissingDeclaredType: count=34, files=15, category=other, examples=compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/core/TypeErrors.scala, compiler/src/dotty/tools/dotc/inlines/Inliner.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala
-  3. AnonymousClassInstantiationDeferred: count=32, files=15, category=other, examples=compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala
-  4. LocalBlockDeclarationDeferred::extension methods: count=25, files=5, category=local declaration support, examples=compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/reporting/MessageRendering.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/typer/Applications.scala, compiler/src/dotty/tools/dotc/typer/Checking.scala
-  5. UnsupportedSingletonReference: count=22, files=1, category=other, examples=compiler/src/dotty/tools/dotc/transform/CheckUnused.scala
-  6. LocalBlockDeclarationDeferred::val/var definition: count=21, files=8, category=local declaration support, examples=compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala
-  7. LocalMethodSignatureDeferred: count=14, files=3, category=other, examples=compiler/src/dotty/tools/dotc/core/SymUtils.scala, compiler/src/dotty/tools/dotc/transform/MegaPhase.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala
-  8. RecursiveInferredMethodResult: count=13, files=1, category=other, examples=compiler/src/dotty/tools/dotc/typer/Typer.scala
-  9. UnsupportedExpression::Function: count=13, files=2, category=expression typing, examples=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala
-  10. UnsupportedTypeTree::FunctionWithMods: count=13, files=2, category=other, examples=library/src/scala/collection/StringParsers.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala
+  1. MissingDeclaredType: count=34, files=15, category=other, examples=compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/core/TypeErrors.scala, compiler/src/dotty/tools/dotc/inlines/Inliner.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala
+  2. AnonymousClassInstantiationDeferred: count=32, files=15, category=other, examples=compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala
+  3. LocalBlockDeclarationDeferred::extension methods: count=25, files=5, category=local declaration support, examples=compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/reporting/MessageRendering.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/typer/Applications.scala, compiler/src/dotty/tools/dotc/typer/Checking.scala
+  4. UnsupportedSingletonReference: count=22, files=1, category=other, examples=compiler/src/dotty/tools/dotc/transform/CheckUnused.scala
+  5. LocalBlockDeclarationDeferred::val/var definition: count=21, files=8, category=local declaration support, examples=compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala
+  6. LocalMethodSignatureDeferred: count=14, files=3, category=other, examples=compiler/src/dotty/tools/dotc/core/SymUtils.scala, compiler/src/dotty/tools/dotc/transform/MegaPhase.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala
+  7. RecursiveInferredMethodResult: count=13, files=1, category=other, examples=compiler/src/dotty/tools/dotc/typer/Typer.scala
+  8. UnsupportedExpression::Function: count=13, files=2, category=expression typing, examples=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala
+  9. UnsupportedTypeTree::FunctionWithMods: count=13, files=2, category=other, examples=library/src/scala/collection/StringParsers.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala
+  10. UnsupportedTypeTree::Function: count=12, files=8, category=other, examples=compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/parsing/Parsers.scala
 top_gap_implementation_scope_notes:
-  UnsupportedExpression::Annotated (64 occurrences, 14 files): first_slice=lower one reported expression node through existing expression typing; owner=dotty-typer/src/typer/expression; prerequisites=the parsed AST node and its child typing rules; non_goals=control-flow or inference redesign
   MissingDeclaredType (34 occurrences, 15 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
   AnonymousClassInstantiationDeferred (32 occurrences, 15 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
   LocalBlockDeclarationDeferred::extension methods (25 occurrences, 5 files): first_slice=enter one local declaration kind transactionally in block typing; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=source symbol and scope metadata from dotty-core; non_goals=local classes, imports, or type definitions beyond the selected kind
@@ -347,7 +369,8 @@ top_gap_implementation_scope_notes:
   RecursiveInferredMethodResult (13 occurrences, 1 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
   UnsupportedExpression::Function (13 occurrences, 2 files): first_slice=lower one reported expression node through existing expression typing; owner=dotty-typer/src/typer/expression; prerequisites=the parsed AST node and its child typing rules; non_goals=control-flow or inference redesign
   UnsupportedTypeTree::FunctionWithMods (13 occurrences, 2 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
-next_typer_increment_recommendation: implement a focused slice for UnsupportedExpression::Annotated (64 occurrences in 14 files); keep classpath materialization as a separate gate because the pinned audit resolved no external members
+  UnsupportedTypeTree::Function (12 occurrences, 8 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
+highest_ranked_semantic_gap: MissingDeclaredType (34 occurrences in 15 files); count ranks the audit only and does not select a sprint increment; keep classpath materialization as a separate gate because the pinned audit resolved no external members
 match_readiness:
   first_blocker_methods=275
   structural_matches_in_first_blocker_methods=306
@@ -373,12 +396,12 @@ match_readiness:
     wildcard/identifier/bind=292 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/ast/tpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala]
 match_corpus_profile:
   matches=7444
-  cases=21832
+  cases=21835
   guarded_cases=2118
-  unguarded_cases=19714
+  unguarded_cases=19717
   pattern_root_shapes:
-    alternative=442 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/ScalaPrimitivesOps.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala]
-    extractor-looking Apply=4313 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala]
+    alternative=443 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/ScalaPrimitivesOps.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala]
+    extractor-looking Apply=4314 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala]
     infix pattern=469 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/opt/InlinerHeuristics.scala]
     literal=1365 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala, compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/BackendUtils.scala, compiler/src/dotty/tools/backend/jvm/CodeGen.scala]
     other=108 files=[compiler/src/dotty/tools/debug/ResolveReflectEval.scala, compiler/src/dotty/tools/dotc/ast/NavigateAST.scala, compiler/src/dotty/tools/dotc/semanticdb/ExtractSemanticDB.scala, compiler/src/dotty/tools/dotc/staging/TreeMapWithStages.scala, compiler/src/dotty/tools/dotc/transform/localopt/StringInterpolatorOpt.scala]
@@ -388,7 +411,7 @@ match_corpus_profile:
     typed explicit Bind=3 files=[compiler/src/dotty/tools/dotc/reporting/trace.scala, compiler/src/dotty/tools/io/FileWriters.scala]
     typed variable=5401 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
     typed wildcard=382 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/GeneratedClassHandler.scala, compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala, compiler/src/dotty/tools/backend/jvm/analysis/AliasingAnalyzer.scala, compiler/src/dotty/tools/backend/jvm/analysis/ProdConsAnalyzer.scala]
-    variable identifier=1145 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BTypeLoader.scala, compiler/src/dotty/tools/backend/jvm/BTypes.scala]
+    variable identifier=1146 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BTypeLoader.scala, compiler/src/dotty/tools/backend/jvm/BTypes.scala]
     wildcard=4675 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/ScalaPrimitivesOps.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala]
     wildcard/identifier/bind=680 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala, compiler/src/dotty/tools/backend/jvm/opt/BCodeRepository.scala, compiler/src/dotty/tools/backend/jvm/opt/CopyProp.scala]
   typed_case_successes:
@@ -407,7 +430,7 @@ match_corpus_profile:
     wildcard=207 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala]
   successful_extractor_protocols:
   typed_pattern_boundaries:
-    generic/erased or unsupported runtime test=472
+    generic/erased or unsupported runtime test=474
     unsupported type-tree projection=109
     unsupported typed-pattern relation=43
   typed_case_first_failures:
@@ -418,7 +441,7 @@ match_corpus_profile:
     ExtractorQualifierNotFound=42 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala, compiler/src/dotty/tools/dotc/util/DiffUtil.scala, compiler/src/dotty/tools/scripting/Main.scala]
     ExtractorQualifierNotValueLike=18 files=[compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/quoted/PickledQuotes.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala]
     ExtractorUnapplyNotFound=52 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/Settings.scala, compiler/src/dotty/tools/dotc/core/Types.scala]
-    ImportQualifierNotFound=13998 files=[compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala]
+    ImportQualifierNotFound=14426 files=[compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala]
     InfixPatternDeferred=7 files=[compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/printing/PlainPrinter.scala, compiler/src/dotty/tools/dotc/typer/Applications.scala, compiler/src/dotty/tools/dotc/typer/Deriving.scala]
     MatchCaseResultTypeCannotBeWidened=1 files=[compiler/src/dotty/tools/dotc/core/Types.scala]
     MatchSelectorTypeCannotBeAdapted=42 files=[compiler/src/dotty/tools/dotc/ast/tpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/config/Settings.scala, compiler/src/dotty/tools/dotc/core/Contexts.scala]
@@ -432,15 +455,15 @@ match_corpus_profile:
     PatternTypeRelationDeferred=111 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala, compiler/src/dotty/tools/dotc/core/Types.scala]
     RightAssociativeInfixDeferred=3 files=[compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/transform/Mixin.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala]
     StringLiteralTypingDeferred=13 files=[compiler/src/dotty/tools/dotc/config/PathResolver.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/Flags.scala, compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala, compiler/src/dotty/tools/scripting/Main.scala]
-    SymbolResolution=165 files=[compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala, compiler/src/dotty/tools/backend/jvm/opt/BCodeRepository.scala, compiler/src/dotty/tools/backend/jvm/opt/BTypesFromClassfile.scala, compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala]
+    SymbolResolution=582 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala, compiler/src/dotty/tools/backend/jvm/analysis/AliasingAnalyzer.scala]
     TermNameNotFound=313 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/MethodMax.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala]
-    TypeNameNotFound=555 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/dotc/ast/untpd.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala]
+    TypeNameNotFound=744 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/dotc/ast/untpd.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala]
     TypedPatternRelationDeferred=44 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/CopyProp.scala, compiler/src/dotty/tools/dotc/transform/patmat/Space.scala, library/src/scala/collection/immutable/ArraySeq.scala, library/src/scala/collection/immutable/Range.scala]
-    TypedPatternRuntimeTestDeferred=482 files=[compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/core/Annotations.scala]
+    TypedPatternRuntimeTestDeferred=484 files=[compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/core/Annotations.scala]
     UnstableSelectionPrefix=19 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/core/GadtConstraint.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala, compiler/src/dotty/tools/dotc/transform/init/Objects.scala]
     UnsupportedBindPatternBody=9 files=[compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala, compiler/src/dotty/tools/dotc/inlines/Inliner.scala, compiler/src/dotty/tools/dotc/parsing/xml/MarkupParsers.scala, compiler/src/dotty/tools/dotc/reporting/trace.scala, compiler/src/dotty/tools/dotc/typer/Applications.scala]
     UnsupportedConstructorInferenceShape=4 files=[library/src/scala/collection/immutable/IntMap.scala, library/src/scala/collection/immutable/LongMap.scala]
-    UnsupportedExpression=1402 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala]
+    UnsupportedExpression=370 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/BTypesFromClassfile.scala, compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala]
     UnsupportedSingletonReference=3 files=[library/src/scala/quoted/Quotes.scala]
     UnsupportedTermReference=1 files=[compiler/src/dotty/tools/dotc/cc/CaptureSet.scala]
     UnsupportedTypeTree::Annotated=150 files=[compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/core/Symbols.scala, compiler/src/dotty/tools/dotc/transform/Erasure.scala, library/src/scala/collection/ArrayOps.scala, library/src/scala/collection/Iterable.scala]
@@ -448,26 +471,26 @@ match_corpus_profile:
     UnsupportedTypeTree::FunctionWithMods=31 files=[library/src/scala/collection/ArrayOps.scala, library/src/scala/collection/IterableOnce.scala, library/src/scala/collection/StrictOptimizedIterableOps.scala, library/src/scala/collection/StringOps.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala]
     UnsupportedTypeTree::Tuple=62 files=[compiler/src/dotty/tools/backend/sjs/JSEncoding.scala, library/src/scala/collection/immutable/IntMap.scala, library/src/scala/collection/immutable/LongMap.scala, library/src/scala/collection/immutable/VectorMap.scala, library/src/scala/quoted/Quotes.scala]
   typed_case_first_failure_top_10:
-    ImportQualifierNotFound=13998
-    UnsupportedExpression=1402
-    TypeNameNotFound=555
-    TypedPatternRuntimeTestDeferred=482
+    ImportQualifierNotFound=14426
+    TypeNameNotFound=744
+    SymbolResolution=582
+    TypedPatternRuntimeTestDeferred=484
+    UnsupportedExpression=370
     TermNameNotFound=313
     MemberLookup=229
-    SymbolResolution=165
     UnsupportedTypeTree::Annotated=150
     MissingDeclaredType=143
     PatternTypeRelationDeferred=111
   extractor_root_shapes:
-    Apply root=6007
+    Apply root=6010
   extractor_dispatch:
     selected extractor=439
-    simple extractor identifier=5568
+    simple extractor identifier=5571
   extractor_type_applied=0
   extractor_argument_counts:
     0=45
-    1=2417
-    2=2844
+    1=2419
+    2=2845
     3=475
     4=159
     5=39
@@ -495,11 +518,11 @@ match_corpus_profile:
     literal=73
     other=447
     stable identifier=183
-    stable selection=161
+    stable selection=163
     tuple=62
     typed variable=357
     typed wildcard=38
-    variable identifier=6419
+    variable identifier=6421
     wildcard=2157
     wildcard/identifier/bind=104
   sequence_wildcard_occurrences=0
@@ -508,32 +531,32 @@ match_corpus_profile:
   infix_pattern_forms=781
   extractor_representative_files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala]
 resolver_metrics:
-  resolver_package_requests=21683
-  external_package_requests=13369
-  external_package_successes=3214
-  external_package_unresolved=10155
+  resolver_package_requests=21885
+  external_package_requests=13481
+  external_package_successes=3267
+  external_package_unresolved=10214
   external_package_errors=0
-  source_package_reuse=8314
-  resolver_member_requests=6908
-  external_member_requests=6908
+  source_package_reuse=8404
+  resolver_member_requests=6975
+  external_member_requests=6975
   external_member_successes=0
   external_class_symbol_successes=0
   external_non_class_member_successes=0
   source_member_reuse=0
-  external_member_unresolved=6726
-  external_member_errors=182
+  external_member_unresolved=6774
+  external_member_errors=201
   distinct_packages=25
   distinct_classes=0
   distinct_members=0
   classloader_success_gate=BLOCKED: external members not materialized
 resolver_581_comparison:
-  external_package_successes=3214 (baseline=1965, delta=+1249)
-  external_package_unresolved=10155 (baseline=5816, delta=+4339)
+  external_package_successes=3267 (baseline=1965, delta=+1302)
+  external_package_unresolved=10214 (baseline=5816, delta=+4398)
   external_package_errors=0 (baseline=0, delta=+0)
   external_class_materializations=0 (baseline=0, delta=+0)
   external_non_class_member_successes=0 (baseline=0, delta=+0)
-  external_member_unresolved=6726 (baseline=3884, delta=+2842)
-  external_member_errors=182 (baseline=91, delta=+91)
+  external_member_unresolved=6774 (baseline=3884, delta=+2890)
+  external_member_errors=201 (baseline=91, delta=+110)
   distinct_packages=25 (baseline=23, delta=+2)
   member_error_kinds:
     Malformed { reason: "class dotty/tools/dotc/CompilationUnit failed to load because java/lang/Object failed: class java/lang/Object failed to load because java/lang/Class failed: class java/lang/Class failed to load because java/lang/reflect/Constructor failed: class java/lang/reflect/Constructor failed to load because java/lang/reflect/Executable failed: class java/lang/reflect/Executable failed to load because java/lang/reflect/AccessibleObject failed: class java/lang/reflect/AccessibleObject failed to load because jdk/internal/reflect/ReflectionFactory failed: class jdk/internal/reflect/ReflectionFactory failed to load because java/lang/reflect/Method failed: class java/lang/reflect/Method failed to load because java/lang/StringBuilder failed: class java/lang/StringBuilder failed to load because java/lang/AbstractStringBuilder failed: class java/lang/AbstractStringBuilder failed to load because java/lang/StringBuffer failed: class java/lang/StringBuffer failed to load because java/io/ObjectStreamField failed: class java/io/ObjectStreamField failed to load because java/lang/reflect/Field failed: class java/lang/reflect/Field failed to load because java/lang/reflect/Member failed: class java/lang/reflect/Member failed to load because java/lang/reflect/AccessFlag failed: class java/lang/reflect/AccessFlag failed to load because java/lang/reflect/ClassFileFormatVersion failed: class java/lang/reflect/ClassFileFormatVersion failed to load because java/lang/Runtime$Version failed: class java/lang/Runtime$Version failed to load because java/lang/Runtime failed: class java/lang/Runtime failed to load because java/lang/Thread failed: class java/lang/Thread failed to load because java/lang/ClassLoader failed: class java/lang/ClassLoader failed to load because java/lang/Module failed: class java/lang/Module failed to load because java/lang/ModuleLayer failed: class java/lang/ModuleLayer failed to load because java/lang/module/Configuration failed: class java/lang/module/Configuration failed to load because java/lang/module/ResolvedModule failed: class java/lang/module/ResolvedModule failed to load because java/lang/module/ModuleReference failed: class java/lang/module/ModuleReference failed to load because java/lang/module/ModuleDescriptor failed: class java/lang/module/ModuleDescriptor failed to load because java/nio/ByteBuffer failed: class java/nio/ByteBuffer failed to load because java/nio/Buffer failed: class java/nio/Buffer failed to load because jdk/internal/misc/Unsafe failed: class jdk/internal/misc/Unsafe failed to load because java/security/ProtectionDomain failed: class java/security/ProtectionDomain failed to load because java/security/CodeSource failed: class java/security/CodeSource failed to load because java/net/URL failed: class java/net/URL failed to load because java/net/InetAddress failed: class java/net/InetAddress failed to load because java/lang/RuntimePermission failed: class java/lang/RuntimePermission failed to load because java/security/BasicPermission failed: class java/security/BasicPermission failed to load because java/io/ObjectInputStream failed: class java/io/ObjectInputStream failed to load because java/io/ObjectInputStream$ValidationList failed: class java/io/ObjectInputStream$ValidationList failed to load because java/io/ObjectInputStream$ValidationList$Callback failed: class java/io/ObjectInputStream$ValidationList$Callback failed to load because java/security/AccessControlContext failed: class java/security/AccessControlContext failed to load because sun/security/util/Debug failed: class sun/security/util/Debug failed to load because java/io/PrintStream failed: class java/io/PrintStream failed to load because jdk/internal/misc/InternalLock failed: class jdk/internal/misc/InternalLock failed to load because java/util/concurrent/locks/ReentrantLock failed: class java/util/concurrent/locks/ReentrantLock failed to load because java/util/concurrent/locks/Lock failed: class java/util/concurrent/locks/Lock failed to load because java/util/concurrent/TimeUnit failed: class java/util/concurrent/TimeUnit failed to load because java/time/Duration failed: class java/time/Duration failed to load because java/time/temporal/TemporalAmount failed: class java/time/temporal/TemporalAmount failed to load because java/time/temporal/TemporalUnit failed: class java/time/temporal/TemporalUnit failed to load because java/time/temporal/Temporal failed: class java/time/temporal/Temporal failed to load because java/time/temporal/TemporalAccessor failed: class java/time/temporal/TemporalAccessor failed to load because java/time/temporal/TemporalField failed: class java/time/temporal/TemporalField failed to load because java/util/Locale failed: class java/util/Locale failed to load because sun/util/locale/LocaleExtensions failed: class sun/util/locale/LocaleExtensions failed to load because java/lang/Character failed: class java/lang/Character failed to load because java/lang/constant/DynamicConstantDesc failed: class java/lang/constant/DynamicConstantDesc failed to load because java/lang/constant/ConstantDesc failed: class java/lang/constant/ConstantDesc failed to load because java/lang/invoke/MethodHandles$Lookup failed: class java/lang/invoke/MethodHandles$Lookup failed to load because java/lang/invoke/MethodHandles failed: class java/lang/invoke/MethodHandles failed to load because java/lang/invoke/MemberName$Factory failed: class java/lang/invoke/MemberName$Factory failed to load because java/lang/invoke/MemberName failed: class java/lang/invoke/MemberName failed to load because java/lang/invoke/MethodType failed: class java/lang/invoke/MethodType failed to load because java/lang/invoke/MethodTypeForm failed: class java/lang/invoke/MethodTypeForm failed to load because java/lang/ref/SoftReference failed: class java/lang/ref/SoftReference failed to load because java/lang/ref/Reference failed: class java/lang/ref/Reference failed to load because java/lang/ref/ReferenceQueue failed: class java/lang/ref/ReferenceQueue failed to load because java/util/concurrent/locks/Condition failed: class java/util/concurrent/locks/Condition failed to load because java/util/Date failed: class java/util/Date failed to load because sun/util/calendar/BaseCalendar failed: class sun/util/calendar/BaseCalendar failed to load because sun/util/calendar/AbstractCalendar failed: class sun/util/calendar/AbstractCalendar failed to load because sun/util/calendar/CalendarSystem failed: class sun/util/calendar/CalendarSystem failed to load because sun/util/calendar/Gregorian failed: class sun/util/calendar/Gregorian failed to load because sun/util/calendar/Gregorian$Date failed: class sun/util/calendar/Gregorian$Date failed to load because sun/util/calendar/BaseCalendar$Date failed: class sun/util/calendar/BaseCalendar$Date failed to load because sun/util/calendar/CalendarDate failed: class sun/util/calendar/CalendarDate failed to load because sun/util/calendar/Era failed: class sun/util/calendar/Era failed to load because java/util/TimeZone failed: class java/util/TimeZone failed to load because java/time/ZoneId failed: class java/time/ZoneId failed to load because java/time/ZoneOffset failed: class java/time/ZoneOffset failed to load because java/time/zone/ZoneRules failed: class java/time/zone/ZoneRules failed to load because java/time/LocalDateTime failed: class java/time/LocalDateTime failed to load because java/time/chrono/ChronoLocalDateTime failed: class java/time/chrono/ChronoLocalDateTime failed to load because java/time/chrono/ChronoLocalDate failed: class java/time/chrono/ChronoLocalDate failed to load because java/time/chrono/Chronology failed: class java/time/chrono/Chronology failed to load because java/time/Clock failed: class java/time/Clock failed to load because java/time/InstantSource failed: class java/time/InstantSource failed to load because java/time/Instant failed: class java/time/Instant failed to load because java/time/OffsetDateTime failed: class java/time/OffsetDateTime failed to load because java/time/LocalDate failed: class java/time/LocalDate failed to load because java/time/format/DateTimeFormatter failed: class java/time/format/DateTimeFormatter failed to load because java/time/format/DateTimeFormatterBuilder$CompositePrinterParser failed: class java/time/format/DateTimeFormatterBuilder$CompositePrinterParser failed to load because java/time/format/DateTimeFormatterBuilder failed: class java/time/format/DateTimeFormatterBuilder failed to load because java/time/format/DateTimeFormatterBuilder$DateTimePrinterParser failed: class java/time/format/DateTimeFormatterBuilder$DateTimePrinterParser failed to load because java/time/format/DateTimePrintContext failed: class java/time/format/DateTimePrintContext failed to load because java/lang/Long failed: class java/lang/Long failed to load because java/math/BigInteger failed: class java/math/BigInteger failed to load because java/util/Random failed: class java/util/Random failed to load because java/io/ObjectOutputStream failed: class java/io/ObjectOutputStream failed to load because java/io/SerialCallbackContext failed: class java/io/SerialCallbackContext failed to load because java/io/ObjectStreamClass failed: class java/io/ObjectStreamClass failed to load because java/lang/invoke/MethodHandle failed: class java/lang/invoke/MethodHandle failed to load because java/lang/invoke/LambdaForm failed: class java/lang/invoke/LambdaForm failed to load because java/lang/invoke/LambdaForm$Name failed: class java/lang/invoke/LambdaForm$Name failed to load because java/lang/invoke/LambdaForm$NamedFunction failed: class java/lang/invoke/LambdaForm$NamedFunction failed to load because java/lang/invoke/MethodHandleImpl$Intrinsic failed: class java/lang/invoke/MethodHandleImpl$Intrinsic failed to load because java/lang/invoke/MethodHandleImpl failed: class java/lang/invoke/MethodHandleImpl failed to load because java/lang/invoke/BoundMethodHandle$SpeciesData failed: class java/lang/invoke/BoundMethodHandle$SpeciesData failed to load because java/lang/invoke/BoundMethodHandle failed: class java/lang/invoke/BoundMethodHandle failed to load because java/lang/invoke/BoundMethodHandle$Specializer failed: class java/lang/invoke/BoundMethodHandle$Specializer failed to load because java/lang/invoke/ClassSpecializer failed: class java/lang/invoke/ClassSpecializer failed to load because java/lang/invoke/ClassSpecializer$SpeciesData failed: signature in class file for java/lang/invoke/ClassSpecializer$SpeciesData references unresolved type variable K" }=1
@@ -567,6 +590,7 @@ resolver_581_comparison:
     Malformed { reason: "invalid .tasty file for scala/Function1: a supertype reference could not be resolved to a name" }=1
     Malformed { reason: "invalid .tasty file for scala/Tuple2: a supertype reference could not be resolved to a name" }=2
     Malformed { reason: "invalid .tasty file for scala/Tuple3: a supertype reference could not be resolved to a name" }=1
+    Malformed { reason: "invalid .tasty file for scala/annotation/switch: a supertype reference could not be resolved to a name" }=19
     Malformed { reason: "invalid .tasty file for scala/collection/IterableOnce: a supertype reference could not be resolved to a name" }=5
     Malformed { reason: "invalid .tasty file for scala/collection/Map: a supertype reference could not be resolved to a name" }=1
     Malformed { reason: "invalid .tasty file for scala/collection/Seq: a supertype reference could not be resolved to a name" }=9
@@ -585,24 +609,24 @@ resolver_581_comparison:
     Malformed { reason: "invalid .tasty file for scala/collection/mutable/Queue: a supertype reference could not be resolved to a name" }=1
     Malformed { reason: "invalid .tasty file for scala/collection/mutable/StringBuilder: a supertype reference could not be resolved to a name" }=7
   most_requested_unresolved_member_names:
-    tpd=692
-    scala=610
-    Contexts=468
+    tpd=703
+    scala=612
+    Contexts=469
     Int=395
-    core=264
-    CollectionConverters=260
+    core=274
+    CollectionConverters=261
     Array=163
     ast=153
     Type=150
     Boolean=108
     Symbol=105
+    Trees=94
     Tree=91
-    Trees=90
     String=88
     Predef=84
     dotty=81
     Context=74
-    reflect=73
+    reflect=74
     Types=68
     List=65
 ```

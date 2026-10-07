@@ -1844,15 +1844,15 @@ fn is_leading_infix(
 
     let previous_indent = line_indentation(source, previous_end.saturating_sub(1));
     let operator_indent = line_indentation(source, current.span.start());
-    // At the previous statement's indentation, a prefix-capable operator
-    // starts a new expression rather than continuing the preceding braced
-    // expression as an infix operator. More-indented leading operators remain
-    // eligible for Scala's multiline infix layout.
-    if previous_kind == Some(TokenKind::Punctuation(Punctuation::RightBrace))
-        && is_prefix_operator(source, current.span)
+    // At or to the left of the previous operand's indentation, a tightly-bound
+    // prefix operator starts a new expression rather than continuing the
+    // preceding expression as an infix operator. This also handles a previous
+    // statement whose final expression was more deeply indented. Spaced
+    // leading operators remain eligible for Scala's multiline infix layout.
+    if is_prefix_operator(source, current.span)
         && current.span.end() == next.span.start()
         && can_start_simple_expr_raw(next.kind)
-        && previous_indent == operator_indent
+        && operator_indent.is_prefix_of(&previous_indent)
     {
         return false;
     }
@@ -4231,6 +4231,45 @@ mod tests {
 
         assert_eq!(separator.kind, TokenKind::Newline);
         assert_eq!(separator.span.end(), bang);
+    }
+
+    #[test]
+    fn separates_a_same_indent_prefix_operator_after_a_value_expression() {
+        let source = "object T:\n  def check =\n    val offset = 1\n    !offset\n";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+        let bang = source.find("!offset").expect("prefix expression exists") as u32;
+        let bang_index = scanner
+            .tokens()
+            .iter()
+            .position(|token| token.span.start() == bang)
+            .expect("prefix operator token exists");
+
+        assert_eq!(scanner.tokens()[bang_index - 1].kind, TokenKind::Newline);
+        assert_eq!(scanner.tokens()[bang_index - 1].span.end(), bang);
+    }
+
+    #[test]
+    fn separates_a_dedented_prefix_operator_after_a_multiline_value_expression() {
+        let source = concat!(
+            "def check = {\n",
+            "  val offset =\n",
+            "    if condition then\n",
+            "      sizeof[UnsignedInt]\n",
+            "    else\n",
+            "      sizeof[BytePointer]\n",
+            "  !(event + offset) = data\n",
+            "}\n",
+        );
+        let scanner = ContextualScanner::new(source).expect("source scans");
+        let bang = source.find("!(event").expect("prefix expression exists") as u32;
+        let bang_index = scanner
+            .tokens()
+            .iter()
+            .position(|token| token.span.start() == bang)
+            .expect("prefix operator token exists");
+
+        assert_eq!(scanner.tokens()[bang_index - 1].kind, TokenKind::Newline);
+        assert_eq!(scanner.tokens()[bang_index - 1].span.end(), bang);
     }
 
     #[test]

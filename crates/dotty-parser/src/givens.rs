@@ -395,7 +395,7 @@ where
             if parser.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
                 parser.with_location(location, |parser| parser.type_expr())
             } else {
-                parser.with_location(location, |parser| parser.parse_infix_type())
+                parser.with_location(location, |parser| parser.parse_given_parent_type())
             }
         });
         if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBracket) {
