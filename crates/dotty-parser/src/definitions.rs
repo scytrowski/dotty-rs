@@ -1051,6 +1051,10 @@ mod tests {
             result.diagnostics[0].kind(),
             ParseDiagnosticKind::ExpectedToken
         );
+        assert_eq!(
+            result.diagnostics[0].message(),
+            "expected `:` or `=` after a value definition name"
+        );
         assert_eq!(result.diagnostics[0].span(), TextRange::new(5, 6).unwrap());
         assert_eq!(
             result
