@@ -12172,6 +12172,91 @@ mod tests {
     }
 
     #[test]
+    fn selected_single_member_keeps_argument_mismatch_diagnostic() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def f(value: Int): Int = value; def use: Int = this.f(false) }",
+        );
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(use_method).unwrap();
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ApplicationArgumentTypeMismatch {
+                argument_index: 0,
+                actual,
+                expected,
+                ..
+            }) if actual == definitions.boolean && expected == definitions.int
+        ));
+    }
+
+    #[test]
+    fn missing_selected_method_keeps_member_not_found_diagnostic() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = this.missing(1) }");
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(use_method).unwrap();
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::MemberNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "missing"
+        ));
+    }
+
+    #[test]
+    fn unstable_receiver_can_call_local_extension() {
+        let source_text = "class C { def choose(value: Boolean): Int = 1; def choose(value: Unit): Int = 2; def outer: Int = { var receiver: C = this; extension (value: C) { def choose(argument: Int): Int = argument }; receiver.choose(2) } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        let result = typer.type_expression(block_tree, context);
+        assert!(result.is_ok(), "unexpected typing result: {result:?}");
+    }
+
+    #[test]
+    fn new_expression_can_be_a_local_extension_receiver() {
+        let source_text = "class C { def outer: Int = { extension (value: Any) { def choose(argument: Int): Int = argument }; new C().choose(2) } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        let result = typer.type_expression(block_tree, context);
+        assert!(result.is_ok(), "unexpected typing result: {result:?}");
+    }
+
+    #[test]
     fn same_name_local_methods_share_an_overload_bucket_in_source_order() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def outer: Int = { def same(value: Int): Int = value; def same(value: Boolean): Int = 1; 0 } }",
