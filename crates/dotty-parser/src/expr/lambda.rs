@@ -13,10 +13,50 @@ where
 {
     pub(crate) fn starts_legacy_implicit_block_lambda(&mut self) -> bool {
         self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Implicit)
+            && !self.implicit_prefix_starts_definition()
             && matches!(
                 self.cursor.lookahead(1).kind,
                 TokenKind::Identifier | TokenKind::BackquotedIdentifier
             )
+    }
+
+    /// `implicit` starts a legacy block lambda only if it is not followed by
+    /// additional definition modifiers and a local definition keyword. Soft
+    /// modifiers such as `inline` are lexed as identifiers, so the statement
+    /// parser must account for them before claiming the construct as a lambda.
+    fn implicit_prefix_starts_definition(&mut self) -> bool {
+        let mut offset = 1;
+        while offset <= 8 {
+            let kind = self.cursor.lookahead(offset).kind;
+            if matches!(
+                kind,
+                TokenKind::Keyword(
+                    dotty_core::HardKeyword::Val
+                        | dotty_core::HardKeyword::Var
+                        | dotty_core::HardKeyword::Def
+                        | dotty_core::HardKeyword::Type
+                        | dotty_core::HardKeyword::Class
+                        | dotty_core::HardKeyword::Trait
+                        | dotty_core::HardKeyword::Object
+                        | dotty_core::HardKeyword::Enum
+                        | dotty_core::HardKeyword::Given
+                ) | TokenKind::CaseClass
+                    | TokenKind::CaseObject
+            ) {
+                return true;
+            }
+
+            let is_soft_modifier = kind == TokenKind::Identifier
+                && ["inline", "transparent", "open", "infix", "opaque", "erased"]
+                    .iter()
+                    .any(|modifier| self.lookahead_text_is(offset, modifier));
+            if crate::modifiers::is_hard_modifier(kind) || is_soft_modifier {
+                offset += 1;
+            } else {
+                return false;
+            }
+        }
+        false
     }
 
     pub(crate) fn parse_legacy_implicit_block_lambda(

@@ -1593,6 +1593,47 @@ mod tests {
     }
 
     #[test]
+    fn implicit_soft_modifier_before_local_definition_is_not_a_lambda() {
+        const SOURCE: &str = "def outer = { implicit inline def f: Int = 1; f }";
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let [outer_id] = package.stats.as_slice() else {
+            panic!("expected one outer method");
+        };
+        let TreeKind::DefDef(outer) = &result.ast.get(*outer_id).kind else {
+            panic!("expected outer method definition");
+        };
+        let TreeKind::Block(body) = &result.ast.get(outer.rhs.unwrap()).kind else {
+            panic!("expected outer method body block");
+        };
+        assert_eq!(body.stats.len(), 1);
+        let TreeKind::DefDef(local) = &result.ast.get(body.stats[0]).kind else {
+            panic!("expected local DefDef instead of a recovered lambda");
+        };
+        assert!(
+            local
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Implicit)
+        );
+        assert!(
+            local
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Inline)
+        );
+        assert!(matches!(result.ast.get(body.expr).kind, TreeKind::Ident(_)));
+    }
+
+    #[test]
     fn stops_legacy_implicit_lambda_lookahead_at_eof_inside_a_type() {
         const SOURCE: &str = "def malformed = { implicit ec: List[Foo";
         let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
