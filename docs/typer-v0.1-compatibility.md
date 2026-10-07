@@ -331,7 +331,30 @@ so the receiver is available to the body. During block lowering, a supported
 `ExtensionMethods` wrapper becomes one ordinary typed `DefDef` with the
 receiver as its first value-parameter clause. The source extension root and
 method definition map to the same typed node, and the receiver source tree
-maps to its typed parameter. Local extension calls remain deferred.
+maps to its typed parameter.
+
+Selected calls support one lexically visible local extension with the
+requested term name, one explicit receiver, a monomorphic method, and ordinary
+plain receiver and argument clauses. The resolver searches typer-owned local
+extension methods in the active block scopes only; it does not search imports,
+packages, companions, implicit scope, or the classpath. An applicable nominal
+member on a modeled source receiver takes precedence. If no nominal candidate
+exists, or the supported ordinary call is inapplicable, the typer checks the
+local extension receiver and ordinary arguments, then lowers the call as an
+identifier application with the receiver as its first argument clause. A
+same-named ordinary local method is not an extension candidate, nested blocks
+shadow deterministically, and multiple same-named extension candidates remain
+explicitly deferred rather than selecting by allocation or source order.
+
+Primitive `Definitions` provide canonical types but no class member scopes in
+the current semantic store. When nominal lookup reports missing class info for
+one of those known builtin primitive classes, the typer may try the bounded
+local extension path; if no extension applies, it preserves the original
+`MemberLookup` error. This does not model primitive members or external class
+members. Unsupported extension group shapes remain
+`LocalBlockDeclarationDeferred`; unsupported receiver/signature shapes use
+focused `LocalMethodSignatureDeferred` features, and unresolved receiver types
+retain the underlying type-resolution error.
 
 For the tested subset, source Typer completion currently supports:
 
