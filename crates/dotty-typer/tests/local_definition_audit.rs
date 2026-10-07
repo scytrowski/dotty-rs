@@ -943,6 +943,54 @@ fn highest_ranked_gap_output_does_not_claim_to_recommend_a_sprint() {
 
 fn scope_note_for_bucket(bucket: &str) -> (&'static str, &'static str, &'static str, &'static str) {
     match bucket {
+        "MissingDeclaredType" => (
+            "split by declaration owner and missing source type-tree shape, then add one exact projection/completion case",
+            "dotty-typer/src/typer/type_projection.rs and dotty-typer/src/typer/completion/methods.rs",
+            "the declaration context and source AST node that owns the missing type",
+            "guessing arbitrary types or combining local value, method, and class inference",
+        ),
+        "AnonymousClassInstantiationDeferred" => (
+            "support one anonymous new with one concrete parent and explicit member ownership",
+            "dotty-typer/src/typer/expression/new.rs",
+            "ordinary New typing, parent projection, and stable anonymous class identity",
+            "closure capture, refinement synthesis, and general anonymous-class members",
+        ),
+        "UnsupportedSingletonReference" => (
+            "profile and type one stable singleton-reference shape from the reported producer",
+            "dotty-typer/src/typer/expression/references.rs and dotty-typer/src/typer/type_projection.rs",
+            "existing TermRef, ThisType, and stable-prefix contracts",
+            "arbitrary paths, unstable prefixes, and path-dependent relation redesign",
+        ),
+        "LocalBlockDeclarationDeferred::val/var definition" => (
+            "split remaining local definitions by PatDef root and binder shape before adding one form",
+            "dotty-typer/src/typer/expression/blocks.rs",
+            "transactional PatDef lowering, local binders, and assignment support",
+            "general destructuring or reopening already supported PatDef forms",
+        ),
+        "LocalMethodSignatureDeferred" => (
+            "split the feature payload and add a fixture for the most frequent unsupported signature",
+            "dotty-typer/src/typer/completion/local_methods.rs",
+            "the shared signature builder and existing parameter/type-parameter scopes",
+            "general dependent-result, erased/by-name, or method-inference redesign",
+        ),
+        "UnsupportedExpression::Function" => (
+            "lower one explicitly typed single-parameter function expression",
+            "dotty-typer/src/typer/expression",
+            "Method types, local parameter scopes, and existing closure AST nodes",
+            "lambda inference, polymorphism, capture checking, and contextual functions",
+        ),
+        "UnsupportedTypeTree::FunctionWithMods" => (
+            "classify modifiers and project one ordinary context-function type",
+            "dotty-typer/src/typer/type_projection.rs",
+            "canonical ContextFunction identity and existing Applied types",
+            "capture checking, erased-function semantics, and arbitrary modifiers",
+        ),
+        "UnsupportedTypeTree::Function" => (
+            "project one ordinary explicit Function type tree",
+            "dotty-typer/src/typer/type_projection.rs",
+            "canonical FunctionN identity and existing Applied types",
+            "lambda expressions, inference, and relation redesign",
+        ),
         "UnsupportedExpression::Match" => (
             "type the scrutinee, each case pattern, and each case body against one expected result type",
             "dotty-typer/src/typer/expression/mod.rs, with a focused pattern helper",
@@ -1537,6 +1585,34 @@ fn local_expression_audit_reports_lambda_and_deferred_declaration_subkinds() {
             .failures
             .contains_key("LocalBlockDeclarationDeferred::type definition"),
         "{type_definition:?}"
+    );
+}
+
+#[test]
+fn local_extension_audit_splits_group_shape_and_receiver_type_failures() {
+    let group = audit_source(
+        "class Audit { def outer: Int = { extension (using context: Int) (receiver: Int) { def choose: Int = receiver }; def marker: Int = 1; 0 } }",
+        "UnsupportedExtensionGroup.scala",
+    );
+    assert!(
+        group
+            .failures
+            .contains_key("LocalExtensionGroupShapeDeferred"),
+        "{group:?}"
+    );
+
+    let receiver = audit_source(
+        "class Audit { def outer: Int = { extension (receiver: MissingReceiverType) { def choose: Int = 1 }; def marker: Int = 1; 0 } }",
+        "MissingExtensionReceiver.scala",
+    );
+    let failure = receiver
+        .failures
+        .get("LocalExtensionReceiverTypeNotFound")
+        .expect("extension receiver name should have its own audit bucket");
+    assert_eq!(failure.count, 1);
+    assert_eq!(
+        failure.files,
+        BTreeSet::from(["MissingExtensionReceiver.scala".to_owned()])
     );
 }
 
@@ -3540,6 +3616,29 @@ fn classify_typer_error(
     operator_spellings: &BTreeMap<u32, String>,
 ) -> FailureClassification {
     match error {
+        TyperError::LocalBlockDeclarationDeferred {
+            kind: "extension methods",
+            ..
+        } => FailureClassification {
+            bucket: "LocalExtensionGroupShapeDeferred".to_owned(),
+            family: FailureFamily::LocalDeclarationDeferral,
+        },
+        TyperError::LocalMethodSignatureDeferred {
+            tree_index,
+            feature,
+            ..
+        } if is_extension_method_tree(arena, *tree_index) => FailureClassification {
+            bucket: format!("LocalExtensionSignatureDeferred::{feature}"),
+            family: FailureFamily::TypeRelationInferenceCompletion,
+        },
+        TyperError::TypeNameNotFound { tree_index, .. }
+            if is_extension_receiver_tree(arena, *tree_index) =>
+        {
+            FailureClassification {
+                bucket: "LocalExtensionReceiverTypeNotFound".to_owned(),
+                family: FailureFamily::ResolutionClasspathEnvironment,
+            }
+        }
         TyperError::UnsupportedExpression { tree_index, .. } => {
             let node = arena
                 .iter()
@@ -3600,6 +3699,31 @@ fn classify_typer_error(
             }
         }
     }
+}
+
+fn is_extension_method_tree(arena: &dotty_core::AstArena<Untyped>, tree_index: u32) -> bool {
+    arena.iter().any(|(_, node)| match &node.kind {
+        TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => extension
+            .methods
+            .iter()
+            .any(|method| method.index() == tree_index),
+        _ => false,
+    })
+}
+
+fn is_extension_receiver_tree(arena: &dotty_core::AstArena<Untyped>, tree_index: u32) -> bool {
+    arena.iter().any(|(_, node)| {
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) = &node.kind else {
+            return false;
+        };
+        extension.param_clauses.iter().flatten().any(|parameter| {
+            parameter.index() == tree_index
+                || matches!(
+                    arena.try_get(*parameter).map(|node| &node.kind),
+                    Some(TreeKind::ValDef(definition)) if definition.tpt.index() == tree_index
+                )
+        })
+    })
 }
 
 fn source_operator_spellings(
