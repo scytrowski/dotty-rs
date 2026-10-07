@@ -12006,13 +12006,16 @@ mod tests {
             typer.typed_ast().get(typed_apply.args[0]).position,
             parsed.ast.get(call.args[0]).position
         );
-        assert!(typer.local_method_symbol_at(source, method_tree).is_some());
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
         assert!(matches!(
             typer
                 .store()
                 .types
                 .get(typer.typed_ast().get(receiver_apply.function).ty),
-            Type::Method(_)
+            Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(target),
+            } if *prefix == definitions.no_prefix && *target == method
         ));
         assert_eq!(
             typer.type_expression(block_tree, context).unwrap(),

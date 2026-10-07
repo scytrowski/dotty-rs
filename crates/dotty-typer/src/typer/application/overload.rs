@@ -320,6 +320,10 @@ impl SourceTyper<'_> {
 
         self.remove_overridden_overload_candidates(&mut candidates, application_tree_index)?;
 
+        let overload_store_checkpoint = self.store.checkpoint();
+        let overload_resolver_checkpoint = self.resolver.checkpoint();
+        let overload_type_index_checkpoint = self.type_index.checkpoint();
+        let overload_journal_checkpoint = info_journal.len();
         let winner = match self.choose_method_overload_candidate(
             &mut candidates,
             &arguments,
@@ -329,6 +333,20 @@ impl SourceTyper<'_> {
         ) {
             Ok(winner) => winner,
             Err(error @ TyperError::OverloadApplicationNoApplicable { .. }) => {
+                for (symbol, previous) in info_journal[overload_journal_checkpoint..]
+                    .iter()
+                    .rev()
+                    .copied()
+                {
+                    if self.store.symbols.contains(symbol) {
+                        self.store.symbols.set_info(symbol, previous);
+                    }
+                }
+                info_journal.truncate(overload_journal_checkpoint);
+                self.resolver
+                    .rollback_to(self.store, overload_resolver_checkpoint);
+                self.store.rollback_to(overload_store_checkpoint);
+                self.type_index.restore(overload_type_index_checkpoint);
                 if let ApplicationFunctionShape::Select {
                     selection,
                     qualifier,
@@ -531,11 +549,15 @@ impl SourceTyper<'_> {
                 }
             }
         }
+        let reference_type = self.store.types.alloc(Type::TermRef {
+            prefix: self.definitions.no_prefix,
+            target: TermRefTarget::Symbol(symbol),
+        });
         let typed_ident = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .ident_with_backquoted(
                 selection.name,
                 selection.backquoted,
-                signature,
+                reference_type,
                 self.arena.get(function_tree).position,
             );
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).apply_with_kind(
