@@ -1474,6 +1474,106 @@ mod tests {
     }
 
     #[test]
+    fn parses_prefix_operator_assignment_after_a_statement_in_a_block() {
+        const SOURCE: &str = concat!(
+            "def data_=(data: Data): Unit = {\n",
+            "  val offset =\n",
+            "    if arch == \"x86_64\" then\n",
+            "      sizeof[UInt]\n",
+            "    else\n",
+            "      sizeof[Ptr[Byte]]\n",
+            "  !(event.asInstanceOf[Ptr[Byte]] + offset).asInstanceOf[Ptr[Data]] = data\n",
+            "}\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let [method_id] = package.stats.as_slice() else {
+            panic!("expected one setter method");
+        };
+        let TreeKind::DefDef(method) = &result.ast.get(*method_id).kind else {
+            panic!("expected a setter method definition");
+        };
+        let TreeKind::Block(body) = &result.ast.get(method.rhs.unwrap()).kind else {
+            panic!("expected the setter body block");
+        };
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            result.ast.get(body.expr).kind,
+            TreeKind::Assign(assignment)
+                if matches!(
+                    result.ast.get(assignment.lhs).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_))
+                )
+        ));
+    }
+
+    #[test]
+    fn rejects_an_infix_prefix_assignment_without_joining_the_next_statement() {
+        const SOURCE: &str = concat!(
+            "def data_=(data: Data): Unit = {\n",
+            "  val offset =\n",
+            "    if arch == \"x86_64\" then\n",
+            "      sizeof[UInt]\n",
+            "    else\n",
+            "      sizeof[Ptr[Byte]]\n",
+            "  !(event + offset) + 1 = data\n",
+            "  val following = 2\n",
+            "}\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let bang = SOURCE.find("!(event").expect("prefix expression exists") as u32;
+        let bang_index = scanner
+            .tokens()
+            .iter()
+            .position(|token| token.span.start() == bang)
+            .expect("prefix operator token exists");
+        assert_eq!(
+            scanner.tokens()[bang_index - 1].kind,
+            dotty_core::TokenKind::Newline
+        );
+
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind() == dotty_parser::ParseDiagnosticKind::UnexpectedToken
+                && diagnostic.message() == "left-hand side is not assignable"
+        }));
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let [method_id] = package.stats.as_slice() else {
+            panic!("expected one setter method");
+        };
+        let TreeKind::DefDef(method) = &result.ast.get(*method_id).kind else {
+            panic!("expected a setter method");
+        };
+        let TreeKind::Block(body) = &result.ast.get(method.rhs.unwrap()).kind else {
+            panic!("expected setter body block");
+        };
+        assert_eq!(body.stats.len(), 3);
+        assert!(matches!(
+            result.ast.get(body.stats[1]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ));
+        assert!(matches!(
+            &result.ast.get(body.stats[2]).kind,
+            TreeKind::ValDef(value)
+                if names.resolve(value.name.as_name().text()) == "following"
+        ));
+    }
+
+    #[test]
     fn if_branch_can_start_with_a_quote() {
         const SOURCE: &str = "def quoted(x: Boolean) = if x then 1 else '{ 2 }";
         let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
