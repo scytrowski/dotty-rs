@@ -2353,6 +2353,14 @@ impl SourceTyper<'_> {
         selector_type: TypeId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        let selector_type = match self.store.types.try_get(selector_type) {
+            Some(Type::Annotated { .. } | Type::Flexible { .. }) => {
+                crate::types::TypeNormalizer::new(self.store)
+                    .normalize_for_lookup(selector_type)
+                    .map_err(TyperError::TypeNormalization)?
+            }
+            _ => selector_type,
+        };
         match self.store.types.try_get(selector_type) {
             Some(Type::Constant(_)) => Ok(selector_type),
             _ => self.widen_expression_type_journaled(selector_type, info_journal, 0),
