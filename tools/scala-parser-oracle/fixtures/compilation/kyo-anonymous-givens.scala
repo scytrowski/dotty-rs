@@ -5,3 +5,5 @@ object KyoAnonymousGivens:
     def render(value: Box[A]): String = render.asString(value.value)
 
   given [A]: Box[A] = Box.empty[A]
+
+  given (using ctx: Ctx): Service = makeService

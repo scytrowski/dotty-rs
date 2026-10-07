@@ -118,7 +118,7 @@ where
                     "expected `:` after a named given signature",
                 );
             }
-        } else if !type_params.is_empty() && self.current_is_using_parameter_clause() {
+        } else if self.current_is_using_parameter_clause() {
             self.parse_given_parameter_clauses(
                 &mut value_param_clauses,
                 &mut num_lead_params,
@@ -1225,6 +1225,48 @@ mod tests {
             "unexpected given result tree: {:?}",
             parser.ast().get(definition.tpt).kind
         );
+        assert!(matches!(
+            parser.ast().get(definition.rhs.unwrap()).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_an_anonymous_given_with_a_using_clause_without_type_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given (using ctx: Ctx): Service = makeService",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+                token(TokenKind::Identifier, 7, 12),
+                token(TokenKind::Identifier, 13, 16),
+                token(TokenKind::ColonFollow, 16, 17),
+                token(TokenKind::Identifier, 18, 21),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 21, 22),
+                token(TokenKind::ColonFollow, 22, 23),
+                token(TokenKind::Identifier, 24, 31),
+                token(TokenKind::Operator, 32, 33),
+                token(TokenKind::Identifier, 34, 45),
+                token(TokenKind::Eof, 45, 45),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an anonymous given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method-like anonymous given tree");
+        };
+        assert!(definition.type_params.is_empty());
+        assert_eq!(definition.value_param_clauses.len(), 1);
+        assert!(matches!(
+            parser.ast().get(definition.tpt).kind,
+            TreeKind::Ident(_)
+        ));
         assert!(matches!(
             parser.ast().get(definition.rhs.unwrap()).kind,
             TreeKind::Ident(_)
