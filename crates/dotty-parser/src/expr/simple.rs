@@ -1,6 +1,6 @@
 use dotty_core::ast::{
-    Apply, ApplyKind, Block, Ident, MacroTree, New, Parens, Quote, Select, SplicePattern, Super,
-    This, Tuple, UntypedNode, ValDef,
+    Apply, ApplyKind, Block, Ident, MacroTree, New, Parens, PostfixOp, Quote, Select,
+    SplicePattern, Super, This, Tuple, UntypedNode, ValDef,
 };
 use dotty_core::{
     Constant, Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped,
@@ -817,6 +817,19 @@ where
                 let body = self.parse_optional_template_body();
                 qualifier = self.new_with_anonymous_template(mark, vec![parent], body);
                 can_apply = false;
+            } else if self.current().kind == TokenKind::Identifier && self.current_text_is("_") {
+                // Scala 3.9 keeps the legacy eta-expansion spelling `expr _`
+                // in SimpleExprRest. It is distinct from a feature-gated
+                // postfix operator and from `_` as a placeholder atom.
+                let operator = dotty_core::TermName::new(self.names.intern("_"));
+                self.advance();
+                return self.alloc_from(
+                    mark,
+                    TreeKind::PhaseSpecific(UntypedNode::PostfixOp(PostfixOp {
+                        operand: qualifier,
+                        op: *operator.as_name(),
+                    })),
+                );
             } else if self
                 .cursor
                 .at(TokenKind::Punctuation(Punctuation::LeftBrace))

@@ -4609,6 +4609,80 @@ fn parses_a_postfix_operator_when_the_feature_is_enabled() {
 }
 
 #[test]
+fn parses_legacy_eta_expansion_after_a_simple_expression() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "f _",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Identifier, 2, 3),
+            token(TokenKind::Eof, 3, 3),
+        ],
+        &mut names,
+    );
+
+    let expression = parser.expr();
+    let TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) =
+        parser.ast().get(expression).kind
+    else {
+        panic!("expected postfix eta-expansion tree");
+    };
+    let operator = postfix.op;
+
+    assert!(matches!(
+        parser.ast().get(postfix.operand).kind,
+        TreeKind::Ident(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+    assert!(parser.placeholder_params.is_empty());
+    assert_eq!(
+        parser
+            .ast()
+            .get(expression)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(0, 3).unwrap()
+    );
+    drop(parser);
+    assert_eq!(names.resolve(operator.text()), "_");
+}
+
+#[test]
+fn eta_expansion_follows_type_application_without_becoming_a_placeholder() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "f[A] _",
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBracket), 1, 2),
+            token(TokenKind::Identifier, 2, 3),
+            token(TokenKind::Punctuation(Punctuation::RightBracket), 3, 4),
+            token(TokenKind::Identifier, 5, 6),
+            token(TokenKind::Eof, 6, 6),
+        ],
+        &mut names,
+    );
+
+    let expression = parser.expr();
+    let TreeKind::PhaseSpecific(UntypedNode::PostfixOp(postfix)) =
+        parser.ast().get(expression).kind
+    else {
+        panic!("expected postfix eta-expansion tree");
+    };
+
+    assert!(matches!(
+        parser.ast().get(postfix.operand).kind,
+        TreeKind::TypeApply(_)
+    ));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(parser.diagnostics().is_empty());
+    assert!(parser.placeholder_params.is_empty());
+}
+
+#[test]
 fn rejects_a_postfix_operator_when_the_feature_is_disabled() {
     let mut names = NameInterner::new();
     let mut parser = parser_for(
