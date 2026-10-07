@@ -50,6 +50,14 @@ children; the Rust AST represents the same empty set as `retains[Nothing]`.
 This keeps the differential check focused on source syntax rather than
 compiler-generated constructor scaffolding.
 
+Scala 3.9 lowers the deprecated type operator `A with B` to an
+`AppliedTypeTree` whose synthetic function contains an anonymous wrapper
+around a zero-width `TypeTree`. The shared Rust AST has no node for that
+compiler-generated anonymous wrapper, so the Scala renderer removes exactly
+that wrapper for `AppliedTypeTree` nodes sourced from `with` types. The
+zero-width type-tree span, both operands, the enclosing type span, and the
+right-associated shape remain compared; ordinary applied types are unchanged.
+
 With no argument, `run` reads the source from standard input. The output keeps
 only parser-facing information: node kind, source span, names, literal source
 text, application kind, operators, and child nodes. It does not use `Tree.show`, because that output is a
