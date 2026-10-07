@@ -19905,10 +19905,13 @@ mod tests {
             &packages,
         );
         let typed_match = typer.type_expression(rhs, context).unwrap();
-        assert!(matches!(
-            typer.typed_ast().get(typed_match).kind,
-            TreeKind::Match(_)
-        ));
+        let TreeKind::Match(typed_match_expr) = &typer.typed_ast().get(typed_match).kind else {
+            panic!("annotated selector should lower to a typed Match");
+        };
+        let TreeKind::CaseDef(typed_case) = &typer.typed_ast().get(typed_match_expr.cases[0]).kind
+        else {
+            panic!("Match should retain its typed CaseDef");
+        };
 
         let selector_annotation_id = typer
             .source_annotations
@@ -19920,6 +19923,11 @@ mod tests {
             .get(source, selector_tree)
             .expect("annotated selector should have a typed mapping");
         let selector_type = typer.typed_ast().get(selector_typed).ty;
+        assert_eq!(
+            typer.typed_ast().get(typed_case.pattern).ty,
+            definitions.int,
+            "pattern adaptation should look through the annotation wrapper"
+        );
         assert!(matches!(
             typer.store().types.get(selector_type),
             Type::Annotated { annotation, .. } if *annotation == selector_annotation_id
