@@ -80,13 +80,35 @@ for root in "${all_roots[@]}"; do
   fi
 done
 
+PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "${scala3_root}" "${scala3_roots[@]}" -- \
+  "${cats_root}" "${cats_roots[@]}" -- \
+  "${cats_effect_root}" "${cats_effect_roots[@]}" -- <<'PY'
+import pathlib
+import subprocess
+import sys
+
+from source_inventory import tracked_scala_sources
+
+arguments = sys.argv[1:]
+while arguments:
+    separator = arguments.index("--")
+    repository, roots = arguments[0], arguments[1:separator]
+    try:
+        tracked_scala_sources(pathlib.Path(repository), [pathlib.Path(root) for root in roots])
+    except (OSError, subprocess.CalledProcessError, ValueError) as error:
+        raise SystemExit(str(error)) from error
+    arguments = arguments[separator + 1:]
+PY
+
 oracle_args=()
 if [[ "$skip_oracle" == 0 ]]; then
-  python3 - "$manifest" "$source_set_counts" \
+  PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "$manifest" "$source_set_counts" \
     "$scala3_root" "$cats_root" "$cats_effect_root" \
     "${scala3_roots[@]}" -- "${cats_roots[@]}" -- "${cats_effect_roots[@]}" <<'PY'
 import pathlib
+import subprocess
 import sys
+from source_inventory import tracked_scala_sources
 
 manifest_path = pathlib.Path(sys.argv[1])
 counts_path = pathlib.Path(sys.argv[2])
@@ -106,15 +128,10 @@ for name, root in (("scala3", scala3_root), ("cats", cats_root), ("cats-effect",
     else:
         source_roots = arguments
         arguments = []
-    for source_root in source_roots:
-        path = pathlib.Path(source_root)
-        for source in path.rglob("*.scala"):
-            if source.is_symlink() or not source.is_file():
-                continue
-            canonical = source.resolve()
-            if not canonical.is_relative_to(root.resolve()):
-                raise SystemExit(f"source escapes checkout root: {source}")
-            groups[name].append(canonical)
+    try:
+        groups[name] = tracked_scala_sources(root, [pathlib.Path(path) for path in source_roots])
+    except (OSError, subprocess.CalledProcessError, ValueError) as error:
+        raise SystemExit(str(error)) from error
 
 owners = {}
 for name, paths in groups.items():
