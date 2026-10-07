@@ -389,8 +389,11 @@ is transactional and repeated requests reuse one `AnnotationId`. Term-mode
 `Type::Annotated` carries that exact ID. Stable term references retain their
 singleton type; literals and parameters use the existing expression widening
 path. Nested annotations retain source order, and failures roll back annotation,
-type, and typed-tree state. Source type-tree annotations and capture-checking
-wrappers remain unsupported.
+type, and typed-tree state. `SemanticStore::has_annotation` follows the outer
+`Type::Annotated` chain and identifies `scala.unchecked` through its resolved
+class symbol and canonical class path; this records identity only and does not
+implement warning suppression. Source type-tree annotations and
+capture-checking wrappers remain unsupported.
 Right-associative infix calls (operators ending in `:`) remain explicitly
 deferred because they require Scala's operand rewrite.
 It also supports expected-type conformance checks, source type ascriptions, direct
@@ -737,6 +740,25 @@ syntax remain separate candidate families. See the [latest normalized audit
 report](typer-classpath-corpus-audit-3.9.0.md) for detailed counts and
 prerequisites.
 
+The #772 rerun uses that same pinned Scala revision, JDK 21, corpus roots, and
+classpath; two independent report generations, each internally checked for
+determinism, matched byte-for-byte. The generic `UnsupportedExpression::PrefixOp`
+and term `UnsupportedExpression::Annotated` first-blocker buckets are both
+0, down from 66 / 23 files and 64 / 14 files. This records blocker movement,
+not corpus semantic success: no local method fully typed, and external member
+materialization remains zero. The source inventory contains 4,529 prefix
+operators and 401 term `Annotated` nodes. Prefix operator counts are `!` 4,327,
+`+` 1, `-` 104, and `~` 97; operator-specific successes and
+`@unchecked`-like uses are not attributed by this first-blocker workflow. The
+refreshed top semantic blocker is `MissingDeclaredType` (34 in 15 files), with
+anonymous class instantiation (32 in 15 files) and local extension methods
+(25 in 5 files) next. The audit recommends a focused local extension slice
+because it has a bounded owner and reuses existing extension receiver
+metadata; classpath materialization remains a separate reachability gate. See
+the [#772 normalized report](typer-classpath-corpus-audit-3.9.0.md) for the
+global ranking, representative paths, first-error counts, and candidate
+analysis.
+
 The previous wildcard-only report recorded 1,666 Match first-blocker methods,
 2,151 Match nodes, and 6,615 cases. It stopped at `Match`, so downstream
 pattern counters below were not reached in that snapshot. The current
@@ -925,9 +947,10 @@ parts remain deferred until their source semantic implementation and fixtures
 are ready:
 
 - expression forms outside the supported identifier, selection, literal,
-  application, `New`, block, ordinary `if`, condition-bearing `while`, and local
-  `return` subset, including `match`, `try`, lambdas, and other forms that are
-  not currently handled by the expression typer;
+  application, `New`, block, ordinary `if`, condition-bearing `while`, local
+  `return`, supported `Match` patterns, unary prefix operators, and term
+  annotations, including `try`, lambdas, and other forms that are not currently
+  handled by the expression typer;
 - other local `def` signature/body shapes, class, type, and pattern
   declarations;
 - generic overload inference outside the structural candidate-local subset,
@@ -943,9 +966,11 @@ are ready:
   type-lambda, and match types; source binder and standard function-class
   identity projection still need focused work. Match-type reduction remains a
   separate non-goal;
-- ordinary annotated source types and capture-checking-only type syntax remain
-  unsupported. `Type::Annotated` exists, but source annotation identity and
-  capture wrappers must be inventoried and implemented separately;
+- ordinary annotated source type trees and capture-checking-only type syntax
+  remain unsupported. Term expressions use the shared `Type::Annotated` /
+  `AnnotationId` representation described above; this does not project type-tree
+  annotations, declaration annotations, capture wrappers, or arbitrary
+  compile-time annotation arguments;
 - advanced parent feasibility and compiler-generated wrapper members.
 
 Scala 3.9 TASTy records inferred/default module self references that source
