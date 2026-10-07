@@ -1474,6 +1474,48 @@ mod tests {
     }
 
     #[test]
+    fn parses_prefix_operator_assignment_after_a_statement_in_a_block() {
+        const SOURCE: &str = concat!(
+            "def data_=(data: Data): Unit = {\n",
+            "  val offset =\n",
+            "    if arch == \"x86_64\" then\n",
+            "      sizeof[UInt]\n",
+            "    else\n",
+            "      sizeof[Ptr[Byte]]\n",
+            "  !(event.asInstanceOf[Ptr[Byte]] + offset).asInstanceOf[Ptr[Data]] = data\n",
+            "}\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let [method_id] = package.stats.as_slice() else {
+            panic!("expected one setter method");
+        };
+        let TreeKind::DefDef(method) = &result.ast.get(*method_id).kind else {
+            panic!("expected a setter method definition");
+        };
+        let TreeKind::Block(body) = &result.ast.get(method.rhs.unwrap()).kind else {
+            panic!("expected the setter body block");
+        };
+        assert_eq!(body.stats.len(), 1);
+        assert!(matches!(
+            result.ast.get(body.expr).kind,
+            TreeKind::Assign(assignment)
+                if matches!(
+                    result.ast.get(assignment.lhs).kind,
+                    TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_))
+                )
+        ));
+    }
+
+    #[test]
     fn if_branch_can_start_with_a_quote() {
         const SOURCE: &str = "def quoted(x: Boolean) = if x then 1 else '{ 2 }";
         let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
