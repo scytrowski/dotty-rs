@@ -50,14 +50,48 @@ impl SourceTyper<'_> {
             tree_index: method_tree_index,
             feature,
         };
-        if self
+        let is_extension = self
             .store
             .symbols
             .get(method)
             .flags
-            .contains(SymbolFlags::EXTENSION)
-        {
-            return Err(deferred("extension methods"));
+            .contains(SymbolFlags::EXTENSION);
+        if is_extension {
+            let Some(prefix_clauses) = self.extension_prefix_clauses(method) else {
+                return Err(deferred("missing extension receiver"));
+            };
+            if prefix_clauses.len() != 1 || prefix_clauses[0].len() != 1 {
+                return Err(deferred("extension receiver shape"));
+            }
+            let receiver_tree = prefix_clauses[0][0];
+            let Some(receiver_node) = self.arena.try_get(receiver_tree) else {
+                return Err(TyperError::TreeOutsideArena {
+                    source: self.source,
+                    tree_index: receiver_tree.index(),
+                });
+            };
+            let TreeKind::ValDef(receiver) = &receiver_node.kind else {
+                return Err(deferred("extension receiver shape"));
+            };
+            if receiver
+                .metadata
+                .modifiers
+                .iter()
+                .any(|modifier| !matches!(modifier, Modifier::Param))
+            {
+                return Err(deferred("contextual or modified extension receiver"));
+            }
+            if !definition.type_params.is_empty() {
+                return Err(deferred("extension type parameters"));
+            }
+            if self
+                .store
+                .names
+                .resolve(definition.name.as_name().text())
+                .ends_with(':')
+            {
+                return Err(deferred("right-associative extension methods"));
+            }
         }
         let result_node =
             self.arena
@@ -177,10 +211,24 @@ impl SourceTyper<'_> {
                 );
             }
         }
-        let parameter_names = parameters_to_enter
+        let mut parameter_names = parameters_to_enter
             .iter()
             .map(|(name, _)| *name)
             .collect::<Vec<_>>();
+        if is_extension {
+            let receiver_tree = self
+                .extension_prefix_clauses(method)
+                .and_then(|clauses| clauses.first())
+                .and_then(|clause| clause.first())
+                .copied()
+                .ok_or_else(|| deferred("missing extension receiver"))?;
+            let Some(TreeKind::ValDef(receiver)) =
+                self.arena.try_get(receiver_tree).map(|node| &node.kind)
+            else {
+                return Err(deferred("extension receiver shape"));
+            };
+            parameter_names.push(*receiver.name.as_name());
+        }
         if self.local_result_depends_on_parameters(definition.tpt, &parameter_names) {
             return Err(deferred("dependent result types"));
         }
