@@ -998,6 +998,12 @@ Parenthesized, braced, and indentation-based enumerator regions are supported,
 including the wrapped legacy form whose body has no explicit `do`. The parser
 emits `ForYield` or `ForDo` directly and does not desugar comprehensions into
 `map`, `flatMap`, or `withFilter`; that belongs to a later lowering phase.
+When enclosing parentheses suppress scanner newline tokens, a physical line
+break before a simple identifier or wildcard generator/alias is still treated
+as the enumerator separator, matching Dotty's `InFor` separator region. A
+wildcard at that boundary is not consumed as the legacy eta-expansion suffix.
+The parser does not reinterpret a line break after an infix operator as such a
+separator.
 An indented body after `do` or `yield` uses the shared statement-sequence
 parser, so local definitions and a final expression form a `Block`. The parser
 uses scanner feedback when such a body is nested in a braced scope and consumes

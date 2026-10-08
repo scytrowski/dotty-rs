@@ -106,19 +106,31 @@ where
                 saw_generator |= generator;
             }
 
-            self.consume_for_separators();
+            let mut had_separator = self.consume_for_separators();
             while self.current().kind == TokenKind::Keyword(HardKeyword::If) {
                 if let Some(guard) = self.parse_guard() {
                     enums.push(guard);
                 }
-                self.consume_for_separators();
+                had_separator |= self.consume_for_separators();
             }
+
+            let has_suppressed_newline_separator = self.current_starts_multiline_for_enumerator();
 
             if !self.cursor.progressed_since(checkpoint) {
                 self.report(
                     ParseDiagnosticKind::UnexpectedToken,
                     "parser made no progress while parsing for enumerators",
                 );
+                break;
+            }
+            if !had_separator
+                && !has_suppressed_newline_separator
+                && self.current().kind != TokenKind::Keyword(HardKeyword::If)
+                && !self.at_for_body_keyword()
+                && self.current().kind != TokenKind::Eof
+                && self.current().kind != TokenKind::Outdent
+                && !end.is_some_and(|kind| self.current().kind == kind)
+            {
                 break;
             }
         }
@@ -220,7 +232,7 @@ where
         self.consume_for_newlines();
         let indented = self.accept(TokenKind::Indent);
         let expr = if can_start_expr(self.current().kind) {
-            self.expr()
+            self.parse_for_enumerator_expression()
         } else {
             self.report(
                 ParseDiagnosticKind::ExpectedExpression,
@@ -233,6 +245,63 @@ where
             self.accept(TokenKind::Outdent);
         }
         expr
+    }
+
+    fn parse_for_enumerator_expression(&mut self) -> TreeId<Untyped> {
+        let previous = std::mem::replace(&mut self.for_enumerator_rhs, true);
+        let expression = self.expr();
+        self.for_enumerator_rhs = previous;
+        expression
+    }
+
+    pub(super) fn current_starts_multiline_for_enumerator(&mut self) -> bool {
+        if !matches!(
+            self.last_real_token_kind,
+            TokenKind::Identifier
+                | TokenKind::BackquotedIdentifier
+                | TokenKind::QuoteId
+                | TokenKind::CharLiteral
+                | TokenKind::IntegerLiteral
+                | TokenKind::DecimalLiteral
+                | TokenKind::ExponentLiteral
+                | TokenKind::LongLiteral
+                | TokenKind::FloatLiteral
+                | TokenKind::DoubleLiteral
+                | TokenKind::StringLiteral
+                | TokenKind::StringPart
+                | TokenKind::Keyword(
+                    HardKeyword::Null
+                        | HardKeyword::True
+                        | HardKeyword::False
+                        | HardKeyword::This
+                        | HardKeyword::Super
+                )
+                | TokenKind::Punctuation(
+                    Punctuation::RightParen | Punctuation::RightBracket | Punctuation::RightBrace
+                )
+        ) || !self.has_physical_line_break(self.last_real_token_end, self.current().span.start())
+        {
+            return false;
+        }
+
+        let mut pattern_offset = 0;
+        if self.current().kind == TokenKind::Keyword(HardKeyword::Case) {
+            pattern_offset += 1;
+        }
+        if !matches!(
+            self.cursor.lookahead(pattern_offset).kind,
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier
+        ) {
+            return false;
+        }
+
+        let operator = self.cursor.lookahead(pattern_offset + 1);
+        operator.kind == TokenKind::Operator
+            && self
+                .source
+                .slice(operator.span)
+                .ok()
+                .is_some_and(|spelling| matches!(spelling, "<-" | "="))
     }
 
     fn parse_for_body(&mut self, feedback_opened: bool) -> TreeId<Untyped> {
@@ -295,11 +364,24 @@ where
         }
     }
 
-    fn consume_for_separators(&mut self) {
-        self.consume_for_newlines();
+    fn consume_for_separators(&mut self) -> bool {
+        let mut consumed = false;
+        while matches!(
+            self.current().kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            let checkpoint = self.cursor.checkpoint();
+            self.advance();
+            consumed = true;
+            if !self.cursor.progressed_since(checkpoint) {
+                break;
+            }
+        }
         while self.accept(TokenKind::Punctuation(Punctuation::Semicolon)) {
+            consumed = true;
             self.consume_for_newlines();
         }
+        consumed
     }
 
     fn current_is_operator(&mut self, spelling: &str) -> bool {
@@ -339,6 +421,14 @@ mod tests {
     use dotty_core::ast::UntypedNode;
     use dotty_core::{NameInterner, Token, TokenValue};
 
+    fn arrow(start: u32, end: u32) -> Token {
+        Token {
+            kind: TokenKind::Operator,
+            span: dotty_core::TextRange::new(start, end).unwrap(),
+            value: TokenValue::None,
+        }
+    }
+
     #[test]
     fn parses_an_ordinary_generator_with_check_mode() {
         let mut names = NameInterner::new();
@@ -374,6 +464,125 @@ mod tests {
         };
         assert_eq!(generator.check_mode, GenCheckMode::Check);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn physical_newline_separates_generators_when_outer_parentheses_suppress_tokens() {
+        let source = "for x <- xs\n    _ <- transform(x) yield y";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Keyword(HardKeyword::For), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                arrow(6, 8),
+                token(TokenKind::Identifier, 9, 11),
+                token(TokenKind::Identifier, 16, 17),
+                arrow(18, 20),
+                token(TokenKind::Identifier, 21, 30),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 30, 31),
+                token(TokenKind::Identifier, 31, 32),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 32, 33),
+                token(TokenKind::Keyword(HardKeyword::Yield), 34, 39),
+                token(TokenKind::Identifier, 40, 41),
+                token(TokenKind::Eof, 41, 41),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        let TreeKind::PhaseSpecific(UntypedNode::ForYield(for_tree)) = &parser.ast().get(tree).kind
+        else {
+            panic!("expected ForYield");
+        };
+        assert_eq!(for_tree.enums.len(), 2);
+        assert!(for_tree.enums.iter().all(|enumerator| matches!(
+            parser.ast().get(*enumerator).kind,
+            TreeKind::PhaseSpecific(UntypedNode::GenFrom(_))
+        )));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(
+            parser.ast().get(tree).position.unwrap().span().range(),
+            dotty_core::TextRange::new(0, source.len() as u32).unwrap()
+        );
+    }
+
+    #[test]
+    fn recovers_at_yield_after_a_multiline_generator_with_missing_rhs() {
+        let source = "for x <- xs\n    y <- yield y";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Keyword(HardKeyword::For), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                arrow(6, 8),
+                token(TokenKind::Identifier, 9, 11),
+                token(TokenKind::Identifier, 16, 17),
+                arrow(18, 20),
+                token(TokenKind::Keyword(HardKeyword::Yield), 21, 26),
+                token(TokenKind::Identifier, 27, 28),
+                token(TokenKind::Eof, 28, 28),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        let TreeKind::PhaseSpecific(UntypedNode::ForYield(for_tree)) = &parser.ast().get(tree).kind
+        else {
+            panic!("expected recoverable ForYield");
+        };
+        assert_eq!(for_tree.enums.len(), 2);
+        assert!(matches!(
+            parser.ast().get(for_tree.body).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedExpression })
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn rejects_a_second_generator_without_a_separator() {
+        let source = "for x <- xs y <- ys yield y";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Keyword(HardKeyword::For), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                arrow(6, 8),
+                token(TokenKind::Identifier, 9, 11),
+                token(TokenKind::Identifier, 12, 13),
+                arrow(14, 16),
+                token(TokenKind::Identifier, 17, 19),
+                token(TokenKind::Keyword(HardKeyword::Yield), 20, 25),
+                token(TokenKind::Identifier, 26, 27),
+                token(TokenKind::Eof, 27, 27),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        let TreeKind::PhaseSpecific(UntypedNode::ForDo(for_do)) = &parser.ast().get(tree).kind
+        else {
+            panic!("expected recoverable ForDo");
+        };
+        assert_eq!(for_do.enums.len(), 1);
+        assert!(
+            parser
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedToken })
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]

@@ -24,6 +24,7 @@ where
     pub(crate) names: &'names mut NameInterner,
     pub(crate) ast: AstArena<Untyped>,
     pub(crate) last_real_token_end: u32,
+    pub(crate) last_real_token_kind: TokenKind,
     pub(crate) context: ParseContext,
     /// Whether the current statement sequence is Dotty's outermost import
     /// position, where global language imports are permitted without a
@@ -51,6 +52,10 @@ where
     /// Active quoted expression bodies; `$` followed by `{` is a splice only
     /// while this depth is nonzero.
     pub(crate) expression_quote_depth: u32,
+    /// Whether the current expression is an enumerator RHS where a physical
+    /// line break may separate the next for-enumerator even if layout tokens
+    /// were suppressed inside surrounding parentheses.
+    pub(crate) for_enumerator_rhs: bool,
     /// Active quote bodies parsed from pattern position. Braced splices in
     /// these bodies contain patterns and must remain source-level pattern
     /// nodes rather than expression splices.
@@ -78,6 +83,11 @@ where
         } else {
             0
         };
+        let last_real_token_kind = if is_zero_width_synthetic(cursor.kind()) {
+            TokenKind::Eof
+        } else {
+            cursor.kind()
+        };
 
         Self {
             cursor,
@@ -86,6 +96,7 @@ where
             names,
             ast: AstArena::new(),
             last_real_token_end,
+            last_real_token_kind,
             context: ParseContext::default(),
             outermost_imports_allowed: false,
             diagnostics: Vec::new(),
@@ -100,6 +111,7 @@ where
             end_marked_trees: HashSet::new(),
             end_marker_owners: Vec::new(),
             expression_quote_depth: 0,
+            for_enumerator_rhs: false,
             quote_pattern_depth: 0,
             type_quote_depth: 0,
         }
@@ -466,6 +478,7 @@ where
         self.last_advance_was_outdent = kind == TokenKind::Outdent;
         if !is_zero_width_synthetic(kind) && kind != TokenKind::Eof {
             self.last_real_token_end = end;
+            self.last_real_token_kind = kind;
         }
         self.cursor.advance();
     }

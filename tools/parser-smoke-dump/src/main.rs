@@ -1448,6 +1448,56 @@ mod tests {
     use dotty_core::{HardKeyword, TokenSource};
 
     #[test]
+    fn multiline_for_enumerators_preserve_the_following_block_statement() {
+        const SOURCE: &str = concat!(
+            "def run = {\n",
+            "  val result = (for\n",
+            "    first <- sources\n",
+            "    second <- transform(first)\n",
+            "    _ <- discard(second)\n",
+            "  yield (first, second))\n",
+            "  after()\n",
+            "}\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let TreeKind::DefDef(method) = &result.ast.get(package.stats[0]).kind else {
+            panic!("expected method definition");
+        };
+        let TreeKind::Block(body) = &result.ast.get(method.rhs.unwrap()).kind else {
+            panic!("expected method body block");
+        };
+        let TreeKind::ValDef(value) = &result.ast.get(body.stats[0]).kind else {
+            panic!("expected local result value");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) =
+            &result.ast.get(value.rhs.unwrap()).kind
+        else {
+            panic!("expected parenthesized for expression");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ForYield(for_yield)) =
+            &result.ast.get(parens.inner).kind
+        else {
+            panic!("expected ForYield");
+        };
+        assert_eq!(for_yield.enums.len(), 3);
+        assert!(matches!(result.ast.get(body.expr).kind, TreeKind::Apply(_)));
+        let after_span = result.ast.get(body.expr).position.unwrap().span().range();
+        assert_eq!(
+            &SOURCE[after_span.start() as usize..after_span.end() as usize],
+            "after()"
+        );
+    }
+
+    #[test]
     fn keeps_control_keywords_before_adjacent_literals_in_the_token_stream() {
         let source = concat!(
             "def thenString(x: Boolean) = if x then\"\" else \"result\"\n",

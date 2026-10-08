@@ -226,6 +226,10 @@ bounded forms), import/export clauses, and named `end` markers across nested
 control-flow, member, and top-level boundaries. Dotty returns `EmptyTree`
 for an empty compilation unit; the Scala renderer normalizes that one case to
 the Rust parser's documented zero-width empty `PackageDef` root.
+`for-multiline-enumerators-parenthesized.scala` exercises physical newline
+separators between generators when an enclosing parenthesis suppresses scanner
+newline tokens, and `compilation/for-body-keeps-following-statement.scala`
+checks that the comprehension body leaves the following block statement intact.
 
 The `patdef-*-3.9.0.scala` fixtures retain local source pattern definitions in
 the parser comparison. Their Scala 3.9 compiler lowering and typed-tree oracle
