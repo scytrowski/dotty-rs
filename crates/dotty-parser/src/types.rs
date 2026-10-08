@@ -1144,10 +1144,14 @@ where
                 TreeKind::PhaseSpecific(UntypedNode::Function(Function { params, body }))
             }
             FunctionTypeArrow::Context | FunctionTypeArrow::PureContext => {
+                let mut modifiers = vec![Modifier::Given];
+                if arrow == FunctionTypeArrow::Context && self.features().capture_checking {
+                    modifiers.push(Modifier::Impure);
+                }
                 TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(FunctionWithMods {
                     erased_params,
                     modifiers: Modifiers {
-                        modifiers: vec![Modifier::Given],
+                        modifiers,
                         ..Modifiers::default()
                     },
                     params,
@@ -3300,7 +3304,7 @@ mod tests {
         else {
             panic!("expected a function-with-modifiers type");
         };
-        assert!(function.modifiers.modifiers.contains(&Modifier::Given));
+        assert_eq!(function.modifiers.modifiers, vec![Modifier::Given]);
         assert_eq!(function.params.len(), 1);
         let TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(captures)) =
             &parser.ast().get(function.result).kind
@@ -3309,6 +3313,27 @@ mod tests {
         };
         assert_eq!(tree_name(captures.result, &parser), Some("B"));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn capture_checked_context_function_arrows_keep_distinct_modifiers() {
+        for (source, expected_modifiers) in [
+            ("A ?=> B", vec![Modifier::Given, Modifier::Impure]),
+            ("A ?-> B", vec![Modifier::Given]),
+        ] {
+            let mut names = NameInterner::new();
+            let mut parser = parser_for_capture_type(source, &mut names, true);
+
+            let tree = parser.type_expr();
+            let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+                &parser.ast().get(tree).kind
+            else {
+                panic!("expected a context function type for {source}");
+            };
+            assert_eq!(function.modifiers.modifiers, expected_modifiers, "{source}");
+            assert_eq!(function.erased_params, vec![false]);
+            assert!(parser.diagnostics().is_empty(), "{source}");
+        }
     }
 
     #[test]

@@ -1218,6 +1218,55 @@ mod tests {
             .unwrap_or_else(|| panic!("source type alias `{name}` not found"))
     }
 
+    fn type_alias_rhs(
+        parsed: &dotty_parser::ParseResult,
+        store: &SemanticStore,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+        name: &str,
+    ) -> TreeId<Untyped> {
+        let symbol = type_alias_symbol(parsed, store, index, source, name);
+        let SourceDefinition::Canonical { tree, .. } = index.definition_of(symbol).unwrap() else {
+            panic!("type alias should have a canonical source definition");
+        };
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(tree).kind else {
+            panic!("type alias should be represented by a TypeDef");
+        };
+        definition.rhs
+    }
+
+    fn enter_scala_function_classes(
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        arities: impl IntoIterator<Item = usize>,
+    ) {
+        let scala = packages
+            .enter(store, SymbolOrigin::Synthetic, &["scala"])
+            .last()
+            .expect("scala package")
+            .symbol;
+        let scope = packages.scope_of(scala).expect("scala package scope");
+        for arity in arities {
+            let name = Name::new(
+                store.names.intern(&format!("Function{arity}")),
+                Namespace::Type,
+            );
+            let class = store.symbols.alloc(dotty_core::Symbol {
+                name,
+                owner: Some(scala),
+                kind: SymbolKind::Trait,
+                flags: SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Missing,
+                origin: SymbolOrigin::Synthetic,
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            });
+            store.scopes.get_mut(scope).enter(name, class);
+        }
+    }
+
     fn complete_builtin_annotation(name: &str) -> (TypeId, Definitions) {
         let text = format!("val x: {name} = 1");
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(&text);
@@ -3496,6 +3545,247 @@ mod tests {
             typer.store().types.get(info),
             Type::AliasingBounds { alias } if *alias == definitions.int
         ));
+    }
+
+    #[test]
+    fn source_function_types_project_recursively_to_canonical_applied_types() {
+        let source_text = concat!(
+            "class A; class B; class C; ",
+            "type Zero = () => A; ",
+            "type One = A => B; ",
+            "type Many = (A, B) => C; ",
+            "type NestedResult = A => (B => C); ",
+            "type FunctionParameter = (A => B) => C; ",
+            "type Contextual = (x: A) ?=> B",
+        );
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name(source_text);
+        enter_scala_function_classes(&mut store, &mut packages, 0..=2);
+        let aliases = [
+            ("Zero", 0),
+            ("One", 1),
+            ("Many", 2),
+            ("NestedResult", 1),
+            ("FunctionParameter", 1),
+        ];
+        let rhs: Vec<_> = aliases
+            .iter()
+            .map(|(name, _)| {
+                let symbol = type_alias_symbol(&parsed, &store, &index, source, name);
+                (
+                    *name,
+                    type_alias_rhs(&parsed, &store, &index, source, name),
+                    index.declaration_context_of(symbol).unwrap(),
+                )
+            })
+            .collect();
+        let contextual_symbol = type_alias_symbol(&parsed, &store, &index, source, "Contextual");
+        let contextual_rhs = type_alias_rhs(&parsed, &store, &index, source, "Contextual");
+        let contextual_context = index.declaration_context_of(contextual_symbol).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let mut projected = std::collections::HashMap::new();
+        let mut ordinary_function_one = None;
+        for (name, tree, context) in rhs {
+            let ty = typer.type_of_tpt(tree, context).unwrap();
+            assert_eq!(typer.source_type_index().type_at(source, tree), Some(ty));
+            assert_eq!(typer.type_of_tpt(tree, context).unwrap(), ty);
+            let Type::Applied { tycon, args } = typer.store().types.get(ty) else {
+                panic!("{name} should project to an applied function type");
+            };
+            let Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            } = typer.store().types.get(*tycon)
+            else {
+                panic!("function constructor should refer to its canonical class");
+            };
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(*class).name.text()),
+                format!("Function{}", args.len() - 1)
+            );
+            if name == "One" {
+                ordinary_function_one = Some(*class);
+            }
+            assert_eq!(
+                args.len(),
+                aliases.iter().find(|(alias, _)| *alias == name).unwrap().1 + 1
+            );
+            projected.insert(name, args.clone());
+        }
+
+        let nested_result = projected["NestedResult"][1];
+        let function_parameter = projected["FunctionParameter"][0];
+        for nested in [nested_result, function_parameter] {
+            let Type::Applied { tycon, .. } = typer.store().types.get(nested) else {
+                panic!("nested function shape should remain applied");
+            };
+            let Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            } = typer.store().types.get(*tycon)
+            else {
+                panic!("nested function should use a class constructor");
+            };
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(*class).name.text()),
+                "Function1"
+            );
+        }
+
+        let contextual = typer
+            .type_of_tpt(contextual_rhs, contextual_context)
+            .unwrap();
+        let Type::Applied { tycon, args } = typer.store().types.get(contextual) else {
+            panic!("contextual function should project to an applied type");
+        };
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(contextual_class),
+            ..
+        } = typer.store().types.get(*tycon)
+        else {
+            panic!("contextual constructor should refer to its canonical class");
+        };
+        assert_eq!(args.len(), 2);
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(*contextual_class).name.text()),
+            "ContextFunction1"
+        );
+        assert_ne!(*contextual_class, ordinary_function_one.unwrap());
+    }
+
+    #[test]
+    fn source_function_type_modifiers_and_erasure_are_explicitly_deferred() {
+        for (modifier, expected_kind) in [
+            (Modifier::Impure, "unsupported function type modifiers"),
+            (Modifier::Erased, "unsupported function type modifiers"),
+        ] {
+            let (mut parsed, mut store, packages, definitions, index, source) =
+                parse_and_name("class A; class B; type Contextual = A ?=> B");
+            let rhs = type_alias_rhs(&parsed, &store, &index, source, "Contextual");
+            let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+                &mut parsed.ast.get_mut(rhs).kind
+            else {
+                panic!("contextual type should retain FunctionWithMods");
+            };
+            function.modifiers.modifiers = vec![modifier];
+            let alias = type_alias_symbol(&parsed, &store, &index, source, "Contextual");
+            let context = index.declaration_context_of(alias).unwrap();
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+
+            assert!(matches!(
+                typer.type_of_tpt(rhs, context),
+                Err(TyperError::UnsupportedTypeTree { tree_kind, .. })
+                    if tree_kind == expected_kind
+            ));
+            assert_eq!(typer.source_type_index().type_at(source, rhs), None);
+        }
+
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class A; class B; type Erased = A ?=> B");
+        let rhs = type_alias_rhs(&parsed, &store, &index, source, "Erased");
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &mut parsed.ast.get_mut(rhs).kind
+        else {
+            panic!("contextual type should retain FunctionWithMods");
+        };
+        function.erased_params[0] = true;
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Erased");
+        let context = index.declaration_context_of(alias).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_of_tpt(rhs, context),
+            Err(TyperError::UnsupportedTypeTree {
+                tree_kind: "erased function type parameter",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn failed_source_function_child_projection_rolls_back_and_missing_class_is_preserved() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class A; type Bad = (A, Missing) => A");
+        let mut packages = packages;
+        enter_scala_function_classes(&mut store, &mut packages, [2]);
+        let rhs = type_alias_rhs(&parsed, &store, &index, source, "Bad");
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Bad");
+        let context = index.declaration_context_of(alias).unwrap();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parsed.ast.get(rhs).kind
+        else {
+            panic!("ordinary function type should use Function");
+        };
+        let first_param = function.params[0];
+        let before = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.type_of_tpt(rhs, context),
+            Err(TyperError::TypeNameNotFound { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(typer.source_type_index().type_at(source, rhs), None);
+        assert_eq!(typer.source_type_index().type_at(source, first_param), None);
+
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class A; class B; type One = A => B");
+        let rhs = type_alias_rhs(&parsed, &store, &index, source, "One");
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "One");
+        let context = index.declaration_context_of(alias).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.type_of_tpt(rhs, context),
+            Err(TyperError::SourceFunctionClassNotFound {
+                kind: SourceFunctionKind::Ordinary,
+                arity: 1
+            })
+        ));
+        assert_eq!(typer.source_type_index().type_at(source, rhs), None);
     }
 
     #[test]

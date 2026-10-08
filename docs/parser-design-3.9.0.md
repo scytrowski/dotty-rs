@@ -487,7 +487,10 @@ and `?->` accept an optional `{captureRef, ...}` set before the result. The
 set and result are preserved in the untyped-only `CapturesAndResult` node,
 matching Dotty's parser tree; parsing does not lower this node to a retaining
 annotation. Ordinary `=>` is marked `Impure` under capture checking. For
-non-function types, `T^` and `T^{...}` use the existing `Annotated` node with
+context arrows, `?=>` retains both `Given` and `Impure` under capture checking,
+while pure `?->` retains only `Given`, so the two forms remain distinguishable
+in the shared AST. For non-function types, `T^` and `T^{...}` use the existing
+`Annotated` node with
 Dotty's `retainsCap`/`retains` annotation shapes. Capture refs support
 qualified term paths, reach `*`, and `.only[QualId]`; explicit empty sets
 lower to `retains[Nothing]`. The oracle normalizes Dotty's generated
