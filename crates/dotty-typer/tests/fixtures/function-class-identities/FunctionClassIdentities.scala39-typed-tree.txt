@@ -1,0 +1,13 @@
+[[syntax trees at end of                     typer]] // crates/dotty-typer/tests/fixtures/function-class-identities/FunctionClassIdentities.scala
+package <empty> {
+  final lazy module val FunctionClassIdentities: FunctionClassIdentities =
+    new FunctionClassIdentities()
+  final module class FunctionClassIdentities() extends Object() {
+    this: FunctionClassIdentities.type =>
+    type Zero = () => Int
+    type One = Int => String
+    type Many = (Int, String) => Boolean
+    type Contextual = (String) ?=> Int
+  }
+}
+

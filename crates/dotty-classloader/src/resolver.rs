@@ -387,6 +387,26 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
             resolver.resolve_package_inner(store, path)
         })
     }
+
+    fn enter_synthetic_package_member(
+        &mut self,
+        store: &mut SemanticStore,
+        package: SymbolId,
+        name: dotty_core::Name,
+        member: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        self.transact(store, |resolver, store| {
+            if resolver.session.packages.scope_of(package).is_none() {
+                return Ok(None);
+            }
+            resolver
+                .session
+                .packages
+                .enter_class(store, package, name, member);
+            Ok(Some(true))
+        })
+        .map(|entered| entered.unwrap_or(false))
+    }
 }
 
 enum PrefixTarget {

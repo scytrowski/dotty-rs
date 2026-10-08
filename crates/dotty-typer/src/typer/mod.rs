@@ -30,6 +30,7 @@ use expression::LocalMethodIndex;
 mod resolution;
 use resolution::imports::ImportSelection;
 mod source_annotations;
+mod source_function;
 mod transaction;
 mod type_projection;
 
@@ -44,6 +45,7 @@ pub use error::{
     ExtractorResultMemberIssue, PatternKind, TuplePatternResolutionIssue, TypeArgumentBoundSide,
     TyperError,
 };
+pub use source_function::{MAX_SOURCE_FUNCTION_ARITY, SourceFunctionKind};
 
 #[path = "../lookup/mod.rs"]
 mod lookup;
@@ -120,6 +122,7 @@ pub struct SourceTyper<'a> {
     typed_index: SourceTypedIndex,
     expression_scopes: Vec<ExpressionScopeFrame>,
     expression_scope_owner: u64,
+    synthetic_package_entries: Vec<(ScopeId, SymbolId)>,
 }
 
 #[derive(Clone, Copy)]
@@ -177,6 +180,7 @@ impl<'a> SourceTyper<'a> {
             typed_index: SourceTypedIndex::new(),
             expression_scopes: Vec::new(),
             expression_scope_owner: next_expression_scope_owner(),
+            synthetic_package_entries: Vec::new(),
         }
     }
 
@@ -236,6 +240,7 @@ impl<'a> SourceTyper<'a> {
     pub fn widen_expression_type(&mut self, ty: TypeId) -> Result<TypeId, TyperError> {
         let store_checkpoint = self.store.checkpoint();
         let resolver_checkpoint = self.resolver.checkpoint();
+        let package_entry_checkpoint = self.synthetic_package_entries.len();
         let type_index_checkpoint = self.type_index.checkpoint();
         let mut info_journal = Vec::new();
         let result = self.widen_expression_type_journaled(ty, &mut info_journal, 0);
@@ -245,6 +250,7 @@ impl<'a> SourceTyper<'a> {
                     self.store.symbols.set_info(symbol, previous);
                 }
             }
+            self.rollback_synthetic_package_entries(package_entry_checkpoint);
             self.resolver.rollback_to(self.store, resolver_checkpoint);
             self.store.rollback_to(store_checkpoint);
             self.type_index.restore(type_index_checkpoint);

@@ -154,6 +154,21 @@ pub trait SymbolResolver {
         store: &mut SemanticStore,
         path: &[&str],
     ) -> Result<Option<SymbolId>, ResolutionError>;
+
+    /// Enters a typer-created synthetic member into a package scope owned by
+    /// this resolver. Returns `false` when the resolver does not own that
+    /// package registry, allowing the caller to use its local `Packages`.
+    /// Successful entries participate in resolver checkpoints and rollback;
+    /// `false` and errors leave the store and resolver state unchanged.
+    fn enter_synthetic_package_member(
+        &mut self,
+        _store: &mut SemanticStore,
+        _package: SymbolId,
+        _name: Name,
+        _member: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        Ok(false)
+    }
 }
 
 /// The resolver that knows nothing: every request is unresolved.
