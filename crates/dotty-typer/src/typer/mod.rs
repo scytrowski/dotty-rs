@@ -3869,6 +3869,10 @@ mod tests {
             };
             assert_eq!(*reference_symbol, method);
             assert_eq!(typer.store().symbols.get(method).kind, SymbolKind::Method);
+            assert_eq!(
+                typer.store().symbols.get(method).visibility,
+                Visibility::Private
+            );
             assert_eq!(typer.store().symbols.get(method).owner, Some(owner));
             let scope = typer.function_literal_method_scope(method).unwrap();
             assert_eq!(typer.store().scopes.get(scope).owner, Some(method));

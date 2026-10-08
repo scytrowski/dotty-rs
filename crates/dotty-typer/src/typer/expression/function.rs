@@ -126,7 +126,7 @@ impl SourceTyper<'_> {
             owner: Some(context.owner),
             kind: SymbolKind::Method,
             flags: SymbolFlags::SYNTHETIC | SymbolFlags::FINAL,
-            visibility: Visibility::Public,
+            visibility: Visibility::Private,
             info: SymbolInfo::Missing,
             origin: SymbolOrigin::Synthetic,
             annotations: Vec::new(),
