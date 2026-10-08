@@ -327,7 +327,10 @@ where
             } else if !closed_by_delimiter && !already_outdented {
                 self.observe_outdented();
             }
-            if !self.accept(TokenKind::Outdent) && !closed_by_delimiter {
+            if !self.accept(TokenKind::Outdent)
+                && !closed_by_delimiter
+                && !self.current_end_marker_matches_active_construct()
+            {
                 self.report(
                     ParseDiagnosticKind::ExpectedToken,
                     "expected an outdent to close a case body",

@@ -1,6 +1,6 @@
 use dotty_core::{
-    AstArena, NameInterner, SourceId, SourceSpan, SourceText, SourceTextError, Span, TermName,
-    TextRange, Token, TokenKind, TokenSource, Tree, TreeId, TreeKind, TypeName, Untyped,
+    AstArena, HardKeyword, NameInterner, SourceId, SourceSpan, SourceText, SourceTextError, Span,
+    TermName, TextRange, Token, TokenKind, TokenSource, Tree, TreeId, TreeKind, TypeName, Untyped,
 };
 
 use dotty_core::ScannerEvent;
@@ -48,6 +48,9 @@ where
     /// outermost to innermost. Nested templates return matching markers to
     /// these owners.
     pub(crate) end_marker_owners: Vec<Option<dotty_core::Name>>,
+    /// Structural expression bodies whose matching `end` marker may close
+    /// their active indentation region before the complete AST node exists.
+    pub(crate) active_end_marker_targets: Vec<(HardKeyword, u32)>,
     /// Active quoted expression bodies; `$` followed by `{` is a splice only
     /// while this depth is nonzero.
     pub(crate) expression_quote_depth: u32,
@@ -99,6 +102,7 @@ where
             feedback_block_indent: None,
             end_marked_trees: HashSet::new(),
             end_marker_owners: Vec::new(),
+            active_end_marker_targets: Vec::new(),
             expression_quote_depth: 0,
             quote_pattern_depth: 0,
             type_quote_depth: 0,
