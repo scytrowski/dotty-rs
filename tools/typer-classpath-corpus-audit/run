@@ -134,12 +134,50 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '\n'
     printf '### Next-sprint candidates\n\n'
     printf '| Candidate | Smallest useful slice and owner | Prerequisites / reuse | Non-goals |\n| --- | --- | --- | --- |\n'
-    printf '| `MissingDeclaredType` (34 / 15) | Split first errors by source declaration owner and missing type-tree shape, beginning in `typer/type_projection.rs` and `completion/methods.rs`. | Reuse existing declaration contexts and source type-tree projection; fixture each producer before changing inference. | Do not infer arbitrary declaration types or combine local value, method, and class completion. |\n'
+    printf '| `MissingDeclaredType` (34 / 15) | Start with immutable inferred class fields (14 occurrences / 7 files), then measure mutable and module-class buckets separately. | Reuse declaration source contexts, expression typing, widening, and completion rollback; add a focused fixture before inference. | Do not infer arbitrary types or combine local values, methods, and all class completion. |\n'
     printf '| `AnonymousClassInstantiationDeferred` (32 / 15) | Support one anonymous `new` with one concrete parent in `typer/expression/new.rs`. | Reuse ordinary `New` typing and parent projection; define stable anonymous symbol ownership and class info. | Closure capture, refinement synthesis, and general anonymous-class members. |\n'
     printf '| `UnsupportedSingletonReference` (22 / 1) | Profile the single-file producer, then support one stable singleton reference shape in `typer/expression/references.rs` or `type_projection.rs`. | Reuse `TermRef`, `ThisType`, and stable-prefix checks. | Arbitrary paths, unstable prefixes, and path-dependent relation redesign. |\n'
     printf '| `LocalBlockDeclarationDeferred::val/var definition` (21 / 8) | Split remaining cases by PatDef root/binder shape in `typer/expression/blocks.rs`. | Reuse transactional PatDef lowering, local binders, and assignment support. | General destructuring and reopening supported PatDef forms. |\n'
     printf '| `LocalMethodSignatureDeferred` (14 / 3) | Split exact `feature` values and add one fixture for the most frequent unsupported signature in `typer/completion/local_methods.rs`. | Reuse the shared signature builder and existing parameter/type-parameter scopes. | General dependent results, erased/by-name expansion, or new method inference. |\n\n'
-    printf 'Recommend a measurement-first `MissingDeclaredType` increment: it is the current highest-ranked Typer-owned blocker (34 occurrences in 15 files), but spans both type projection and method completion. First attribute its producers to declaration kinds and source shapes, then select one narrow behavior. Reevaluate `UnsupportedExpression::Function` (13 / 2), `UnsupportedTypeTree::FunctionWithMods` (13 / 2), and `UnsupportedTypeTree::Function` (12 / 8) as separate candidates. Keep classpath reachability independent: external non-class member materialization is still zero, so this corpus cannot establish standard-library member coverage.\n\n'
+    printf '## #825 MissingDeclaredType producer profile\n\n'
+    printf 'The 34 existing first blockers across 15 files are all attributed to source `ValDef` declarations with a right-hand side and a zero-width synthetic inferred `TypeTree`. They split into 24 immutable values and 10 mutable variables; all have semantic `Field` identity. Source `val` versus `var` comes from the AST modifier and is cross-checked against the semantic `MUTABLE` flag; `SymbolKind::Field` alone does not preserve that distinction. The owner kind is `Class` for 24 occurrences and `ModuleClass` for 10. Four immutable module-class values carry `Inline`. The report retains each occurrence with the failed local method tree, type-tree and declaration tree indexes and kinds, source span, modifiers, semantic and context owner kinds, and typer entry path. The profile counts downstream local-method first blockers, so one source declaration can appear more than once.\n\n'
+    printf '| Source declaration bucket | Occurrences / files | Representative paths |\n| --- | ---: | --- |\n'
+    awk '
+        /^missing_declared_type_profile:$/ { in_profile = 1; next }
+        /^missing_declared_type_records:$/ { in_profile = 0 }
+        in_profile && /^  first_blockers=/ {
+            line = $0
+            sub(/^  first_blockers=/, "", line)
+            split(line, fields, " distinct_declarations=")
+            printf "| Total (%s distinct declarations) | %s / 15 | — |\n", fields[2], fields[1]
+        }
+        in_profile && /^  [^ ]/ && $0 !~ /^  first_blockers=/ {
+            line = $0
+            sub(/^  /, "", line)
+            separator = index(line, ": ")
+            name = substr(line, 1, separator - 1)
+            values = substr(line, separator + 2)
+            count = values
+            sub(/ \(.*/, "", count)
+            files = values
+            sub(/^[^(]*\(/, "", files)
+            sub(/ files\).*/, "", files)
+            examples = values
+            sub(/^[^]]*\) \[/, "", examples)
+            sub(/^\[/, "", examples)
+            sub(/\]$/, "", examples)
+            printf "| `%s` | %s / %s | %s |\n", name, count, files, examples
+        }
+    ' "$tmp_dir/first.report"
+    printf '\n### Family assessment\n\n'
+    printf '| Producer family | Smallest useful slice | Infrastructure and reuse | Main risks and non-goals |\n| --- | --- | --- | --- |\n'
+    printf '| Immutable `Class` fields (14 / 7) | Infer an RHS for a source `val` member of a class. The 14/7 count is the bucket ceiling; actual reduction depends on which RHS shapes the slice accepts. | Build a field initializer `ExpressionContext` from the namer declaration context and semantic class owner. Reuse expression typing, widening, member lookup, and `run_atomic`. | `expression_context_for` rejects non-method owners. Preserve `this` ownership; guard self and mutual field cycles. Start without `var`, module fields, or arbitrary RHS forms. |\n'
+    printf '| Mutable `Class` fields (10 / 6) | Add `var` only after immutable field inference works. | Reuse the class initializer context and RHS inference; preserve the source `Var` modifier and semantic `MUTABLE` flag. | Assignment checks must use the inferred field type; check reads and writes during initialization. No changes to assignment typing in the first slice. |\n'
+    printf '| Ordinary `ModuleClass` fields (6 / 2) | Infer one non-inline module member value after class fields. | Reuse field type inference with a module-class owner and the namer-provided lexical context. | Singleton initialization and module cycles differ from per-instance class initialization. Keep module values out of the first slice. |\n'
+    printf '| Inline `ModuleClass` fields (4 / 1) | Add inline values as a separate follow-up after ordinary module values. | Reuse only the proven module initializer path and existing inline flags. | Compile-time constant and inline expansion rules add constraints. Do not assume ordinary runtime RHS typing is sufficient. |\n\n'
+    printf '\n`complete_symbol` reuses an already-complete symbol, and source type projection reuses a cached type-index entry before projection. On a field cache miss, `complete_symbol_inner` calls `type_of_tpt_inner_journaled`; the inferred `TypeTree` produces the blocker before the RHS is typed. Ordinary and local method signatures use a separate result path: inferred results are guarded against recursion, typed from the RHS, and widened, but neither method path produced a corpus blocker here. `run_atomic` restores symbol information, store allocations, type-index state, and other typer state after failure; local method completion also removes newly entered parameter symbols. Namer-provided declaration and lexical contexts identify the field semantic owner. The observed 34/15 therefore measure field type projection, not method-result inference.\n\n'
+    printf '### Recommended next sprint\n\n'
+    printf 'Target the immutable inferred `Class` field bucket (14 of 34 occurrences across 7 of 15 files); 14/7 is the bucket ceiling, not a promised first-blocker reduction, because the RHS forms differ. Sequence the sprint narrowly:\n\n1. Add a field-initializer context builder using `declaration_context_of(field)`, its lexical context, and the owning `Class`; do not call `expression_context_for`, which accepts only methods and constructors, and do not push a method scope.\n2. Add a transaction-aware in-progress field set. Detect direct and mutual re-entry before recursive completion; the current `initializing_local_symbols` guard is populated for local values and does not protect class fields. Test rollback after a cycle.\n3. Type an immutable class field RHS through `type_value_expression_inner`, widen with the existing helper, and publish `SymbolInfo::Complete` only on success. Cover a supported RHS, a cycle, an unsupported RHS, and an explicit declared type.\n4. Re-run the pinned audit and report the actual reduction. Only then extend the same path to mutable class fields, and assess module and inline fields as separate increments.\n\nThe first increment belongs in `typer/context.rs`, `typer/transaction.rs`, `typer/completion/mod.rs`, `typer/expression/references.rs`, and focused typer tests. Exclude `var` (10/6), ordinary module values (6/2), inline module values (4/1), method-result inference, local `PatDef`, generalized expected-type inference, and classpath loading from that increment.\n\n'
     printf '## Previous type projection snapshot\n\n'
     printf 'The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.\n\n'
     printf '```text\n'

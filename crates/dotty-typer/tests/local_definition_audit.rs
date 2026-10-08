@@ -240,6 +240,14 @@ struct Audit {
     match_readiness: MatchReadiness,
     match_profile: MatchProfile,
     patdef_profile: PatDefProfile,
+    missing_declared_type_profile: MissingDeclaredTypeProfile,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MissingDeclaredTypeProfile {
+    buckets: BTreeMap<String, FailureBucket>,
+    records: BTreeSet<String>,
+    declarations: BTreeSet<String>,
 }
 
 impl Default for Audit {
@@ -264,6 +272,7 @@ impl Default for Audit {
             match_readiness: MatchReadiness::default(),
             match_profile: MatchProfile::default(),
             patdef_profile: PatDefProfile::default(),
+            missing_declared_type_profile: MissingDeclaredTypeProfile::default(),
         }
     }
 }
@@ -402,6 +411,8 @@ impl Audit {
         self.match_readiness.merge(other.match_readiness);
         self.match_profile.merge(other.match_profile);
         self.patdef_profile.merge(other.patdef_profile);
+        self.missing_declared_type_profile
+            .merge(other.missing_declared_type_profile);
         for (name, count) in other.buckets {
             *self.buckets.entry(name).or_default() += count;
         }
@@ -413,6 +424,30 @@ impl Audit {
             target.examples.extend(bucket.examples);
             target.examples = target.examples.iter().take(5).cloned().collect();
         }
+    }
+}
+
+impl MissingDeclaredTypeProfile {
+    fn merge(&mut self, other: Self) {
+        for (key, bucket) in other.buckets {
+            let target = self.buckets.entry(key).or_default();
+            target.family = bucket.family;
+            target.count += bucket.count;
+            target.files.extend(bucket.files);
+            target.examples.extend(bucket.examples);
+        }
+        self.records.extend(other.records);
+        self.declarations.extend(other.declarations);
+    }
+
+    fn record(&mut self, key: String, path: &str, detail: String, declaration: String) {
+        let bucket = self.buckets.entry(key).or_default();
+        bucket.family = FailureFamily::TypeRelationInferenceCompletion;
+        bucket.count += 1;
+        bucket.files.insert(path.to_owned());
+        bucket.examples.insert(path.to_owned());
+        self.records.insert(detail);
+        self.declarations.insert(declaration);
     }
 }
 
@@ -565,6 +600,28 @@ fn pinned_scala39_local_definition_audit() {
             Rc::clone(&resolver_metrics),
         ));
     }
+
+    let missing_declared_type = audit
+        .failures
+        .get("MissingDeclaredType")
+        .expect("the pinned audit should retain MissingDeclaredType first blockers");
+    assert_eq!(missing_declared_type.count, 34);
+    assert_eq!(missing_declared_type.files.len(), 15);
+    assert_eq!(
+        audit.missing_declared_type_profile.records.len(),
+        missing_declared_type.count,
+        "every existing MissingDeclaredType occurrence must have one profile row"
+    );
+    assert_eq!(
+        audit
+            .missing_declared_type_profile
+            .buckets
+            .values()
+            .map(|bucket| bucket.count)
+            .sum::<usize>(),
+        missing_declared_type.count,
+        "profile buckets must preserve the top-level MissingDeclaredType count"
+    );
 
     println!("AUDIT_REPORT_BEGIN");
     println!("scala_revision={revision}");
@@ -772,6 +829,7 @@ fn pinned_scala39_local_definition_audit() {
                 .join(", ")
         );
     }
+    print_missing_declared_type_profile(&audit.missing_declared_type_profile);
     print_ranked_gaps(&audit.failures);
     print_match_readiness(&audit.match_readiness);
     print_match_profile(&audit.match_profile);
@@ -944,10 +1002,10 @@ fn highest_ranked_gap_output_does_not_claim_to_recommend_a_sprint() {
 fn scope_note_for_bucket(bucket: &str) -> (&'static str, &'static str, &'static str, &'static str) {
     match bucket {
         "MissingDeclaredType" => (
-            "split by declaration owner and missing source type-tree shape, then add one exact projection/completion case",
-            "dotty-typer/src/typer/type_projection.rs and dotty-typer/src/typer/completion/methods.rs",
-            "the declaration context and source AST node that owns the missing type",
-            "guessing arbitrary types or combining local value, method, and class inference",
+            "type one immutable inferred class field from its RHS; this bucket is 14 of 34 occurrences across 7 of 15 files",
+            "dotty-typer/src/typer/completion/mod.rs, completion/declarations.rs, type_projection.rs, and existing expression typing",
+            "the field declaration context, RHS typing and widening, and completion rollback",
+            "mutable or module-class fields, method results, local PatDef, and generalized expected-type inference",
         ),
         "AnonymousClassInstantiationDeferred" => (
             "support one anonymous new with one concrete parent and explicit member ownership",
@@ -1790,6 +1848,138 @@ fn unsupported_type_tree_failures_keep_exact_source_shapes() {
 }
 
 #[test]
+fn missing_declared_type_profile_separates_inferred_fields_methods_and_explicit_types() {
+    let source_text = "object Audit { val inferred = 1; var mutable = 2; val explicit: Int = 3; def inferredMethod = 4; def declaredMethod: Int = 5 }";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "MissingDeclaredType.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let val_tpt = |name: &str| {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == name =>
+                {
+                    Some(definition.tpt)
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    let def_tpt = |name: &str| {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == name =>
+                {
+                    Some(definition.tpt)
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+
+    let inferred = missing_declared_type_detail(
+        &parsed.ast,
+        &index,
+        &store,
+        source,
+        val_tpt("inferred").index(),
+    );
+    assert!(inferred.bucket.contains("value::Field::"), "{inferred:?}");
+    assert!(
+        inferred.bucket.contains("synthetic inferred TypeTree"),
+        "{inferred:?}"
+    );
+    assert!(inferred.record.contains("rhs=true"));
+    assert!(inferred.record.contains("type_of_tpt_inner_journaled"));
+
+    let mutable = missing_declared_type_detail(
+        &parsed.ast,
+        &index,
+        &store,
+        source,
+        val_tpt("mutable").index(),
+    );
+    assert!(mutable.bucket.contains("variable::Field::"), "{mutable:?}");
+    assert!(mutable.record.contains("modifiers=[Var]"));
+    assert!(mutable.record.contains("semantic_mutable=true"));
+
+    let method_result = missing_declared_type_detail(
+        &parsed.ast,
+        &index,
+        &store,
+        source,
+        def_tpt("inferredMethod").index(),
+    );
+    assert!(method_result.bucket.contains("method result::Method::"));
+    assert!(method_result.record.contains("complete_method_signature"));
+
+    assert!(!matches!(
+        &parsed.ast.get(val_tpt("explicit")).kind,
+        TreeKind::TypeTree(_)
+    ));
+    assert!(!matches!(
+        &parsed.ast.get(def_tpt("declaredMethod")).kind,
+        TreeKind::TypeTree(_)
+    ));
+
+    let unknown = missing_declared_type_detail(&parsed.ast, &index, &store, source, u32::MAX);
+    assert!(unknown.bucket.starts_with("unknown declaration::unknown::"));
+    assert!(unknown.record.contains("declaration_tree=unknown"));
+}
+
+#[test]
+fn missing_declared_type_profile_orders_records_and_paths_deterministically() {
+    let mut profile = MissingDeclaredTypeProfile::default();
+    profile.record(
+        "field::inferred".to_owned(),
+        "z.scala",
+        "z record".to_owned(),
+        "z.scala#1".to_owned(),
+    );
+    profile.record(
+        "field::inferred".to_owned(),
+        "a.scala",
+        "a record".to_owned(),
+        "a.scala#1".to_owned(),
+    );
+
+    assert_eq!(
+        profile.records.iter().cloned().collect::<Vec<_>>(),
+        ["a record", "z record"]
+    );
+    assert_eq!(
+        profile.buckets["field::inferred"]
+            .files
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["a.scala", "z.scala"]
+    );
+}
+
+#[test]
 fn local_expression_histogram_excludes_parameters_and_type_trees() {
     let audit = audit_source("object Audit { def outer(x: Int): Int = x }", "Types.scala");
 
@@ -2496,7 +2686,11 @@ fn audit_source_inner(
                     &mut audit.match_readiness,
                 );
             }
-            root_failures.push((range, failure));
+            let missing_type_tree = match &error {
+                TyperError::MissingDeclaredType { tree_index, .. } => Some(*tree_index),
+                _ => None,
+            };
+            root_failures.push((range, failure, missing_type_tree));
         }
     }
 
@@ -2569,17 +2763,43 @@ fn audit_source_inner(
         if typer.source_typed_index().get(source, tree).is_some() {
             audit.typed_local_defdefs += 1;
         } else {
-            let kind = root_failures
+            let (kind, missing_type_tree) = root_failures
                 .iter()
-                .filter(|(parent, _)| {
+                .filter(|(parent, _, _)| {
                     parent.start() <= range.start() && range.end() <= parent.end()
                 })
-                .min_by_key(|(parent, _)| parent.end().saturating_sub(parent.start()))
-                .map(|(_, failure)| failure.clone())
-                .unwrap_or_else(|| FailureClassification {
-                    bucket: "NoSuccessfulEnclosingMethodTyping".to_owned(),
-                    family: FailureFamily::Other,
+                .min_by_key(|(parent, _, _)| parent.end().saturating_sub(parent.start()))
+                .map(|(_, failure, tree)| (failure.clone(), *tree))
+                .unwrap_or_else(|| {
+                    (
+                        FailureClassification {
+                            bucket: "NoSuccessfulEnclosingMethodTyping".to_owned(),
+                            family: FailureFamily::Other,
+                        },
+                        None,
+                    )
                 });
+            if kind.bucket == "MissingDeclaredType"
+                && let Some(tree_index) = missing_type_tree
+            {
+                let detail = missing_declared_type_detail(
+                    &parsed.ast,
+                    &index,
+                    typer.store(),
+                    source,
+                    tree_index,
+                );
+                audit.missing_declared_type_profile.record(
+                    detail.bucket,
+                    path,
+                    format!(
+                        "{path}: failed_local_method_tree={} {}",
+                        tree.index(),
+                        detail.record
+                    ),
+                    format!("{path}#{}", detail.tree_index),
+                );
+            }
             record_failure(&mut audit, kind, path);
         }
     }
@@ -3701,6 +3921,205 @@ fn record_failure(audit: &mut Audit, failure: FailureClassification, path: &str)
     bucket.files.insert(path.to_owned());
     bucket.examples.insert(path.to_owned());
     bucket.examples = bucket.examples.iter().take(5).cloned().collect();
+}
+
+#[derive(Debug)]
+struct MissingDeclaredTypeDetail {
+    bucket: String,
+    record: String,
+    tree_index: u32,
+}
+
+fn missing_declared_type_detail(
+    arena: &dotty_core::AstArena<Untyped>,
+    index: &dotty_core::SourceSemanticIndex,
+    store: &SemanticStore,
+    source: SourceId,
+    type_tree_index: u32,
+) -> MissingDeclaredTypeDetail {
+    let tree = arena
+        .iter()
+        .find_map(|(tree, node)| (tree.index() == type_tree_index).then_some(node));
+    let tree_shape = tree.map_or("unknown", |tree| match tree.kind {
+        TreeKind::TypeTree(_)
+            if tree.position.is_none_or(|position| {
+                let range = position.span().range();
+                range.start() == range.end()
+            }) =>
+        {
+            "synthetic inferred TypeTree"
+        }
+        TreeKind::TypeTree(_) => "explicit or positioned TypeTree",
+        _ => "non-TypeTree error target",
+    });
+    let error_tree_kind = tree.map_or("unknown", |tree| match &tree.kind {
+        TreeKind::TypeTree(_) => "TypeTree",
+        TreeKind::Ident(_) => "Ident",
+        TreeKind::PhaseSpecific(_) => "PhaseSpecific",
+        _ => "other",
+    });
+    let declaration = arena
+        .iter()
+        .find_map(|(declaration_tree, node)| match &node.kind {
+            TreeKind::ValDef(definition) if definition.tpt.index() == type_tree_index => {
+                let has_param = definition
+                    .metadata
+                    .modifiers
+                    .contains(&dotty_core::ast::Modifier::Param);
+                let has_accessor = definition
+                    .metadata
+                    .modifiers
+                    .contains(&dotty_core::ast::Modifier::ParamAccessor);
+                let kind = if has_param || has_accessor {
+                    "parameter/accessor"
+                } else if definition
+                    .metadata
+                    .modifiers
+                    .contains(&dotty_core::ast::Modifier::Var)
+                {
+                    "variable"
+                } else {
+                    "value"
+                };
+                Some((
+                    declaration_tree,
+                    kind,
+                    definition.rhs.is_some(),
+                    definition.metadata.modifiers.clone(),
+                ))
+            }
+            TreeKind::DefDef(definition) if definition.tpt.index() == type_tree_index => Some((
+                declaration_tree,
+                "method result",
+                definition.rhs.is_some(),
+                definition.metadata.modifiers.clone(),
+            )),
+            _ => None,
+        });
+    let (decl_tree, declaration_kind, rhs_present, modifiers) = declaration
+        .map(|(tree, kind, rhs, modifiers)| (Some(tree.index()), kind, rhs, modifiers))
+        .unwrap_or((None, "unknown declaration", false, Default::default()));
+    let declaration_symbol = decl_tree.and_then(|tree_index| {
+        arena
+            .iter()
+            .find_map(|(tree, _)| (tree.index() == tree_index).then_some(tree))
+            .and_then(|tree| index.symbol_at(source, tree))
+    });
+    let symbol = declaration_symbol;
+    let symbol_kind = symbol.map_or("unknown", |symbol| match store.symbols.get(symbol).kind {
+        dotty_core::symbols::SymbolKind::Field => "Field",
+        dotty_core::symbols::SymbolKind::Value => "Value",
+        dotty_core::symbols::SymbolKind::Variable => "Variable",
+        dotty_core::symbols::SymbolKind::Parameter => "Parameter",
+        dotty_core::symbols::SymbolKind::Method => "Method",
+        kind => match kind {
+            dotty_core::symbols::SymbolKind::Class => "Class",
+            dotty_core::symbols::SymbolKind::Trait => "Trait",
+            dotty_core::symbols::SymbolKind::Object => "Object",
+            dotty_core::symbols::SymbolKind::ModuleClass => "ModuleClass",
+            dotty_core::symbols::SymbolKind::Constructor => "Constructor",
+            dotty_core::symbols::SymbolKind::Package => "Package",
+            dotty_core::symbols::SymbolKind::TypeParameter => "TypeParameter",
+            dotty_core::symbols::SymbolKind::TypeAlias => "TypeAlias",
+            dotty_core::symbols::SymbolKind::Local => "Local",
+            _ => "other",
+        },
+    });
+    let context_owner_kind = symbol
+        .and_then(|symbol| index.declaration_context_of(symbol))
+        .and_then(|context| index.try_source_context(context))
+        .map(|context| store.symbols.get(context.owner).kind)
+        .map(symbol_kind_label)
+        .unwrap_or("unknown");
+    let owner_kind = symbol
+        .and_then(|symbol| store.symbols.get(symbol).owner)
+        .map(|owner| symbol_kind_label(store.symbols.get(owner).kind))
+        .unwrap_or(context_owner_kind);
+    let modifier_labels = modifiers
+        .iter()
+        .map(|modifier| format!("{modifier:?}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let semantic_mutable = symbol.is_some_and(|symbol| {
+        store
+            .symbols
+            .get(symbol)
+            .flags
+            .contains(dotty_core::symbols::SymbolFlags::MUTABLE)
+    });
+    let entry_path = match declaration_kind {
+        "value" | "variable" | "parameter/accessor" => {
+            "complete_symbol_inner -> type_of_tpt_inner_journaled"
+        }
+        "method result" if owner_kind == "Method" => {
+            "complete_symbol_inner -> complete_local_method_signature"
+        }
+        "method result" => "complete_symbol_inner -> complete_method_signature",
+        _ => "unknown typer entry path",
+    };
+    let owner_name = owner_kind;
+    MissingDeclaredTypeDetail {
+        bucket: format!(
+            "{declaration_kind}::{symbol_kind}::owner={owner_name}::{tree_shape}::rhs={rhs_present}::modifiers={modifier_labels}::semantic_mutable={semantic_mutable}"
+        ),
+        record: format!(
+            "tree={type_tree_index} error_tree_kind={error_tree_kind} declaration_tree={} declaration_tree_kind={} declaration={declaration_kind} symbol_kind={symbol_kind} owner_kind={owner_name} context_owner_kind={context_owner_kind} shape={tree_shape} rhs={rhs_present} modifiers=[{modifier_labels}] semantic_mutable={semantic_mutable} entry={entry_path} span={:?}",
+            decl_tree.map_or_else(|| "unknown".to_owned(), |tree| tree.to_string()),
+            declaration_kind_tree(declaration_kind),
+            tree.and_then(|tree| tree.position)
+        ),
+        tree_index: type_tree_index,
+    }
+}
+
+fn declaration_kind_tree(kind: &str) -> &'static str {
+    match kind {
+        "value" | "variable" | "parameter/accessor" => "ValDef",
+        "method result" => "DefDef",
+        _ => "unknown",
+    }
+}
+
+fn symbol_kind_label(kind: dotty_core::symbols::SymbolKind) -> &'static str {
+    match kind {
+        dotty_core::symbols::SymbolKind::Package => "Package",
+        dotty_core::symbols::SymbolKind::Class => "Class",
+        dotty_core::symbols::SymbolKind::Trait => "Trait",
+        dotty_core::symbols::SymbolKind::Object => "Object",
+        dotty_core::symbols::SymbolKind::ModuleClass => "ModuleClass",
+        dotty_core::symbols::SymbolKind::Method => "Method",
+        dotty_core::symbols::SymbolKind::Constructor => "Constructor",
+        dotty_core::symbols::SymbolKind::Field => "Field",
+        dotty_core::symbols::SymbolKind::Value => "Value",
+        dotty_core::symbols::SymbolKind::Variable => "Variable",
+        dotty_core::symbols::SymbolKind::Parameter => "Parameter",
+        dotty_core::symbols::SymbolKind::TypeParameter => "TypeParameter",
+        dotty_core::symbols::SymbolKind::TypeAlias => "TypeAlias",
+        dotty_core::symbols::SymbolKind::Local => "Local",
+    }
+}
+
+fn print_missing_declared_type_profile(profile: &MissingDeclaredTypeProfile) {
+    println!("missing_declared_type_profile:");
+    println!(
+        "  first_blockers={} distinct_declarations={}",
+        profile.records.len(),
+        profile.declarations.len()
+    );
+    let mut buckets = profile.buckets.iter().collect::<Vec<_>>();
+    buckets.sort_by(|(name_a, a), (name_b, b)| b.count.cmp(&a.count).then(name_a.cmp(name_b)));
+    for (name, bucket) in buckets {
+        println!(
+            "  {name}: {} ({} files) [{}]",
+            bucket.count,
+            bucket.files.len(),
+            bucket.files.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    println!("missing_declared_type_records:");
+    for record in &profile.records {
+        println!("  {record}");
+    }
 }
 
 fn classify_typer_error(
