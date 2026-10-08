@@ -303,7 +303,9 @@ where
                 .with_case_body(|parser| parser.parse_expression_block_body(TokenKind::Outdent));
             let closed_by_delimiter = matches!(
                 self.current().kind,
-                TokenKind::Punctuation(Punctuation::RightParen | Punctuation::RightBrace)
+                TokenKind::Punctuation(
+                    Punctuation::RightParen | Punctuation::RightBrace | Punctuation::Comma
+                )
             );
             let already_outdented = self.cursor.at(TokenKind::Outdent);
             if let Some((indent_offset, opened_by_feedback)) = body_indent {

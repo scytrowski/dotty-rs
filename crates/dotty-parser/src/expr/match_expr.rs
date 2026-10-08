@@ -91,8 +91,10 @@ where
             if self.accept(TokenKind::Indent) {
                 let cases = self
                     .case_clauses_in_region(case_region.map(|(indent_offset, _)| indent_offset));
-                let closed_by_delimiter =
-                    self.current().kind == TokenKind::Punctuation(Punctuation::RightParen);
+                let closed_by_delimiter = matches!(
+                    self.current().kind,
+                    TokenKind::Punctuation(Punctuation::RightParen | Punctuation::Comma)
+                );
                 if closed_by_delimiter
                     && case_region.is_some_and(|(_, opened_by_feedback)| opened_by_feedback)
                 {

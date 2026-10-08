@@ -999,6 +999,7 @@ where
                     | HardKeyword::Finally
                     | HardKeyword::Then
             ) | TokenKind::Punctuation(Punctuation::RightBrace | Punctuation::RightParen)
+                | TokenKind::Punctuation(Punctuation::Comma)
                 | TokenKind::Outdent
         )
     }
