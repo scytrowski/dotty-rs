@@ -1458,7 +1458,7 @@ mod tests {
     fn end_new_after_nested_method_body_matches_the_anonymous_new() {
         let fixture = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../tools/scala-parser-oracle/fixtures/expressions/end-new-after-anonymous-template.scala"
+            "/../../tools/scala-parser-oracle/fixtures/compilation/end-new-after-anonymous-template.scala"
         );
         let source = fs::read_to_string(fixture).expect("fixture should be readable");
         let scanner = ContextualScanner::new(&source).expect("source should scan cleanly");
@@ -1478,6 +1478,41 @@ mod tests {
         assert_eq!(
             new_tree.position.unwrap().span().range().end(),
             expected_end
+        );
+    }
+
+    #[test]
+    fn misaligned_end_new_is_diagnosed_without_losing_the_following_member() {
+        const SOURCE: &str = concat!(
+            "object O:\n",
+            "  def make =\n",
+            "    new Ordering[Int]:\n",
+            "      def compare(left: Int, right: Int): Int = left - right\n",
+            "  end new\n",
+            "  def after = 1\n",
+            "end O\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.message() == "misaligned end marker" }),
+            "expected the misaligned `end new` to be diagnosed: {:?}",
+            result.diagnostics
+        );
+        assert!(
+            result.ast.iter().any(|(_, tree)| matches!(
+                &tree.kind,
+                TreeKind::DefDef(definition)
+                    if names.resolve(definition.name.as_name().text()) == "after"
+            )),
+            "the method following the invalid marker must remain in the AST"
         );
     }
 
