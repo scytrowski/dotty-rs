@@ -4019,6 +4019,70 @@ mod tests {
     }
 
     #[test]
+    fn function_literal_can_use_an_imported_object_value_without_capture() {
+        let source_text = concat!(
+            "object Constants { val answer: Int = 42 }; ",
+            "class C { def imported: Int => Int = { ",
+            "import Constants.answer; (x: Int) => answer } }",
+        );
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name(source_text);
+        enter_scala_function_classes(&mut store, &mut packages, [1]);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "imported");
+        let TreeKind::Block(source_block) = &parsed.ast.get(rhs).kind else {
+            panic!("method body should contain the import and lambda");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) =
+            &parsed.ast.get(source_block.expr).kind
+        else {
+            panic!("method body should end in a function literal");
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed).kind else {
+            panic!("typed method body should remain a block");
+        };
+        let TreeKind::Closure(closure) = &typer.typed_ast().get(typed_block.expr).kind else {
+            panic!("imported value should be usable in a typed closure");
+        };
+        assert!(closure.env.is_empty());
+        let typed_body = typer
+            .source_typed_index()
+            .get(source, function.body)
+            .expect("imported value reference should have a typed mapping");
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(answer),
+            ..
+        } = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(typed_body).ty)
+        else {
+            panic!("imported value should retain its source symbol identity");
+        };
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(*answer).name.text()),
+            "answer"
+        );
+        let owner = typer.store().symbols.get(*answer).owner.unwrap();
+        assert!(matches!(
+            typer.store().symbols.get(owner).kind,
+            SymbolKind::Object | SymbolKind::ModuleClass
+        ));
+    }
+
+    #[test]
     fn failed_function_literal_body_rolls_back_lambda_identity_and_typed_nodes() {
         let (parsed, mut store, mut packages, definitions, index, source) =
             parse_and_name("class C { def bad: Int => Int = (x: Int) => missing }");
