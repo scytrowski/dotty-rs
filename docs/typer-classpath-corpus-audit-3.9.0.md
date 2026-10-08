@@ -85,7 +85,9 @@ Target the immutable inferred `Class` field bucket (14 of 34 occurrences across 
 3. Type an immutable class field RHS through `type_value_expression_inner`, widen with the existing helper, and publish `SymbolInfo::Complete` only on success. Cover a supported RHS, a cycle, an unsupported RHS, and an explicit declared type.
 4. Re-run the pinned audit and report the actual reduction. Only then extend the same path to mutable class fields, and assess module and inline fields as separate increments.
 
-The first increment belongs in `typer/context.rs`, `typer/transaction.rs`, `typer/completion/mod.rs`, `typer/expression/references.rs`, and focused typer tests. Exclude `var` (10/6), ordinary module values (6/2), inline module values (4/1), method-result inference, local `PatDef`, generalized expected-type inference, and classpath loading from that increment.## Previous type projection snapshot
+The first increment belongs in `typer/context.rs`, `typer/transaction.rs`, `typer/completion/mod.rs`, `typer/expression/references.rs`, and focused typer tests. Exclude `var` (10/6), ordinary module values (6/2), inline module values (4/1), method-result inference, local `PatDef`, generalized expected-type inference, and classpath loading from that increment.
+
+## Previous type projection snapshot
 
 The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.
 
