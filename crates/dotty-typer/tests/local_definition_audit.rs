@@ -4766,6 +4766,8 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::SymbolSourceKindMismatch { .. } => "SymbolSourceKindMismatch",
         TyperError::TreeOutsideArena { .. } => "TreeOutsideArena",
         TyperError::TypeNameNotFound { .. } => "TypeNameNotFound",
+        TyperError::UnsupportedSourceFunctionArity { .. } => "UnsupportedSourceFunctionArity",
+        TyperError::SourceFunctionClassNotFound { .. } => "SourceFunctionClassNotFound",
         TyperError::WrongTypeNameKind { .. } => "WrongTypeNameKind",
         TyperError::SymbolResolution { .. } => "SymbolResolution",
         TyperError::AmbiguousTypeName { .. } => "AmbiguousTypeName",

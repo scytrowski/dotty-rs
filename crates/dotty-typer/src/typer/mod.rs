@@ -30,6 +30,7 @@ use expression::LocalMethodIndex;
 mod resolution;
 use resolution::imports::ImportSelection;
 mod source_annotations;
+mod source_function;
 mod transaction;
 mod type_projection;
 
@@ -44,6 +45,7 @@ pub use error::{
     ExtractorResultMemberIssue, PatternKind, TuplePatternResolutionIssue, TypeArgumentBoundSide,
     TyperError,
 };
+pub use source_function::{MAX_SOURCE_FUNCTION_ARITY, SourceFunctionKind};
 
 #[path = "../lookup/mod.rs"]
 mod lookup;
