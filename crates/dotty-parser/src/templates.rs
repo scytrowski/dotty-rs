@@ -54,7 +54,7 @@ where
         body: TemplateBody,
         feedback_indent: Option<u32>,
         expected_end_marker: Option<Name>,
-        comma_terminates: bool,
+        delimiter_terminates: bool,
     ) -> TemplateBodyResult {
         let (opening, closing) = match body {
             TemplateBody::Braced => (
@@ -63,7 +63,6 @@ where
             ),
             TemplateBody::Indented => (TokenKind::Indent, TokenKind::Outdent),
         };
-
         if !self.expect(opening) {
             return TemplateBodyResult {
                 self_val: None,
@@ -80,7 +79,7 @@ where
                         closing,
                         &body_indent,
                         expected_end_marker,
-                        comma_terminates,
+                        delimiter_terminates,
                     )
                 })
             })
@@ -92,24 +91,23 @@ where
         let closes_at_end_marker =
             body == TemplateBody::Indented && self.current().kind == TokenKind::EndMarker;
         let closes_at_eof = body == TemplateBody::Indented && self.current().kind == TokenKind::Eof;
-        let closes_at_comma = comma_terminates
+        let closes_at_delimiter = delimiter_terminates
             && body == TemplateBody::Indented
-            && self.current().kind == TokenKind::Punctuation(Punctuation::Comma);
-
-        if body == TemplateBody::Indented && !closes_at_comma {
+            && matches!(
+                self.current().kind,
+                TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightParen)
+            );
+        if body == TemplateBody::Indented && !closes_at_delimiter {
             if let Some(indent_offset) = feedback_indent {
                 self.observe_outdented_region(indent_offset);
-            } else if self.current().kind != TokenKind::Outdent
-                && !(comma_terminates
-                    && self.current().kind == TokenKind::Punctuation(Punctuation::Comma))
-            {
+            } else if self.current().kind != TokenKind::Outdent && !closes_at_delimiter {
                 self.observe_outdented();
             }
         }
         if !self.accept(closing)
             && !(closes_at_end_marker && self.current().kind == TokenKind::EndMarker)
             && !closes_at_eof
-            && !closes_at_comma
+            && !closes_at_delimiter
         {
             self.report(
                 ParseDiagnosticKind::ExpectedToken,
@@ -162,7 +160,7 @@ where
         closing: TokenKind,
         body_indent: &str,
         expected_end_marker: Option<Name>,
-        comma_terminates: bool,
+        delimiter_terminates: bool,
     ) -> TemplateBodyResult {
         let mut members = Vec::new();
         self.consume_template_separators(closing);
@@ -262,10 +260,13 @@ where
                 }
             }
 
-            let comma_closes_body = comma_terminates
+            let delimiter_closes_body = delimiter_terminates
                 && closing == TokenKind::Outdent
-                && self.current().kind == TokenKind::Punctuation(Punctuation::Comma);
-            if comma_closes_body {
+                && matches!(
+                    self.current().kind,
+                    TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightParen)
+                );
+            if delimiter_closes_body {
                 self.observe_outdented_by_delimiter();
                 break;
             }

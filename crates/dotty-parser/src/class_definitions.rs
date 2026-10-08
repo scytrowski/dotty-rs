@@ -1077,7 +1077,7 @@ where
         required: bool,
         indent_reference: Option<u32>,
         expected_end_marker: Option<dotty_core::Name>,
-        comma_terminates: bool,
+        delimiter_terminates: bool,
     ) -> TemplateBodyResult {
         self.consume_newlines_before_template_body();
         if required
@@ -1112,7 +1112,7 @@ where
                         TemplateBody::Indented,
                         feedback_indent,
                         expected_end_marker,
-                        comma_terminates,
+                        delimiter_terminates,
                     );
                 }
                 self.report(
@@ -1132,13 +1132,13 @@ where
                     TemplateBody::Braced,
                     None,
                     expected_end_marker,
-                    comma_terminates,
+                    delimiter_terminates,
                 ),
             TokenKind::Indent => self.parse_template_body_with_feedback_and_owner(
                 TemplateBody::Indented,
                 feedback_indent,
                 expected_end_marker,
-                comma_terminates,
+                delimiter_terminates,
             ),
             _ => TemplateBodyResult {
                 self_val: None,
