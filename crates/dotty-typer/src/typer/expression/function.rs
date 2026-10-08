@@ -16,6 +16,7 @@ pub(in crate::typer) struct FunctionLiteralIndex {
 struct FunctionLiteralDefinition {
     method: SymbolId,
     scope: ScopeId,
+    typed_definition: Option<TreeId<Typed>>,
 }
 
 impl FunctionLiteralIndex {
@@ -40,6 +41,16 @@ impl FunctionLiteralIndex {
             .values()
             .find(|entry| entry.method == method)
             .map(|entry| entry.scope)
+    }
+
+    pub(in crate::typer) fn definition_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<TreeId<Typed>> {
+        self.definitions
+            .get(&(source, tree))
+            .and_then(|entry| entry.typed_definition)
     }
 
     pub(in crate::typer) fn parameter_at(
@@ -131,6 +142,7 @@ impl SourceTyper<'_> {
                 FunctionLiteralDefinition {
                     method,
                     scope: method_scope,
+                    typed_definition: None,
                 },
             )
             .is_some()
@@ -253,6 +265,18 @@ impl SourceTyper<'_> {
             position,
             ty: method_ref,
         });
+        let Some(definition) = self
+            .function_literals
+            .definitions
+            .get_mut(&(self.source, tree))
+        else {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index: tree.index(),
+                expression_kind: "function literal definition identity is missing",
+            });
+        };
+        definition.typed_definition = Some(typed_method);
 
         let tycon = self.source_function_type_constructor(
             SourceFunctionKind::Ordinary,
@@ -279,10 +303,12 @@ impl SourceTyper<'_> {
         args.push(body_result);
         let function_type = self.store.types.alloc(Type::Applied { tycon, args });
 
+        let typed_method_reference = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+            .ident(method_name, method_ref, position);
         Ok(
             TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).closure(
                 Vec::new(),
-                typed_method,
+                typed_method_reference,
                 None,
                 function_type,
                 position,

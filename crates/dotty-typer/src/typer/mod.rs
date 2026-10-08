@@ -542,6 +542,15 @@ impl<'a> SourceTyper<'a> {
         self.function_literals.scope_of(method)
     }
 
+    /// Returns the separate typed definition referenced by a source closure.
+    pub fn function_literal_definition_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<TreeId<Typed>> {
+        self.function_literals.definition_at(source, tree)
+    }
+
     /// Returns the typer-owned parameter identity for a function-literal parameter.
     pub fn function_literal_parameter_symbol_at(
         &self,
@@ -3802,9 +3811,19 @@ mod tests {
             };
             assert!(closure.env.is_empty());
             assert_eq!(closure.tpt, None);
-            let TreeKind::DefDef(method_definition) = &typer.typed_ast().get(closure.method).kind
+            let TreeKind::Ident(_) = &typer.typed_ast().get(closure.method).kind else {
+                panic!("closure should reference its synthetic method by typed identifier");
+            };
+            let Some(method_definition_tree) =
+                typer.function_literal_definition_at(source, lambda_tree)
             else {
-                panic!("closure should retain its synthetic method definition");
+                panic!("synthetic method definition should be available separately");
+            };
+            assert_ne!(closure.method, method_definition_tree);
+            let TreeKind::DefDef(method_definition) =
+                &typer.typed_ast().get(method_definition_tree).kind
+            else {
+                panic!("indexed lambda definition should be a DefDef");
             };
             assert_eq!(method_definition.value_param_clauses.len(), 1);
             let parameters = &method_definition.value_param_clauses[0];
@@ -3838,6 +3857,17 @@ mod tests {
             let method = typer
                 .function_literal_method_at(source, lambda_tree)
                 .expect("typed lambda should have a semantic method identity");
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(reference_symbol),
+                ..
+            } = typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(closure.method).ty)
+            else {
+                panic!("closure method identifier should carry a symbol reference");
+            };
+            assert_eq!(*reference_symbol, method);
             assert_eq!(typer.store().symbols.get(method).kind, SymbolKind::Method);
             assert_eq!(typer.store().symbols.get(method).owner, Some(owner));
             let scope = typer.function_literal_method_scope(method).unwrap();
