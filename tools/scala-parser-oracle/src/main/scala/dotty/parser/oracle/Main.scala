@@ -367,6 +367,8 @@ object Main:
     val enabledWithSource =
       enabled ++ (if includeMutable && sourceWords.contains("var") then Set("var") else Set.empty)
     val keywordIndex = tree match
+      case ddef: dotty.tools.dotc.ast.Trees.DefDef[?] if ddef.mods.is(Given) =>
+        indexOfWord(sourceText, "given").map(_ + "given".length).getOrElse(sourceText.length)
       case _: dotty.tools.dotc.ast.Trees.ValDef[?] if isValueDefinitionSource(sourceText) =>
         List(sourceText.indexOf('='), sourceText.indexOf(':'))
           .filter(_ >= 0)

@@ -118,6 +118,17 @@ where
                     "expected `:` after a named given signature",
                 );
             }
+        } else if self.current_is_using_parameter_clause() {
+            self.parse_given_parameter_clauses(
+                &mut value_param_clauses,
+                &mut num_lead_params,
+                &mut has_explicit_parameter_clause,
+                true,
+            );
+            self.consume_newlines_before_given_colon();
+            if self.current_is_given_colon() {
+                self.advance();
+            }
         } else if !type_params.is_empty() && self.current_is_given_colon() {
             // Anonymous parameterized givens may use the legacy colon between
             // their type-parameter clause and the implemented given type.
@@ -1161,6 +1172,138 @@ mod tests {
         assert!(definition.value_param_clauses.is_empty());
         assert!(definition.metadata.modifiers.contains(&Modifier::Given));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_an_anonymous_parameterized_given_with_a_using_clause() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "inline given [A](using inline evidence: Evidence[A]): Result[A] = value",
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Keyword(HardKeyword::Given), 7, 12),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 13, 14),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 15, 16),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 16, 17),
+                token(TokenKind::Identifier, 17, 22),
+                token(TokenKind::Identifier, 23, 29),
+                token(TokenKind::Identifier, 30, 38),
+                token(TokenKind::ColonFollow, 38, 39),
+                token(TokenKind::Identifier, 40, 48),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 48, 49),
+                token(TokenKind::Identifier, 49, 50),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 50, 51),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 51, 52),
+                token(TokenKind::ColonFollow, 52, 53),
+                token(TokenKind::Identifier, 54, 60),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 60, 61),
+                token(TokenKind::Identifier, 61, 62),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 62, 63),
+                token(TokenKind::Operator, 64, 65),
+                token(TokenKind::Identifier, 66, 71),
+                token(TokenKind::Eof, 71, 71),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an anonymous given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected the method-like anonymous given tree");
+        };
+        assert_eq!(definition.type_params.len(), 1);
+        assert_eq!(definition.value_param_clauses.len(), 1);
+        assert!(definition.metadata.modifiers.contains(&Modifier::Inline));
+        assert!(definition.metadata.modifiers.contains(&Modifier::Given));
+        assert!(
+            matches!(
+                parser.ast().get(definition.tpt).kind,
+                TreeKind::AppliedTypeTree(_)
+            ),
+            "unexpected given result tree: {:?}",
+            parser.ast().get(definition.tpt).kind
+        );
+        assert!(matches!(
+            parser.ast().get(definition.rhs.unwrap()).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_an_anonymous_given_with_a_using_clause_without_type_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given (using ctx: Ctx): Service = makeService",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 6, 7),
+                token(TokenKind::Identifier, 7, 12),
+                token(TokenKind::Identifier, 13, 16),
+                token(TokenKind::ColonFollow, 16, 17),
+                token(TokenKind::Identifier, 18, 21),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 21, 22),
+                token(TokenKind::ColonFollow, 22, 23),
+                token(TokenKind::Identifier, 24, 31),
+                token(TokenKind::Operator, 32, 33),
+                token(TokenKind::Identifier, 34, 45),
+                token(TokenKind::Eof, 45, 45),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(id) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected an anonymous given definition");
+        };
+        let TreeKind::DefDef(definition) = &parser.ast().get(id).kind else {
+            panic!("expected a method-like anonymous given tree");
+        };
+        assert!(definition.type_params.is_empty());
+        assert_eq!(definition.value_param_clauses.len(), 1);
+        assert!(matches!(
+            parser.ast().get(definition.tpt).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            parser.ast().get(definition.rhs.unwrap()).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn diagnoses_an_anonymous_given_using_clause_without_a_result_type_separator() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given [A](using ctx: Ctx) = value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 6, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 9, 10),
+                token(TokenKind::Identifier, 10, 15),
+                token(TokenKind::Identifier, 16, 19),
+                token(TokenKind::ColonFollow, 19, 20),
+                token(TokenKind::Identifier, 21, 24),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 24, 25),
+                token(TokenKind::Operator, 26, 27),
+                token(TokenKind::Identifier, 28, 33),
+                token(TokenKind::Eof, 33, 33),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(_) = parser.parse_statement(Location::Elsewhere) else {
+            panic!("expected a recoverable given definition");
+        };
+
+        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
