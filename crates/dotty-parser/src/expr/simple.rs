@@ -38,8 +38,8 @@ where
     }
 
     fn simple_expr_atom(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
-        if self.expression_quote_depth > 0
-            && (self.current_starts_braced_splice() || self.current_starts_simple_splice())
+        if self.current_starts_braced_splice()
+            || (self.expression_quote_depth > 0 && self.current_starts_simple_splice())
         {
             return self.parse_expression_splice(mark);
         }
@@ -135,6 +135,7 @@ where
                 }
                 expr
             }
+            TokenKind::QuoteId if self.expression_splice_depth > 0 => self.parse_quote_id(mark),
             TokenKind::Quote => self.parse_quote(mark),
             TokenKind::Punctuation(Punctuation::LeftParen) => self.parse_parens_or_tuple(mark),
             TokenKind::Punctuation(Punctuation::LeftBrace) => self.parse_block(mark),
@@ -366,8 +367,10 @@ where
         }
 
         let body_mark = self.mark();
+        self.expression_splice_depth += 1;
         let (stats, expr) =
             self.parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace));
+        self.expression_splice_depth -= 1;
         let body = if stats.is_empty() {
             if self.is_synthetic_unit(expr) {
                 self.alloc(
@@ -399,6 +402,31 @@ where
         self.alloc_from(
             mark,
             TreeKind::Splice(dotty_core::ast::Splice { expr: body }),
+        )
+    }
+
+    fn parse_quote_id(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
+        let Ok(spelling) = self.current_text() else {
+            return self.unexpected_expression();
+        };
+        let Some(spelling) = spelling.strip_prefix('\'') else {
+            return self.unexpected_expression();
+        };
+        let name = self.names.intern(spelling);
+        self.advance();
+        let body = self.alloc(
+            TreeKind::Ident(Ident {
+                name: *dotty_core::TermName::new(name).as_name(),
+                backquoted: false,
+            }),
+            Some(self.zero_width_span(mark.start())),
+        );
+        self.alloc_from(
+            mark,
+            TreeKind::Quote(Quote {
+                body,
+                tags: Vec::new(),
+            }),
         )
     }
 

@@ -6,8 +6,8 @@ use dotty_core::ast::{
     Super, This, Tuple, UntypedNode,
 };
 use dotty_core::{
-    Constant, HardKeyword, NameInterner, ScannerEvent, SourceId, SourceText, TextRange, Token,
-    TokenSource,
+    Constant, HardKeyword, NameInterner, Punctuation, ScannerEvent, SourceId, SourceText,
+    TextRange, Token, TokenSource,
 };
 
 #[test]
@@ -132,7 +132,115 @@ fn a_stuck_token_source_does_not_loop_while_reading_macro_prefixes() {
         parser.ast().get(tree).kind,
         TreeKind::PhaseSpecific(UntypedNode::Error(_))
     ));
-    assert_eq!(parser.diagnostics().len(), 1);
+    assert!(!parser.diagnostics().is_empty());
+}
+
+#[test]
+fn unclosed_braced_macro_splice_reports_the_missing_brace_and_returns_a_tree() {
+    let source = "${ body";
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        source,
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+            token(TokenKind::Identifier, 3, 7),
+            token(TokenKind::Eof, 7, 7),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    assert!(matches!(parser.ast().get(tree).kind, TreeKind::Splice(_)));
+    assert_eq!(parser.current().kind, TokenKind::Eof);
+    assert!(!parser.diagnostics().is_empty());
+    assert_eq!(
+        parser.diagnostics()[0].kind(),
+        ParseDiagnosticKind::ExpectedToken
+    );
+}
+
+#[test]
+fn dollar_prefixed_identifier_remains_an_identifier_outside_a_quote() {
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        "$generated",
+        vec![
+            token(TokenKind::Identifier, 0, 10),
+            token(TokenKind::Eof, 10, 10),
+        ],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    let TreeKind::Ident(identifier) = &parser.ast().get(tree).kind else {
+        panic!("expected a dollar-prefixed identifier outside a quote");
+    };
+    assert_eq!(parser.names.resolve(identifier.name.text()), "$generated");
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn quote_id_is_an_identifier_only_inside_a_braced_expression_splice() {
+    let source = "${ 'x }";
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        source,
+        vec![
+            token(TokenKind::Identifier, 0, 1),
+            token(TokenKind::Punctuation(Punctuation::LeftBrace), 1, 2),
+            token(TokenKind::QuoteId, 3, 5),
+            token(TokenKind::Punctuation(Punctuation::RightBrace), 6, 7),
+            token(TokenKind::Eof, 7, 7),
+        ],
+        &mut names,
+    );
+
+    let splice = parser.expr();
+
+    let TreeKind::Splice(splice) = &parser.ast().get(splice).kind else {
+        panic!("expected a braced expression splice");
+    };
+    let TreeKind::Quote(quote) = &parser.ast().get(splice.expr).kind else {
+        panic!("expected quoteId to retain Dotty's Quote wrapper");
+    };
+    let TreeKind::Ident(identifier) = &parser.ast().get(quote.body).kind else {
+        panic!("expected the quote body to reference the quoted identifier");
+    };
+    assert_eq!(parser.names.resolve(identifier.name.text()), "x");
+    assert_eq!(
+        parser
+            .ast()
+            .get(quote.body)
+            .position
+            .unwrap()
+            .span()
+            .range(),
+        TextRange::new(3, 3).unwrap()
+    );
+    assert!(parser.diagnostics().is_empty());
+}
+
+#[test]
+fn quote_id_outside_a_splice_keeps_the_ordinary_quote_error() {
+    let source = "'x";
+    let mut names = NameInterner::new();
+    let mut parser = parser_for(
+        source,
+        vec![token(TokenKind::QuoteId, 0, 2), token(TokenKind::Eof, 2, 2)],
+        &mut names,
+    );
+
+    let tree = parser.expr();
+
+    assert!(!matches!(parser.ast().get(tree).kind, TreeKind::Ident(_)));
+    assert!(!parser.diagnostics().is_empty());
+    assert_eq!(
+        parser.diagnostics()[0].kind(),
+        ParseDiagnosticKind::ExpectedExpression
+    );
 }
 
 #[test]

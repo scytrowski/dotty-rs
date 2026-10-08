@@ -1758,6 +1758,96 @@ mod tests {
     }
 
     #[test]
+    fn inline_method_body_parses_braced_macro_splices() {
+        const SOURCE: &str = concat!(
+            "inline def make: Int = ${ makeImpl }\n",
+            "inline def nested(value: Int): Int = ${ wrap(makeImpl(value + 1)) }\n",
+            "inline def quoted(value: Int): Int = ${ makeImpl('value) }\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        assert_eq!(package.stats.len(), 3);
+        let TreeKind::DefDef(first) = &result.ast.get(package.stats[0]).kind else {
+            panic!("expected first inline method");
+        };
+        let first_rhs = result.ast.get(first.rhs.expect("first method RHS"));
+        let TreeKind::Splice(first_splice) = &first_rhs.kind else {
+            panic!("expected a macro splice, got {:?}", first_rhs.kind);
+        };
+        assert!(matches!(
+            result.ast.get(first_splice.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        let first_range = first_rhs.position.unwrap().span().range();
+        assert_eq!(
+            &SOURCE[first_range.start() as usize..first_range.end() as usize],
+            "${ makeImpl }"
+        );
+
+        let TreeKind::DefDef(nested) = &result.ast.get(package.stats[1]).kind else {
+            panic!("expected nested inline method");
+        };
+        let nested_rhs = result.ast.get(nested.rhs.expect("nested method RHS"));
+        let TreeKind::Splice(nested_splice) = &nested_rhs.kind else {
+            panic!("expected nested macro splice, got {:?}", nested_rhs.kind);
+        };
+        assert!(matches!(
+            result.ast.get(nested_splice.expr).kind,
+            TreeKind::Apply(_)
+        ));
+        let nested_range = nested_rhs.position.unwrap().span().range();
+        assert_eq!(
+            &SOURCE[nested_range.start() as usize..nested_range.end() as usize],
+            "${ wrap(makeImpl(value + 1)) }"
+        );
+
+        let TreeKind::DefDef(quoted) = &result.ast.get(package.stats[2]).kind else {
+            panic!("expected quoteId inline method");
+        };
+        let quoted_rhs = result.ast.get(quoted.rhs.expect("quoted method RHS"));
+        let TreeKind::Splice(quoted_splice) = &quoted_rhs.kind else {
+            panic!("expected quoteId macro splice, got {:?}", quoted_rhs.kind);
+        };
+        let TreeKind::Apply(quoted_apply) = &result.ast.get(quoted_splice.expr).kind else {
+            panic!("expected quoteId argument in the implementation call");
+        };
+        let TreeKind::Quote(quoted_argument) = &result.ast.get(quoted_apply.args[0]).kind else {
+            panic!("expected quoteId to retain Dotty's Quote wrapper");
+        };
+        let TreeKind::Ident(quoted_identifier) = &result.ast.get(quoted_argument.body).kind else {
+            panic!("expected the quote body to reference the identifier");
+        };
+        assert_eq!(names.resolve(quoted_identifier.name.text()), "value");
+        let quoted_range = result
+            .ast
+            .get(quoted_argument.body)
+            .position
+            .unwrap()
+            .span()
+            .range();
+        assert_eq!(quoted_range.start(), quoted_range.end());
+        let quote_range = result
+            .ast
+            .get(quoted_apply.args[0])
+            .position
+            .unwrap()
+            .span()
+            .range();
+        assert_eq!(
+            &SOURCE[quote_range.start() as usize..quote_range.end() as usize],
+            "'value"
+        );
+    }
+
+    #[test]
     fn if_branch_can_start_with_a_quote() {
         const SOURCE: &str = "def quoted(x: Boolean) = if x then 1 else '{ 2 }";
         let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
