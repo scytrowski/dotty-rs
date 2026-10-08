@@ -12102,6 +12102,28 @@ mod tests {
     }
 
     #[test]
+    fn missing_primitive_member_info_precedes_unstable_prefix_errors() {
+        let source_text = "class C { def outer: Int = { var value: Int = 1; extension (receiver: Int) { def choose(argument: Int): Int = receiver }; value.unknown(1) } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (outer, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::MemberLookup(error))
+                if matches!(*error, MemberLookupError::ClassInfoUnavailable { .. })
+        ));
+    }
+
+    #[test]
     fn applicable_ordinary_member_takes_precedence_over_local_extension() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { def choose(argument: Int): Int = argument; def outer: Int = { extension (receiver: C) { def choose(argument: Int): Int = 1 }; this.choose(2) } }",
