@@ -160,6 +160,17 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         }
         result
     }
+
+    fn enter_synthetic_package_member(
+        &mut self,
+        store: &mut SemanticStore,
+        package: SymbolId,
+        name: dotty_core::Name,
+        member: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        self.inner
+            .enter_synthetic_package_member(store, package, name, member)
+    }
 }
 
 fn audit_symbol_path(store: &SemanticStore, symbol: SymbolId) -> String {

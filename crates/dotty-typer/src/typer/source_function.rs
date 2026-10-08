@@ -112,7 +112,7 @@ impl SourceTyper<'_> {
                     })? {
                     Some(class) => class,
                     None if kind == SourceFunctionKind::Contextual => {
-                        self.materialize_context_function(package, name, arity)?
+                        self.materialize_context_function(package, name, arity, tree_index)?
                     }
                     None => {
                         return Err(TyperError::SourceFunctionClassNotFound { kind, arity });
@@ -161,14 +161,8 @@ impl SourceTyper<'_> {
         package: SymbolId,
         class_name: Name,
         arity: usize,
+        tree_index: u32,
     ) -> Result<SymbolId, TyperError> {
-        let package_scope =
-            self.packages
-                .scope_of(package)
-                .ok_or(TyperError::SourceFunctionClassNotFound {
-                    kind: SourceFunctionKind::Contextual,
-                    arity,
-                })?;
         let class = self.store.symbols.alloc(Symbol {
             name: class_name,
             owner: Some(package),
@@ -262,10 +256,28 @@ impl SourceTyper<'_> {
         self.store
             .symbols
             .set_info(class, SymbolInfo::Complete(class_info));
-        self.store
-            .scopes
-            .get_mut(package_scope)
-            .enter(class_name, class);
+        let resolver_entered = self
+            .resolver
+            .enter_synthetic_package_member(self.store, package, class_name, class)
+            .map_err(|error| TyperError::SymbolResolution {
+                source: self.source,
+                tree_index,
+                error,
+            })?;
+        if !resolver_entered {
+            let package_scope =
+                self.packages
+                    .scope_of(package)
+                    .ok_or(TyperError::SourceFunctionClassNotFound {
+                        kind: SourceFunctionKind::Contextual,
+                        arity,
+                    })?;
+            self.store
+                .scopes
+                .get_mut(package_scope)
+                .enter(class_name, class);
+            self.synthetic_package_entries.push((package_scope, class));
+        }
         Ok(class)
     }
 
@@ -604,6 +616,48 @@ mod tests {
     }
 
     #[test]
+    fn failed_outer_transaction_removes_synthetic_package_entry_before_retry() {
+        let (arena, index, mut store, packages, definitions, scala) = setup();
+        let resolver = FunctionResolver {
+            package: Some(scala),
+            ..FunctionResolver::default()
+        };
+        let mut typer = typer(&arena, &index, &mut store, &packages, definitions, resolver);
+        let class_name = Name::new(
+            typer.store.names.intern("ContextFunction1"),
+            Namespace::Type,
+        );
+        let package_scope = packages.scope_of(scala).unwrap();
+
+        let failed: Result<(), TyperError> = typer.run_atomic(|typer, _| {
+            let class = typer.source_function_class_inner(SourceFunctionKind::Contextual, 1, 18)?;
+            Err(TyperError::UnknownSymbol { symbol: class })
+        });
+        assert!(matches!(failed, Err(TyperError::UnknownSymbol { .. })));
+        assert!(
+            typer
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&class_name)
+                .is_empty()
+        );
+
+        let retry = typer
+            .source_function_class(SourceFunctionKind::Contextual, 1, 19)
+            .unwrap();
+        assert!(typer.store.symbols.contains(retry));
+        assert_eq!(
+            typer
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&class_name),
+            &[retry]
+        );
+    }
+
+    #[test]
     #[ignore = "requires pinned Scala 3.9 jars and JAVA_HOME"]
     fn scala_39_classpath_uses_synthesis_for_context_function_classes() {
         let classpath = std::env::var("SCALA39_CLASSPATH")
@@ -626,36 +680,47 @@ mod tests {
             entries.push(Box::new(JarClassPath::new(jar, release).unwrap()));
         }
         let classpath = CompositeClassPath::new(entries);
-        let (arena, index, mut store, packages, definitions, scala) = setup();
-        let request = MemberRequest {
-            prefix: store.types.alloc(Type::TypeRef {
-                prefix: definitions.no_prefix,
-                target: TypeRefTarget::Symbol(scala),
-            }),
-            name: Name::new(store.names.intern("ContextFunction1"), Namespace::Type),
-            selector: MemberSelector::Unique,
-            space: MemberSpace::Prefix,
-        };
-        let mut resolver = ClasspathSymbolResolver::new(
+        let arena = AstArena::new();
+        let index = SourceSemanticIndex::new();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let resolver_packages = Packages::new();
+        let typer_packages = Packages::new();
+        let resolver = ClasspathSymbolResolver::new(
             classpath,
             definitions,
-            LoadingSession::with_packages(packages),
+            LoadingSession::with_packages(resolver_packages),
         );
-        assert_eq!(resolver.resolve_member(&mut store, &request).unwrap(), None);
-        let packages = resolver.into_session().into_packages();
         let mut typer = SourceTyper::new(
             &arena,
             dotty_core::SourceId::from_index(1),
             &index,
             &mut store,
             definitions,
-            &packages,
-        );
+            &typer_packages,
+        )
+        .with_resolver(Box::new(resolver));
 
+        let failed: Result<(), TyperError> = typer.run_atomic(|typer, _| {
+            let class = typer.source_function_class_inner(SourceFunctionKind::Contextual, 1, 17)?;
+            Err(TyperError::UnknownSymbol { symbol: class })
+        });
+        assert!(matches!(failed, Err(TyperError::UnknownSymbol { .. })));
         let contextual = typer
-            .source_function_class(SourceFunctionKind::Contextual, 1, 17)
+            .source_function_class(SourceFunctionKind::Contextual, 1, 21)
             .unwrap();
-        assert_eq!(typer.store.symbols.get(contextual).owner, Some(scala));
+        let repeated = typer
+            .source_function_class(SourceFunctionKind::Contextual, 1, 20)
+            .unwrap();
+        assert_eq!(contextual, repeated);
+        let scala = typer.store.symbols.get(contextual).owner.unwrap();
+        assert_eq!(
+            typer
+                .store
+                .names
+                .resolve(typer.store.symbols.get(scala).name.text()),
+            "scala"
+        );
         assert_eq!(
             typer.store.symbols.get(contextual).origin,
             SymbolOrigin::Synthetic
