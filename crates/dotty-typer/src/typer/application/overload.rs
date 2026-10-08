@@ -223,9 +223,16 @@ impl SourceTyper<'_> {
                 let receiver =
                     self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
                 let receiver_view = self.this_type_receiver_view(receiver)?;
-                let members = self
-                    .lookup_overload_members_journaled(receiver_view, selection.name, info_journal)
-                    .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+                let members = match self.lookup_overload_members_journaled(
+                    receiver_view,
+                    selection.name,
+                    info_journal,
+                ) {
+                    Ok(members) => members,
+                    Err(error) => {
+                        return Err(TyperError::MemberLookup(Box::new(error)));
+                    }
+                };
                 if members.is_empty() {
                     if let Some(resolved) = self.resolve_local_extension_application(
                         selection,

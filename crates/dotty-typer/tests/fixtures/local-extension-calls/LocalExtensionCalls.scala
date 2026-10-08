@@ -1,6 +1,8 @@
 class C {
-  def outer: Int = {
-    extension (receiver: C) { def choose(argument: Int): Int = 1 }
-    this.choose(2)
+  def outer(value: Int): Int = {
+    extension (receiver: Int) {
+      def choose(argument: Int): Int = receiver
+    }
+    value.choose(1)
   }
 }

@@ -4,34 +4,28 @@ The report is generated from two byte-identical runs of the pinned Scala 3.9.0 a
 
 Run `tools/typer-classpath-corpus-audit/run` with the environment documented in `docs/typer-v0.1-compatibility.md` to regenerate this report.
 
-## #767–#771 expression sprint
+## Historical #767–#771 expression sprint snapshot
 
-| First blocker | Before #767 | Current |
+At the #772 snapshot, first blockers for term prefix operators and term annotations had moved to zero. These historical measurements are retained here for context; current values and ranking come from the report below.
+
+| First blocker | Before #767 | At #772 snapshot |
 | --- | ---: | ---: |
 | `UnsupportedExpression::PrefixOp` | 66 / 23 files | 0 / 0 |
 | `UnsupportedExpression::Annotated` (term expressions) | 64 / 14 files | 0 / 0 |
-| `MissingDeclaredType` | 34 / 15 files | 34 / 15 |
-| Local extension methods | 25 / 5 files | 25 / 5 |
-| Anonymous class instantiation | 22 / 14 files | 32 / 15 |
-| `UnsupportedSingletonReference` | 22 / 1 file | 22 / 1 |
-| Local val/var definitions | 21 / 8 files | 21 / 8 |
-| `LocalMethodSignatureDeferred` | 14 / 3 files | 14 / 3 |
-| `RecursiveInferredMethodResult` | 13 / 1 file | 13 / 1 |
-| `UnsupportedExpression::Function` | 13 / 2 files | 13 / 2 |
 
-The two zero generic buckets are first-blocker counts, not successful-expression counts. The corpus audit attempted 3,297 local method definitions and fully typed zero; moved failures are not counted as semantic success. The focused audit fixtures separately prove supported unary and term-annotation lowering and retain deeper `MemberNotFound` and `SourceAnnotationArgumentNotConstant` failures.
+## #802–#806 local extension hardening
 
-| Audit signal | Result | Interpretation |
+The initial local-extension blocker was 25 occurrences in 5 files. The current audit splits extension-specific failures from ordinary local method signatures. It attempted 3,297 local method definitions and fully typed zero; moved failures are not counted as semantic success. Focused tests cover a fully typed local extension call, nominal-member precedence, local shadowing, unsupported receiver/signature forms, rollback, and bounded ambiguity.
+
+| Focused extension failure bucket | Count / files | Representative paths |
 | --- | ---: | --- |
-| Term `Annotated` AST nodes | 401 | Syntax reachable in method bodies; not an isolated typing-success count. |
-| Prefix operators `!`, `+`, `-`, `~` | 4,327; 1; 104; 97 | Source syntax counts. The first-blocker audit cannot attribute successful lowering by operator. |
-| Annotation class, argument, and underlying-adaptation first-error buckets | 0 | No such error was the method's first blocker; this does not prove each annotation expression succeeded. `TypeNameNotFound` remains 80 / 31 files without annotation-specific attribution. |
-| `@unchecked`-like term annotation uses | Not classified | The audit does not associate term annotation nodes with resolved annotation class symbols. The focused typer test pins the `scala.unchecked` identity. |
-| Annotated type-tree failures | 3 / 2 files | Separate from term-expression annotations; see `UnsupportedTypeTree::Annotated`. |
+| `LocalExtensionGroupShapeDeferred` | 3 / 1 | compiler/src/dotty/tools/dotc/typer/Applications.scala |
+| `LocalExtensionReceiverTypeNotFound` | 1 / 1 | compiler/src/dotty/tools/dotc/core/Flags.scala |
+| `LocalExtensionSignatureDeferred::dependent result types` | 1 / 1 | compiler/src/dotty/tools/dotc/reporting/MessageRendering.scala |
 
-External member materialization remains zero, and no local method fully types in this environment. Therefore the corpus does not provide a sound count of successful annotated terms or operator-specific successful prefix lowering. The raw report retains `MemberNotFound` (1 / 1 file), `MemberLookup` (60 / 27 files), and `OverloadedTypeApplicationDeferred` (1 / 1 file) as method first blockers, but does not attribute them to a particular prefix expression. `prefix_operator_forms` and `expression_forms::Annotated` record syntax reachability only.
+Receiver or ordinary-argument mismatches remain non-applicable candidates and preserve `MemberNotFound`; the audit does not relabel those as successful typing. Multiple viable same-name local extensions produce `OverloadedSelectionDeferred` in a focused regression. Primitive definitions have no modeled member scopes. If nominal lookup cannot inspect a primitive member index, local extension resolution is not attempted and the original `MemberLookup` error is retained; fallback is available only after a completed index confirms that the ordinary name has no member. External member materialization remains zero.
 
-### Current top ten semantic blockers
+### Current top ten Typer-owned semantic blockers
 
 The ranked list below excludes parser/namer and classpath-resolution failures, and excludes the downstream `NoSuccessfulEnclosingMethodTyping` counter. Counts and representative paths are in `top_semantic_gaps` in the raw report.
 
@@ -39,28 +33,26 @@ The ranked list below excludes parser/namer and classpath-resolution failures, a
 | ---: | --- | ---: |
 | 1 | `MissingDeclaredType` | 34 / 15 |
 | 2 | `AnonymousClassInstantiationDeferred` | 32 / 15 |
-| 3 | `LocalBlockDeclarationDeferred::extension methods` | 25 / 5 |
-| 4 | `UnsupportedSingletonReference` | 22 / 1 |
-| 5 | `LocalBlockDeclarationDeferred::val/var definition` | 21 / 8 |
-| 6 | `LocalMethodSignatureDeferred` | 14 / 3 |
-| 7 | `RecursiveInferredMethodResult` | 13 / 1 |
-| 8 | `UnsupportedExpression::Function` | 13 / 2 |
-| 9 | `UnsupportedTypeTree::FunctionWithMods` | 13 / 2 |
-| 10 | `UnsupportedTypeTree::Function` | 12 / 8 |
+| 3 | `UnsupportedSingletonReference` | 22 / 1 |
+| 4 | `LocalBlockDeclarationDeferred::val/var definition` | 21 / 8 |
+| 5 | `LocalMethodSignatureDeferred` | 14 / 3 |
+| 6 | `RecursiveInferredMethodResult` | 13 / 1 |
+| 7 | `UnsupportedExpression::Function` | 13 / 2 |
+| 8 | `UnsupportedTypeTree::FunctionWithMods` | 13 / 2 |
+| 9 | `UnsupportedTypeTree::Function` | 12 / 8 |
+| 10 | `LocalBlockDeclarationDeferred::type definition` | 11 / 4 |
 
 ### Next-sprint candidates
 
 | Candidate | Smallest useful slice and owner | Prerequisites / reuse | Non-goals |
 | --- | --- | --- | --- |
-| `MissingDeclaredType` (34 / 15) | Split the broad bucket by declaration owner and missing source type tree; start in `typer/type_projection.rs` or `completion/methods.rs` according to the resulting subprofile. | Existing source type-tree projection and declaration contexts; first add exact fixtures for each producer. | Do not infer arbitrary declaration types or combine local val, method, and class completion. |
-| Anonymous class instantiation (32 / 15) | Support one anonymous `new` whose template has one concrete parent, in `typer/expression/new.rs`. | Reuse class-instance typing and parent type projection; will need stable anonymous symbol ownership and class info. | Closure capture, refinement synthesis, and general anonymous-class members. |
-| Local extension methods (25 / 5) | Enter and call one local extension with a single explicit receiver and monomorphic method, in `typer/expression/blocks.rs` plus application lookup. | Reuse `extension_prefix_clauses`, existing local-method scopes, and selected-member application. | General extension search, overload inference, contextual receivers, and multiple receiver clauses. |
-| Local val/var definitions (21 / 8) | Further split `LocalBlockDeclarationDeferred::val/var definition` by PatDef shape before selecting a binder subset, in `typer/expression/blocks.rs`. | Reuse the transactional PatDef lowering and local binder machinery. | Reopening already supported PatDef forms or broad pattern semantics. |
-| Function expressions (13 / 2) | Lower one explicitly typed, single-parameter function expression in the expression typer. | Reuse `Type::Method`, local parameter scopes, and existing closure AST nodes. | Lambda inference, polymorphism, captures, and contextual functions. |
-| Function type trees (12 / 8) | Project one ordinary explicit `Function` type tree in `typer/type_projection.rs`. | Resolve canonical `FunctionN` class identity through definitions/classpath and reuse `Type::Applied`. | Lambda expressions, inference, relation changes, and arbitrary function modifiers. |
-| `FunctionWithMods` type trees (13 / 2) | Classify modifiers and project one ordinary context-function type tree in `typer/type_projection.rs`. | Resolve canonical `ContextFunctionN` identity and distinguish contextual, erased, and capture-related modifiers. | Capture checking, erased-function semantics, and treating modifiers as ordinary annotations. |
+| `MissingDeclaredType` (34 / 15) | Split first errors by source declaration owner and missing type-tree shape, beginning in `typer/type_projection.rs` and `completion/methods.rs`. | Reuse existing declaration contexts and source type-tree projection; fixture each producer before changing inference. | Do not infer arbitrary declaration types or combine local value, method, and class completion. |
+| `AnonymousClassInstantiationDeferred` (32 / 15) | Support one anonymous `new` with one concrete parent in `typer/expression/new.rs`. | Reuse ordinary `New` typing and parent projection; define stable anonymous symbol ownership and class info. | Closure capture, refinement synthesis, and general anonymous-class members. |
+| `UnsupportedSingletonReference` (22 / 1) | Profile the single-file producer, then support one stable singleton reference shape in `typer/expression/references.rs` or `type_projection.rs`. | Reuse `TermRef`, `ThisType`, and stable-prefix checks. | Arbitrary paths, unstable prefixes, and path-dependent relation redesign. |
+| `LocalBlockDeclarationDeferred::val/var definition` (21 / 8) | Split remaining cases by PatDef root/binder shape in `typer/expression/blocks.rs`. | Reuse transactional PatDef lowering, local binders, and assignment support. | General destructuring and reopening supported PatDef forms. |
+| `LocalMethodSignatureDeferred` (14 / 3) | Split exact `feature` values and add one fixture for the most frequent unsupported signature in `typer/completion/local_methods.rs`. | Reuse the shared signature builder and existing parameter/type-parameter scopes. | General dependent results, erased/by-name expansion, or new method inference. |
 
-Recommend a focused local extension slice: its 25 blockers form a coherent local declaration family and the typer already records extension receiver clauses and supports ordinary selected applications. Keep the broader `MissingDeclaredType` bucket in measurement until its producers are separated. The classpath gate remains independent: external class and non-class member materializations are both zero, so this corpus cannot yet demonstrate standard-library reachability.
+Recommend a measurement-first `MissingDeclaredType` increment: it is the current highest-ranked Typer-owned blocker (34 occurrences in 15 files), but spans both type projection and method completion. First attribute its producers to declaration kinds and source shapes, then select one narrow behavior. Reevaluate `UnsupportedExpression::Function` (13 / 2), `UnsupportedTypeTree::FunctionWithMods` (13 / 2), and `UnsupportedTypeTree::Function` (12 / 8) as separate candidates. Keep classpath reachability independent: external non-class member materialization is still zero, so this corpus cannot establish standard-library member coverage.
 
 ## Previous type projection snapshot
 
@@ -79,9 +71,9 @@ audit_v1_comparison:
   local_declarations=22713 (delta=-505)
   local_methods=3297 (delta=-481)
   typed_local_methods=0 (delta=+0)
-  ImportQualifierNotFound=2782 (delta=+736)
+  ImportQualifierNotFound=2803 (delta=+757)
   UnsupportedExpression_total=38 (delta=-534)
-  LocalBlockDeclarationDeferred=66 (delta=-206)
+  LocalBlockDeclarationDeferred=41 (delta=-231)
   NoSuccessfulEnclosingMethodTyping=34 (delta=-449)
 audit_581_feature_comparison:
   UnsupportedExpression::Parens=0 (baseline=146, delta=-146)
@@ -96,18 +88,18 @@ local_objects=34
 local_classes=28
 local_pattern_bindings=25
 expression_forms:
-  Ident=250524
+  Ident=250525
   Select=117733
   Apply=87453
-  Block=42729
-  InfixOp=39420
+  Block=42730
+  InfixOp=39381
   If=16290
   Parens=15385
   Match=7379
   Assign=6004
   Function=4924
   New=4831
-  PrefixOp=4529
+  PrefixOp=4567
   TypeApply=4219
   InterpolatedString=3179
   Tuple=1334
@@ -126,9 +118,9 @@ expression_forms:
   PostfixOp=0
   Try=0
 prefix_operator_forms:
-  operator="!" count=4327
+  operator="!" count=4364
   operator="+" count=1
-  operator="-" count=104
+  operator="-" count=105
   operator="~" count=97
 type_tree_forms:
   Annotated=1403
@@ -285,7 +277,7 @@ expression_sprint_first_blockers:
   UnsupportedExpression::Annotated=0 files=0
   MemberNotFound=1 files=1
   MemberLookup=60 files=27
-  TypeNameNotFound=80 files=31
+  TypeNameNotFound=79 files=30
   SourceAnnotationClassDeferred=0 files=0
   SourceAnnotationNotAnnotationClass=0 files=0
   SourceAnnotationArgumentNotConstant=0 files=0
@@ -301,25 +293,24 @@ unsupported_type_tree_failures:
   UnsupportedTypeTree::Function: count=12, files=8 [compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/parsing/Parsers.scala]
   UnsupportedTypeTree::Annotated: count=3, files=2 [library/src/scala/collection/immutable/ArraySeq.scala, library/src/scala/collection/immutable/LazyListIterable.scala]
   UnsupportedTypeTree::Tuple: count=2, files=1 [compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala]
-local_block_declaration_deferred=66
+local_block_declaration_deferred=41
 no_successful_enclosing_method_typing=34
-import_qualifier_not_found=2782
-external_name_or_member_resolution_failures=189
+import_qualifier_not_found=2803
+external_name_or_member_resolution_failures=188
 failure_families:
-  resolution/classpath environment=2971
+  resolution/classpath environment=2992
   other=188
-  local declaration deferral=68
+  local declaration deferral=46
   unsupported expression syntax/semantics=38
-  type relation/inference/completion=32
+  type relation/inference/completion=33
 local_defdef_failures:
-  ImportQualifierNotFound [resolution/classpath environment]: 2782 (270 files) [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
-  TypeNameNotFound [resolution/classpath environment]: 80 (31 files) [compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/dotc/core/Flags.scala, compiler/src/dotty/tools/dotc/core/tasty/CommentPickler.scala, compiler/src/dotty/tools/dotc/core/tasty/TreeBuffer.scala, compiler/src/dotty/tools/dotc/coverage/Serializer.scala]
+  ImportQualifierNotFound [resolution/classpath environment]: 2803 (270 files) [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
+  TypeNameNotFound [resolution/classpath environment]: 79 (30 files) [compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/dotc/core/tasty/CommentPickler.scala, compiler/src/dotty/tools/dotc/core/tasty/TreeBuffer.scala, compiler/src/dotty/tools/dotc/coverage/Serializer.scala, compiler/src/dotty/tools/dotc/util/Chars.scala]
   MemberLookup [resolution/classpath environment]: 60 (27 files) [compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/SymDenotations.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/core/classfile/ClassfileParser.scala]
   MissingDeclaredType [other]: 34 (15 files) [compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/core/TypeErrors.scala, compiler/src/dotty/tools/dotc/inlines/Inliner.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala]
   NoSuccessfulEnclosingMethodTyping [other]: 34 (15 files) [compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/classpath/DirectoryClassPath.scala, compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala]
   AnonymousClassInstantiationDeferred [other]: 32 (15 files) [compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala]
   SymbolResolution [resolution/classpath environment]: 28 (10 files) [compiler/src/dotty/tools/dotc/core/Decorators.scala, compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala, compiler/src/dotty/tools/dotc/core/tasty/TastyClassName.scala, compiler/src/dotty/tools/dotc/core/tasty/TastyPickler.scala, compiler/src/dotty/tools/dotc/core/tasty/TastyPrinter.scala]
-  LocalBlockDeclarationDeferred::extension methods [local declaration deferral]: 25 (5 files) [compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/reporting/MessageRendering.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/typer/Applications.scala, compiler/src/dotty/tools/dotc/typer/Checking.scala]
   UnsupportedSingletonReference [other]: 22 (1 files) [compiler/src/dotty/tools/dotc/transform/CheckUnused.scala]
   LocalBlockDeclarationDeferred::val/var definition [local declaration deferral]: 21 (8 files) [compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala]
   TermNameNotFound [resolution/classpath environment]: 20 (12 files) [compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/backend/jvm/opt/MethodMax.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala, compiler/src/dotty/tools/dotc/util/ClasspathFromClassloader.scala, compiler/src/dotty/tools/dotc/util/WeakHashSet.scala]
@@ -338,6 +329,7 @@ local_defdef_failures:
   UnsupportedExpression::InterpolatedString [unsupported expression syntax/semantics]: 5 (4 files) [compiler/src/dotty/tools/dotc/core/ConstraintHandling.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/report.scala, compiler/src/dotty/tools/dotc/util/SimpleIdentityMap.scala]
   MatchSelectorTypeCannotBeAdapted [other]: 4 (2 files) [compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/config/Settings.scala]
   UnstableSelectionPrefix [type relation/inference/completion]: 4 (3 files) [compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/core/Contexts.scala, compiler/src/dotty/tools/dotc/core/Types.scala]
+  LocalExtensionGroupShapeDeferred [local declaration deferral]: 3 (1 files) [compiler/src/dotty/tools/dotc/typer/Applications.scala]
   UnsupportedTypeTree::Annotated [other]: 3 (2 files) [library/src/scala/collection/immutable/ArraySeq.scala, library/src/scala/collection/immutable/LazyListIterable.scala]
   LocalPatDefDeferred::multiple source patterns [local declaration deferral]: 2 (1 files) [compiler/src/dotty/tools/dotc/transform/FirstTransform.scala]
   RightAssociativeInfixDeferred [other]: 2 (2 files) [compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/typer/ImportInfo.scala]
@@ -346,30 +338,32 @@ local_defdef_failures:
   UnsupportedTypeTree::Tuple [other]: 2 (1 files) [compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala]
   ApplicationCalleeNotMethod [type relation/inference/completion]: 1 (1 files) [compiler/src/dotty/tools/dotc/core/TypeErasure.scala]
   ExtractorQualifierNotValueLike [other]: 1 (1 files) [compiler/src/scala/quoted/runtime/impl/QuoteMatcher.scala]
+  LocalExtensionReceiverTypeNotFound [resolution/classpath environment]: 1 (1 files) [compiler/src/dotty/tools/dotc/core/Flags.scala]
+  LocalExtensionSignatureDeferred::dependent result types [type relation/inference/completion]: 1 (1 files) [compiler/src/dotty/tools/dotc/reporting/MessageRendering.scala]
   MemberNotFound [resolution/classpath environment]: 1 (1 files) [compiler/src/dotty/tools/backend/jvm/BTypes.scala]
   PatternTypeRelationDeferred [other]: 1 (1 files) [library/src/scala/collection/immutable/List.scala]
 top_semantic_gaps:
   1. MissingDeclaredType: count=34, files=15, category=other, examples=compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/core/TypeErrors.scala, compiler/src/dotty/tools/dotc/inlines/Inliner.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala
   2. AnonymousClassInstantiationDeferred: count=32, files=15, category=other, examples=compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala
-  3. LocalBlockDeclarationDeferred::extension methods: count=25, files=5, category=local declaration support, examples=compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/reporting/MessageRendering.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/typer/Applications.scala, compiler/src/dotty/tools/dotc/typer/Checking.scala
-  4. UnsupportedSingletonReference: count=22, files=1, category=other, examples=compiler/src/dotty/tools/dotc/transform/CheckUnused.scala
-  5. LocalBlockDeclarationDeferred::val/var definition: count=21, files=8, category=local declaration support, examples=compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala
-  6. LocalMethodSignatureDeferred: count=14, files=3, category=other, examples=compiler/src/dotty/tools/dotc/core/SymUtils.scala, compiler/src/dotty/tools/dotc/transform/MegaPhase.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala
-  7. RecursiveInferredMethodResult: count=13, files=1, category=other, examples=compiler/src/dotty/tools/dotc/typer/Typer.scala
-  8. UnsupportedExpression::Function: count=13, files=2, category=expression typing, examples=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala
-  9. UnsupportedTypeTree::FunctionWithMods: count=13, files=2, category=other, examples=library/src/scala/collection/StringParsers.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala
-  10. UnsupportedTypeTree::Function: count=12, files=8, category=other, examples=compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/parsing/Parsers.scala
+  3. UnsupportedSingletonReference: count=22, files=1, category=other, examples=compiler/src/dotty/tools/dotc/transform/CheckUnused.scala
+  4. LocalBlockDeclarationDeferred::val/var definition: count=21, files=8, category=local declaration support, examples=compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala
+  5. LocalMethodSignatureDeferred: count=14, files=3, category=other, examples=compiler/src/dotty/tools/dotc/core/SymUtils.scala, compiler/src/dotty/tools/dotc/transform/MegaPhase.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala
+  6. RecursiveInferredMethodResult: count=13, files=1, category=other, examples=compiler/src/dotty/tools/dotc/typer/Typer.scala
+  7. UnsupportedExpression::Function: count=13, files=2, category=expression typing, examples=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala
+  8. UnsupportedTypeTree::FunctionWithMods: count=13, files=2, category=other, examples=library/src/scala/collection/StringParsers.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala
+  9. UnsupportedTypeTree::Function: count=12, files=8, category=other, examples=compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/parsing/Parsers.scala
+  10. LocalBlockDeclarationDeferred::type definition: count=11, files=4, category=local declaration support, examples=compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/typer/Checking.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala
 top_gap_implementation_scope_notes:
-  MissingDeclaredType (34 occurrences, 15 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
-  AnonymousClassInstantiationDeferred (32 occurrences, 15 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
-  LocalBlockDeclarationDeferred::extension methods (25 occurrences, 5 files): first_slice=enter one local declaration kind transactionally in block typing; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=source symbol and scope metadata from dotty-core; non_goals=local classes, imports, or type definitions beyond the selected kind
-  UnsupportedSingletonReference (22 occurrences, 1 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
-  LocalBlockDeclarationDeferred::val/var definition (21 occurrences, 8 files): first_slice=enter one local declaration kind transactionally in block typing; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=source symbol and scope metadata from dotty-core; non_goals=local classes, imports, or type definitions beyond the selected kind
-  LocalMethodSignatureDeferred (14 occurrences, 3 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
+  MissingDeclaredType (34 occurrences, 15 files): first_slice=split by declaration owner and missing source type-tree shape, then add one exact projection/completion case; owner=dotty-typer/src/typer/type_projection.rs and dotty-typer/src/typer/completion/methods.rs; prerequisites=the declaration context and source AST node that owns the missing type; non_goals=guessing arbitrary types or combining local value, method, and class inference
+  AnonymousClassInstantiationDeferred (32 occurrences, 15 files): first_slice=support one anonymous new with one concrete parent and explicit member ownership; owner=dotty-typer/src/typer/expression/new.rs; prerequisites=ordinary New typing, parent projection, and stable anonymous class identity; non_goals=closure capture, refinement synthesis, and general anonymous-class members
+  UnsupportedSingletonReference (22 occurrences, 1 files): first_slice=profile and type one stable singleton-reference shape from the reported producer; owner=dotty-typer/src/typer/expression/references.rs and dotty-typer/src/typer/type_projection.rs; prerequisites=existing TermRef, ThisType, and stable-prefix contracts; non_goals=arbitrary paths, unstable prefixes, and path-dependent relation redesign
+  LocalBlockDeclarationDeferred::val/var definition (21 occurrences, 8 files): first_slice=split remaining local definitions by PatDef root and binder shape before adding one form; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=transactional PatDef lowering, local binders, and assignment support; non_goals=general destructuring or reopening already supported PatDef forms
+  LocalMethodSignatureDeferred (14 occurrences, 3 files): first_slice=split the feature payload and add a fixture for the most frequent unsupported signature; owner=dotty-typer/src/typer/completion/local_methods.rs; prerequisites=the shared signature builder and existing parameter/type-parameter scopes; non_goals=general dependent-result, erased/by-name, or method-inference redesign
   RecursiveInferredMethodResult (13 occurrences, 1 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
-  UnsupportedExpression::Function (13 occurrences, 2 files): first_slice=lower one reported expression node through existing expression typing; owner=dotty-typer/src/typer/expression; prerequisites=the parsed AST node and its child typing rules; non_goals=control-flow or inference redesign
-  UnsupportedTypeTree::FunctionWithMods (13 occurrences, 2 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
-  UnsupportedTypeTree::Function (12 occurrences, 8 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
+  UnsupportedExpression::Function (13 occurrences, 2 files): first_slice=lower one explicitly typed single-parameter function expression; owner=dotty-typer/src/typer/expression; prerequisites=Method types, local parameter scopes, and existing closure AST nodes; non_goals=lambda inference, polymorphism, capture checking, and contextual functions
+  UnsupportedTypeTree::FunctionWithMods (13 occurrences, 2 files): first_slice=classify modifiers and project one ordinary context-function type; owner=dotty-typer/src/typer/type_projection.rs; prerequisites=canonical ContextFunction identity and existing Applied types; non_goals=capture checking, erased-function semantics, and arbitrary modifiers
+  UnsupportedTypeTree::Function (12 occurrences, 8 files): first_slice=project one ordinary explicit Function type tree; owner=dotty-typer/src/typer/type_projection.rs; prerequisites=canonical FunctionN identity and existing Applied types; non_goals=lambda expressions, inference, and relation redesign
+  LocalBlockDeclarationDeferred::type definition (11 occurrences, 4 files): first_slice=enter one local declaration kind transactionally in block typing; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=source symbol and scope metadata from dotty-core; non_goals=local classes, imports, or type definitions beyond the selected kind
 highest_ranked_semantic_gap: MissingDeclaredType (34 occurrences in 15 files); count ranks the audit only and does not select a sprint increment; keep classpath materialization as a separate gate because the pinned audit resolved no external members
 match_readiness:
   first_blocker_methods=275
@@ -441,11 +435,11 @@ match_corpus_profile:
     ExtractorQualifierNotFound=42 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala, compiler/src/dotty/tools/dotc/util/DiffUtil.scala, compiler/src/dotty/tools/scripting/Main.scala]
     ExtractorQualifierNotValueLike=18 files=[compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/quoted/PickledQuotes.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala]
     ExtractorUnapplyNotFound=52 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/Settings.scala, compiler/src/dotty/tools/dotc/core/Types.scala]
-    ImportQualifierNotFound=14426 files=[compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala]
+    ImportQualifierNotFound=14427 files=[compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala]
     InfixPatternDeferred=7 files=[compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/printing/PlainPrinter.scala, compiler/src/dotty/tools/dotc/typer/Applications.scala, compiler/src/dotty/tools/dotc/typer/Deriving.scala]
     MatchCaseResultTypeCannotBeWidened=1 files=[compiler/src/dotty/tools/dotc/core/Types.scala]
     MatchSelectorTypeCannotBeAdapted=42 files=[compiler/src/dotty/tools/dotc/ast/tpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/config/Settings.scala, compiler/src/dotty/tools/dotc/core/Contexts.scala]
-    MemberLookup=229 files=[compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/debug/ResolveReflectEval.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala]
+    MemberLookup=245 files=[compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/debug/ResolveReflectEval.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala]
     MemberNotFound=51 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/cc/Mutability.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/transform/init/Objects.scala, compiler/src/dotty/tools/dotc/transform/init/Semantic.scala]
     MissingDeclaredType=143 files=[compiler/src/dotty/tools/backend/jvm/BTypeLoader.scala, compiler/src/dotty/tools/backend/jvm/PostProcessor.scala, compiler/src/dotty/tools/backend/jvm/opt/BCodeRepository.scala, compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala]
     NullLiteralTypingDeferred=7 files=[compiler/src/dotty/tools/dotc/core/Types.scala, library/src/scala/collection/immutable/RedBlackTree.scala, library/src/scala/collection/mutable/CollisionProofHashMap.scala, library/src/scala/collection/mutable/RedBlackTree.scala, library/src/scala/runtime/ScalaRunTime.scala]
@@ -460,7 +454,7 @@ match_corpus_profile:
     TypeNameNotFound=744 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/dotc/ast/untpd.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala]
     TypedPatternRelationDeferred=44 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/CopyProp.scala, compiler/src/dotty/tools/dotc/transform/patmat/Space.scala, library/src/scala/collection/immutable/ArraySeq.scala, library/src/scala/collection/immutable/Range.scala]
     TypedPatternRuntimeTestDeferred=484 files=[compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/core/Annotations.scala]
-    UnstableSelectionPrefix=19 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/core/GadtConstraint.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala, compiler/src/dotty/tools/dotc/transform/init/Objects.scala]
+    UnstableSelectionPrefix=2 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala]
     UnsupportedBindPatternBody=9 files=[compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala, compiler/src/dotty/tools/dotc/inlines/Inliner.scala, compiler/src/dotty/tools/dotc/parsing/xml/MarkupParsers.scala, compiler/src/dotty/tools/dotc/reporting/trace.scala, compiler/src/dotty/tools/dotc/typer/Applications.scala]
     UnsupportedConstructorInferenceShape=4 files=[library/src/scala/collection/immutable/IntMap.scala, library/src/scala/collection/immutable/LongMap.scala]
     UnsupportedExpression=370 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/BTypesFromClassfile.scala, compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala]
@@ -471,13 +465,13 @@ match_corpus_profile:
     UnsupportedTypeTree::FunctionWithMods=31 files=[library/src/scala/collection/ArrayOps.scala, library/src/scala/collection/IterableOnce.scala, library/src/scala/collection/StrictOptimizedIterableOps.scala, library/src/scala/collection/StringOps.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala]
     UnsupportedTypeTree::Tuple=62 files=[compiler/src/dotty/tools/backend/sjs/JSEncoding.scala, library/src/scala/collection/immutable/IntMap.scala, library/src/scala/collection/immutable/LongMap.scala, library/src/scala/collection/immutable/VectorMap.scala, library/src/scala/quoted/Quotes.scala]
   typed_case_first_failure_top_10:
-    ImportQualifierNotFound=14426
+    ImportQualifierNotFound=14427
     TypeNameNotFound=744
     SymbolResolution=582
     TypedPatternRuntimeTestDeferred=484
     UnsupportedExpression=370
     TermNameNotFound=313
-    MemberLookup=229
+    MemberLookup=245
     UnsupportedTypeTree::Annotated=150
     MissingDeclaredType=143
     PatternTypeRelationDeferred=111
@@ -531,31 +525,31 @@ match_corpus_profile:
   infix_pattern_forms=781
   extractor_representative_files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala]
 resolver_metrics:
-  resolver_package_requests=21885
-  external_package_requests=13481
-  external_package_successes=3267
-  external_package_unresolved=10214
+  resolver_package_requests=21955
+  external_package_requests=13541
+  external_package_successes=3275
+  external_package_unresolved=10266
   external_package_errors=0
-  source_package_reuse=8404
-  resolver_member_requests=6975
-  external_member_requests=6975
+  source_package_reuse=8414
+  resolver_member_requests=6986
+  external_member_requests=6986
   external_member_successes=0
   external_class_symbol_successes=0
   external_non_class_member_successes=0
   source_member_reuse=0
-  external_member_unresolved=6774
+  external_member_unresolved=6785
   external_member_errors=201
   distinct_packages=25
   distinct_classes=0
   distinct_members=0
   classloader_success_gate=BLOCKED: external members not materialized
 resolver_581_comparison:
-  external_package_successes=3267 (baseline=1965, delta=+1302)
-  external_package_unresolved=10214 (baseline=5816, delta=+4398)
+  external_package_successes=3275 (baseline=1965, delta=+1310)
+  external_package_unresolved=10266 (baseline=5816, delta=+4450)
   external_package_errors=0 (baseline=0, delta=+0)
   external_class_materializations=0 (baseline=0, delta=+0)
   external_non_class_member_successes=0 (baseline=0, delta=+0)
-  external_member_unresolved=6774 (baseline=3884, delta=+2890)
+  external_member_unresolved=6785 (baseline=3884, delta=+2901)
   external_member_errors=201 (baseline=91, delta=+110)
   distinct_packages=25 (baseline=23, delta=+2)
   member_error_kinds:
@@ -609,9 +603,9 @@ resolver_581_comparison:
     Malformed { reason: "invalid .tasty file for scala/collection/mutable/Queue: a supertype reference could not be resolved to a name" }=1
     Malformed { reason: "invalid .tasty file for scala/collection/mutable/StringBuilder: a supertype reference could not be resolved to a name" }=7
   most_requested_unresolved_member_names:
-    tpd=703
+    tpd=704
     scala=612
-    Contexts=469
+    Contexts=472
     Int=395
     core=274
     CollectionConverters=261
@@ -624,9 +618,9 @@ resolver_581_comparison:
     Tree=91
     String=88
     Predef=84
-    dotty=81
+    dotty=82
     Context=74
     reflect=74
-    Types=68
+    Types=69
     List=65
 ```

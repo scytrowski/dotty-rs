@@ -943,6 +943,54 @@ fn highest_ranked_gap_output_does_not_claim_to_recommend_a_sprint() {
 
 fn scope_note_for_bucket(bucket: &str) -> (&'static str, &'static str, &'static str, &'static str) {
     match bucket {
+        "MissingDeclaredType" => (
+            "split by declaration owner and missing source type-tree shape, then add one exact projection/completion case",
+            "dotty-typer/src/typer/type_projection.rs and dotty-typer/src/typer/completion/methods.rs",
+            "the declaration context and source AST node that owns the missing type",
+            "guessing arbitrary types or combining local value, method, and class inference",
+        ),
+        "AnonymousClassInstantiationDeferred" => (
+            "support one anonymous new with one concrete parent and explicit member ownership",
+            "dotty-typer/src/typer/expression/new.rs",
+            "ordinary New typing, parent projection, and stable anonymous class identity",
+            "closure capture, refinement synthesis, and general anonymous-class members",
+        ),
+        "UnsupportedSingletonReference" => (
+            "profile and type one stable singleton-reference shape from the reported producer",
+            "dotty-typer/src/typer/expression/references.rs and dotty-typer/src/typer/type_projection.rs",
+            "existing TermRef, ThisType, and stable-prefix contracts",
+            "arbitrary paths, unstable prefixes, and path-dependent relation redesign",
+        ),
+        "LocalBlockDeclarationDeferred::val/var definition" => (
+            "split remaining local definitions by PatDef root and binder shape before adding one form",
+            "dotty-typer/src/typer/expression/blocks.rs",
+            "transactional PatDef lowering, local binders, and assignment support",
+            "general destructuring or reopening already supported PatDef forms",
+        ),
+        "LocalMethodSignatureDeferred" => (
+            "split the feature payload and add a fixture for the most frequent unsupported signature",
+            "dotty-typer/src/typer/completion/local_methods.rs",
+            "the shared signature builder and existing parameter/type-parameter scopes",
+            "general dependent-result, erased/by-name, or method-inference redesign",
+        ),
+        "UnsupportedExpression::Function" => (
+            "lower one explicitly typed single-parameter function expression",
+            "dotty-typer/src/typer/expression",
+            "Method types, local parameter scopes, and existing closure AST nodes",
+            "lambda inference, polymorphism, capture checking, and contextual functions",
+        ),
+        "UnsupportedTypeTree::FunctionWithMods" => (
+            "classify modifiers and project one ordinary context-function type",
+            "dotty-typer/src/typer/type_projection.rs",
+            "canonical ContextFunction identity and existing Applied types",
+            "capture checking, erased-function semantics, and arbitrary modifiers",
+        ),
+        "UnsupportedTypeTree::Function" => (
+            "project one ordinary explicit Function type tree",
+            "dotty-typer/src/typer/type_projection.rs",
+            "canonical FunctionN identity and existing Applied types",
+            "lambda expressions, inference, and relation redesign",
+        ),
         "UnsupportedExpression::Match" => (
             "type the scrutinee, each case pattern, and each case body against one expected result type",
             "dotty-typer/src/typer/expression/mod.rs, with a focused pattern helper",
@@ -1541,6 +1589,117 @@ fn local_expression_audit_reports_lambda_and_deferred_declaration_subkinds() {
 }
 
 #[test]
+fn local_extension_audit_splits_group_shape_and_receiver_type_failures() {
+    let group = audit_source(
+        "class Audit { def outer: Int = { extension (using context: Int) (receiver: Int) { def choose: Int = receiver }; def marker: Int = 1; 0 } }",
+        "UnsupportedExtensionGroup.scala",
+    );
+    assert!(
+        group
+            .failures
+            .contains_key("LocalExtensionGroupShapeDeferred"),
+        "{group:?}"
+    );
+
+    let receiver = audit_source(
+        "class Audit { def outer: Int = { extension (receiver: MissingReceiverType) { def choose: Int = 1 }; def marker: Int = 1; 0 } }",
+        "MissingExtensionReceiver.scala",
+    );
+    let failure = receiver
+        .failures
+        .get("LocalExtensionReceiverTypeNotFound")
+        .expect("extension receiver name should have its own audit bucket");
+    assert_eq!(failure.count, 1);
+    assert_eq!(
+        failure.files,
+        BTreeSet::from(["MissingExtensionReceiver.scala".to_owned()])
+    );
+
+    let nested_receiver = audit_source(
+        "class Box[A] {}; class Audit { def outer: Int = { extension (receiver: Box[MissingReceiverType]) { def choose: Int = 1 }; def marker: Int = 1; 0 } }",
+        "NestedMissingExtensionReceiver.scala",
+    );
+    assert!(
+        nested_receiver
+            .failures
+            .contains_key("LocalExtensionReceiverTypeNotFound"),
+        "nested receiver type errors should stay in the focused bucket: {nested_receiver:?}"
+    );
+}
+
+#[test]
+fn local_extension_audit_separates_nonapplicable_and_ambiguous_calls() {
+    let nonapplicable = audit_source(
+        "class Audit { def outer: Int = { extension (receiver: Audit) { def choose(argument: Int): Int = argument }; this.choose(false); def marker: Int = 1; 0 } }",
+        "NonapplicableExtension.scala",
+    );
+    let failure = nonapplicable
+        .failures
+        .get("LocalExtensionNotApplicable")
+        .expect("inapplicable local extensions should be classified separately");
+    assert_eq!(failure.count, 1);
+    assert_eq!(
+        failure.files,
+        BTreeSet::from(["NonapplicableExtension.scala".to_owned()])
+    );
+
+    let shadowed = audit_source(
+        "class Audit { def outer: Int = { extension (receiver: Audit) { def choose(argument: Int): Int = argument }; { val choose: Int = 0; this.choose(1) } } }",
+        "ShadowedExtension.scala",
+    );
+    assert!(
+        !shadowed
+            .failures
+            .contains_key("LocalExtensionNotApplicable"),
+        "a nested local value hides the enclosing extension: {shadowed:?}"
+    );
+
+    let unsupported_group = audit_source(
+        "class Audit { def outer: Int = { this.choose(1); extension (receiver: Audit) { def choose(argument: Int): Int = argument; def choose(other: Boolean): Int = 0 }; def marker: Int = 1; 0 } }",
+        "UnsupportedExtensionGroup.scala",
+    );
+    assert!(
+        !unsupported_group
+            .failures
+            .contains_key("LocalExtensionNotApplicable"),
+        "a group that is not preindexed is not an extension candidate: {unsupported_group:?}"
+    );
+
+    let right_associative = audit_source(
+        "class Audit { def outer: Int = { this.++:(1); extension (receiver: Audit) { def ++:(argument: Int): Int = argument }; def marker: Int = 1; 0 } }",
+        "RightAssociativeExtension.scala",
+    );
+    assert!(
+        !right_associative
+            .failures
+            .contains_key("LocalExtensionNotApplicable"),
+        "right-associative extensions are not preindexed: {right_associative:?}"
+    );
+
+    let tuple_shadow = audit_source(
+        "class Audit { def outer: Int = { extension (receiver: Audit) { def choose(argument: Int): Int = argument }; { val (choose, other) = (0, 1); this.choose(1) } } }",
+        "TuplePatternShadow.scala",
+    );
+    assert!(
+        !tuple_shadow
+            .failures
+            .contains_key("LocalExtensionNotApplicable"),
+        "tuple pattern binders shadow enclosing extensions: {tuple_shadow:?}"
+    );
+
+    let ambiguous = audit_source(
+        "class Audit { def outer: Int = { extension (left: Audit) { def choose(argument: Int): Int = 1 }; extension (right: Audit) { def choose(argument: Int): Int = 2 }; this.choose(1); def marker: Int = 1; 0 } }",
+        "AmbiguousExtension.scala",
+    );
+    assert!(
+        ambiguous
+            .failures
+            .contains_key("LocalExtensionAmbiguityDeferred"),
+        "{ambiguous:?}"
+    );
+}
+
+#[test]
 fn local_expression_audit_classifies_missing_names_as_resolution_failures() {
     let audit = audit_source(
         "object Audit { def outer: Int = { def local: Missing = 1; local } }",
@@ -1616,7 +1775,7 @@ fn unsupported_type_tree_failures_keep_exact_source_shapes() {
             tree_index: tree.index(),
             tree_kind: tree_kind_label(&node.kind),
         };
-        let failure = classify_typer_error(&error, &parsed.ast, &operators);
+        let failure = classify_typer_error(&error, &parsed.ast, &operators, &store.names);
 
         assert_eq!(
             failure.bucket,
@@ -1624,7 +1783,7 @@ fn unsupported_type_tree_failures_keep_exact_source_shapes() {
         );
         assert_eq!(failure.family, FailureFamily::Other);
         assert_eq!(
-            typed_case_failure_label(&error, &parsed.ast, &operators),
+            typed_case_failure_label(&error, &parsed.ast, &operators, &store.names),
             format!("UnsupportedTypeTree::{expected_shape}")
         );
     }
@@ -2001,8 +2160,12 @@ fn probe_supported_match_cases(
                 }
             }
             Err(error) => {
-                let error_name =
-                    typed_case_failure_label(&error, &parsed.ast, &type_operator_spellings);
+                let error_name = typed_case_failure_label(
+                    &error,
+                    &parsed.ast,
+                    &type_operator_spellings,
+                    &typer.store().names,
+                );
                 *profile
                     .typed_case_failures
                     .entry(error_name.clone())
@@ -2118,6 +2281,7 @@ fn typed_case_failure_label(
     error: &TyperError,
     arena: &dotty_core::AstArena<Untyped>,
     operator_spellings: &BTreeMap<u32, String>,
+    names: &dotty_core::names::NameInterner,
 ) -> String {
     match error {
         TyperError::TuplePatternResolutionDeferred { issue, .. } => {
@@ -2127,7 +2291,7 @@ fn typed_case_failure_label(
             format!("extractor argument::{issue:?}")
         }
         TyperError::UnsupportedTypeTree { .. } => {
-            classify_typer_error(error, arena, operator_spellings).bucket
+            classify_typer_error(error, arena, operator_spellings, names).bucket
         }
         _ => typer_error_name(error).to_owned(),
     }
@@ -2275,7 +2439,12 @@ fn audit_source_inner(
             .expression_context_for(method)
             .and_then(|context| typer.type_expression(rhs, context));
         if let Err(error) = outcome {
-            let failure = classify_typer_error(&error, &parsed.ast, &type_operator_spellings);
+            let failure = classify_typer_error(
+                &error,
+                &parsed.ast,
+                &type_operator_spellings,
+                &typer.store().names,
+            );
             if matches!(
                 error,
                 TyperError::UnsupportedPattern { .. }
@@ -3538,8 +3707,58 @@ fn classify_typer_error(
     error: &TyperError,
     arena: &dotty_core::AstArena<Untyped>,
     operator_spellings: &BTreeMap<u32, String>,
+    names: &dotty_core::names::NameInterner,
 ) -> FailureClassification {
     match error {
+        TyperError::LocalBlockDeclarationDeferred {
+            kind: "extension methods",
+            ..
+        } => FailureClassification {
+            bucket: "LocalExtensionGroupShapeDeferred".to_owned(),
+            family: FailureFamily::LocalDeclarationDeferral,
+        },
+        TyperError::LocalMethodSignatureDeferred {
+            tree_index,
+            feature,
+            ..
+        } if is_extension_method_tree(arena, *tree_index) => FailureClassification {
+            bucket: format!("LocalExtensionSignatureDeferred::{feature}"),
+            family: FailureFamily::TypeRelationInferenceCompletion,
+        },
+        TyperError::TypeNameNotFound { tree_index, .. }
+            if is_extension_receiver_tree(arena, *tree_index) =>
+        {
+            FailureClassification {
+                bucket: "LocalExtensionReceiverTypeNotFound".to_owned(),
+                family: FailureFamily::ResolutionClasspathEnvironment,
+            }
+        }
+        TyperError::MemberNotFound {
+            tree_index, name, ..
+        } if has_lexical_extension_candidate(arena, *tree_index, *name, names) => {
+            FailureClassification {
+                bucket: "LocalExtensionNotApplicable".to_owned(),
+                family: FailureFamily::LocalDeclarationDeferral,
+            }
+        }
+        TyperError::OverloadedSelectionDeferred {
+            tree_index, name, ..
+        } if has_lexical_extension_candidate(arena, *tree_index, *name, names) => {
+            FailureClassification {
+                bucket: "LocalExtensionAmbiguityDeferred".to_owned(),
+                family: FailureFamily::LocalDeclarationDeferral,
+            }
+        }
+        TyperError::ApplicationArgumentConformanceUnsupported { tree_index, .. }
+            if selected_name(arena, *tree_index).is_some_and(|name| {
+                has_lexical_extension_candidate(arena, *tree_index, name, names)
+            }) =>
+        {
+            FailureClassification {
+                bucket: "LocalExtensionConformanceUnsupported".to_owned(),
+                family: FailureFamily::TypeRelationInferenceCompletion,
+            }
+        }
         TyperError::UnsupportedExpression { tree_index, .. } => {
             let node = arena
                 .iter()
@@ -3600,6 +3819,262 @@ fn classify_typer_error(
             }
         }
     }
+}
+
+fn is_extension_method_tree(arena: &dotty_core::AstArena<Untyped>, tree_index: u32) -> bool {
+    arena.iter().any(|(_, node)| match &node.kind {
+        TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) => extension
+            .methods
+            .iter()
+            .any(|method| method.index() == tree_index),
+        _ => false,
+    })
+}
+
+fn is_extension_receiver_tree(arena: &dotty_core::AstArena<Untyped>, tree_index: u32) -> bool {
+    arena.iter().any(|(_, node)| {
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) = &node.kind else {
+            return false;
+        };
+        extension.param_clauses.iter().flatten().any(|parameter| {
+            parameter.index() == tree_index
+                || matches!(
+                    arena.try_get(*parameter).map(|node| &node.kind),
+                    Some(TreeKind::ValDef(definition))
+                        if type_tree_contains(arena, definition.tpt, tree_index)
+                )
+        })
+    })
+}
+
+fn type_tree_contains(
+    arena: &dotty_core::AstArena<Untyped>,
+    root: dotty_core::TreeId<Untyped>,
+    target_index: u32,
+) -> bool {
+    let mut pending = vec![root];
+    let mut visited = BTreeSet::new();
+    while let Some(tree) = pending.pop() {
+        if tree.index() == target_index {
+            return true;
+        }
+        if !visited.insert(tree.index()) {
+            continue;
+        }
+        if let Some(node) = arena.try_get(tree) {
+            pending.extend(type_tree_children(&node.kind));
+        }
+    }
+    false
+}
+
+fn selected_name(
+    arena: &dotty_core::AstArena<Untyped>,
+    tree_index: u32,
+) -> Option<dotty_core::Name> {
+    let tree = arena
+        .iter()
+        .find_map(|(tree, _)| (tree.index() == tree_index).then_some(tree))?;
+    let function = match &arena.get(tree).kind {
+        TreeKind::Apply(application) => application.function,
+        TreeKind::Select(_) => tree,
+        _ => return None,
+    };
+    match &arena.try_get(function)?.kind {
+        TreeKind::Select(selection) => Some(selection.name),
+        _ => None,
+    }
+}
+
+fn has_lexical_extension_candidate(
+    arena: &dotty_core::AstArena<Untyped>,
+    tree_index: u32,
+    name: dotty_core::Name,
+    names: &dotty_core::names::NameInterner,
+) -> bool {
+    let Some(selection_tree) = arena
+        .iter()
+        .find_map(|(tree, _)| (tree.index() == tree_index).then_some(tree))
+    else {
+        return false;
+    };
+    let selection_tree = match &arena.get(selection_tree).kind {
+        TreeKind::Apply(application) => application.function,
+        TreeKind::Select(_) => selection_tree,
+        _ => return false,
+    };
+    let Some(selection_node) = arena.try_get(selection_tree) else {
+        return false;
+    };
+    let TreeKind::Select(selection) = &selection_node.kind else {
+        return false;
+    };
+    if selection.name != name {
+        return false;
+    }
+    let Some(selection_range) = selection_node
+        .position
+        .map(|position| position.span().range())
+    else {
+        return false;
+    };
+
+    let mut containing_blocks = arena
+        .iter()
+        .filter_map(|(_, node)| {
+            let TreeKind::Block(block) = &node.kind else {
+                return None;
+            };
+            let range = node.position?.span().range();
+            (range.start() <= selection_range.start() && selection_range.end() <= range.end())
+                .then(|| (range.end() - range.start(), block.stats.clone()))
+        })
+        .collect::<Vec<_>>();
+    containing_blocks.sort_by_key(|(length, _)| *length);
+
+    for (_, statements) in containing_blocks {
+        let mut has_extension = false;
+        let mut has_ordinary_method = false;
+        let mut has_shadowing_value = false;
+        for statement in statements {
+            match arena.try_get(statement).map(|node| &node.kind) {
+                Some(TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension))) => {
+                    has_extension |= is_preindexable_extension(arena, extension, name, names);
+                }
+                Some(TreeKind::DefDef(definition)) => {
+                    has_ordinary_method |= *definition.name.as_name() == name;
+                }
+                Some(TreeKind::ValDef(definition)) if *definition.name.as_name() == name => {
+                    has_shadowing_value |=
+                        statement_precedes_selection(arena, statement, selection_range.start());
+                }
+                Some(TreeKind::PhaseSpecific(UntypedNode::PatDef(definition))) => {
+                    has_shadowing_value |=
+                        statement_precedes_selection(arena, statement, selection_range.start())
+                            && definition
+                                .patterns
+                                .iter()
+                                .any(|pattern| pattern_binds_name(arena, *pattern, name, names));
+                }
+                Some(TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)))
+                    if *definition.name.as_name() == name =>
+                {
+                    has_shadowing_value |=
+                        statement_precedes_selection(arena, statement, selection_range.start());
+                }
+                _ => {}
+            }
+        }
+        if has_extension {
+            return true;
+        }
+        if has_ordinary_method || has_shadowing_value {
+            return false;
+        }
+    }
+    false
+}
+
+fn is_preindexable_extension(
+    arena: &dotty_core::AstArena<Untyped>,
+    extension: &dotty_core::ast::ExtensionMethods,
+    name: dotty_core::Name,
+    names: &dotty_core::names::NameInterner,
+) -> bool {
+    if extension.methods.len() != 1
+        || extension.param_clauses.len() != 1
+        || extension.param_clauses[0].len() != 1
+    {
+        return false;
+    }
+    let parameter = extension.param_clauses[0][0];
+    let supported_receiver = matches!(
+        arena.try_get(parameter).map(|node| &node.kind),
+        Some(TreeKind::ValDef(definition))
+            if !definition.metadata.modifiers.iter().any(|modifier| {
+                matches!(modifier, dotty_core::ast::Modifier::Given | dotty_core::ast::Modifier::Implicit)
+            })
+    );
+    if !supported_receiver {
+        return false;
+    }
+    matches!(
+        arena
+            .try_get(extension.methods[0])
+            .map(|node| &node.kind),
+        Some(TreeKind::DefDef(definition))
+            if *definition.name.as_name() == name
+                && definition.type_params.is_empty()
+                && definition.rhs.is_some()
+                && !names.resolve(definition.name.as_name().text()).ends_with(':')
+    )
+}
+
+fn statement_precedes_selection(
+    arena: &dotty_core::AstArena<Untyped>,
+    statement: dotty_core::TreeId<Untyped>,
+    selection_start: u32,
+) -> bool {
+    arena
+        .try_get(statement)
+        .and_then(|node| node.position)
+        .is_some_and(|position| position.span().range().start() < selection_start)
+}
+
+fn pattern_binds_name(
+    arena: &dotty_core::AstArena<Untyped>,
+    pattern: dotty_core::TreeId<Untyped>,
+    name: dotty_core::Name,
+    names: &dotty_core::names::NameInterner,
+) -> bool {
+    let mut pending = vec![pattern];
+    while let Some(tree) = pending.pop() {
+        let Some(node) = arena.try_get(tree) else {
+            continue;
+        };
+        match &node.kind {
+            TreeKind::Ident(ident)
+                if !ident.backquoted
+                    && ident.name == name
+                    && names
+                        .resolve(ident.name.text())
+                        .chars()
+                        .next()
+                        .is_some_and(char::is_lowercase) =>
+            {
+                return true;
+            }
+            TreeKind::Bind(binding) => {
+                if binding.name == name && names.resolve(binding.name.text()) != "_" {
+                    return true;
+                }
+                pending.push(binding.body);
+            }
+            TreeKind::NamedArg(argument) => pending.push(argument.arg),
+            TreeKind::Typed(typed) => pending.push(typed.expr),
+            TreeKind::Apply(application) => {
+                pending.extend(application.args.iter().rev().copied());
+            }
+            TreeKind::Alternative(alternative) => {
+                if let Some(first) = alternative.alternatives.first() {
+                    pending.push(*first);
+                }
+            }
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => pending.push(parens.inner),
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+                pending.extend(tuple.elements.iter().rev().copied());
+            }
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
+                pending.push(infix.right);
+                pending.push(infix.left);
+            }
+            TreeKind::UnApply(unapply) => {
+                pending.extend(unapply.patterns.iter().rev().copied());
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn source_operator_spellings(

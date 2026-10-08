@@ -331,7 +331,34 @@ so the receiver is available to the body. During block lowering, a supported
 `ExtensionMethods` wrapper becomes one ordinary typed `DefDef` with the
 receiver as its first value-parameter clause. The source extension root and
 method definition map to the same typed node, and the receiver source tree
-maps to its typed parameter. Local extension calls remain deferred.
+maps to its typed parameter.
+
+Selected calls support one lexically visible local extension with the
+requested term name, one explicit receiver, a monomorphic method, and ordinary
+plain receiver and argument clauses. The resolver searches typer-owned local
+extension methods in the active block scopes only; it does not search imports,
+packages, companions, implicit scope, or the classpath. An applicable nominal
+member on a modeled receiver takes precedence. Local extension fallback runs
+only after nominal lookup completes successfully and finds no supported member
+candidate, or after a supported ordinary call is inapplicable. Missing class
+information is not evidence that a member is absent: the typer preserves that
+lookup error and does not try an extension. The fallback checks the local
+extension receiver and ordinary arguments, then lowers the call as an
+identifier application with the receiver as its first argument clause. A
+same-named ordinary local method is not an extension candidate, nested blocks
+shadow deterministically, and multiple same-named extension candidates remain
+explicitly deferred rather than selecting by allocation or source order.
+
+Primitive `Definitions` provide canonical types but no class member scopes in
+the current semantic store. A local extension call on a primitive can resolve
+when a completed nominal member index is available and confirms that the
+selected name has no ordinary member. Without that information, the typer
+preserves `MemberLookup` rather than risking an extension masking a standard
+primitive member. This does not model primitive members or external class
+members. Unsupported extension group shapes remain
+`LocalBlockDeclarationDeferred`; unsupported receiver/signature shapes use
+focused `LocalMethodSignatureDeferred` features, and unresolved receiver types
+retain the underlying type-resolution error.
 
 For the tested subset, source Typer completion currently supports:
 
