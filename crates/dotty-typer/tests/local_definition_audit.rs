@@ -1665,6 +1665,28 @@ fn local_extension_audit_separates_nonapplicable_and_ambiguous_calls() {
         "a group that is not preindexed is not an extension candidate: {unsupported_group:?}"
     );
 
+    let right_associative = audit_source(
+        "class Audit { def outer: Int = { this.++:(1); extension (receiver: Audit) { def ++:(argument: Int): Int = argument }; def marker: Int = 1; 0 } }",
+        "RightAssociativeExtension.scala",
+    );
+    assert!(
+        !right_associative
+            .failures
+            .contains_key("LocalExtensionNotApplicable"),
+        "right-associative extensions are not preindexed: {right_associative:?}"
+    );
+
+    let tuple_shadow = audit_source(
+        "class Audit { def outer: Int = { extension (receiver: Audit) { def choose(argument: Int): Int = argument }; { val (choose, other) = (0, 1); this.choose(1) } } }",
+        "TuplePatternShadow.scala",
+    );
+    assert!(
+        !tuple_shadow
+            .failures
+            .contains_key("LocalExtensionNotApplicable"),
+        "tuple pattern binders shadow enclosing extensions: {tuple_shadow:?}"
+    );
+
     let ambiguous = audit_source(
         "class Audit { def outer: Int = { extension (left: Audit) { def choose(argument: Int): Int = 1 }; extension (right: Audit) { def choose(argument: Int): Int = 2 }; this.choose(1); def marker: Int = 1; 0 } }",
         "AmbiguousExtension.scala",
@@ -1753,7 +1775,7 @@ fn unsupported_type_tree_failures_keep_exact_source_shapes() {
             tree_index: tree.index(),
             tree_kind: tree_kind_label(&node.kind),
         };
-        let failure = classify_typer_error(&error, &parsed.ast, &operators);
+        let failure = classify_typer_error(&error, &parsed.ast, &operators, &store.names);
 
         assert_eq!(
             failure.bucket,
@@ -1761,7 +1783,7 @@ fn unsupported_type_tree_failures_keep_exact_source_shapes() {
         );
         assert_eq!(failure.family, FailureFamily::Other);
         assert_eq!(
-            typed_case_failure_label(&error, &parsed.ast, &operators),
+            typed_case_failure_label(&error, &parsed.ast, &operators, &store.names),
             format!("UnsupportedTypeTree::{expected_shape}")
         );
     }
@@ -2138,8 +2160,12 @@ fn probe_supported_match_cases(
                 }
             }
             Err(error) => {
-                let error_name =
-                    typed_case_failure_label(&error, &parsed.ast, &type_operator_spellings);
+                let error_name = typed_case_failure_label(
+                    &error,
+                    &parsed.ast,
+                    &type_operator_spellings,
+                    &typer.store().names,
+                );
                 *profile
                     .typed_case_failures
                     .entry(error_name.clone())
@@ -2255,6 +2281,7 @@ fn typed_case_failure_label(
     error: &TyperError,
     arena: &dotty_core::AstArena<Untyped>,
     operator_spellings: &BTreeMap<u32, String>,
+    names: &dotty_core::names::NameInterner,
 ) -> String {
     match error {
         TyperError::TuplePatternResolutionDeferred { issue, .. } => {
@@ -2264,7 +2291,7 @@ fn typed_case_failure_label(
             format!("extractor argument::{issue:?}")
         }
         TyperError::UnsupportedTypeTree { .. } => {
-            classify_typer_error(error, arena, operator_spellings).bucket
+            classify_typer_error(error, arena, operator_spellings, names).bucket
         }
         _ => typer_error_name(error).to_owned(),
     }
@@ -2412,7 +2439,12 @@ fn audit_source_inner(
             .expression_context_for(method)
             .and_then(|context| typer.type_expression(rhs, context));
         if let Err(error) = outcome {
-            let failure = classify_typer_error(&error, &parsed.ast, &type_operator_spellings);
+            let failure = classify_typer_error(
+                &error,
+                &parsed.ast,
+                &type_operator_spellings,
+                &typer.store().names,
+            );
             if matches!(
                 error,
                 TyperError::UnsupportedPattern { .. }
@@ -3675,6 +3707,7 @@ fn classify_typer_error(
     error: &TyperError,
     arena: &dotty_core::AstArena<Untyped>,
     operator_spellings: &BTreeMap<u32, String>,
+    names: &dotty_core::names::NameInterner,
 ) -> FailureClassification {
     match error {
         TyperError::LocalBlockDeclarationDeferred {
@@ -3702,19 +3735,24 @@ fn classify_typer_error(
         }
         TyperError::MemberNotFound {
             tree_index, name, ..
-        } if has_lexical_extension_candidate(arena, *tree_index, *name) => FailureClassification {
-            bucket: "LocalExtensionNotApplicable".to_owned(),
-            family: FailureFamily::LocalDeclarationDeferral,
-        },
+        } if has_lexical_extension_candidate(arena, *tree_index, *name, names) => {
+            FailureClassification {
+                bucket: "LocalExtensionNotApplicable".to_owned(),
+                family: FailureFamily::LocalDeclarationDeferral,
+            }
+        }
         TyperError::OverloadedSelectionDeferred {
             tree_index, name, ..
-        } if has_lexical_extension_candidate(arena, *tree_index, *name) => FailureClassification {
-            bucket: "LocalExtensionAmbiguityDeferred".to_owned(),
-            family: FailureFamily::LocalDeclarationDeferral,
-        },
+        } if has_lexical_extension_candidate(arena, *tree_index, *name, names) => {
+            FailureClassification {
+                bucket: "LocalExtensionAmbiguityDeferred".to_owned(),
+                family: FailureFamily::LocalDeclarationDeferral,
+            }
+        }
         TyperError::ApplicationArgumentConformanceUnsupported { tree_index, .. }
-            if selected_name(arena, *tree_index)
-                .is_some_and(|name| has_lexical_extension_candidate(arena, *tree_index, name)) =>
+            if selected_name(arena, *tree_index).is_some_and(|name| {
+                has_lexical_extension_candidate(arena, *tree_index, name, names)
+            }) =>
         {
             FailureClassification {
                 bucket: "LocalExtensionConformanceUnsupported".to_owned(),
@@ -3852,6 +3890,7 @@ fn has_lexical_extension_candidate(
     arena: &dotty_core::AstArena<Untyped>,
     tree_index: u32,
     name: dotty_core::Name,
+    names: &dotty_core::names::NameInterner,
 ) -> bool {
     let Some(selection_tree) = arena
         .iter()
@@ -3900,7 +3939,7 @@ fn has_lexical_extension_candidate(
         for statement in statements {
             match arena.try_get(statement).map(|node| &node.kind) {
                 Some(TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension))) => {
-                    has_extension |= is_preindexable_extension(arena, extension, name);
+                    has_extension |= is_preindexable_extension(arena, extension, name, names);
                 }
                 Some(TreeKind::DefDef(definition)) => {
                     has_ordinary_method |= *definition.name.as_name() == name;
@@ -3915,7 +3954,13 @@ fn has_lexical_extension_candidate(
                             && definition
                                 .patterns
                                 .iter()
-                                .any(|pattern| pattern_binds_name(arena, *pattern, name));
+                                .any(|pattern| pattern_binds_name(arena, *pattern, name, names));
+                }
+                Some(TreeKind::PhaseSpecific(UntypedNode::ModuleDef(definition)))
+                    if *definition.name.as_name() == name =>
+                {
+                    has_shadowing_value |=
+                        statement_precedes_selection(arena, statement, selection_range.start());
                 }
                 _ => {}
             }
@@ -3934,6 +3979,7 @@ fn is_preindexable_extension(
     arena: &dotty_core::AstArena<Untyped>,
     extension: &dotty_core::ast::ExtensionMethods,
     name: dotty_core::Name,
+    names: &dotty_core::names::NameInterner,
 ) -> bool {
     if extension.methods.len() != 1
         || extension.param_clauses.len() != 1
@@ -3960,6 +4006,7 @@ fn is_preindexable_extension(
             if *definition.name.as_name() == name
                 && definition.type_params.is_empty()
                 && definition.rhs.is_some()
+                && !names.resolve(definition.name.as_name().text()).ends_with(':')
     )
 }
 
@@ -3978,25 +4025,56 @@ fn pattern_binds_name(
     arena: &dotty_core::AstArena<Untyped>,
     pattern: dotty_core::TreeId<Untyped>,
     name: dotty_core::Name,
+    names: &dotty_core::names::NameInterner,
 ) -> bool {
-    let Some(node) = arena.try_get(pattern) else {
-        return false;
-    };
-    match &node.kind {
-        TreeKind::Bind(binding) => {
-            binding.name == name || pattern_binds_name(arena, binding.body, name)
+    let mut pending = vec![pattern];
+    while let Some(tree) = pending.pop() {
+        let Some(node) = arena.try_get(tree) else {
+            continue;
+        };
+        match &node.kind {
+            TreeKind::Ident(ident)
+                if !ident.backquoted
+                    && ident.name == name
+                    && names
+                        .resolve(ident.name.text())
+                        .chars()
+                        .next()
+                        .is_some_and(char::is_lowercase) =>
+            {
+                return true;
+            }
+            TreeKind::Bind(binding) => {
+                if binding.name == name && names.resolve(binding.name.text()) != "_" {
+                    return true;
+                }
+                pending.push(binding.body);
+            }
+            TreeKind::NamedArg(argument) => pending.push(argument.arg),
+            TreeKind::Typed(typed) => pending.push(typed.expr),
+            TreeKind::Apply(application) => {
+                pending.extend(application.args.iter().rev().copied());
+            }
+            TreeKind::Alternative(alternative) => {
+                if let Some(first) = alternative.alternatives.first() {
+                    pending.push(*first);
+                }
+            }
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => pending.push(parens.inner),
+            TreeKind::PhaseSpecific(UntypedNode::Tuple(tuple)) => {
+                pending.extend(tuple.elements.iter().rev().copied());
+            }
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
+                pending.push(infix.right);
+                pending.push(infix.left);
+            }
+            TreeKind::UnApply(unapply) => {
+                pending.extend(unapply.patterns.iter().rev().copied());
+            }
+            _ => {}
         }
-        TreeKind::Alternative(alternative) => alternative
-            .alternatives
-            .iter()
-            .any(|pattern| pattern_binds_name(arena, *pattern, name)),
-        TreeKind::UnApply(unapply) => unapply
-            .patterns
-            .iter()
-            .any(|pattern| pattern_binds_name(arena, *pattern, name)),
-        TreeKind::Typed(typed) => pattern_binds_name(arena, typed.expr, name),
-        _ => false,
     }
+    false
 }
 
 fn source_operator_spellings(
