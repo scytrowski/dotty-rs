@@ -1681,6 +1681,73 @@ mod tests {
     }
 
     #[test]
+    fn quote_id_keywords_keep_their_literal_and_this_kinds_inside_splices() {
+        const SOURCE: &str = concat!(
+            "object Q:\n",
+            "  inline def trueValue = ${ 'true }\n",
+            "  inline def falseValue = ${ 'false }\n",
+            "  inline def nullValue = ${ 'null }\n",
+            "  inline def thisValue = ${ 'this }\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+            &result.ast.get(package.stats[0]).kind
+        else {
+            panic!("expected object definition");
+        };
+        let TreeKind::Template(template) = &result.ast.get(module.template).kind else {
+            panic!("expected object template");
+        };
+        let expected = [
+            ("trueValue", dotty_core::Constant::Boolean(true)),
+            ("falseValue", dotty_core::Constant::Boolean(false)),
+            ("nullValue", dotty_core::Constant::Null),
+        ];
+        for (definition_id, (expected_name, expected_value)) in
+            template.body.iter().take(3).zip(expected)
+        {
+            let TreeKind::DefDef(definition) = &result.ast.get(*definition_id).kind else {
+                panic!("expected inline method definition");
+            };
+            assert_eq!(
+                names.resolve(definition.name.as_name().text()),
+                expected_name
+            );
+            let TreeKind::Splice(splice) = &result.ast.get(definition.rhs.unwrap()).kind else {
+                panic!("expected expression splice");
+            };
+            let TreeKind::Quote(quote) = &result.ast.get(splice.expr).kind else {
+                panic!("expected quote-id tree");
+            };
+            let TreeKind::Literal(literal) = &result.ast.get(quote.body).kind else {
+                panic!("expected a keyword literal");
+            };
+            assert_eq!(literal.value, expected_value);
+            let range = result.ast.get(quote.body).position.unwrap().span().range();
+            assert_eq!(range.start(), range.end());
+        }
+        let TreeKind::DefDef(this_value) = &result.ast.get(template.body[3]).kind else {
+            panic!("expected inline this method");
+        };
+        let TreeKind::Splice(splice) = &result.ast.get(this_value.rhs.unwrap()).kind else {
+            panic!("expected this expression splice");
+        };
+        let TreeKind::Quote(quote) = &result.ast.get(splice.expr).kind else {
+            panic!("expected quoted this");
+        };
+        assert!(matches!(result.ast.get(quote.body).kind, TreeKind::This(_)));
+    }
+
+    #[test]
     fn parses_a_legacy_implicit_parameter_in_a_braced_lambda_argument() {
         const SOURCE: &str = concat!(
             "def fromFuture = flatMap(executionContext) {\n",
@@ -1962,6 +2029,96 @@ mod tests {
             TreeKind::ValDef(value)
                 if names.resolve(value.name.as_name().text()) == "following"
         ));
+    }
+
+    #[test]
+    fn inline_method_body_parses_braced_macro_splices() {
+        const SOURCE: &str = concat!(
+            "inline def make: Int = ${ makeImpl }\n",
+            "inline def nested(value: Int): Int = ${ wrap(makeImpl(value + 1)) }\n",
+            "inline def quoted(value: Int): Int = ${ makeImpl('value) }\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        assert_eq!(package.stats.len(), 3);
+        let TreeKind::DefDef(first) = &result.ast.get(package.stats[0]).kind else {
+            panic!("expected first inline method");
+        };
+        let first_rhs = result.ast.get(first.rhs.expect("first method RHS"));
+        let TreeKind::Splice(first_splice) = &first_rhs.kind else {
+            panic!("expected a macro splice, got {:?}", first_rhs.kind);
+        };
+        assert!(matches!(
+            result.ast.get(first_splice.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        let first_range = first_rhs.position.unwrap().span().range();
+        assert_eq!(
+            &SOURCE[first_range.start() as usize..first_range.end() as usize],
+            "${ makeImpl }"
+        );
+
+        let TreeKind::DefDef(nested) = &result.ast.get(package.stats[1]).kind else {
+            panic!("expected nested inline method");
+        };
+        let nested_rhs = result.ast.get(nested.rhs.expect("nested method RHS"));
+        let TreeKind::Splice(nested_splice) = &nested_rhs.kind else {
+            panic!("expected nested macro splice, got {:?}", nested_rhs.kind);
+        };
+        assert!(matches!(
+            result.ast.get(nested_splice.expr).kind,
+            TreeKind::Apply(_)
+        ));
+        let nested_range = nested_rhs.position.unwrap().span().range();
+        assert_eq!(
+            &SOURCE[nested_range.start() as usize..nested_range.end() as usize],
+            "${ wrap(makeImpl(value + 1)) }"
+        );
+
+        let TreeKind::DefDef(quoted) = &result.ast.get(package.stats[2]).kind else {
+            panic!("expected quoteId inline method");
+        };
+        let quoted_rhs = result.ast.get(quoted.rhs.expect("quoted method RHS"));
+        let TreeKind::Splice(quoted_splice) = &quoted_rhs.kind else {
+            panic!("expected quoteId macro splice, got {:?}", quoted_rhs.kind);
+        };
+        let TreeKind::Apply(quoted_apply) = &result.ast.get(quoted_splice.expr).kind else {
+            panic!("expected quoteId argument in the implementation call");
+        };
+        let TreeKind::Quote(quoted_argument) = &result.ast.get(quoted_apply.args[0]).kind else {
+            panic!("expected quoteId to retain Dotty's Quote wrapper");
+        };
+        let TreeKind::Ident(quoted_identifier) = &result.ast.get(quoted_argument.body).kind else {
+            panic!("expected the quote body to reference the identifier");
+        };
+        assert_eq!(names.resolve(quoted_identifier.name.text()), "value");
+        let quoted_range = result
+            .ast
+            .get(quoted_argument.body)
+            .position
+            .unwrap()
+            .span()
+            .range();
+        assert_eq!(quoted_range.start(), quoted_range.end());
+        let quote_range = result
+            .ast
+            .get(quoted_apply.args[0])
+            .position
+            .unwrap()
+            .span()
+            .range();
+        assert_eq!(
+            &SOURCE[quote_range.start() as usize..quote_range.end() as usize],
+            "'value"
+        );
     }
 
     #[test]

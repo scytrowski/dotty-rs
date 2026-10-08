@@ -58,6 +58,9 @@ where
     /// Active quoted expression bodies; `$` followed by `{` is a splice only
     /// while this depth is nonzero.
     pub(crate) expression_quote_depth: u32,
+    /// Active braced expression splices, where Dotty's `quoteId` form (`'id`)
+    /// is a simple expression.
+    pub(crate) expression_splice_depth: u32,
     /// Active quote bodies parsed from pattern position. Braced splices in
     /// these bodies contain patterns and must remain source-level pattern
     /// nodes rather than expression splices.
@@ -109,6 +112,7 @@ where
             end_marker_owners: Vec::new(),
             active_end_marker_targets: Vec::new(),
             expression_quote_depth: 0,
+            expression_splice_depth: 0,
             quote_pattern_depth: 0,
             type_quote_depth: 0,
         }
