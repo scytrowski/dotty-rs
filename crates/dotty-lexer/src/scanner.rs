@@ -581,6 +581,11 @@ impl ContextualScanner {
                 .any(|token| matches!(token.kind, TokenKind::Newline | TokenKind::Newlines));
             let starts_unspaced_prefix_expr =
                 is_unspaced_prefix_expr(&self.source, &self.tokens, current_index);
+            let starts_annotation = current.kind == TokenKind::Operator
+                && self
+                    .source
+                    .get(current.span.start() as usize..current.span.end() as usize)
+                    == Some("@");
             let starts_symbolic_operator = current.kind == TokenKind::Operator
                 && self
                     .source
@@ -590,6 +595,7 @@ impl ContextualScanner {
                 && !has_separator
                 && can_end_statement(Some(previous.kind))
                 && (can_start_statement_kind(current.kind)
+                    || starts_annotation
                     || starts_unspaced_prefix_expr
                     || starts_symbolic_operator)
                 && !suppresses_statement_separator_kind(current.kind)
@@ -5647,6 +5653,61 @@ mod tests {
         assert_eq!(
             indent.span,
             TextRange::new(child.span.start(), child.span.start()).unwrap()
+        );
+    }
+
+    #[test]
+    fn feedback_body_restores_separator_before_annotated_local_definition_in_parens() {
+        let source = concat!(
+            "call(\n",
+            "  value =>\n",
+            "    val n = value\n",
+            "    + 1\n",
+            "    @tailrec def loop(i: Int): Int =\n",
+            "      if i >= n then n else loop(i + 1)\n",
+            "    loop(0)\n",
+            "  ,\n",
+            "  other => other\n",
+            ")\n",
+        );
+        let mut scanner = ContextualScanner::new(source).expect("source scans");
+        let arrow = scanner
+            .tokens
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Operator
+                    && source.get(token.span.start() as usize..token.span.end() as usize)
+                        == Some("=>")
+            })
+            .expect("lambda arrow");
+        scanner.position = arrow;
+        scanner.observe(ScannerEvent::Indented);
+
+        let annotation = scanner
+            .tokens
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Operator
+                    && source.get(token.span.start() as usize..token.span.end() as usize)
+                        == Some("@")
+            })
+            .expect("annotation operator");
+        assert_eq!(scanner.tokens[annotation - 1].kind, TokenKind::Newline);
+        assert_eq!(scanner.tokens[annotation + 1].kind, TokenKind::Identifier);
+
+        let infix_operator = scanner
+            .tokens
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Operator
+                    && source.get(token.span.start() as usize..token.span.end() as usize)
+                        == Some("+")
+            })
+            .expect("leading infix operator");
+        assert_ne!(
+            scanner.tokens[infix_operator - 1].kind,
+            TokenKind::Newline,
+            "the feedback separator must not split a leading infix continuation"
         );
     }
 
