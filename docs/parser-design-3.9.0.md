@@ -860,6 +860,13 @@ template semantics, other legacy given migration syntax, remaining control flow 
 and staging semantics remain follow-up increments. Legacy `macro expr` syntax
 is retained in the untyped AST as a `MacroTree`; macro expansion and semantic
 desugaring are not performed by the parser.
+Braced `${...}` macro splices are parsed as source-level `Splice` nodes,
+including in inline definition bodies, matching Dotty's `isSplice` path.
+Within those braced splices, legacy quote identifiers such as `'value` are
+accepted as identifier references, as required by Dotty's `quoteId` production.
+This does not validate inline ownership, expand the splice, or implement
+staging semantics; unbraced `$name` remains an ordinary identifier outside a
+quoted body.
 
 The initial match layer parses braced and indented `case` regions, including
 patterns, optional guards (including line breaks between a pattern and its

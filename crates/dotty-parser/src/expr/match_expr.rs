@@ -73,6 +73,8 @@ where
             None
         };
         self.advance();
+        self.active_end_marker_targets
+            .push((dotty_core::HardKeyword::Match, mark.start));
         let cases = if self.accept(TokenKind::Punctuation(Punctuation::LeftBrace)) {
             let cases = self.case_clauses();
             if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
@@ -110,7 +112,10 @@ where
                 } else if let Some((indent_offset, _)) = case_region {
                     self.observe_match_cases_closed(indent_offset);
                 }
-                if !self.accept(TokenKind::Outdent) && !closed_by_delimiter {
+                if !self.accept(TokenKind::Outdent)
+                    && !closed_by_delimiter
+                    && !self.current_end_marker_matches_active_construct()
+                {
                     self.report(
                         crate::ParseDiagnosticKind::ExpectedToken,
                         "expected an outdent to close match cases",
@@ -125,6 +130,11 @@ where
                 self.case_clauses()
             }
         };
+        let popped_target = self.active_end_marker_targets.pop();
+        debug_assert_eq!(
+            popped_target,
+            Some((dotty_core::HardKeyword::Match, mark.start))
+        );
 
         if cases.is_empty() {
             self.report(

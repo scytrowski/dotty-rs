@@ -175,6 +175,10 @@ quoted expression/type bodies, empty quoted blocks, nested quotes, braced
 expression splices, and simple `$name` splices. The Rust and Scala renderers
 compare quote/splice child trees and source spans; staging semantics are not
 part of this parser oracle.
+The definition fixture `fixtures/definitions/inline-macro-splice.scala` also
+checks Dotty's source-level `${...}` splice path in inline method bodies,
+including a nested call expression. This compares parser trees only and does
+not run macro expansion or validate staging.
 
 Fixtures under `fixtures/definitions/` cover the initial class-like
 definition subset in block mode: class, trait, object, and enum nodes; primary
