@@ -466,8 +466,11 @@ where
                     Punctuation::Comma | Punctuation::RightParen | Punctuation::RightBrace
                 )
             );
+        let closes_for_enumerator =
+            self.for_enumerator_rhs && self.current_starts_multiline_for_enumerator();
         if matches!(self.current().kind, TokenKind::Outdent | TokenKind::Eof)
             || closes_enclosing_argument
+            || closes_for_enumerator
         {
             return body;
         }

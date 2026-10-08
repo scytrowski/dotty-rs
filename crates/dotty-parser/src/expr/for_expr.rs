@@ -279,13 +279,22 @@ where
                 | TokenKind::Punctuation(
                     Punctuation::RightParen | Punctuation::RightBracket | Punctuation::RightBrace
                 )
-        ) || !self.has_physical_line_break(self.last_real_token_end, self.current().span.start())
-        {
+        ) {
             return false;
         }
 
         let mut pattern_offset = 0;
-        if self.current().kind == TokenKind::Keyword(HardKeyword::Case) {
+        while matches!(
+            self.cursor.lookahead(pattern_offset).kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            pattern_offset += 1;
+        }
+        let pattern = self.cursor.lookahead(pattern_offset).clone();
+        if !self.has_physical_line_break(self.last_real_token_end, pattern.span.start()) {
+            return false;
+        }
+        if pattern.kind == TokenKind::Keyword(HardKeyword::Case) {
             pattern_offset += 1;
         }
         if !matches!(
@@ -506,6 +515,28 @@ mod tests {
             parser.ast().get(tree).position.unwrap().span().range(),
             dotty_core::TextRange::new(0, source.len() as u32).unwrap()
         );
+    }
+
+    #[test]
+    fn recognizes_an_enumerator_after_a_line_break_token_in_a_lambda_rhs() {
+        let source = "incremented\nresult <- values";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Newline, 11, 12),
+                token(TokenKind::Identifier, 12, 18),
+                arrow(19, 21),
+                token(TokenKind::Identifier, 22, 28),
+                token(TokenKind::Eof, 28, 28),
+            ],
+            &mut names,
+        );
+        parser.last_real_token_kind = TokenKind::Identifier;
+        parser.last_real_token_end = 11;
+        parser.for_enumerator_rhs = true;
+
+        assert!(parser.current_starts_multiline_for_enumerator());
     }
 
     #[test]
