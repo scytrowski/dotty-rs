@@ -1065,3 +1065,22 @@ remaining modifier-bearing cases stay deferred. This measures first-blocker
 movement, not full source semantic parity. The audit used the pinned source
 revision `777528f19a58e794c9954a42f433373472ec57f8` and the available JDK 25.
 See the [pinned function-type reference and typed-tree fixture](../crates/dotty-typer/tests/fixtures/function-type-projection/FunctionTypeProjection.oracle.md).
+
+## Explicitly typed function literals (#828)
+
+Ordinary function literals with explicit parameter types now type to a shared
+`Closure` node whose type is the canonical applied `scala.FunctionN` type.
+The closure references a typer-owned synthetic method definition. Each
+parameter is a method-owned `Parameter` symbol in an isolated lambda scope;
+the body is typed in that scope, and its widened type becomes the synthetic
+method result. The bounded slice covers zero, one, and multiple parameters,
+block bodies, and lambdas passed to an already-supported method application.
+
+Missing parameter types, parameter modifiers, annotations, and duplicate
+parameter names remain explicit errors. Expected-type-driven parameter
+inference, contextual or polymorphic lambdas, and capture analysis remain out
+of scope. The current closure environment is empty for the supported
+capture-free forms. Failed lambda typing rolls back its synthetic method,
+parameter symbols, scopes, typed nodes, and source mappings. The pinned
+Scala 3.9.0 typer and `lambdaLift` shapes, including source positions, are
+recorded in the [function-literal fixture](../crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.oracle.md).

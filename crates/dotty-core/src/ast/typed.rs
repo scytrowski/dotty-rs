@@ -3,8 +3,8 @@
 
 use crate::ast::arena::AstArena;
 use crate::ast::common::{
-    Alternative, Apply, ApplyKind, Assign, Bind, Block, CaseDef, Ident, If, Literal, Match, New,
-    Return, Select, This, TypeApply, TypeTree, TypedExpr, UnApply, While,
+    Alternative, Apply, ApplyKind, Assign, Bind, Block, CaseDef, Closure, Ident, If, Literal,
+    Match, New, Return, Select, This, TypeApply, TypeTree, TypedExpr, UnApply, While,
 };
 use crate::ast::phase::Typed;
 use crate::ast::tree::{Tree, TreeKind};
@@ -249,6 +249,30 @@ impl<'a> TypedAstBuilder<'a> {
         );
         self.arena.alloc(Tree {
             kind: TreeKind::New(New { tpt }),
+            position,
+            ty,
+        })
+    }
+
+    /// Allocates a typed closure over its environment and method reference.
+    pub fn closure(
+        &mut self,
+        env: Vec<TreeId<Typed>>,
+        method: TreeId<Typed>,
+        tpt: Option<TreeId<Typed>>,
+        ty: TypeId,
+        position: Option<SourceSpan>,
+    ) -> TreeId<Typed> {
+        for captured in &env {
+            self.assert_real_typed_tree(*captured, "each typed closure environment value");
+        }
+        self.assert_real_typed_tree(method, "a typed closure method reference");
+        if let Some(tpt) = tpt {
+            self.assert_real_typed_tree(tpt, "a typed closure target type");
+        }
+        self.assert_real_type(ty, "a typed closure");
+        self.arena.alloc(Tree {
+            kind: TreeKind::Closure(Closure { env, method, tpt }),
             position,
             ty,
         })

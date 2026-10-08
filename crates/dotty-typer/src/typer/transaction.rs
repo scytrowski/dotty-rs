@@ -14,6 +14,7 @@ impl SourceTyper<'_> {
         let annotation_checkpoint = self.source_annotations.clone();
         let typed_ast_checkpoint = self.typed_arena.checkpoint();
         let typed_index_checkpoint = self.typed_index.clone();
+        let function_literals_checkpoint = self.function_literals.clone();
         let local_symbols_checkpoint = self.local_symbols.clone();
         let patdef_expansions_checkpoint = self.patdef_expansions.clone();
         let pattern_bindings_checkpoint = self.pattern_bindings.clone();
@@ -36,6 +37,7 @@ impl SourceTyper<'_> {
             self.source_annotations = annotation_checkpoint;
             self.typed_arena.rollback_to(typed_ast_checkpoint);
             self.typed_index = typed_index_checkpoint;
+            self.function_literals = function_literals_checkpoint;
             self.local_symbols = local_symbols_checkpoint;
             self.patdef_expansions = patdef_expansions_checkpoint;
             self.pattern_bindings = pattern_bindings_checkpoint;
@@ -57,6 +59,7 @@ impl SourceTyper<'_> {
     ) -> Result<T, TyperError> {
         let ast_checkpoint = self.typed_arena.checkpoint();
         let typed_index_checkpoint = self.typed_index.clone();
+        let function_literals_checkpoint = self.function_literals.clone();
         let store_checkpoint = self.store.checkpoint();
         let resolver_checkpoint = self.resolver.checkpoint();
         let package_entry_checkpoint = self.synthetic_package_entries.len();
@@ -96,6 +99,7 @@ impl SourceTyper<'_> {
                 // successful nested mappings cannot outlive rolled-back AST
                 // nodes when this outer expression fails.
                 self.typed_index = typed_index_checkpoint;
+                self.function_literals = function_literals_checkpoint;
                 Err(error)
             }
         }

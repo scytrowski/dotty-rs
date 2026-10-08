@@ -12,11 +12,13 @@ mod annotated;
 mod assignment;
 pub(super) mod blocks;
 mod control_flow;
+pub(super) mod function;
 mod match_expr;
 mod new;
 mod patterns;
 mod references;
 pub(super) use blocks::LocalMethodIndex;
+pub(super) use function::FunctionLiteralIndex;
 
 impl SourceTyper<'_> {
     pub(super) fn type_prefix_expression(

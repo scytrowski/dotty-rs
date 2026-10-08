@@ -120,6 +120,7 @@ pub struct SourceTyper<'a> {
     inferred_method_results_in_progress: HashSet<SymbolId>,
     typed_arena: AstArena<Typed>,
     typed_index: SourceTypedIndex,
+    function_literals: expression::FunctionLiteralIndex,
     expression_scopes: Vec<ExpressionScopeFrame>,
     expression_scope_owner: u64,
     synthetic_package_entries: Vec<(ScopeId, SymbolId)>,
@@ -178,6 +179,7 @@ impl<'a> SourceTyper<'a> {
             inferred_method_results_in_progress: HashSet::new(),
             typed_arena: AstArena::new(),
             typed_index: SourceTypedIndex::new(),
+            function_literals: expression::FunctionLiteralIndex::default(),
             expression_scopes: Vec::new(),
             expression_scope_owner: next_expression_scope_owner(),
             synthetic_package_entries: Vec::new(),
@@ -300,6 +302,14 @@ impl<'a> SourceTyper<'a> {
             TreeKind::New(new) => self.type_new_expression(
                 tree,
                 new,
+                source_tree.position,
+                context,
+                info_journal,
+                new_mappings,
+            ),
+            TreeKind::PhaseSpecific(UntypedNode::Function(function)) => self.type_function_literal(
+                tree,
+                function,
                 source_tree.position,
                 context,
                 info_journal,
@@ -516,6 +526,29 @@ impl<'a> SourceTyper<'a> {
         tree: TreeId<Untyped>,
     ) -> Option<SymbolId> {
         self.local_methods.parameter_symbol_at(source, tree)
+    }
+
+    /// Returns the typer-owned method identity assigned to a source function literal.
+    pub fn function_literal_method_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        self.function_literals.method_at(source, tree)
+    }
+
+    /// Returns the method-owned scope for a successfully typed function literal.
+    pub fn function_literal_method_scope(&self, method: SymbolId) -> Option<ScopeId> {
+        self.function_literals.scope_of(method)
+    }
+
+    /// Returns the typer-owned parameter identity for a function-literal parameter.
+    pub fn function_literal_parameter_symbol_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<SymbolId> {
+        self.function_literals.parameter_at(source, tree)
     }
 
     /// Returns the typer-owned type parameter symbol for a local method tree.
@@ -3731,6 +3764,221 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn explicitly_typed_function_literals_lower_to_method_owned_closures() {
+        let source_text = concat!(
+            "class C { ",
+            "def zero: () => Int = () => 1; ",
+            "def one: Int => Int = (x: Int) => x; ",
+            "def many: (Int, Int) => Int = (x: Int, y: Int) => x; ",
+            "def block: Int => Int = (x: Int) => { val local: Int = x; local }; ",
+            "def accept(function: Int => Int): Int = 1; ",
+            "def argument: Int = accept((x: Int) => x); ",
+            "def outside: Int = x",
+            " }",
+        );
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name(source_text);
+        enter_scala_function_classes(&mut store, &mut packages, 0..=2);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let mut lambdas = Vec::new();
+        for method_name in ["zero", "one", "many", "block"] {
+            let (owner, lambda_tree) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, method_name);
+            let context = typer.expression_context_for(owner).unwrap();
+            let typed = typer.type_expression(lambda_tree, context).unwrap();
+            let TreeKind::Closure(closure) = &typer.typed_ast().get(typed).kind else {
+                panic!("{method_name} should lower to a typed closure");
+            };
+            assert!(closure.env.is_empty());
+            assert_eq!(closure.tpt, None);
+            let TreeKind::DefDef(method_definition) = &typer.typed_ast().get(closure.method).kind
+            else {
+                panic!("closure should retain its synthetic method definition");
+            };
+            assert_eq!(method_definition.value_param_clauses.len(), 1);
+            let parameters = &method_definition.value_param_clauses[0];
+            let expected_arity = match method_name {
+                "zero" => 0,
+                "one" | "block" => 1,
+                "many" => 2,
+                _ => unreachable!(),
+            };
+            assert_eq!(parameters.len(), expected_arity);
+            let closure_type = typer.typed_ast().get(typed).ty;
+            let Type::Applied { tycon, args } = typer.store().types.get(closure_type) else {
+                panic!("closure should have its applied FunctionN type");
+            };
+            let Type::TypeRef {
+                target: TypeRefTarget::Symbol(function_class),
+                ..
+            } = typer.store().types.get(*tycon)
+            else {
+                panic!("lambda type should reference its canonical function class");
+            };
+            assert_eq!(args.len(), expected_arity + 1);
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(*function_class).name.text()),
+                format!("Function{expected_arity}")
+            );
+
+            let method = typer
+                .function_literal_method_at(source, lambda_tree)
+                .expect("typed lambda should have a semantic method identity");
+            assert_eq!(typer.store().symbols.get(method).kind, SymbolKind::Method);
+            assert_eq!(typer.store().symbols.get(method).owner, Some(owner));
+            let scope = typer.function_literal_method_scope(method).unwrap();
+            assert_eq!(typer.store().scopes.get(scope).owner, Some(method));
+            let TreeKind::PhaseSpecific(UntypedNode::Function(function)) =
+                &parsed.ast.get(lambda_tree).kind
+            else {
+                panic!("source lambda should remain an untyped Function");
+            };
+            for (parameter_tree, typed_parameter) in
+                function.params.iter().zip(parameters.iter().copied())
+            {
+                let symbol = typer
+                    .function_literal_parameter_symbol_at(source, *parameter_tree)
+                    .unwrap();
+                assert_eq!(typer.store().symbols.get(symbol).owner, Some(method));
+                let TreeKind::ValDef(parameter) = &typer.typed_ast().get(typed_parameter).kind
+                else {
+                    panic!("lambda parameter should lower to a typed value definition");
+                };
+                assert_eq!(
+                    typer
+                        .store()
+                        .scopes
+                        .get(scope)
+                        .lookup_all(parameter.name.as_name()),
+                    &[symbol]
+                );
+                assert_eq!(
+                    typer.source_typed_index().get(source, *parameter_tree),
+                    Some(typed_parameter)
+                );
+            }
+            let TreeKind::PhaseSpecific(UntypedNode::Function(function)) =
+                &parsed.ast.get(lambda_tree).kind
+            else {
+                unreachable!();
+            };
+            assert!(
+                typer
+                    .source_typed_index()
+                    .get(source, function.body)
+                    .is_some()
+            );
+            assert_eq!(
+                typer.source_typed_index().get(source, lambda_tree),
+                Some(typed)
+            );
+            let repeated = typer.type_expression(lambda_tree, context).unwrap();
+            assert_eq!(repeated, typed);
+            assert_eq!(
+                typer.function_literal_method_at(source, lambda_tree),
+                Some(method)
+            );
+            lambdas.push((lambda_tree, method, function.params.first().copied()));
+        }
+        assert_ne!(lambdas[1].1, lambdas[3].1);
+        assert_ne!(
+            typer.function_literal_parameter_symbol_at(source, lambdas[1].2.unwrap()),
+            typer.function_literal_parameter_symbol_at(source, lambdas[3].2.unwrap()),
+            "same-named parameters from separate lambdas must have distinct identities"
+        );
+
+        let (argument_method, argument_tree) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "argument");
+        let context = typer.expression_context_for(argument_method).unwrap();
+        let typed = typer.type_expression(argument_tree, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("the accepted lambda argument should remain in its application");
+        };
+        assert!(matches!(
+            typer.typed_ast().get(application.args[0]).kind,
+            TreeKind::Closure(_)
+        ));
+
+        let (outside_method, outside_tree) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "outside");
+        let outside_context = typer.expression_context_for(outside_method).unwrap();
+        assert!(matches!(
+            typer.type_expression(outside_tree, outside_context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn inferred_function_literal_parameters_are_explicitly_unsupported() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def bad = x => x }");
+        let (owner, lambda) = method_definition_and_rhs(&parsed, &store, &index, source, "bad");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(owner).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(lambda, context),
+            Err(TyperError::UnsupportedFunctionLiteralParameter {
+                reason: "an explicit parameter type is required",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn failed_function_literal_body_rolls_back_lambda_identity_and_typed_nodes() {
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name("class C { def bad: Int => Int = (x: Int) => missing }");
+        enter_scala_function_classes(&mut store, &mut packages, [1]);
+        let (owner, lambda) = method_definition_and_rhs(&parsed, &store, &index, source, "bad");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(owner).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+        let typed_count = typer.typed_ast().iter().count();
+
+        assert!(matches!(
+            typer.type_expression(lambda, context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.typed_ast().iter().count(), typed_count);
+        assert_eq!(typer.function_literal_method_at(source, lambda), None);
+        assert_eq!(typer.source_typed_index().get(source, lambda), None);
+
+        assert!(matches!(
+            typer.type_expression(lambda, context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.function_literal_method_at(source, lambda), None);
     }
 
     #[test]

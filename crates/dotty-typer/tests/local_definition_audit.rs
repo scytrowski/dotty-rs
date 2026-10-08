@@ -1624,15 +1624,13 @@ fn local_expression_audit_types_supported_typed_patterns() {
 }
 
 #[test]
-fn local_expression_audit_reports_lambda_and_deferred_declaration_subkinds() {
+fn local_expression_audit_reports_lambda_projection_and_deferred_declaration_subkinds() {
     let lambda = audit_source(
         "object Audit { def outer: Int = { def local: Int = (x: Int) => x; 0 } }",
         "Lambda.scala",
     );
     assert!(
-        lambda
-            .failures
-            .contains_key("UnsupportedExpression::Function"),
+        lambda.failures.contains_key("SourceFunctionClassNotFound"),
         "{lambda:?}"
     );
 
@@ -4920,6 +4918,9 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::TypeSelectionInExpression { .. } => "TypeSelectionInExpression",
         TyperError::MemberLookup(..) => "MemberLookup",
         TyperError::UnsupportedExpression { .. } => "UnsupportedExpression",
+        TyperError::UnsupportedFunctionLiteralParameter { .. } => {
+            "UnsupportedFunctionLiteralParameter"
+        }
         TyperError::UnsupportedPattern { .. } => "UnsupportedPattern",
         TyperError::TuplePatternResolutionDeferred { .. } => "TuplePatternResolutionDeferred",
         TyperError::TuplePatternTypeMismatch { .. } => "TuplePatternTypeMismatch",

@@ -1256,6 +1256,12 @@ pub enum TyperError {
         tree_index: u32,
         expression_kind: &'static str,
     },
+    /// A function literal parameter is outside the explicitly typed subset.
+    UnsupportedFunctionLiteralParameter {
+        source: SourceId,
+        tree_index: u32,
+        reason: &'static str,
+    },
     /// The source pattern root is not supported by the current pattern subset.
     UnsupportedPattern {
         source: SourceId,
