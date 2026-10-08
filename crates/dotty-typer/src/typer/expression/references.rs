@@ -442,16 +442,23 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         let symbol = self.resolve_expression_term(ident.name, context, tree.index(), position)?;
+        let declaration = self.store.symbols.get(symbol);
+        let shared_owner = declaration
+            .owner
+            .filter(|owner| self.store.symbols.contains(*owner))
+            .is_some_and(|owner| {
+                matches!(
+                    self.store.symbols.get(owner).kind,
+                    SymbolKind::Object | SymbolKind::ModuleClass | SymbolKind::Package
+                )
+            });
         if self.function_literals.is_method(context.owner)
-            && self.store.symbols.get(symbol).owner != Some(context.owner)
-            && matches!(
-                self.store.symbols.get(symbol).kind,
-                SymbolKind::Parameter
-                    | SymbolKind::Field
-                    | SymbolKind::Value
-                    | SymbolKind::Variable
-                    | SymbolKind::Local
-            )
+            && declaration.owner != Some(context.owner)
+            && (matches!(declaration.kind, SymbolKind::Parameter | SymbolKind::Local)
+                || (matches!(
+                    declaration.kind,
+                    SymbolKind::Field | SymbolKind::Value | SymbolKind::Variable
+                ) && !shared_owner))
         {
             return Err(TyperError::FunctionLiteralCaptureUnsupported {
                 source: self.source,
