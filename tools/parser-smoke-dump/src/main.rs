@@ -3798,6 +3798,27 @@ mod tests {
     }
 
     #[test]
+    fn extension_end_marker_follows_a_nested_method_end_marker() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/scala-parser-oracle/fixtures/compilation/end-extension-after-method-marker.scala"
+        );
+        let source = fs::read_to_string(fixture).expect("fixture should be readable");
+        let scanner = ContextualScanner::new(&source).expect("source should scan cleanly");
+        let source_text = SourceText::new(&source).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(result.ast.iter().any(|(_, tree)| matches!(
+            &tree.kind,
+            TreeKind::DefDef(definition)
+                if names.resolve(definition.name.as_name().text()) == "after"
+        )));
+    }
+
+    #[test]
     fn end_marker_at_outer_indentation_is_not_stolen_by_same_named_member() {
         const SOURCE: &str = "object Outer:\n  class Outer {}\nend Outer";
         let scanner = ContextualScanner::new(SOURCE).expect("source scans");
