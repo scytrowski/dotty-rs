@@ -2,7 +2,7 @@ use dotty_core::ast::{Block, If, Match, ParsedTry, Return, Throw, UntypedNode, W
 use dotty_core::{Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use super::{can_start_expr, is_else_separator};
-use crate::{Location, Parser};
+use crate::Parser;
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -648,7 +648,7 @@ where
                     TokenKind::Punctuation(Punctuation::RightParen | Punctuation::RightBrace)
                 )
                 || (feedback_indent.is_some()
-                    && self.context.location == Location::InArgs
+                    && self.is_within_argument_list()
                     && self.current().kind == TokenKind::Punctuation(Punctuation::Comma));
             if closed_by_delimiter {
                 self.observe_outdented_by_delimiter();
@@ -685,7 +685,7 @@ where
                 TokenKind::Punctuation(Punctuation::RightParen | Punctuation::RightBrace)
             )
             || (feedback_indent.is_some()
-                && self.context.location == Location::InArgs
+                && self.is_within_argument_list()
                 && self.current().kind == TokenKind::Punctuation(Punctuation::Comma));
         if closed_by_delimiter {
             self.observe_outdented_by_delimiter();

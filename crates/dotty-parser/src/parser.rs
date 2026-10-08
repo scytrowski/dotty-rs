@@ -42,6 +42,10 @@ where
     /// feedback. Nested grammar such as a lambda body must keep notifying the
     /// scanner so it can emit the matching outdent at the right boundary.
     pub(crate) feedback_block_indent: Option<u32>,
+    /// Locations that own the statement sequence surrounding each active
+    /// expression block. Statement parsing temporarily switches to `InBlock`;
+    /// nested grammar may still need the enclosing argument delimiter.
+    pub(crate) block_parent_locations: Vec<Location>,
     /// AST constructs already closed by an explicit Scala `end` marker.
     pub(crate) end_marked_trees: HashSet<TreeId<Untyped>>,
     /// Active enclosing constructs that can own Scala `end` markers, from
@@ -100,6 +104,7 @@ where
             last_advance_was_outdent: false,
             last_advance_consumed_statement_separator: false,
             feedback_block_indent: None,
+            block_parent_locations: Vec::new(),
             end_marked_trees: HashSet::new(),
             end_marker_owners: Vec::new(),
             active_end_marker_targets: Vec::new(),
@@ -283,6 +288,22 @@ where
         let result = parse(self);
         self.feedback_block_indent = previous;
         result
+    }
+
+    pub(crate) fn with_block_parent_location<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.block_parent_locations.push(self.context.location);
+        let result = parse(self);
+        let parent_location = self.block_parent_locations.pop();
+        debug_assert_eq!(parent_location, Some(self.context.location));
+        result
+    }
+
+    pub(crate) fn is_within_argument_list(&self) -> bool {
+        self.context.location == Location::InArgs
+            || self.block_parent_locations.contains(&Location::InArgs)
     }
 
     /// Runs a nested parse with case/catch-body boundaries enabled.
