@@ -325,4 +325,3 @@
     crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<7..7>
     )
 }:<empty>.type>@<FunctionLiterals.scala:1>
-
