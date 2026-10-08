@@ -319,6 +319,23 @@ where
         let mark = self.mark();
         self.advance(); // `@` is scanner-facing Operator punctuation.
 
+        // Scanner feedback can expose a zero-width statement separator at
+        // this boundary even though `@` and its annotation type are adjacent
+        // in source. Ignore only that synthetic token; a physical line break
+        // after `@` remains invalid syntax.
+        while matches!(
+            self.current().kind,
+            TokenKind::Newline | TokenKind::Newlines
+        ) {
+            let separator = self.current().span;
+            if separator.start() != separator.end()
+                || self.cursor.lookahead(1).span.start() != separator.end()
+            {
+                break;
+            }
+            self.advance();
+        }
+
         let tpt = if matches!(
             self.current().kind,
             TokenKind::Identifier | TokenKind::BackquotedIdentifier
@@ -761,6 +778,30 @@ mod tests {
         };
         assert_eq!(parser.diagnostics().len(), 1);
         assert!(parser.current().kind == TokenKind::Eof);
+    }
+
+    #[test]
+    fn does_not_skip_a_physical_newline_after_annotation_marker() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "@\nAnn",
+            vec![
+                token(TokenKind::Operator, 0, 1),
+                token(TokenKind::Newline, 1, 2),
+                token(TokenKind::Identifier, 2, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        );
+
+        parser.parse_annotation();
+
+        assert_eq!(parser.current().kind, TokenKind::Newline);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        );
     }
 
     #[test]
