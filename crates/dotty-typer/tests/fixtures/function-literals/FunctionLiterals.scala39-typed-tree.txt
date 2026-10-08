@@ -1,0 +1,328 @@
+[[syntax trees at end of                     typer]] // crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala
+<package <<empty>:<empty>>@<FunctionLiterals.scala:1> {
+  final lazy module val FunctionLiterals:
+    FunctionLiterals@<FunctionLiterals.scala:1> =
+    <
+      <
+        <new FunctionLiterals@<FunctionLiterals.scala:1>:FunctionLiterals>@<
+          FunctionLiterals.scala:1>
+      :((): FunctionLiterals)>@<FunctionLiterals.scala:1>
+    ():FunctionLiterals>@<FunctionLiterals.scala:1>
+  @<FunctionLiterals.scala:1>@@(FunctionLiterals=
+    crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<0..0>
+    )
+  final module class FunctionLiterals() extends <
+    <<new Object:Object>@<FunctionLiterals.scala:1>:((): Object)>@<
+      FunctionLiterals.scala:1>
+  ():Object>@<FunctionLiterals.scala:1> {
+    this: FunctionLiterals.type@<FunctionLiterals.scala:2> =>
+    val zero: () => Int@<FunctionLiterals.scala:2> =
+      <() => <1:(1 : Int)>@<FunctionLiterals.scala:2>:() => Int>@<
+        FunctionLiterals.scala:2>
+    @<FunctionLiterals.scala:2>@@(zero=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<31..31>
+      )
+    val one: Int => Int@<FunctionLiterals.scala:3> =
+      <(
+        x: Int@<FunctionLiterals.scala:3>@<FunctionLiterals.scala:3>@@(x=
+          crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<82..82>
+          )
+      ) => <x:Int>@<FunctionLiterals.scala:3>:Int => Int>@<
+        FunctionLiterals.scala:3>
+    @<FunctionLiterals.scala:3>@@(one=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<63..63>
+      )
+    val many: (Int, Int) => Int@<FunctionLiterals.scala:4> =
+      <(
+        x: Int@<FunctionLiterals.scala:4>@<FunctionLiterals.scala:4>@@(x=
+          crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<128..128>
+          ),
+        y: Int@<FunctionLiterals.scala:4>@<FunctionLiterals.scala:4>@@(y=
+          crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<136..136>
+          )
+      ) => <x:Int>@<FunctionLiterals.scala:4>:(Int, Int) => Int>@<
+        FunctionLiterals.scala:4>
+    @<FunctionLiterals.scala:4>@@(many=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<101..101>
+      )
+    val block: Int => Int@<FunctionLiterals.scala:5> =
+      <(
+        x: Int@<FunctionLiterals.scala:5>@<FunctionLiterals.scala:5>@@(x=
+          crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<176..176>
+          )
+      ) =>
+        <
+          {
+            val local: Int@<FunctionLiterals.scala:6> =
+              <x:Int>@<FunctionLiterals.scala:6>@<FunctionLiterals.scala:6>
+              @@(local=
+              crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<195..195>
+              )
+            <<local:Int>@<FunctionLiterals.scala:7> :Int:Int>@<
+              FunctionLiterals.scala:7>
+          }
+        :Int>@<FunctionLiterals.scala:6>
+      :Int => Int>@<FunctionLiterals.scala:5>
+    @<FunctionLiterals.scala:5>@@(block=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<155..155>
+      )
+    def consume(
+      function: Int => Int@<FunctionLiterals.scala:9>@<FunctionLiterals.scala:9>
+        @@(function=
+        crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<235..235>
+        )
+    ): Int@<FunctionLiterals.scala:9> =
+      <
+        <<function:(Int => Int)>@<FunctionLiterals.scala:9>.apply:
+          ((v1: Int): Int)>@<FunctionLiterals.scala:9>
+      (<1:(1 : Int)>@<FunctionLiterals.scala:9>):Int>@<FunctionLiterals.scala:9>
+      @<FunctionLiterals.scala:9>@@(consume=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<227..227>
+      )
+    val argument: Int@<FunctionLiterals.scala:10> =
+      <
+        <FunctionLiterals.consume:((function: Int => Int): Int)>@<
+          FunctionLiterals.scala:10>
+      (
+        <(
+          x: Int@<FunctionLiterals.scala:10>@<FunctionLiterals.scala:10>@@(x=
+            crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<307..307>
+            )
+        ) => <x:Int>@<FunctionLiterals.scala:10>:Int => Int>@<
+          FunctionLiterals.scala:10>
+      ):Int>@<FunctionLiterals.scala:10>
+    @<FunctionLiterals.scala:10>@@(argument=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<282..282>
+      )
+  }@<FunctionLiterals.scala:1>@@(FunctionLiterals$=
+    crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<7..7>
+    )
+}:<empty>.type>@<FunctionLiterals.scala:1>
+
+[[syntax trees at end of MegaPhase{lambdaLift, elimStaticThis, countOuterAccesses}]] // crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala
+<package <<empty>:<empty>>@<FunctionLiterals.scala:1> {
+  final lazy module val FunctionLiterals: FunctionLiterals =
+    <
+      <<new FunctionLiterals:FunctionLiterals>@<FunctionLiterals.scala:1>:
+        ((): FunctionLiterals)>@<FunctionLiterals.scala:1>
+    ():FunctionLiterals>@<FunctionLiterals.scala:1>
+  @<FunctionLiterals.scala:1>@@(FunctionLiterals=
+    crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<0..0>
+    )
+  @SourceFile(
+    <
+      "crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala"
+      :
+      (
+        "crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala"
+         : String)
+    >@<FunctionLiterals.scala:1>
+  ) final module class FunctionLiterals extends Object {
+    def <init>(): Unit =
+      <
+        {
+          <
+            <<super:(FunctionLiterals : Object)>@<FunctionLiterals.scala:1>:
+              ((): Object)>@<FunctionLiterals.scala:1>
+          ():Object>@<FunctionLiterals.scala:1>
+          <<FunctionLiterals.zero:Function0>@<FunctionLiterals.scala:2> =
+            <
+              {
+                <closure(
+                  <
+                    <this:(FunctionLiterals : FunctionLiterals)>@<
+                      FunctionLiterals.scala:2>
+                  .$init$$$anonfun$1:(): Int>@<FunctionLiterals.scala:2>
+                ):Function0>@<FunctionLiterals.scala:2>
+              }
+            :Function0>@<FunctionLiterals.scala:2>
+          :Unit>@<FunctionLiterals.scala:2>
+          <<FunctionLiterals.one:Function1>@<FunctionLiterals.scala:3> =
+            <
+              {
+                <closure(
+                  <
+                    <this:(FunctionLiterals : FunctionLiterals)>@<
+                      FunctionLiterals.scala:3>
+                  .$init$$$anonfun$2:(x: Int): Int>@<FunctionLiterals.scala:3>
+                :scala.runtime.java8.JFunction1$mcII$sp):
+                  scala.runtime.java8.JFunction1$mcII$sp>@<
+                  FunctionLiterals.scala:3>
+              }
+            :scala.runtime.java8.JFunction1$mcII$sp>@<FunctionLiterals.scala:3>
+          :Unit>@<FunctionLiterals.scala:3>
+          <<FunctionLiterals.many:Function2>@<FunctionLiterals.scala:4> =
+            <
+              {
+                <closure(
+                  <
+                    <this:(FunctionLiterals : FunctionLiterals)>@<
+                      FunctionLiterals.scala:4>
+                  .$init$$$anonfun$3:(x: Int, y: Int): Int>@<
+                    FunctionLiterals.scala:4>
+                :scala.runtime.java8.JFunction2$mcIII$sp):
+                  scala.runtime.java8.JFunction2$mcIII$sp>@<
+                  FunctionLiterals.scala:4>
+              }
+            :scala.runtime.java8.JFunction2$mcIII$sp>@<FunctionLiterals.scala:4>
+            :Unit>@<FunctionLiterals.scala:4>
+          <<FunctionLiterals.block:Function1>@<FunctionLiterals.scala:5> =
+            <
+              {
+                <closure(
+                  <
+                    <this:(FunctionLiterals : FunctionLiterals)>@<
+                      FunctionLiterals.scala:5>
+                  .$init$$$anonfun$4:(x: Int): Int>@<FunctionLiterals.scala:5>
+                :scala.runtime.java8.JFunction1$mcII$sp):
+                  scala.runtime.java8.JFunction1$mcII$sp>@<
+                  FunctionLiterals.scala:5>
+              }
+            :scala.runtime.java8.JFunction1$mcII$sp>@<FunctionLiterals.scala:5>
+          :Unit>@<FunctionLiterals.scala:5>
+          <<FunctionLiterals.argument:Int>@<FunctionLiterals.scala:10> =
+            <
+              <FunctionLiterals.consume:((function: Function1): Int)>@<
+                FunctionLiterals.scala:10>
+            (
+              <
+                {
+                  <closure(
+                    <
+                      <this:(FunctionLiterals : FunctionLiterals)>@<
+                        FunctionLiterals.scala:10>
+                    .$init$$$anonfun$5:(x: Int): Int>@<FunctionLiterals.scala:10
+                      >
+                  :scala.runtime.java8.JFunction1$mcII$sp):
+                    scala.runtime.java8.JFunction1$mcII$sp>@<
+                    FunctionLiterals.scala:10>
+                }
+              :scala.runtime.java8.JFunction1$mcII$sp>@<
+                FunctionLiterals.scala:10>
+            ):Int>@<FunctionLiterals.scala:10>
+          :Unit>@<FunctionLiterals.scala:10>
+          <():Unit>@<FunctionLiterals.scala:10>
+        }
+      :Unit>@<FunctionLiterals.scala:1>
+    @<FunctionLiterals.scala:2>@@(<init>=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<27..27>
+      )
+    private def writeReplace(): Object =
+      <
+        <
+          <new scala.runtime.ModuleSerializationProxy:
+            scala.runtime.ModuleSerializationProxy>@<FunctionLiterals.scala:1>
+        :((moduleClass: Class): scala.runtime.ModuleSerializationProxy)>@<
+          FunctionLiterals.scala:1>
+      (<classOf[FunctionLiterals]:Class>@<FunctionLiterals.scala:1>):
+        scala.runtime.ModuleSerializationProxy>@<FunctionLiterals.scala:1>
+    @<FunctionLiterals.scala:1>@@(writeReplace=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<7..7>
+      )
+    private val zero: Function0@<FunctionLiterals.scala:2>@@(zero=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<31..31>
+      )
+    def zero(): Function0 =
+      <FunctionLiterals.zero:Function0>@<FunctionLiterals.scala:2>@<
+      FunctionLiterals.scala:2>@@(zero=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<31..31>
+      )
+    private val one: Function1@<FunctionLiterals.scala:3>@@(one=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<63..63>
+      )
+    def one(): Function1 =
+      <FunctionLiterals.one:Function1>@<FunctionLiterals.scala:3>@<
+      FunctionLiterals.scala:3>@@(one=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<63..63>
+      )
+    private val many: Function2@<FunctionLiterals.scala:4>@@(many=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<101..101>
+      )
+    def many(): Function2 =
+      <FunctionLiterals.many:Function2>@<FunctionLiterals.scala:4>@<
+      FunctionLiterals.scala:4>@@(many=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<101..101>
+      )
+    private val block: Function1@<FunctionLiterals.scala:5>@@(block=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<155..155>
+      )
+    def block(): Function1 =
+      <FunctionLiterals.block:Function1>@<FunctionLiterals.scala:5>@<
+      FunctionLiterals.scala:5>@@(block=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<155..155>
+      )
+    def consume(
+      function: Function1@<FunctionLiterals.scala:9>@@(function=
+        crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<235..235>
+        )
+    ): Int =
+      <
+        <<function:Function1>@<FunctionLiterals.scala:9>.apply$mcII$sp:
+          ((x$0: Int): Int)>@<FunctionLiterals.scala:9>
+      (<1:Int>@<FunctionLiterals.scala:9>):Int>@<FunctionLiterals.scala:9>
+    @<FunctionLiterals.scala:9>@@(consume=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<227..227>
+      )
+    private val argument: Int@<FunctionLiterals.scala:10>@@(argument=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<282..282>
+      )
+    def argument(): Int =
+      <FunctionLiterals.argument:Int>@<FunctionLiterals.scala:10>@<
+      FunctionLiterals.scala:10>@@(argument=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<282..282>
+      )
+    private final def $init$$$anonfun$1(): Int =
+      <1:Int>@<FunctionLiterals.scala:2>@<FunctionLiterals.scala:2>
+      @@($init$$$anonfun$1=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<52..52>
+      )
+    private final def $init$$$anonfun$2(
+      x: Int@<FunctionLiterals.scala:3>@@(x=
+        crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<82..82>
+        )
+    ): Int = <x:Int>@<FunctionLiterals.scala:3>@<FunctionLiterals.scala:3>
+      @@($init$$$anonfun$2=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<90..90>
+      )
+    private final def $init$$$anonfun$3(
+      x: Int@<FunctionLiterals.scala:4>@@(x=
+        crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<128..128>
+        ),
+      y: Int@<FunctionLiterals.scala:4>@@(y=
+        crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<136..136>
+        )
+    ): Int = <x:Int>@<FunctionLiterals.scala:4>@<FunctionLiterals.scala:4>
+      @@($init$$$anonfun$3=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<144..144>
+      )
+    private final def $init$$$anonfun$4(
+      x: Int@<FunctionLiterals.scala:5>@@(x=
+        crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<176..176>
+        )
+    ): Int =
+      <
+        {
+          val local: Int = <x:Int>@<FunctionLiterals.scala:6>@<
+            FunctionLiterals.scala:6>@@(local=
+            crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<195..195>
+            )
+          <<local:Int>@<FunctionLiterals.scala:7> :Int:Int>@<
+            FunctionLiterals.scala:7>
+        }
+      :Int>@<FunctionLiterals.scala:6>
+    @<FunctionLiterals.scala:5>@@($init$$$anonfun$4=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<184..184>
+      )
+    private final def $init$$$anonfun$5(
+      x: Int@<FunctionLiterals.scala:10>@@(x=
+        crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<307..307>
+        )
+    ): Int = <x:Int>@<FunctionLiterals.scala:10>@<FunctionLiterals.scala:10>
+      @@($init$$$anonfun$5=
+      crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<315..315>
+      )
+  }@<FunctionLiterals.scala:1>@@(FunctionLiterals$=
+    crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.scala:<7..7>
+    )
+}:<empty>.type>@<FunctionLiterals.scala:1>
+
