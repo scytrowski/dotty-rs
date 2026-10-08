@@ -65,7 +65,9 @@ where
     fn parse_poly_function_body(&mut self) -> TreeId<Untyped> {
         self.consume_lambda_newlines();
         if self.current().kind == TokenKind::Indent {
-            self.parse_indented_block()
+            // The arrow opened this scanner feedback region, so close it with
+            // delimiter-aware feedback when the polyfunction is an argument.
+            self.parse_feedback_indented_block()
         } else {
             self.expr()
         }
