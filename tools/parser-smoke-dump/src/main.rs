@@ -1474,6 +1474,89 @@ mod tests {
     }
 
     #[test]
+    fn quote_id_keywords_keep_their_literal_and_this_kinds_inside_splices() {
+        const SOURCE: &str = concat!(
+            "object Q:\n",
+            "  inline def trueValue = ${ 'true }\n",
+            "  inline def falseValue = ${ 'false }\n",
+            "  inline def nullValue = ${ 'null }\n",
+            "  inline def thisValue = ${ 'this }\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+            &result.ast.get(package.stats[0]).kind
+        else {
+            panic!("expected object definition");
+        };
+        let TreeKind::Template(template) = &result.ast.get(module.template).kind else {
+            panic!("expected object template");
+        };
+        let expected = [
+            ("trueValue", dotty_core::Constant::Boolean(true)),
+            ("falseValue", dotty_core::Constant::Boolean(false)),
+            ("nullValue", dotty_core::Constant::Null),
+        ];
+        for (definition_id, (expected_name, expected_value)) in
+            template.body.iter().take(3).zip(expected)
+        {
+            let TreeKind::DefDef(definition) = &result.ast.get(*definition_id).kind else {
+                panic!("expected inline method definition");
+            };
+            assert_eq!(
+                names.resolve(definition.name.as_name().text()),
+                expected_name
+            );
+            let TreeKind::Splice(splice) = &result.ast.get(definition.rhs.unwrap()).kind else {
+                panic!("expected expression splice");
+            };
+            let TreeKind::Quote(quote) = &result.ast.get(splice.expr).kind else {
+                panic!("expected quote-id tree");
+            };
+            let TreeKind::Literal(literal) = &result.ast.get(quote.body).kind else {
+                panic!("expected a keyword literal");
+            };
+            assert_eq!(literal.value, expected_value);
+            assert_eq!(
+                result
+                    .ast
+                    .get(quote.body)
+                    .position
+                    .unwrap()
+                    .span()
+                    .range()
+                    .start(),
+                result
+                    .ast
+                    .get(quote.body)
+                    .position
+                    .unwrap()
+                    .span()
+                    .range()
+                    .end()
+            );
+        }
+        let TreeKind::DefDef(this_value) = &result.ast.get(template.body[3]).kind else {
+            panic!("expected inline this method");
+        };
+        let TreeKind::Splice(splice) = &result.ast.get(this_value.rhs.unwrap()).kind else {
+            panic!("expected this expression splice");
+        };
+        let TreeKind::Quote(quote) = &result.ast.get(splice.expr).kind else {
+            panic!("expected quoted this");
+        };
+        assert!(matches!(result.ast.get(quote.body).kind, TreeKind::This(_)));
+    }
+
+    #[test]
     fn parses_a_legacy_implicit_parameter_in_a_braced_lambda_argument() {
         const SOURCE: &str = concat!(
             "def fromFuture = flatMap(executionContext) {\n",

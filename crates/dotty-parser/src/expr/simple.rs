@@ -1,5 +1,5 @@
 use dotty_core::ast::{
-    Apply, ApplyKind, Block, Ident, MacroTree, New, Parens, PostfixOp, Quote, Select,
+    Apply, ApplyKind, Block, Ident, Literal, MacroTree, New, Parens, PostfixOp, Quote, Select,
     SplicePattern, Super, This, Tuple, UntypedNode, ValDef,
 };
 use dotty_core::{
@@ -412,15 +412,24 @@ where
         let Some(spelling) = spelling.strip_prefix('\'') else {
             return self.unexpected_expression();
         };
-        let name = self.names.intern(spelling);
-        self.advance();
-        let body = self.alloc(
-            TreeKind::Ident(Ident {
-                name: *dotty_core::TermName::new(name).as_name(),
+        let body_kind = match spelling {
+            "true" => TreeKind::Literal(Literal {
+                value: Constant::Boolean(true),
+            }),
+            "false" => TreeKind::Literal(Literal {
+                value: Constant::Boolean(false),
+            }),
+            "null" => TreeKind::Literal(Literal {
+                value: Constant::Null,
+            }),
+            "this" => TreeKind::This(This { qual: None }),
+            _ => TreeKind::Ident(Ident {
+                name: *dotty_core::TermName::new(self.names.intern(spelling)).as_name(),
                 backquoted: false,
             }),
-            Some(self.zero_width_span(mark.start())),
-        );
+        };
+        self.advance();
+        let body = self.alloc(body_kind, Some(self.zero_width_span(mark.start())));
         self.alloc_from(
             mark,
             TreeKind::Quote(Quote {
