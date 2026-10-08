@@ -1632,6 +1632,28 @@ fn local_extension_audit_separates_nonapplicable_and_ambiguous_calls() {
         BTreeSet::from(["NonapplicableExtension.scala".to_owned()])
     );
 
+    let shadowed = audit_source(
+        "class Audit { def outer: Int = { extension (receiver: Audit) { def choose(argument: Int): Int = argument }; { val choose: Int = 0; this.choose(1) } } }",
+        "ShadowedExtension.scala",
+    );
+    assert!(
+        !shadowed
+            .failures
+            .contains_key("LocalExtensionNotApplicable"),
+        "a nested local value hides the enclosing extension: {shadowed:?}"
+    );
+
+    let unsupported_group = audit_source(
+        "class Audit { def outer: Int = { this.choose(1); extension (receiver: Audit) { def choose(argument: Int): Int = argument; def choose(other: Boolean): Int = 0 }; def marker: Int = 1; 0 } }",
+        "UnsupportedExtensionGroup.scala",
+    );
+    assert!(
+        !unsupported_group
+            .failures
+            .contains_key("LocalExtensionNotApplicable"),
+        "a group that is not preindexed is not an extension candidate: {unsupported_group:?}"
+    );
+
     let ambiguous = audit_source(
         "class Audit { def outer: Int = { extension (left: Audit) { def choose(argument: Int): Int = 1 }; extension (right: Audit) { def choose(argument: Int): Int = 2 }; this.choose(1); def marker: Int = 1; 0 } }",
         "AmbiguousExtension.scala",
@@ -3841,18 +3863,26 @@ fn has_lexical_extension_candidate(
     for (_, statements) in containing_blocks {
         let mut has_extension = false;
         let mut has_ordinary_method = false;
+        let mut has_shadowing_value = false;
         for statement in statements {
             match arena.try_get(statement).map(|node| &node.kind) {
                 Some(TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension))) => {
-                    has_extension |= extension.methods.iter().any(|method| {
-                        matches!(
-                            arena.try_get(*method).map(|node| &node.kind),
-                            Some(TreeKind::DefDef(definition)) if *definition.name.as_name() == name
-                        )
-                    });
+                    has_extension |= is_preindexable_extension(arena, extension, name);
                 }
                 Some(TreeKind::DefDef(definition)) => {
                     has_ordinary_method |= *definition.name.as_name() == name;
+                }
+                Some(TreeKind::ValDef(definition)) if *definition.name.as_name() == name => {
+                    has_shadowing_value |=
+                        statement_precedes_selection(arena, statement, selection_range.start());
+                }
+                Some(TreeKind::PhaseSpecific(UntypedNode::PatDef(definition))) => {
+                    has_shadowing_value |=
+                        statement_precedes_selection(arena, statement, selection_range.start())
+                            && definition
+                                .patterns
+                                .iter()
+                                .any(|pattern| pattern_binds_name(arena, *pattern, name));
                 }
                 _ => {}
             }
@@ -3860,11 +3890,80 @@ fn has_lexical_extension_candidate(
         if has_extension {
             return true;
         }
-        if has_ordinary_method {
+        if has_ordinary_method || has_shadowing_value {
             return false;
         }
     }
     false
+}
+
+fn is_preindexable_extension(
+    arena: &dotty_core::AstArena<Untyped>,
+    extension: &dotty_core::ast::ExtensionMethods,
+    name: dotty_core::Name,
+) -> bool {
+    if extension.methods.len() != 1
+        || extension.param_clauses.len() != 1
+        || extension.param_clauses[0].len() != 1
+    {
+        return false;
+    }
+    let parameter = extension.param_clauses[0][0];
+    let supported_receiver = matches!(
+        arena.try_get(parameter).map(|node| &node.kind),
+        Some(TreeKind::ValDef(definition))
+            if !definition.metadata.modifiers.iter().any(|modifier| {
+                matches!(modifier, dotty_core::ast::Modifier::Given | dotty_core::ast::Modifier::Implicit)
+            })
+    );
+    if !supported_receiver {
+        return false;
+    }
+    matches!(
+        arena
+            .try_get(extension.methods[0])
+            .map(|node| &node.kind),
+        Some(TreeKind::DefDef(definition))
+            if *definition.name.as_name() == name
+                && definition.type_params.is_empty()
+                && definition.rhs.is_some()
+    )
+}
+
+fn statement_precedes_selection(
+    arena: &dotty_core::AstArena<Untyped>,
+    statement: dotty_core::TreeId<Untyped>,
+    selection_start: u32,
+) -> bool {
+    arena
+        .try_get(statement)
+        .and_then(|node| node.position)
+        .is_some_and(|position| position.span().range().start() < selection_start)
+}
+
+fn pattern_binds_name(
+    arena: &dotty_core::AstArena<Untyped>,
+    pattern: dotty_core::TreeId<Untyped>,
+    name: dotty_core::Name,
+) -> bool {
+    let Some(node) = arena.try_get(pattern) else {
+        return false;
+    };
+    match &node.kind {
+        TreeKind::Bind(binding) => {
+            binding.name == name || pattern_binds_name(arena, binding.body, name)
+        }
+        TreeKind::Alternative(alternative) => alternative
+            .alternatives
+            .iter()
+            .any(|pattern| pattern_binds_name(arena, *pattern, name)),
+        TreeKind::UnApply(unapply) => unapply
+            .patterns
+            .iter()
+            .any(|pattern| pattern_binds_name(arena, *pattern, name)),
+        TreeKind::Typed(typed) => pattern_binds_name(arena, typed.expr, name),
+        _ => false,
+    }
 }
 
 fn source_operator_spellings(
