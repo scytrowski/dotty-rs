@@ -1388,9 +1388,37 @@ where
             tree = parsed;
             indented_refinement
         };
+        let mut colon_indented_refinement = None;
+        if !stop_at_legacy_with
+            && matches!(
+                self.current().kind,
+                TokenKind::ColonFollow | TokenKind::ColonOp | TokenKind::ColonEol
+            )
+        {
+            if self.current().kind != TokenKind::ColonEol {
+                self.observe_colon_eol(false);
+            }
+            if self.current().kind == TokenKind::ColonEol {
+                let feedback_indent = self.observe_indented_body_region();
+                self.advance();
+                if self.accept(TokenKind::Indent) {
+                    colon_indented_refinement = Some(self.parse_indented_refinement_body());
+                    if let Some(indent_offset) = feedback_indent {
+                        self.observe_outdented_by_existing_outdent(indent_offset);
+                    }
+                } else {
+                    self.report(
+                        ParseDiagnosticKind::ExpectedToken,
+                        "expected an indented refinement body after `:`",
+                    );
+                }
+            }
+        }
 
         loop {
-            let refinements = if legacy_with_indent && self.accept(TokenKind::Indent) {
+            let refinements = if let Some(refinements) = colon_indented_refinement.take() {
+                refinements
+            } else if legacy_with_indent && self.accept(TokenKind::Indent) {
                 legacy_with_indent = false;
                 if self.current().kind == TokenKind::Punctuation(Punctuation::LeftBrace) {
                     let refinements = self.parse_refinement_body();

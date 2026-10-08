@@ -644,7 +644,8 @@ that precedes `.type`; literal singleton aliases use the same node around a
 decoded `Literal`. Unions and intersections use `InfixOp` with `&` binding
 tighter than `|`. Refined types use the shared `RefinedTypeTree`; the initial
 subset supports abstract, aliased, and upper-bounded `TypeDef` members in
-source order, including the parentless `{ type X }` form. Parentless
+source order, in braced bodies and colon-introduced indented bodies, including
+the parentless `{ type X }` form. Parentless
 refinements use a zero-width `TypeTree` only as the non-optional AST parent
 placeholder and do not create a semantic refinement scope. Declaration-only
 `val`, `var`, and `def` members reuse the shared `ValDef` and `DefDef` nodes.
