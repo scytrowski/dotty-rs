@@ -739,6 +739,23 @@ where
             .is_some()
     }
 
+    pub(crate) fn current_end_marker_matches_active_construct(&mut self) -> bool {
+        if self.current().kind != TokenKind::EndMarker {
+            return false;
+        }
+        let target = self.cursor.lookahead(1).kind;
+        let marker_indent = self.source_line_indent_prefix(self.current().span.start());
+        self.active_end_marker_targets
+            .iter()
+            .rev()
+            .any(|(active_target, owner_start)| {
+                if target != TokenKind::Keyword(*active_target) {
+                    return false;
+                }
+                marker_indent.starts_with(&self.source_line_indent_prefix(*owner_start))
+            })
+    }
+
     /// Checks whether the statement itself owns an `end` marker. Dotty checks
     /// only the last direct statement in the active statement sequence; nested
     /// constructs have their own sequence and must not steal an enclosing
@@ -924,8 +941,14 @@ where
         match target_kind {
             TokenKind::Keyword(HardKeyword::If) => matches!(kind, TreeKind::If(_)),
             TokenKind::Keyword(HardKeyword::While) => matches!(kind, TreeKind::While(_)),
-            TokenKind::Keyword(HardKeyword::Match) => matches!(kind, TreeKind::Match(_)),
-            TokenKind::Keyword(HardKeyword::Try) => matches!(kind, TreeKind::Try(_)),
+            TokenKind::Keyword(HardKeyword::Match) => matches!(
+                kind,
+                TreeKind::Match(_) | TreeKind::PhaseSpecific(UntypedNode::InlineMatch(_))
+            ),
+            TokenKind::Keyword(HardKeyword::Try) => matches!(
+                kind,
+                TreeKind::Try(_) | TreeKind::PhaseSpecific(UntypedNode::ParsedTry(_))
+            ),
             TokenKind::Keyword(HardKeyword::New) => matches!(kind, TreeKind::New(_)),
             TokenKind::Keyword(HardKeyword::For) => matches!(
                 kind,

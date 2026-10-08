@@ -697,7 +697,9 @@ where
             self.observe_outdented_region(indent_offset);
         }
         let closes_at_enclosing_end_marker = self.current().kind == TokenKind::EndMarker
-            && self.current_end_marker_matches_active_template();
+            && (self.current_end_marker_matches_active_template()
+                || self.current_end_marker_matches_active_construct()
+                || self.end_marker_matches_next(Some(expr)));
         if !closed_by_delimiter
             && !self.accept(TokenKind::Outdent)
             && !closes_at_enclosing_end_marker
