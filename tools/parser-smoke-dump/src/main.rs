@@ -1482,6 +1482,28 @@ mod tests {
     }
 
     #[test]
+    fn annotated_local_method_after_feedback_lambda_value_keeps_statement_boundary() {
+        // Minimized from Kyo's
+        // `kyo-data/shared/src/main/scala/kyo/Dict.scala`, `Dict.apply`:
+        // the first `reduce` lambda has a local value, an `@tailrec` local
+        // method, and a final call; a comma then separates the second lambda.
+        // The method body is shortened here, while the nested argument/layout
+        // shape that triggered the corpus diagnostic is retained.
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/scala-parser-oracle/fixtures/compilation/annotated-local-after-feedback-lambda.scala"
+        );
+        let source = fs::read_to_string(fixture).expect("fixture should be readable");
+        let scanner = ContextualScanner::new(&source).expect("source should scan cleanly");
+        let source_text = SourceText::new(&source).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
     fn misaligned_end_new_is_diagnosed_without_losing_the_following_member() {
         const SOURCE: &str = concat!(
             "object O:\n",

@@ -648,6 +648,17 @@ pub enum TyperError {
         kind: SymbolKind,
         position: Option<SourceSpan>,
     },
+    /// The requested function class is beyond the source typer's bounded support.
+    UnsupportedSourceFunctionArity {
+        kind: SourceFunctionKind,
+        arity: usize,
+        max_arity: usize,
+    },
+    /// The configured semantic resolver could not materialize a canonical function class.
+    SourceFunctionClassNotFound {
+        kind: SourceFunctionKind,
+        arity: usize,
+    },
     /// The external semantic symbol resolver could not answer soundly.
     SymbolResolution {
         source: SourceId,
