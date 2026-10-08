@@ -21,4 +21,3 @@ package <empty> {
     type Contextual = (x: FunctionTypeProjection.A) ?=> FunctionTypeProjection.B
     }
 }
-
