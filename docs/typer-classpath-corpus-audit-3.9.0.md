@@ -23,7 +23,7 @@ The initial local-extension blocker was 25 occurrences in 5 files. The current a
 | `LocalExtensionReceiverTypeNotFound` | 1 / 1 | compiler/src/dotty/tools/dotc/core/Flags.scala |
 | `LocalExtensionSignatureDeferred::dependent result types` | 1 / 1 | compiler/src/dotty/tools/dotc/reporting/MessageRendering.scala |
 
-Receiver or ordinary-argument mismatches remain non-applicable candidates and preserve `MemberNotFound`; the audit does not relabel those as successful typing. Multiple viable same-name local extensions produce `OverloadedSelectionDeferred` in a focused regression. Primitive definitions have no modeled member scopes, so the bounded extension path is tried for a missing builtin primitive class scope; if no candidate applies, the original `MemberLookup` error is retained. External member materialization remains zero.
+Receiver or ordinary-argument mismatches remain non-applicable candidates and preserve `MemberNotFound`; the audit does not relabel those as successful typing. Multiple viable same-name local extensions produce `OverloadedSelectionDeferred` in a focused regression. Primitive definitions have no modeled member scopes. If nominal lookup cannot inspect a primitive member index, local extension resolution is not attempted and the original `MemberLookup` error is retained; fallback is available only after a completed index confirms that the ordinary name has no member. External member materialization remains zero.
 
 ### Current top ten Typer-owned semantic blockers
 

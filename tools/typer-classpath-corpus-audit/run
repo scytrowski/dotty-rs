@@ -110,7 +110,7 @@ mkdir -p "$(dirname -- "$output_path")"
             if (!found) printf "| (none observed) | 0 / 0 | — |\n"
         }
     ' "$tmp_dir/first.report"
-    printf '\nReceiver or ordinary-argument mismatches remain non-applicable candidates and preserve `MemberNotFound`; the audit does not relabel those as successful typing. Multiple viable same-name local extensions produce `OverloadedSelectionDeferred` in a focused regression. Primitive definitions have no modeled member scopes, so the bounded extension path is tried for a missing builtin primitive class scope; if no candidate applies, the original `MemberLookup` error is retained. External member materialization remains zero.\n\n'
+    printf '\nReceiver or ordinary-argument mismatches remain non-applicable candidates and preserve `MemberNotFound`; the audit does not relabel those as successful typing. Multiple viable same-name local extensions produce `OverloadedSelectionDeferred` in a focused regression. Primitive definitions have no modeled member scopes. If nominal lookup cannot inspect a primitive member index, local extension resolution is not attempted and the original `MemberLookup` error is retained; fallback is available only after a completed index confirms that the ordinary name has no member. External member materialization remains zero.\n\n'
     printf '### Current top ten Typer-owned semantic blockers\n\n'
     printf 'The ranked list below excludes parser/namer and classpath-resolution failures, and excludes the downstream `NoSuccessfulEnclosingMethodTyping` counter. Counts and representative paths are in `top_semantic_gaps` in the raw report.\n\n'
     printf '| Rank | First blocker | Count / files |\n| ---: | --- | ---: |\n'
