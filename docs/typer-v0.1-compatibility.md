@@ -1027,17 +1027,22 @@ expression typing or full Scala source compatibility.
 
 ## Canonical source function class identities (#826)
 
-`SourceTyper::source_function_class` resolves ordinary and contextual function
-classes through the entered `scala` package and the configured semantic
-resolver. It does not create local pseudo-classes. The paired
+`SourceTyper::source_function_class` resolves ordinary function classes
+through the entered `scala` package and configured semantic resolver. Scala
+3.9 does not ship `ContextFunctionN` classpath files: its `scala` package
+synthesizer creates these traits on demand. When the resolver cannot find a
+contextual class, the source typer materializes its canonical synthetic class
+symbol in the shared `scala` package scope, including its contextual `apply`
+signature. The paired
 `source_function_type_constructor` returns the corresponding package-qualified
 `TypeRef`, ready for later applied function type construction.
 
 The bounded source API accepts arities 0 through 22. Ordinary and contextual
 functions remain distinct (`scala.FunctionN` versus
-`scala.ContextFunctionN`); missing classpath identities and requests above the
-bound return explicit typer errors. Scala 3.9 synthesizes higher-arity source
-function classes and erases them through `scala.runtime.FunctionXXL`; this
-increment does not synthesize those classes. The API does not project source
+`scala.ContextFunctionN`). Missing ordinary classpath identities and requests
+above the bound return explicit typer errors. Scala 3.9 also synthesizes
+higher-arity source function classes and erases them through
+`scala.runtime.FunctionXXL`; this increment does not synthesize those classes.
+The API does not project source
 function type trees or type lambda expressions. See the [pinned Scala 3.9
 identity reference and fixture](../crates/dotty-typer/tests/fixtures/function-class-identities/FunctionClassIdentities.oracle.md).

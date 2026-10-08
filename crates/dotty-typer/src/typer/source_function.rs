@@ -1,6 +1,10 @@
 //! Canonical identity lookup for source-level Scala function classes.
 
 use super::*;
+use dotty_core::{
+    ClassInfo, MethodKind, MethodParam, Namespace, Scope, Symbol, SymbolFlags, SymbolInfo,
+    SymbolKind, SymbolOrigin, TermName, Visibility,
+};
 
 /// The source-level function class family requested by function type syntax.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -98,14 +102,22 @@ impl SourceTyper<'_> {
                     selector: MemberSelector::Unique,
                     space: MemberSpace::Prefix,
                 };
-                self.resolver
+                match self
+                    .resolver
                     .resolve_member(self.store, &request)
                     .map_err(|error| TyperError::SymbolResolution {
                         source: self.source,
                         tree_index,
                         error,
-                    })?
-                    .ok_or(TyperError::SourceFunctionClassNotFound { kind, arity })?
+                    })? {
+                    Some(class) => class,
+                    None if kind == SourceFunctionKind::Contextual => {
+                        self.materialize_context_function(package, name, arity)?
+                    }
+                    None => {
+                        return Err(TyperError::SourceFunctionClassNotFound { kind, arity });
+                    }
+                }
             }
             many => {
                 return Err(TyperError::SymbolResolution {
@@ -137,6 +149,123 @@ impl SourceTyper<'_> {
                 },
             });
         }
+        Ok(class)
+    }
+
+    /// Dotty 3.9 installs a synthesizer on `scala` for `ContextFunctionN`:
+    /// these traits have no classpath files. Keep the synthesized declaration
+    /// in the shared semantic store and package scope so every later lookup
+    /// observes the same canonical symbol.
+    fn materialize_context_function(
+        &mut self,
+        package: SymbolId,
+        class_name: Name,
+        arity: usize,
+    ) -> Result<SymbolId, TyperError> {
+        let package_scope =
+            self.packages
+                .scope_of(package)
+                .ok_or(TyperError::SourceFunctionClassNotFound {
+                    kind: SourceFunctionKind::Contextual,
+                    arity,
+                })?;
+        let class = self.store.symbols.alloc(Symbol {
+            name: class_name,
+            owner: Some(package),
+            kind: SymbolKind::Trait,
+            flags: SymbolFlags::SYNTHETIC | SymbolFlags::ABSTRACT,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: Default::default(),
+        });
+        let declarations = self.store.scopes.alloc(Scope::new(Some(class)));
+        let class_prefix = self.store.types.alloc(Type::ThisType { class });
+        let mut param_refs = Vec::with_capacity(arity + 1);
+
+        for index in 0..=arity {
+            let param_text = if index == arity {
+                "R".to_owned()
+            } else {
+                format!("T{}", index + 1)
+            };
+            let param_name = Name::new(self.store.names.intern(&param_text), Namespace::Type);
+            let param = self.store.symbols.alloc(Symbol {
+                name: param_name,
+                owner: Some(class),
+                kind: SymbolKind::TypeParameter,
+                flags: SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Complete(self.store.types.alloc(Type::Bounds {
+                    low: self.definitions.nothing_type,
+                    high: self.definitions.any_type,
+                })),
+                origin: SymbolOrigin::Synthetic,
+                annotations: Vec::new(),
+                position: None,
+                links: Default::default(),
+            });
+            self.store
+                .scopes
+                .get_mut(declarations)
+                .enter(param_name, param);
+            param_refs.push(self.store.types.alloc(Type::TypeRef {
+                prefix: class_prefix,
+                target: TypeRefTarget::Symbol(param),
+            }));
+        }
+
+        let result = *param_refs
+            .last()
+            .expect("function type always has a result parameter");
+        let method_name = Name::new(self.store.names.intern("apply"), Namespace::Term);
+        let method_type = self.store.types.alloc(Type::Method(MethodType {
+            params: param_refs[..arity]
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| MethodParam {
+                    name: TermName::new(self.store.names.intern(&format!("x{index}"))),
+                    ty: *ty,
+                    erased: false,
+                    varargs: false,
+                })
+                .collect(),
+            result,
+            kind: MethodKind::Contextual,
+        }));
+        let apply = self.store.symbols.alloc(Symbol {
+            name: method_name,
+            owner: Some(class),
+            kind: SymbolKind::Method,
+            flags: SymbolFlags::ABSTRACT,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Complete(method_type),
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: Default::default(),
+        });
+        self.store
+            .scopes
+            .get_mut(declarations)
+            .enter(method_name, apply);
+        let package_prefix = self.package_type_prefix(package);
+        let class_info = self.store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: package_prefix,
+            class,
+            parents: vec![self.definitions.object_type],
+            declarations,
+            self_type: None,
+        }));
+        self.store
+            .symbols
+            .set_info(class, SymbolInfo::Complete(class_info));
+        self.store
+            .scopes
+            .get_mut(package_scope)
+            .enter(class_name, class);
         Ok(class)
     }
 
@@ -402,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_classpath_function_class_is_reported_and_failed_resolution_rolls_back() {
+    fn missing_ordinary_classpath_function_is_reported_and_failed_resolution_rolls_back() {
         let (arena, index, mut store, packages, definitions, scala) = setup();
         let requests = Rc::new(RefCell::new(Vec::new()));
         let resolver = FunctionResolver {
@@ -413,13 +542,125 @@ mod tests {
         let mut typer = typer(&arena, &index, &mut store, &packages, definitions, resolver);
 
         assert!(matches!(
-            typer.source_function_class(SourceFunctionKind::Contextual, 3, 12),
+            typer.source_function_class(SourceFunctionKind::Ordinary, 3, 12),
             Err(TyperError::SourceFunctionClassNotFound {
-                kind: SourceFunctionKind::Contextual,
+                kind: SourceFunctionKind::Ordinary,
                 arity: 3
             })
         ));
         assert!(requests.borrow().is_empty());
+    }
+
+    #[test]
+    fn missing_contextual_class_is_materialized_once_with_apply_signature() {
+        let (arena, index, mut store, packages, definitions, scala) = setup();
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let resolver = FunctionResolver {
+            package: Some(scala),
+            requests: Rc::clone(&requests),
+            ..FunctionResolver::default()
+        };
+        let mut typer = typer(&arena, &index, &mut store, &packages, definitions, resolver);
+
+        let class = typer
+            .source_function_class(SourceFunctionKind::Contextual, 2, 15)
+            .unwrap();
+        let repeated = typer
+            .source_function_class(SourceFunctionKind::Contextual, 2, 16)
+            .unwrap();
+        assert_eq!(class, repeated);
+        let symbol = typer.store.symbols.get(class);
+        assert_eq!(symbol.origin, SymbolOrigin::Synthetic);
+        assert_eq!(symbol.owner, Some(scala));
+        assert_eq!(symbol.kind, SymbolKind::Trait);
+        let SymbolInfo::Complete(class_info) = symbol.info else {
+            panic!("synthesized contextual function has complete class info");
+        };
+        let Type::ClassInfo(class_info) = typer.store.types.get(class_info) else {
+            panic!("synthesized contextual function has ClassInfo");
+        };
+        let apply_name = Name::new(typer.store.names.intern("apply"), Namespace::Term);
+        let [apply] = typer
+            .store
+            .scopes
+            .get(class_info.declarations)
+            .lookup_all(&apply_name)
+        else {
+            panic!("contextual function exposes one apply method");
+        };
+        let SymbolInfo::Complete(apply_info) = typer.store.symbols.get(*apply).info else {
+            panic!("apply method has a complete signature");
+        };
+        let Type::Method(method) = typer.store.types.get(apply_info) else {
+            panic!("apply signature is a method type");
+        };
+        assert_eq!(method.kind, MethodKind::Contextual);
+        assert_eq!(method.params.len(), 2);
+        assert!(matches!(
+            typer.store.types.get(method.result),
+            Type::TypeRef { .. }
+        ));
+        assert_eq!(requests.borrow().len(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires pinned Scala 3.9 jars and JAVA_HOME"]
+    fn scala_39_classpath_uses_synthesis_for_context_function_classes() {
+        let classpath = std::env::var("SCALA39_CLASSPATH")
+            .expect("SCALA39_CLASSPATH must list the pinned Scala 3.9 jars");
+        let java_home = std::env::var("JAVA_HOME").expect("JAVA_HOME must identify a JDK");
+        let release = std::env::var("SCALA39_JDK_RELEASE")
+            .expect("SCALA39_JDK_RELEASE must select the JDK classfile release")
+            .parse::<u16>()
+            .expect("SCALA39_JDK_RELEASE must be numeric");
+        use dotty_classloader::classloader::{
+            ClassPathEntry, ClasspathSymbolResolver, CompositeClassPath, JarClassPath,
+            JdkClassPath, LoadingSession,
+        };
+        use std::path::PathBuf;
+
+        let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![Box::new(
+            JdkClassPath::new(PathBuf::from(java_home).join("jmods")).unwrap(),
+        )];
+        for jar in std::env::split_paths(&classpath) {
+            entries.push(Box::new(JarClassPath::new(jar, release).unwrap()));
+        }
+        let classpath = CompositeClassPath::new(entries);
+        let (arena, index, mut store, packages, definitions, scala) = setup();
+        let request = MemberRequest {
+            prefix: store.types.alloc(Type::TypeRef {
+                prefix: definitions.no_prefix,
+                target: TypeRefTarget::Symbol(scala),
+            }),
+            name: Name::new(store.names.intern("ContextFunction1"), Namespace::Type),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let mut resolver = ClasspathSymbolResolver::new(
+            classpath,
+            definitions,
+            LoadingSession::with_packages(packages),
+        );
+        assert_eq!(resolver.resolve_member(&mut store, &request).unwrap(), None);
+        let packages = resolver.into_session().into_packages();
+        let mut typer = SourceTyper::new(
+            &arena,
+            dotty_core::SourceId::from_index(1),
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let contextual = typer
+            .source_function_class(SourceFunctionKind::Contextual, 1, 17)
+            .unwrap();
+        assert_eq!(typer.store.symbols.get(contextual).owner, Some(scala));
+        assert_eq!(
+            typer.store.symbols.get(contextual).origin,
+            SymbolOrigin::Synthetic
+        );
+        assert!(typer.store.symbols.contains(contextual));
     }
 
     #[test]
