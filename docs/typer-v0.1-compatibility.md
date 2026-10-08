@@ -1006,11 +1006,10 @@ are ready:
 - enum semantics, case-class synthetic APIs, and `derives`;
 - context-bound evidence synthesis;
 - default imports and general standard-library member lookup;
-- source function types, refined types, type lambdas, and match types are not
-  yet projected. The core has reusable representations for refined/recursive,
-  type-lambda, and match types; source binder and standard function-class
-  identity projection still need focused work. Match-type reduction remains a
-  separate non-goal;
+- ordinary and bounded contextual source function types are projected as
+  canonical applied function-class types (#827 below). Refined types, type
+  lambdas, and match types remain separate work; match-type reduction is also
+  unsupported;
 - ordinary annotated source type trees and capture-checking-only type syntax
   remain unsupported. Term expressions use the shared `Type::Annotated` /
   `AnnotationId` representation described above; this does not project type-tree
@@ -1043,6 +1042,26 @@ functions remain distinct (`scala.FunctionN` versus
 above the bound return explicit typer errors. Scala 3.9 also synthesizes
 higher-arity source function classes and erases them through
 `scala.runtime.FunctionXXL`; this increment does not synthesize those classes.
-The API does not project source
-function type trees or type lambda expressions. See the [pinned Scala 3.9
-identity reference and fixture](../crates/dotty-typer/tests/fixtures/function-class-identities/FunctionClassIdentities.oracle.md).
+The API does not type function expressions or type lambda expressions. See the
+[pinned Scala 3.9 identity reference and fixture](../crates/dotty-typer/tests/fixtures/function-class-identities/FunctionClassIdentities.oracle.md).
+
+## Source function type projection (#827)
+
+The source type projector maps ordinary `() => R`, `A => R`, and multi-parameter
+function types to `Applied(scala.FunctionN, [parameters..., result])`. It
+recurses through nested parameter and result types and reuses the source type
+cache and transaction journal. The accepted `FunctionWithMods` subset is a
+plain contextual function marked only with `Given`, projected through the
+distinct `scala.ContextFunctionN` identity. Erased parameters, capture-specific
+forms, and other modifier combinations remain explicit unsupported type-tree
+errors. This does not add contextual argument search or contextual function
+expression typing.
+
+The pinned Scala 3.9 local-definition audit was run twice with byte-identical
+output after #827. `UnsupportedTypeTree::Function` moved from 12 occurrences in
+8 files to zero. `UnsupportedTypeTree::FunctionWithMods` remains at 13
+occurrences in 2 files; the bounded `Given` form is supported, while the
+remaining modifier-bearing cases stay deferred. This measures first-blocker
+movement, not full source semantic parity. The audit used the pinned source
+revision `777528f19a58e794c9954a42f433373472ec57f8` and the available JDK 25.
+See the [pinned function-type reference and typed-tree fixture](../crates/dotty-typer/tests/fixtures/function-type-projection/FunctionTypeProjection.oracle.md).

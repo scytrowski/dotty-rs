@@ -1049,9 +1049,9 @@ fn scope_note_for_bucket(bucket: &str) -> (&'static str, &'static str, &'static 
             "lambda inference, polymorphism, capture checking, and contextual functions",
         ),
         "UnsupportedTypeTree::FunctionWithMods" => (
-            "classify modifiers and project one ordinary context-function type",
+            "inspect the remaining modifier-bearing function types and keep erased/capture-specific forms deferred",
             "dotty-typer/src/typer/type_projection.rs",
-            "canonical ContextFunction identity and existing Applied types",
+            "plain contextual `Given` forms now use the canonical ContextFunction identity and existing Applied types",
             "capture checking, erased-function semantics, and arbitrary modifiers",
         ),
         "UnsupportedTypeTree::Function" => (
