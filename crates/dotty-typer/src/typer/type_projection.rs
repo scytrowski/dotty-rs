@@ -177,6 +177,48 @@ impl SourceTyper<'_> {
                 position: source_tree.position,
             });
         }
+        let function_shape = match &source_tree.kind {
+            TreeKind::PhaseSpecific(UntypedNode::Function(function)) => Some((
+                function.params.clone(),
+                function.body,
+                SourceFunctionKind::Ordinary,
+            )),
+            TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) => {
+                if function.erased_params.len() != function.params.len() {
+                    return Err(TyperError::UnsupportedTypeTree {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        tree_kind: "malformed function type erasure metadata",
+                    });
+                }
+                if function.erased_params.iter().any(|erased| *erased) {
+                    return Err(TyperError::UnsupportedTypeTree {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        tree_kind: "erased function type parameter",
+                    });
+                }
+                if function.modifiers.visibility.is_some()
+                    || !function.modifiers.annotations.is_empty()
+                    || function.modifiers.modifiers.as_slice() != [Modifier::Given]
+                {
+                    return Err(TyperError::UnsupportedTypeTree {
+                        source: self.source,
+                        tree_index: tree.index(),
+                        tree_kind: "unsupported function type modifiers",
+                    });
+                }
+                Some((
+                    function.params.clone(),
+                    function.result,
+                    SourceFunctionKind::Contextual,
+                ))
+            }
+            _ => None,
+        };
+        if let Some((params, result, kind)) = function_shape {
+            return self.project_function_type(tree, params, result, kind, context, info_journal);
+        }
         if let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &source_tree.kind {
             let ty = self.type_of_tpt_inner_journaled(parens.inner, context, info_journal)?;
             if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
@@ -326,6 +368,33 @@ impl SourceTyper<'_> {
                 position,
             },
         )?;
+        if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
+            return Err(TyperError::DuplicateSourceTypeCacheEntry {
+                source: self.source,
+                tree_index: tree.index(),
+                existing,
+                attempted: ty,
+            });
+        }
+        Ok(ty)
+    }
+
+    fn project_function_type(
+        &mut self,
+        tree: TreeId<Untyped>,
+        params: Vec<TreeId<Untyped>>,
+        result: TreeId<Untyped>,
+        kind: SourceFunctionKind,
+        context: SourceContextId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        let tycon = self.source_function_type_constructor(kind, params.len(), tree.index())?;
+        let mut args = Vec::with_capacity(params.len() + 1);
+        for param in params {
+            args.push(self.type_of_tpt_inner_journaled(param, context, info_journal)?);
+        }
+        args.push(self.type_of_tpt_inner_journaled(result, context, info_journal)?);
+        let ty = self.store.types.alloc(Type::Applied { tycon, args });
         if let Err(existing) = self.type_index.insert(self.source, tree, ty) {
             return Err(TyperError::DuplicateSourceTypeCacheEntry {
                 source: self.source,
