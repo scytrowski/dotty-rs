@@ -1614,6 +1614,17 @@ fn local_extension_audit_splits_group_shape_and_receiver_type_failures() {
         failure.files,
         BTreeSet::from(["MissingExtensionReceiver.scala".to_owned()])
     );
+
+    let nested_receiver = audit_source(
+        "class Box[A] {}; class Audit { def outer: Int = { extension (receiver: Box[MissingReceiverType]) { def choose: Int = 1 }; def marker: Int = 1; 0 } }",
+        "NestedMissingExtensionReceiver.scala",
+    );
+    assert!(
+        nested_receiver
+            .failures
+            .contains_key("LocalExtensionReceiverTypeNotFound"),
+        "nested receiver type errors should stay in the focused bucket: {nested_receiver:?}"
+    );
 }
 
 #[test]
@@ -3791,10 +3802,32 @@ fn is_extension_receiver_tree(arena: &dotty_core::AstArena<Untyped>, tree_index:
             parameter.index() == tree_index
                 || matches!(
                     arena.try_get(*parameter).map(|node| &node.kind),
-                    Some(TreeKind::ValDef(definition)) if definition.tpt.index() == tree_index
+                    Some(TreeKind::ValDef(definition))
+                        if type_tree_contains(arena, definition.tpt, tree_index)
                 )
         })
     })
+}
+
+fn type_tree_contains(
+    arena: &dotty_core::AstArena<Untyped>,
+    root: dotty_core::TreeId<Untyped>,
+    target_index: u32,
+) -> bool {
+    let mut pending = vec![root];
+    let mut visited = BTreeSet::new();
+    while let Some(tree) = pending.pop() {
+        if tree.index() == target_index {
+            return true;
+        }
+        if !visited.insert(tree.index()) {
+            continue;
+        }
+        if let Some(node) = arena.try_get(tree) {
+            pending.extend(type_tree_children(&node.kind));
+        }
+    }
+    false
 }
 
 fn selected_name(
