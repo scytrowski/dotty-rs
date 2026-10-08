@@ -3819,6 +3819,32 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_extension_end_marker_is_diagnosed() {
+        const SOURCE: &str = concat!(
+            "object Outer:\n",
+            "  extension (self: Outer)\n",
+            "    def nested = 1\n",
+            "  end wrong\n",
+            "  def after = 2\n",
+            "end Outer",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.message().contains("end marker") }),
+            "{:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
     fn end_marker_at_outer_indentation_is_not_stolen_by_same_named_member() {
         const SOURCE: &str = "object Outer:\n  class Outer {}\nend Outer";
         let scanner = ContextualScanner::new(SOURCE).expect("source scans");
