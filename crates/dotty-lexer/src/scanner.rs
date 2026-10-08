@@ -2017,6 +2017,7 @@ fn is_end_marker_target(kind: TokenKind) -> bool {
                     | HardKeyword::Try
                     | HardKeyword::New
                     | HardKeyword::This
+                    | HardKeyword::End
                     | HardKeyword::Given
                     | HardKeyword::Val
                     | HardKeyword::Throw
@@ -2722,6 +2723,20 @@ mod tests {
                 TokenKind::Newline,
                 TokenKind::EndMarker,
                 TokenKind::Keyword(HardKeyword::Given),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recognizes_an_end_marker_for_a_method_named_end() {
+        assert_eq!(
+            kinds("value\nend end"),
+            vec![
+                TokenKind::Identifier,
+                TokenKind::Newline,
+                TokenKind::EndMarker,
+                TokenKind::Identifier,
                 TokenKind::Eof,
             ]
         );
