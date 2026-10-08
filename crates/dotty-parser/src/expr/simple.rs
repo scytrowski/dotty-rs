@@ -680,6 +680,18 @@ where
 
     fn parse_new(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         self.advance();
+        self.active_end_marker_targets
+            .push((dotty_core::HardKeyword::New, mark.start));
+        let tree = self.parse_new_after_keyword(mark);
+        let popped_target = self.active_end_marker_targets.pop();
+        debug_assert_eq!(
+            popped_target,
+            Some((dotty_core::HardKeyword::New, mark.start))
+        );
+        tree
+    }
+
+    fn parse_new_after_keyword(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         if self.optional_template_body_starts_here() {
             let body = self.parse_optional_template_body();
             return self.new_with_anonymous_template(mark, Vec::new(), body);

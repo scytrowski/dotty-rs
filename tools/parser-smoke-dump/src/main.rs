@@ -1455,6 +1455,33 @@ mod tests {
     }
 
     #[test]
+    fn end_new_after_nested_method_body_matches_the_anonymous_new() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/scala-parser-oracle/fixtures/expressions/end-new-after-anonymous-template.scala"
+        );
+        let source = fs::read_to_string(fixture).expect("fixture should be readable");
+        let scanner = ContextualScanner::new(&source).expect("source should scan cleanly");
+        let source_text = SourceText::new(&source).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let (_, new_tree) = result
+            .ast
+            .iter()
+            .find(|(_, tree)| matches!(tree.kind, TreeKind::New(_)))
+            .expect("the anonymous construction should remain a New tree");
+        let expected_end =
+            source.find("end new").expect("new end marker") as u32 + "end new".len() as u32;
+        assert_eq!(
+            new_tree.position.unwrap().span().range().end(),
+            expected_end
+        );
+    }
+
+    #[test]
     fn lambda_for_rhs_stops_at_alias_after_a_nested_indented_body() {
         let fixture = concat!(
             env!("CARGO_MANIFEST_DIR"),

@@ -186,6 +186,9 @@ where
                 if self.current_end_marker_matches_ancestor() {
                     break;
                 }
+                if self.current_end_marker_matches_active_construct() {
+                    break;
+                }
                 if !self.consume_end_marker(members.last().copied()) {
                     break;
                 }
@@ -301,6 +304,10 @@ where
                     self.consume_template_separators(closing);
                 } else if self.current_end_marker_matches_ancestor() {
                     // Leave enclosing markers to the template that owns them.
+                    break;
+                } else if self.current_end_marker_matches_active_construct() {
+                    // A marker such as `end new` belongs to the enclosing
+                    // expression, not to the final member of this template.
                     break;
                 } else {
                     if !self.consume_end_marker(members.last().copied()) {
