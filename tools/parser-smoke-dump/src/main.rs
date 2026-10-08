@@ -1447,6 +1447,130 @@ mod tests {
     use dotty_core::ast::UntypedNode;
     use dotty_core::{HardKeyword, TokenSource};
 
+    fn parse_expression_fragment_for_test(source: &str) -> dotty_parser::ParseResult {
+        let scanner = ContextualScanner::new(source).expect("source should scan cleanly");
+        let source_text = SourceText::new(source).expect("source should be valid");
+        let mut names = NameInterner::new();
+        parse_expression_fragment(source_text, SourceId::from_index(0), scanner, &mut names)
+    }
+
+    #[test]
+    fn lambda_for_rhs_stops_at_alias_after_a_nested_indented_body() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/scala-parser-oracle/fixtures/expressions/for-lambda-next-alias-deep-body.scala"
+        );
+        let source = fs::read_to_string(fixture).expect("fixture should be readable");
+        let result = parse_expression_fragment_for_test(&source);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PhaseSpecific(UntypedNode::ForYield(for_tree)) =
+            &result.ast.get(result.root).kind
+        else {
+            panic!("expected ForYield");
+        };
+        assert_eq!(for_tree.enums.len(), 4);
+        assert!(matches!(
+            result.ast.get(for_tree.enums[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::GenFrom(_))
+        ));
+        let TreeKind::PhaseSpecific(UntypedNode::GenAlias(transform)) =
+            &result.ast.get(for_tree.enums[1]).kind
+        else {
+            panic!("expected the lambda alias as the second enumerator");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) =
+            &result.ast.get(transform.expr).kind
+        else {
+            panic!("expected the alias RHS to be a lambda");
+        };
+        let TreeKind::Block(lambda_body) = &result.ast.get(function.body).kind else {
+            panic!("expected a block for the multi-statement lambda body");
+        };
+        assert_eq!(lambda_body.stats.len(), 1);
+        assert!(matches!(
+            result.ast.get(lambda_body.stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        let TreeKind::If(nested_if) = &result.ast.get(lambda_body.expr).kind else {
+            panic!("expected the nested if to remain the lambda body expression");
+        };
+        let TreeKind::Block(then_body) = &result.ast.get(nested_if.then_branch).kind else {
+            panic!("expected a nested block in the more deeply indented then branch");
+        };
+        assert_eq!(then_body.stats.len(), 1);
+        assert!(matches!(
+            result.ast.get(then_body.stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert!(matches!(
+            result.ast.get(then_body.expr).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            result.ast.get(for_tree.enums[2]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::GenAlias(_))
+        ));
+        assert!(matches!(
+            result.ast.get(for_tree.enums[3]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::GenFrom(_))
+        ));
+        assert!(matches!(
+            result.ast.get(for_tree.body).kind,
+            TreeKind::Ident(_)
+        ));
+    }
+
+    #[test]
+    fn malformed_generator_after_lambda_alias_recovers_to_yield_body() {
+        let source = concat!(
+            "for\n",
+            "  first <- values\n",
+            "  transform = (item: Int) =>\n",
+            "    val incremented = item + 1\n",
+            "    incremented\n",
+            "  broken <-\n",
+            "yield broken\n",
+        );
+        let result = parse_expression_fragment_for_test(source);
+
+        assert!(!result.diagnostics.is_empty());
+        let TreeKind::PhaseSpecific(UntypedNode::ForYield(for_tree)) =
+            &result.ast.get(result.root).kind
+        else {
+            panic!("expected a recoverable ForYield");
+        };
+        assert_eq!(for_tree.enums.len(), 3);
+        assert!(matches!(
+            result.ast.get(for_tree.enums[0]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::GenFrom(_))
+        ));
+        assert!(matches!(
+            result.ast.get(for_tree.enums[1]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::GenAlias(_))
+        ));
+        assert!(matches!(
+            result.ast.get(for_tree.enums[2]).kind,
+            TreeKind::PhaseSpecific(UntypedNode::GenFrom(_))
+        ));
+        let TreeKind::PhaseSpecific(UntypedNode::GenFrom(broken)) =
+            &result.ast.get(for_tree.enums[2]).kind
+        else {
+            unreachable!();
+        };
+        assert!(matches!(
+            result.ast.get(broken.expr).kind,
+            TreeKind::PhaseSpecific(UntypedNode::Error(_))
+        ));
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind() == dotty_parser::ParseDiagnosticKind::ExpectedExpression
+        }));
+        assert!(matches!(
+            result.ast.get(for_tree.body).kind,
+            TreeKind::Ident(_)
+        ));
+    }
+
     #[test]
     fn multiline_for_enumerators_preserve_the_following_block_statement() {
         const SOURCE: &str = concat!(
