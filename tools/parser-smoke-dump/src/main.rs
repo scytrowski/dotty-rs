@@ -2501,6 +2501,205 @@ mod tests {
     }
 
     #[test]
+    fn nested_colon_lambda_argument_keeps_the_enclosing_block_separator() {
+        const SOURCE: &str = concat!(
+            "object O:\n",
+            "  def run =\n",
+            "    val first = List(1).map: value =>\n",
+            "      val incremented = value + 1\n",
+            "      incremented\n",
+            "    val after = true\n",
+            "  def outside = true\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+            &result.ast.get(package.stats[0]).kind
+        else {
+            panic!("expected object");
+        };
+        let TreeKind::Template(template) = &result.ast.get(module.template).kind else {
+            panic!("expected object template");
+        };
+        assert_eq!(template.body.len(), 2);
+        let TreeKind::DefDef(run) = &result.ast.get(template.body[0]).kind else {
+            panic!("expected run method");
+        };
+        let TreeKind::Block(body) = &result.ast.get(run.rhs.expect("run body")).kind else {
+            panic!("expected method body block");
+        };
+        assert_eq!(body.stats.len(), 2);
+        assert!(matches!(
+            result.ast.get(body.stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert!(matches!(
+            result.ast.get(body.stats[1]).kind,
+            TreeKind::ValDef(_)
+        ));
+        let TreeKind::DefDef(outside) = &result.ast.get(template.body[1]).kind else {
+            panic!("expected following method");
+        };
+        assert_eq!(names.resolve(outside.name.as_name().text()), "outside");
+    }
+
+    #[test]
+    fn nested_colon_lambda_bodies_preserve_each_enclosing_separator() {
+        const SOURCE: &str = concat!(
+            "object O:\n",
+            "  def run =\n",
+            "    val first = outer: x =>\n",
+            "      inner: y =>\n",
+            "        val combined = x + y\n",
+            "        combined\n",
+            "      after(x)\n",
+            "    val next = true\n",
+            "  def outside = true\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+            &result.ast.get(package.stats[0]).kind
+        else {
+            panic!("expected object");
+        };
+        let TreeKind::Template(template) = &result.ast.get(module.template).kind else {
+            panic!("expected object template");
+        };
+        assert_eq!(template.body.len(), 2);
+        let TreeKind::DefDef(run) = &result.ast.get(template.body[0]).kind else {
+            panic!("expected run method");
+        };
+        let TreeKind::Block(body) = &result.ast.get(run.rhs.expect("run body")).kind else {
+            panic!("expected method body block");
+        };
+        assert_eq!(body.stats.len(), 2);
+        assert!(matches!(
+            result.ast.get(body.stats[0]).kind,
+            TreeKind::ValDef(_)
+        ));
+        assert!(matches!(
+            result.ast.get(body.stats[1]).kind,
+            TreeKind::ValDef(_)
+        ));
+        let TreeKind::DefDef(outside) = &result.ast.get(template.body[1]).kind else {
+            panic!("expected following method");
+        };
+        assert_eq!(names.resolve(outside.name.as_name().text()), "outside");
+    }
+
+    #[test]
+    fn nested_regular_lambda_body_stops_before_the_outer_call_delimiter() {
+        const SOURCE: &str = concat!(
+            "object O:\n",
+            "  def run =\n",
+            "    val first = values.map(\n",
+            "      value =>\n",
+            "        val nested = other =>\n",
+            "          val combined = value + other\n",
+            "          combined\n",
+            "        nested(1)\n",
+            "    )\n",
+            "    val after = true\n",
+            "  def outside = true\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn nested_polyfunction_argument_preserves_named_argument_boundaries() {
+        const SOURCE: &str = concat!(
+            "object O:\n",
+            "  def run =\n",
+            "    val first = invoke(\n",
+            "      handle = [A] =>\n",
+            "        (value: A) =>\n",
+            "          locally {\n",
+            "            val result = value\n",
+            "            result\n",
+            "          },\n",
+            "      done = value => value\n",
+            "    )\n",
+            "    val after = true\n",
+            "  def outside = true\n",
+        );
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
+            panic!("expected package root");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ModuleDef(module)) =
+            &result.ast.get(package.stats[0]).kind
+        else {
+            panic!("expected object");
+        };
+        let TreeKind::Template(template) = &result.ast.get(module.template).kind else {
+            panic!("expected object template");
+        };
+        let TreeKind::DefDef(run) = &result.ast.get(template.body[0]).kind else {
+            panic!("expected run method");
+        };
+        let TreeKind::Block(body) = &result.ast.get(run.rhs.expect("run body")).kind else {
+            panic!("expected method body block");
+        };
+        assert_eq!(body.stats.len(), 2);
+        let TreeKind::ValDef(first) = &result.ast.get(body.stats[0]).kind else {
+            panic!("expected first local value");
+        };
+        let TreeKind::Apply(invoke) = &result.ast.get(first.rhs.expect("invoke RHS")).kind else {
+            panic!("expected named-argument application");
+        };
+        assert_eq!(invoke.args.len(), 2);
+        let TreeKind::NamedArg(handle) = &result.ast.get(invoke.args[0]).kind else {
+            panic!("expected the polymorphic `handle` argument");
+        };
+        assert_eq!(names.resolve(handle.name.text()), "handle");
+        assert!(matches!(
+            result.ast.get(handle.arg).kind,
+            TreeKind::PhaseSpecific(UntypedNode::PolyFunction(_))
+        ));
+        let TreeKind::NamedArg(done) = &result.ast.get(invoke.args[1]).kind else {
+            panic!("expected the following `done` argument to remain separate");
+        };
+        assert_eq!(names.resolve(done.name.text()), "done");
+        let TreeKind::ValDef(after) = &result.ast.get(body.stats[1]).kind else {
+            panic!("expected the following block statement");
+        };
+        assert_eq!(names.resolve(after.name.as_name().text()), "after");
+        let TreeKind::DefDef(outside) = &result.ast.get(template.body[1]).kind else {
+            panic!("expected the following template method");
+        };
+        assert_eq!(names.resolve(outside.name.as_name().text()), "outside");
+    }
+
+    #[test]
     fn missing_assignment_rhs_does_not_consume_following_definition() {
         let source = concat!("def f(x: Int) =\n", "  x =\n", "  val y = 1\n", "  y\n",);
         let scanner = ContextualScanner::new(source).expect("source should scan cleanly");
