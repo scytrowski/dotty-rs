@@ -2,7 +2,7 @@
 
 `FunctionTypeProjection.scala` records the source shapes in #827, including
 zero, one, and multiple input parameters, nested function results, a function
-type used as another function's parameter, and a contextual function. The
+type used as another function's parameter, and a named contextual parameter. The
 Scala 3.9.0 `-Vprint:typer` output is captured in
 `FunctionTypeProjection.scala39-typed-tree.txt`.
 
@@ -16,11 +16,13 @@ The fixture was checked with Scala revision
 | `(A, B) => C` | 2 | `scala.Function2[A, B, C]` |
 | `A => B => C` | 1 at outer level | `scala.Function1[A, scala.Function1[B, C]]` |
 | `(A => B) => C` | 1 | `scala.Function1[scala.Function1[A, B], C]` |
-| `A ?=> B` | 1 | `scala.ContextFunction1[A, B]` |
+| `(x: A) ?=> B` | 1 | `scala.ContextFunction1[A, B]` |
 
 The parser emits ordinary arrows as `UntypedNode::Function { params, body }`.
 Contextual arrows are `UntypedNode::FunctionWithMods` with the `Given`
 modifier, one erased-parameter flag per input, and an explicit result tree.
+Named contextual inputs arrive as parameter definition trees; projection uses
+their declared type while keeping the parameter name out of type identity.
 Projection therefore counts only parameter trees and recursively projects
 every input and result. Contextual identity is selected by the modifier rather
 than inferred from spelling or from a mock classpath symbol.

@@ -18,7 +18,7 @@ package <empty> {
     type FunctionParameter =
       (FunctionTypeProjection.A => FunctionTypeProjection.B) =>
         FunctionTypeProjection.C
-    type Contextual = (FunctionTypeProjection.A) ?=> FunctionTypeProjection.B
-  }
+    type Contextual = (x: FunctionTypeProjection.A) ?=> FunctionTypeProjection.B
+    }
 }
 

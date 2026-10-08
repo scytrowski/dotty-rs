@@ -391,7 +391,18 @@ impl SourceTyper<'_> {
         let tycon = self.source_function_type_constructor(kind, params.len(), tree.index())?;
         let mut args = Vec::with_capacity(params.len() + 1);
         for param in params {
-            args.push(self.type_of_tpt_inner_journaled(param, context, info_journal)?);
+            let param_type = if kind == SourceFunctionKind::Contextual {
+                self.arena
+                    .try_get(param)
+                    .and_then(|parameter| match &parameter.kind {
+                        TreeKind::ValDef(definition) => Some(definition.tpt),
+                        _ => None,
+                    })
+                    .unwrap_or(param)
+            } else {
+                param
+            };
+            args.push(self.type_of_tpt_inner_journaled(param_type, context, info_journal)?);
         }
         args.push(self.type_of_tpt_inner_journaled(result, context, info_journal)?);
         let ty = self.store.types.alloc(Type::Applied { tycon, args });

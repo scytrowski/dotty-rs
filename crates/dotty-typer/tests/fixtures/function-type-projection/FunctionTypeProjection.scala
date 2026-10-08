@@ -8,4 +8,4 @@ object FunctionTypeProjection:
   type Many = (A, B) => C
   type NestedResult = A => B => C
   type FunctionParameter = (A => B) => C
-  type Contextual = A ?=> B
+  type Contextual = (x: A) ?=> B
