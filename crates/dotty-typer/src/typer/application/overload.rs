@@ -223,23 +223,12 @@ impl SourceTyper<'_> {
                 let receiver =
                     self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
                 let receiver_view = self.this_type_receiver_view(receiver)?;
-                let (members, unavailable_builtin_info) = match self
-                    .lookup_overload_members_journaled(receiver_view, selection.name, info_journal)
-                {
-                    Ok(members) => (members, None),
-                    Err(
-                        error @ MemberLookupError::ClassInfoUnavailable {
-                            symbol,
-                            state: crate::types::SymbolInfoState::Missing,
-                        },
-                    ) if self.is_bootstrapped_primitive_class(symbol) => {
-                        // Primitive definitions have canonical types but
-                        // no source member scopes in this semantic store.
-                        // Let a bounded local extension resolve against
-                        // that known receiver type; if none applies, keep
-                        // the original lookup failure observable.
-                        (Vec::new(), Some(error))
-                    }
+                let members = match self.lookup_overload_members_journaled(
+                    receiver_view,
+                    selection.name,
+                    info_journal,
+                ) {
+                    Ok(members) => members,
                     Err(error) => {
                         return Err(TyperError::MemberLookup(Box::new(error)));
                     }
@@ -259,9 +248,6 @@ impl SourceTyper<'_> {
                         return Ok(Some(resolved));
                     }
                     self.require_stable_selection_prefix(receiver_type, function_tree.index())?;
-                    if let Some(error) = unavailable_builtin_info {
-                        return Err(TyperError::MemberLookup(Box::new(error)));
-                    }
                     return Ok(None);
                 }
                 if members.len() == 1 {
@@ -646,27 +632,6 @@ impl SourceTyper<'_> {
             arguments,
             argument_trees: None,
         }))
-    }
-
-    fn is_bootstrapped_primitive_class(&self, symbol: SymbolId) -> bool {
-        [
-            self.definitions.byte,
-            self.definitions.char,
-            self.definitions.double,
-            self.definitions.float,
-            self.definitions.int,
-            self.definitions.long,
-            self.definitions.short,
-            self.definitions.boolean,
-            self.definitions.unit,
-        ]
-        .into_iter()
-        .any(|ty| {
-            matches!(
-                self.store.types.try_get(ty),
-                Some(Type::TypeRef { target: TypeRefTarget::Symbol(found), .. }) if *found == symbol
-            )
-        })
     }
 
     fn single_member_application_applicability(

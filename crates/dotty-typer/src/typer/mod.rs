@@ -742,6 +742,26 @@ mod tests {
         (parsed, store, packages, definitions, index, source)
     }
 
+    fn publish_empty_class_info(store: &mut SemanticStore, class_type: TypeId, no_prefix: TypeId) {
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(class),
+            ..
+        }) = store.types.try_get(class_type)
+        else {
+            panic!("class type should refer to a symbol");
+        };
+        let class = *class;
+        let declarations = store.scopes.alloc(dotty_core::Scope::new(Some(class)));
+        let info = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: no_prefix,
+            class,
+            parents: Vec::new(),
+            declarations,
+            self_type: None,
+        }));
+        store.symbols.set_info(class, SymbolInfo::Complete(info));
+    }
+
     fn parse_and_name_unit(
         text: &str,
         source: SourceId,
@@ -11951,6 +11971,10 @@ mod tests {
     fn local_extension_call_lowers_receiver_as_first_argument() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name(LOCAL_EXTENSION_CALL_SOURCE);
+        // This fixture models a completed nominal Int member index with no
+        // `choose` member. A missing class-info record alone is not proof
+        // that ordinary primitive members are absent.
+        publish_empty_class_info(&mut store, definitions.int, definitions.no_prefix);
         let (outer, block_tree) =
             method_definition_and_rhs(&parsed, &store, &index, source, "outer");
         let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
@@ -12037,6 +12061,28 @@ mod tests {
     fn builtin_missing_class_info_stays_visible_without_a_local_extension() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def outer(value: Int): Int = value.choose(1) }");
+        let (outer, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::MemberLookup(error))
+                if matches!(*error, MemberLookupError::ClassInfoUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn local_extension_cannot_mask_a_primitive_member_lookup_without_class_info() {
+        let source_text = "class C { def outer(value: Int): Int = { extension (receiver: Int) { def +(argument: Int): Int = 99 }; value.+(1) } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (outer, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "outer");
         let mut typer = SourceTyper::new(
             &parsed.ast,
