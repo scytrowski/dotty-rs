@@ -1458,7 +1458,7 @@ mod tests {
     fn annotated_local_method_after_feedback_lambda_value_keeps_statement_boundary() {
         let fixture = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../tools/scala-parser-oracle/fixtures/expressions/annotated-local-after-feedback-lambda.scala"
+            "/../../tools/scala-parser-oracle/fixtures/compilation/annotated-local-after-feedback-lambda.scala"
         );
         let source = fs::read_to_string(fixture).expect("fixture should be readable");
         let scanner = ContextualScanner::new(&source).expect("source should scan cleanly");

@@ -5662,6 +5662,7 @@ mod tests {
             "call(\n",
             "  value =>\n",
             "    val n = value\n",
+            "    + 1\n",
             "    @tailrec def loop(i: Int): Int =\n",
             "      if i >= n then n else loop(i + 1)\n",
             "    loop(0)\n",
@@ -5693,6 +5694,21 @@ mod tests {
             .expect("annotation operator");
         assert_eq!(scanner.tokens[annotation - 1].kind, TokenKind::Newline);
         assert_eq!(scanner.tokens[annotation + 1].kind, TokenKind::Identifier);
+
+        let infix_operator = scanner
+            .tokens
+            .iter()
+            .position(|token| {
+                token.kind == TokenKind::Operator
+                    && source.get(token.span.start() as usize..token.span.end() as usize)
+                        == Some("+")
+            })
+            .expect("leading infix operator");
+        assert_ne!(
+            scanner.tokens[infix_operator - 1].kind,
+            TokenKind::Newline,
+            "the feedback separator must not split a leading infix continuation"
+        );
     }
 
     #[test]
