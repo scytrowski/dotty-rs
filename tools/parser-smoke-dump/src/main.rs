@@ -1455,6 +1455,22 @@ mod tests {
     }
 
     #[test]
+    fn annotated_local_method_after_feedback_lambda_value_keeps_statement_boundary() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/scala-parser-oracle/fixtures/expressions/annotated-local-after-feedback-lambda.scala"
+        );
+        let source = fs::read_to_string(fixture).expect("fixture should be readable");
+        let scanner = ContextualScanner::new(&source).expect("source should scan cleanly");
+        let source_text = SourceText::new(&source).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
     fn lambda_for_rhs_stops_at_alias_after_a_nested_indented_body() {
         let fixture = concat!(
             env!("CARGO_MANIFEST_DIR"),
