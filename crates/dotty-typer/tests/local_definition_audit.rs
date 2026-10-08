@@ -4921,6 +4921,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::UnsupportedFunctionLiteralParameter { .. } => {
             "UnsupportedFunctionLiteralParameter"
         }
+        TyperError::FunctionLiteralCaptureUnsupported { .. } => "FunctionLiteralCaptureUnsupported",
         TyperError::UnsupportedPattern { .. } => "UnsupportedPattern",
         TyperError::TuplePatternResolutionDeferred { .. } => "TuplePatternResolutionDeferred",
         TyperError::TuplePatternTypeMismatch { .. } => "TuplePatternTypeMismatch",

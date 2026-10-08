@@ -3947,6 +3947,44 @@ mod tests {
     }
 
     #[test]
+    fn function_literal_keeps_enclosing_local_methods_and_rejects_value_capture() {
+        let source_text = concat!(
+            "class C { ",
+            "def make: Int => Int = { def identity(value: Int): Int = value; ",
+            "(x: Int) => identity(x) }; ",
+            "def capture(value: Int): Int => Int = (x: Int) => value",
+            " }",
+        );
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name(source_text);
+        enter_scala_function_classes(&mut store, &mut packages, [1]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let (make_method, make_rhs) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "make");
+        let make_context = typer.expression_context_for(make_method).unwrap();
+        assert!(typer.type_expression(make_rhs, make_context).is_ok());
+
+        let (capture_method, capture_rhs) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "capture");
+        let capture_context = typer.expression_context_for(capture_method).unwrap();
+        assert!(matches!(
+            typer.type_expression(capture_rhs, capture_context),
+            Err(TyperError::FunctionLiteralCaptureUnsupported {
+                symbol: Some(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn failed_function_literal_body_rolls_back_lambda_identity_and_typed_nodes() {
         let (parsed, mut store, mut packages, definitions, index, source) =
             parse_and_name("class C { def bad: Int => Int = (x: Int) => missing }");

@@ -19,6 +19,12 @@ struct FunctionLiteralDefinition {
 }
 
 impl FunctionLiteralIndex {
+    pub(in crate::typer) fn is_method(&self, method: SymbolId) -> bool {
+        self.definitions
+            .values()
+            .any(|definition| definition.method == method)
+    }
+
     pub(in crate::typer) fn method_at(
         &self,
         source: SourceId,
@@ -117,6 +123,24 @@ impl SourceTyper<'_> {
             links: SymbolLinks::default(),
         });
         let method_scope = self.store.scopes.alloc(Scope::new(Some(method)));
+        if self
+            .function_literals
+            .definitions
+            .insert(
+                (self.source, tree),
+                FunctionLiteralDefinition {
+                    method,
+                    scope: method_scope,
+                },
+            )
+            .is_some()
+        {
+            return Err(TyperError::UnsupportedExpression {
+                source: self.source,
+                tree_index: tree.index(),
+                expression_kind: "function literal identity was already assigned",
+            });
+        }
 
         let mut typed_parameters = Vec::with_capacity(parameters.len());
         let mut method_parameters = Vec::with_capacity(parameters.len());
@@ -185,7 +209,7 @@ impl SourceTyper<'_> {
             ExpressionContext {
                 lexical: context.lexical,
                 owner: method,
-                local_scopes: None,
+                local_scopes: context.local_scopes,
             },
             method_scope,
         )?;
@@ -254,25 +278,6 @@ impl SourceTyper<'_> {
             .collect::<Result<Vec<_>, _>>()?;
         args.push(body_result);
         let function_type = self.store.types.alloc(Type::Applied { tycon, args });
-
-        if self
-            .function_literals
-            .definitions
-            .insert(
-                (self.source, tree),
-                FunctionLiteralDefinition {
-                    method,
-                    scope: method_scope,
-                },
-            )
-            .is_some()
-        {
-            return Err(TyperError::UnsupportedExpression {
-                source: self.source,
-                tree_index: tree.index(),
-                expression_kind: "function literal identity was already assigned",
-            });
-        }
 
         Ok(
             TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).closure(

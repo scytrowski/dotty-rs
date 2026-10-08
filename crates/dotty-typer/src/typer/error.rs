@@ -1262,6 +1262,12 @@ pub enum TyperError {
         tree_index: u32,
         reason: &'static str,
     },
+    /// A function literal references an outer value requiring closure capture.
+    FunctionLiteralCaptureUnsupported {
+        source: SourceId,
+        tree_index: u32,
+        symbol: Option<SymbolId>,
+    },
     /// The source pattern root is not supported by the current pattern subset.
     UnsupportedPattern {
         source: SourceId,

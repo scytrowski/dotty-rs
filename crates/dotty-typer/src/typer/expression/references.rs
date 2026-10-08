@@ -418,6 +418,13 @@ impl SourceTyper<'_> {
         position: Option<SourceSpan>,
         context: ExpressionContext,
     ) -> Result<TreeId<Typed>, TyperError> {
+        if self.function_literals.is_method(context.owner) {
+            return Err(TyperError::FunctionLiteralCaptureUnsupported {
+                source: self.source,
+                tree_index: tree.index(),
+                symbol: None,
+            });
+        }
         let class = self.enclosing_this_owner(this.qual, context.owner, tree.index())?;
         let ty = self.store.types.alloc(Type::ThisType { class });
         Ok(
@@ -435,6 +442,23 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         let symbol = self.resolve_expression_term(ident.name, context, tree.index(), position)?;
+        if self.function_literals.is_method(context.owner)
+            && self.store.symbols.get(symbol).owner != Some(context.owner)
+            && matches!(
+                self.store.symbols.get(symbol).kind,
+                SymbolKind::Parameter
+                    | SymbolKind::Field
+                    | SymbolKind::Value
+                    | SymbolKind::Variable
+                    | SymbolKind::Local
+            )
+        {
+            return Err(TyperError::FunctionLiteralCaptureUnsupported {
+                source: self.source,
+                tree_index: tree.index(),
+                symbol: Some(symbol),
+            });
+        }
         let ty =
             self.expression_type_of_symbol(symbol, context.owner, tree.index(), info_journal)?;
         Ok(
