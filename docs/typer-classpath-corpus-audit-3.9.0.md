@@ -64,13 +64,28 @@ The 34 existing first blockers across 15 files are all attributed to source `Val
 | `value::Field::owner=ModuleClass::synthetic inferred TypeTree::rhs=true::modifiers=::semantic_mutable=false` | 6 / 2 | compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala |
 | `value::Field::owner=ModuleClass::synthetic inferred TypeTree::rhs=true::modifiers=Inline::semantic_mutable=false` | 4 / 1 | compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala |
 
+### Family assessment
+
+| Producer family | Smallest useful slice | Infrastructure and reuse | Main risks and non-goals |
+| --- | --- | --- | --- |
+| Immutable `Class` fields (14 / 7) | Infer an RHS for a source `val` member of a class. The 14/7 count is the bucket ceiling; actual reduction depends on which RHS shapes the slice accepts. | Build a field initializer `ExpressionContext` from the namer declaration context and semantic class owner. Reuse expression typing, widening, member lookup, and `run_atomic`. | `expression_context_for` rejects non-method owners. Preserve `this` ownership; guard self and mutual field cycles. Start without `var`, module fields, or arbitrary RHS forms. |
+| Mutable `Class` fields (10 / 6) | Add `var` only after immutable field inference works. | Reuse the class initializer context and RHS inference; preserve the source `Var` modifier and semantic `MUTABLE` flag. | Assignment checks must use the inferred field type; check reads and writes during initialization. No changes to assignment typing in the first slice. |
+| Ordinary `ModuleClass` fields (6 / 2) | Infer one non-inline module member value after class fields. | Reuse field type inference with a module-class owner and the namer-provided lexical context. | Singleton initialization and module cycles differ from per-instance class initialization. Keep module values out of the first slice. |
+| Inline `ModuleClass` fields (4 / 1) | Add inline values as a separate follow-up after ordinary module values. | Reuse only the proven module initializer path and existing inline flags. | Compile-time constant and inline expansion rules add constraints. Do not assume ordinary runtime RHS typing is sufficient. |
+
+
 `complete_symbol` reuses an already-complete symbol, and source type projection reuses a cached type-index entry before projection. On a field cache miss, `complete_symbol_inner` calls `type_of_tpt_inner_journaled`; the inferred `TypeTree` produces the blocker before the RHS is typed. Ordinary and local method signatures use a separate result path: inferred results are guarded against recursion, typed from the RHS, and widened, but neither method path produced a corpus blocker here. `run_atomic` restores symbol information, store allocations, type-index state, and other typer state after failure; local method completion also removes newly entered parameter symbols. Namer-provided declaration and lexical contexts identify the field semantic owner. The observed 34/15 therefore measure field type projection, not method-result inference.
 
 ### Recommended next sprint
 
-Target the immutable inferred Class field bucket first (14 of 34 occurrences across 7 of 15 files). Treat 14/7 as the maximum possible reduction for this slice, not a promised change to first-blocker totals. Add a focused positive fixture and explicit unsupported/rollback cases; type the field RHS in its declaration context, widen the result using existing helpers, and commit type information only through the existing completion transaction. Work in typer/completion/mod.rs, typer/completion/declarations.rs, typer/type_projection.rs, and existing expression typing entry points. Measure whether the same slice covers a later blocker before adding mutable vars (10/6), ordinary module-class values (6/2), or inline module-class values (4/1). Keep method-result inference, local PatDef, generalized expected-type inference, and classpath loading out of scope.
+Target the immutable inferred `Class` field bucket (14 of 34 occurrences across 7 of 15 files); 14/7 is the bucket ceiling, not a promised first-blocker reduction, because the RHS forms differ. Sequence the sprint narrowly:
 
-## Previous type projection snapshot
+1. Add a field-initializer context builder using `declaration_context_of(field)`, its lexical context, and the owning `Class`; do not call `expression_context_for`, which accepts only methods and constructors, and do not push a method scope.
+2. Add a transaction-aware in-progress field set. Detect direct and mutual re-entry before recursive completion; the current `initializing_local_symbols` guard is populated for local values and does not protect class fields. Test rollback after a cycle.
+3. Type an immutable class field RHS through `type_value_expression_inner`, widen with the existing helper, and publish `SymbolInfo::Complete` only on success. Cover a supported RHS, a cycle, an unsupported RHS, and an explicit declared type.
+4. Re-run the pinned audit and report the actual reduction. Only then extend the same path to mutable class fields, and assess module and inline fields as separate increments.
+
+The first increment belongs in `typer/context.rs`, `typer/transaction.rs`, `typer/completion/mod.rs`, `typer/expression/references.rs`, and focused typer tests. Exclude `var` (10/6), ordinary module values (6/2), inline module values (4/1), method-result inference, local `PatDef`, generalized expected-type inference, and classpath loading from that increment.## Previous type projection snapshot
 
 The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.
 
