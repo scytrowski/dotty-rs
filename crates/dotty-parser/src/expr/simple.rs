@@ -559,7 +559,9 @@ where
                             | StatementSequenceBoundary::CompilationUnit => None,
                         };
                         parser.with_feedback_block_indent(feedback_indent, |parser| {
-                            parser.parse_statement_sequence(boundary)
+                            parser.with_block_parent_location(|parser| {
+                                parser.parse_statement_sequence(boundary)
+                            })
                         })
                     },
                 )
