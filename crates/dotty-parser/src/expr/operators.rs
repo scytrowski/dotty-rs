@@ -25,6 +25,13 @@ where
 
         loop {
             self.consume_guard_infix_newlines();
+            // Newlines are normally suppressed inside parentheses by the
+            // scanner. Dotty's `InFor` separator region restores them between
+            // enumerators; recognize that narrow boundary before treating an
+            // identifier such as `pipe` or `fiber` as an infix method name.
+            if self.for_enumerator_rhs && self.current_starts_multiline_for_enumerator() {
+                break;
+            }
             // The scanner suppresses a physical newline when an outdent
             // closes a nested layout region. An alphabetic identifier at
             // that boundary starts the enclosing statement, not an infix

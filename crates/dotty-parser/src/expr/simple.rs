@@ -856,6 +856,12 @@ where
                 let body = self.parse_optional_template_body();
                 qualifier = self.new_with_anonymous_template(mark, vec![parent], body);
                 can_apply = false;
+            } else if self.current().kind == TokenKind::Identifier
+                && self.current_text_is("_")
+                && self.for_enumerator_rhs
+                && self.current_starts_multiline_for_enumerator()
+            {
+                break;
             } else if self.current().kind == TokenKind::Identifier && self.current_text_is("_") {
                 // Scala 3.9 keeps the legacy eta-expansion spelling `expr _`
                 // in SimpleExprRest. It is distinct from a feature-gated
