@@ -210,7 +210,7 @@ where
         )
     }
 
-    fn current_infix_operator(&mut self) -> Option<PendingOperator> {
+    pub(super) fn current_infix_operator(&mut self) -> Option<PendingOperator> {
         if !matches!(
             self.current().kind,
             TokenKind::Identifier

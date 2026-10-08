@@ -768,12 +768,7 @@ where
             return tree;
         }
 
-        if continues_condition
-            && matches!(
-                self.current().kind,
-                TokenKind::Operator | TokenKind::ColonOp
-            )
-        {
+        if continues_condition && self.current_infix_operator().is_some() {
             return self.infix_expr(tree);
         }
 
