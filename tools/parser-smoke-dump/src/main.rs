@@ -3820,9 +3820,20 @@ mod tests {
         let result =
             parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
 
-        assert!(
-            !result.diagnostics.is_empty(),
-            "missing refinement body is malformed"
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        let diagnostic = &result.diagnostics[0];
+        assert_eq!(
+            diagnostic.kind(),
+            dotty_parser::ParseDiagnosticKind::ExpectedToken
+        );
+        assert_eq!(
+            diagnostic.message(),
+            "expected an indented refinement body after `:`"
+        );
+        let next_member = SOURCE.find("def after").unwrap() as u32;
+        assert_eq!(
+            diagnostic.span(),
+            dotty_core::TextRange::new(next_member, next_member).unwrap()
         );
         assert!(result.ast.iter().any(|(_, tree)| matches!(
             &tree.kind,
