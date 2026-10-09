@@ -1862,7 +1862,12 @@ fn root_label(root: &Path) -> String {
             || part.starts_with("cats-effect-v")
             || part.starts_with("kyo-v")
             || part.starts_with("shapeless-3-v")
-            || part.starts_with("chimney-")
+            || part.strip_prefix("chimney-").is_some_and(|version| {
+                version
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_digit())
+            })
     }) {
         return components[index + 1..].join("/");
     }
@@ -2503,6 +2508,16 @@ mod tests {
         assert_eq!(
             root_label(Path::new("/tmp/cache/chimney-2.1.0/chimney/src/main/scala",)),
             "chimney/src/main/scala"
+        );
+    }
+
+    #[test]
+    fn chimney_module_root_label_keeps_the_module_name() {
+        assert_eq!(
+            root_label(Path::new(
+                "/tmp/cache/chimney-2.1.0/chimney-cats/src/main/scala",
+            )),
+            "chimney-cats/src/main/scala"
         );
     }
 
