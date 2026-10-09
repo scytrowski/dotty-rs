@@ -189,11 +189,14 @@ mkdir -p "$(dirname -- "$output_path")"
     printf 'The 14 `LocalMethodSignatureDeferred` observations split into 3 direct signature failures and 11 sibling local methods that inherit the first blocker from an enclosing failed body. The direct payloads are `by-name parameters` (2 origins; 8 affected methods across 2 files) and `parameter modifiers` (1 origin; 6 affected methods in 1 file). Recommend a narrow follow-up for local `inline` parameter signatures: the direct modifier origin is one method in `MegaPhase.scala`, and the shared signature builder already preserves `Inline` on parameter symbols. Keep inline expansion and argument evaluation out of scope. By-name signatures affect more methods, but one direct origin has an inferred result and by-name applications currently defer separately (`ByNameApplicationParameterDeferred`); that slice therefore has additional downstream blockers. Dependent-result signatures have no corpus first-blocker observations and remain covered only by focused fixtures. The other high-ranked buckets still need separate prerequisites: anonymous classes (32 / 15) need stable identity and ownership, while local values/variables (21 / 8) need a PatDef shape breakdown.\n\n'
     printf '### #899 local method signature profile\n\n'
     printf 'The profile counts local methods whose first blocker is a local signature failure. `direct_origins` identifies methods carrying that signature feature; `inherited_methods` are sibling methods attributed to the same enclosing failure. Thus 14 affected methods do not mean 14 independently unsupported signatures. The profile is diagnostic only and does not type additional methods.\n\n'
+    printf 'Every affected method is listed below with its source path, line/span, tree index, feature payload, signature shape, blocker origin, and direct/inherited attribution.\n\n'
+    printf '```text\n'
     awk '
-        /^local_method_signature_profile:$/ { in_profile = 1 }
-        /^singleton_reference_profile:$/ { in_profile = 0 }
-        in_profile { print }
+        /^  records:$/ { in_records = 1; next }
+        /^singleton_reference_profile:$/ { in_records = 0 }
+        in_records { sub(/^    /, ""); print }
     ' "$tmp_dir/first.report"
+    printf '```\n\n'
     printf '\n'
     printf '### Historical #825 next-sprint candidates (pre-#856)\n\n'
     printf '| Candidate | Smallest useful slice and owner | Prerequisites / reuse | Non-goals |\n| --- | --- | --- | --- |\n'
