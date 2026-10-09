@@ -957,6 +957,21 @@ Constructor contexts expose constructor-owned parameters for lookup, but
 constructor-body typing is not otherwise implemented. `push_local_scope` adds
 empty block scopes without changing the source-context graph.
 
+`SourceTyper::field_initializer_context_for` builds a separate context for an
+initialized `ValDef` field owned by an ordinary source class. Namer records
+initialized `ValDef` field owned by an ordinary source class. The semantic
+index keeps this separate from the field declaration context, which remains
+the source of truth for completing its declared type. Namer records the
+primary-constructor scope as the initializer context's nearest lexical scope,
+then chains to the declaration-point class context. This lets ordinary lookup
+see the existing constructor parameter identities first, then class members
+and preceding imports. The expression owner remains the enclosing class, so
+`this` has class ownership; the Typer does not push a method or local block
+scope. Trait and module-class fields, fields without source provenance or an
+initializer, and malformed owner/context relationships are rejected with a
+focused context error. This entry point builds context only; it does not infer
+or publish field types or type field initializers as part of class completion.
+
 Explicit positional type applications are supported for one resolved `Poly`
 callee. Type arguments use the expression's lexical context, require exact
 arity, and are checked against ordinary lower and upper bounds before the Poly

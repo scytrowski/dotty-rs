@@ -42,8 +42,8 @@ pub use context::{ExpressionContext, ExpressionScopeId};
 use context::{ExpressionScopeFrame, next_expression_scope_owner};
 pub use error::{
     ExtractorMethodShapeIssue, ExtractorPatternArgumentIssue, ExtractorProductIssue,
-    ExtractorResultMemberIssue, PatternKind, TuplePatternResolutionIssue, TypeArgumentBoundSide,
-    TyperError,
+    ExtractorResultMemberIssue, FieldInitializerContextIssue, PatternKind,
+    TuplePatternResolutionIssue, TypeArgumentBoundSide, TyperError,
 };
 pub use source_function::{MAX_SOURCE_FUNCTION_ARITY, SourceFunctionKind};
 
@@ -17502,6 +17502,313 @@ mod tests {
             .expression_term_candidates(name, context, parameter_tree.index(), None)
             .unwrap();
         assert_eq!(candidates, vec![parameter]);
+    }
+
+    #[test]
+    fn field_initializer_context_uses_constructor_parameters_and_class_members() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C(arg: Int) { val first: Int = arg; def member: Int = 1; val second: Int = first; val self = this }",
+        );
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let (first, _, _) = val_definition_and_rhs(&parsed, &store, &index, source, "first");
+        let (second, second_tree, _) =
+            val_definition_and_rhs(&parsed, &store, &index, source, "second");
+        let (self_field, _, self_rhs) =
+            val_definition_and_rhs(&parsed, &store, &index, source, "self");
+        let member = method_symbol(&parsed, &store, &index, source, "member");
+        let (constructor, parameter_tree) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (index.symbol_at(source, tree).is_some()
+                    && store.names.resolve(definition.name.as_name().text()) == "<init>")
+                    .then(|| {
+                        (
+                            index.symbol_at(source, tree).unwrap(),
+                            definition.value_param_clauses[0][0],
+                        )
+                    })
+            })
+            .expect("class should have its primary constructor");
+        let parameter = index
+            .derived_symbol_at(constructor, source, parameter_tree)
+            .unwrap();
+        let parameter_name = store.symbols.get(parameter).name;
+        let declaration_context_id = index.declaration_context_of(second).unwrap();
+        let field_context_id = index.field_initializer_context_of(second).unwrap();
+        let lexical_context = index.source_context(field_context_id);
+        let constructor_scope = index.scope_of(constructor).unwrap();
+        let class_scope = index.scope_of(class).unwrap();
+        assert_eq!(lexical_context.owner, constructor);
+        assert_eq!(lexical_context.lexical_scope, constructor_scope);
+        assert_eq!(lexical_context.parent, Some(declaration_context_id));
+        let parent = index
+            .try_source_context(lexical_context.parent.unwrap())
+            .unwrap();
+        assert_eq!(parent.owner, class);
+        assert_eq!(parent.lexical_scope, class_scope);
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let before = typer.store.checkpoint();
+        let expression_context = typer.field_initializer_context_for(second).unwrap();
+        let repeated_context = typer.field_initializer_context_for(second).unwrap();
+        assert_eq!(expression_context, repeated_context);
+        assert_eq!(expression_context.lexical, field_context_id);
+        assert_eq!(expression_context.owner, class);
+        assert_eq!(expression_context.local_scopes, None);
+        assert_eq!(typer.store.checkpoint(), before);
+        assert!(typer.expression_scopes.is_empty());
+
+        for (name, expected) in [
+            (parameter_name, parameter),
+            (typer.store.symbols.get(first).name, first),
+            (typer.store.symbols.get(member).name, member),
+        ] {
+            assert_eq!(
+                typer
+                    .expression_term_candidates(name, expression_context, second_tree.index(), None)
+                    .unwrap(),
+                vec![expected]
+            );
+        }
+
+        let self_context = typer.field_initializer_context_for(self_field).unwrap();
+        let typed_self = typer.type_expression(self_rhs, self_context).unwrap();
+        assert!(matches!(
+            typer.typed_ast().get(typed_self).kind,
+            TreeKind::This(dotty_core::ast::This { qual: None })
+        ));
+        assert_eq!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_self).ty),
+            &Type::ThisType { class }
+        );
+    }
+
+    #[test]
+    fn field_initializer_context_preserves_imports_at_the_declaration_point() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { object Nested { val imported: Int = 1 }; import Nested.imported; val copied: Int = imported }",
+        );
+        let (field, field_tree, _) =
+            val_definition_and_rhs(&parsed, &store, &index, source, "copied");
+        let imported = val_symbol(&parsed, &store, &index, source, "imported").0;
+        let imported_name = store.symbols.get(imported).name;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let context = typer.field_initializer_context_for(field).unwrap();
+        let candidates = typer
+            .expression_term_candidates(imported_name, context, field_tree.index(), None)
+            .unwrap();
+
+        assert_eq!(candidates, vec![imported]);
+    }
+
+    #[test]
+    fn field_initializer_context_rejects_unsupported_owners_and_non_fields() {
+        for (source_text, field_name, expected_owner_kind) in [
+            (
+                "object O { val value: Int = 1 }",
+                "value",
+                SymbolKind::ModuleClass,
+            ),
+            ("trait T { val value: Int = 1 }", "value", SymbolKind::Trait),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (field, _, _) = val_definition_and_rhs(&parsed, &store, &index, source, field_name);
+            let owner = store.symbols.get(field).owner.unwrap();
+            assert_eq!(store.symbols.get(owner).kind, expected_owner_kind);
+            let typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+
+            assert!(matches!(
+                typer.field_initializer_context_for(field),
+                Err(TyperError::FieldInitializerContextInvalid {
+                    field: actual_field,
+                    issue: FieldInitializerContextIssue::OwnerKind { owner: actual_owner, kind },
+                    ..
+                }) if actual_field == field && actual_owner == owner && kind == expected_owner_kind
+            ));
+        }
+
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def method: Int = 1 }");
+        let method = method_symbol(&parsed, &store, &index, source, "method");
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.field_initializer_context_for(method),
+            Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                issue: FieldInitializerContextIssue::SymbolKind(SymbolKind::Method),
+                ..
+            }) if field == method
+        ));
+
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value: Int = 1 }");
+        let (field, _, _) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let malformed_owner = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        store.symbols.get_mut(field).owner = Some(malformed_owner);
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.field_initializer_context_for(field),
+            Err(TyperError::FieldInitializerContextInvalid {
+                field: actual_field,
+                issue: FieldInitializerContextIssue::EnclosingClassMalformed { owner },
+                ..
+            }) if actual_field == field && owner == malformed_owner
+        ));
+
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val abstractValue: Int }");
+        let field = val_symbol(&parsed, &store, &index, source, "abstractValue").0;
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.field_initializer_context_for(field),
+            Err(TyperError::FieldInitializerContextInvalid {
+                field: actual_field,
+                issue: FieldInitializerContextIssue::InitializerMissing,
+                ..
+            }) if actual_field == field
+        ));
+    }
+
+    #[test]
+    fn field_initializer_context_rejects_missing_provenance_and_declaration_context() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value: Int = 1 }");
+        let (field, _field_tree, _) =
+            val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let field_name = store.names.intern("syntheticField");
+        let field_owner = store.symbols.get(field).owner;
+        let synthetic_field = store.symbols.alloc(dotty_core::Symbol {
+            name: Name::new(field_name, Namespace::Term),
+            owner: field_owner,
+            kind: SymbolKind::Field,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.field_initializer_context_for(synthetic_field),
+            Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                issue: FieldInitializerContextIssue::SourceDefinitionMissing,
+                ..
+            }) if field == synthetic_field
+        ));
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value: Int = 1 }");
+        let (field, field_tree, _) =
+            val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let class = store.symbols.get(field).owner.unwrap();
+        let class_tree = match index.definition_of(class).unwrap() {
+            SourceDefinition::Canonical { tree, .. } => tree,
+            SourceDefinition::Derived { .. } => unreachable!(),
+        };
+        let constructor_tree = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                matches!(node.kind, TreeKind::DefDef(_))
+                    .then(|| index.symbol_at(source, tree))
+                    .flatten()
+                    .filter(|symbol| store.symbols.get(*symbol).kind == SymbolKind::Constructor)
+                    .map(|_| tree)
+            })
+            .unwrap();
+        let constructor = index.symbol_at(source, constructor_tree).unwrap();
+        let mut without_field_context = SourceSemanticIndex::new();
+        without_field_context
+            .record_symbol(source, class_tree, class)
+            .unwrap();
+        without_field_context
+            .record_symbol(source, constructor_tree, constructor)
+            .unwrap();
+        without_field_context
+            .record_symbol(source, field_tree, field)
+            .unwrap();
+        without_field_context
+            .record_scope(class, index.scope_of(class).unwrap())
+            .unwrap();
+        without_field_context
+            .record_scope(constructor, index.scope_of(constructor).unwrap())
+            .unwrap();
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &without_field_context,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.field_initializer_context_for(field),
+            Err(TyperError::FieldInitializerContextInvalid {
+                field: actual_field,
+                issue: FieldInitializerContextIssue::DeclarationContextMissing,
+                ..
+            }) if actual_field == field
+        ));
     }
 
     #[test]

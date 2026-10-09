@@ -1827,6 +1827,9 @@ fn namer_error_kind(error: &dotty_namer::NamerError) -> String {
         dotty_namer::NamerError::DuplicateDeclarationContext { .. } => {
             "DuplicateDeclarationContext"
         }
+        dotty_namer::NamerError::DuplicateFieldInitializerContext { .. } => {
+            "DuplicateFieldInitializerContext"
+        }
         dotty_namer::NamerError::MalformedAstShape { .. } => "MalformedAstShape",
         dotty_namer::NamerError::InvalidVisibilityQualifier { .. } => "InvalidVisibilityQualifier",
         dotty_namer::NamerError::UnsupportedGivenNameShape { .. } => "UnsupportedGivenNameShape",

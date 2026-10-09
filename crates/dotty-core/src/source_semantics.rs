@@ -1106,6 +1106,7 @@ mod tests {
     fn field_initializer_context_is_idempotent_and_conflicts_do_not_replace_it() {
         let mut store = SemanticStore::new();
         let field = symbol(&mut store);
+        store.symbols.get_mut(field).kind = SymbolKind::Field;
         let constructor = symbol(&mut store);
         let first_scope = store.scopes.alloc(Scope::new(Some(constructor)));
         let second_scope = store.scopes.alloc(Scope::new(Some(constructor)));

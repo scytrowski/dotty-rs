@@ -4857,6 +4857,9 @@ fn classify_namer_error(error: &NamerError) -> FailureClassification {
         NamerError::DuplicateSourceExportSite { .. } => "NamerError::DuplicateSourceExportSite",
         NamerError::DuplicateDeclarationScope { .. } => "NamerError::DuplicateDeclarationScope",
         NamerError::DuplicateDeclarationContext { .. } => "NamerError::DuplicateDeclarationContext",
+        NamerError::DuplicateFieldInitializerContext { .. } => {
+            "NamerError::DuplicateFieldInitializerContext"
+        }
         NamerError::MalformedAstShape { .. } => "NamerError::MalformedAstShape",
         NamerError::InvalidVisibilityQualifier { protected, .. } => {
             if *protected {
@@ -4935,6 +4938,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::ExpressionOwnerDeclarationContextMissing { .. } => {
             "ExpressionOwnerDeclarationContextMissing"
         }
+        TyperError::FieldInitializerContextInvalid { .. } => "FieldInitializerContextInvalid",
         TyperError::ExpressionLocalScopeMissing { .. } => "ExpressionLocalScopeMissing",
         TyperError::ExpressionLocalScopeStackMissing { .. } => "ExpressionLocalScopeStackMissing",
         TyperError::ExpressionLocalScopeStackForeign { .. } => "ExpressionLocalScopeStackForeign",

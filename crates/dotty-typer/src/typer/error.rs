@@ -70,6 +70,48 @@ pub enum TuplePatternResolutionIssue {
     TupleTypeUnsupported,
 }
 
+/// Why a source field cannot provide a field-initializer expression context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldInitializerContextIssue {
+    /// The symbol is not present in the semantic store.
+    SymbolMissing,
+    /// The symbol is not a field.
+    SymbolKind(SymbolKind),
+    /// The symbol has no canonical source definition.
+    SourceDefinitionMissing,
+    /// The source definition belongs to a different source or is derived.
+    SourceDefinitionMismatch,
+    /// The source tree does not map back to this field symbol.
+    SourceTreeSymbolMismatch,
+    /// The source tree is outside the current arena.
+    SourceTreeMissing,
+    /// The source tree is not a `ValDef`.
+    SourceTreeKind,
+    /// The field has no initializer RHS.
+    InitializerMissing,
+    /// The initializer RHS is outside the current arena.
+    InitializerTreeMissing,
+    /// The field has no semantic owner.
+    OwnerMissing,
+    /// The field is not owned by an ordinary source class.
+    OwnerKind { owner: SymbolId, kind: SymbolKind },
+    /// The enclosing class does not match its source class definition.
+    EnclosingClassMalformed { owner: SymbolId },
+    /// No lexical source context was recorded for the field.
+    DeclarationContextMissing,
+    /// No separate initializer context was recorded for the field.
+    InitializerContextMissing,
+    /// The recorded source context is outside the semantic index.
+    SourceContextMissing { context: SourceContextId },
+    /// The context does not expose the primary-constructor parameter scope
+    /// with the enclosing class declaration context as its parent.
+    InitializerEnvironmentMalformed {
+        context_owner: SymbolId,
+        context_scope: dotty_core::ScopeId,
+        actual_scope_owner: Option<SymbolId>,
+    },
+}
+
 impl PatternKind {
     /// Returns the stable diagnostic/audit label for this pattern shape.
     pub const fn as_str(self) -> &'static str {
@@ -139,6 +181,12 @@ pub enum TyperError {
     /// No source context is indexed for this expression owner.
     ExpressionOwnerDeclarationContextMissing {
         owner: SymbolId,
+    },
+    /// A source field cannot provide a validated initializer context.
+    FieldInitializerContextInvalid {
+        field: SymbolId,
+        tree_index: Option<u32>,
+        issue: FieldInitializerContextIssue,
     },
     /// A local expression scope is outside the semantic store's scope arena.
     ExpressionLocalScopeMissing {
