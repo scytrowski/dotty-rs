@@ -252,6 +252,8 @@ struct Audit {
     match_profile: MatchProfile,
     patdef_profile: PatDefProfile,
     missing_declared_type_profile: MissingDeclaredTypeProfile,
+    source_function_method_outcomes: BTreeSet<String>,
+    source_function_outcomes: BTreeMap<String, FailureBucket>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -284,6 +286,8 @@ impl Default for Audit {
             match_profile: MatchProfile::default(),
             patdef_profile: PatDefProfile::default(),
             missing_declared_type_profile: MissingDeclaredTypeProfile::default(),
+            source_function_method_outcomes: BTreeSet::new(),
+            source_function_outcomes: BTreeMap::new(),
         }
     }
 }
@@ -429,6 +433,16 @@ impl Audit {
         }
         for (name, bucket) in other.failures {
             let target = self.failures.entry(name).or_default();
+            target.family = bucket.family;
+            target.count += bucket.count;
+            target.files.extend(bucket.files);
+            target.examples.extend(bucket.examples);
+            target.examples = target.examples.iter().take(5).cloned().collect();
+        }
+        self.source_function_method_outcomes
+            .extend(other.source_function_method_outcomes);
+        for (key, bucket) in other.source_function_outcomes {
+            let target = self.source_function_outcomes.entry(key).or_default();
             target.family = bucket.family;
             target.count += bucket.count;
             target.files.extend(bucket.files);
@@ -611,6 +625,32 @@ fn pinned_scala39_local_definition_audit() {
             Rc::clone(&resolver_metrics),
         ));
     }
+
+    assert_eq!(
+        audit
+            .source_function_outcomes
+            .get("expression::Function::UnsupportedFunctionLiteralParameter")
+            .map(|bucket| bucket.count),
+        Some(9),
+        "the same nine inferred-lambda baseline methods should remain explicitly deferred"
+    );
+    assert_eq!(
+        audit
+            .source_function_outcomes
+            .get("expression::Function::ImportQualifierNotFound")
+            .map(|bucket| bucket.count),
+        Some(4),
+        "the four Scala2Unpickler lambda methods should expose their classpath blocker"
+    );
+    assert_eq!(
+        audit
+            .source_function_outcomes
+            .get("type::Function::SymbolResolution")
+            .map(|bucket| bucket.count),
+        Some(12),
+        "all ordinary function-type baseline methods should retain their resolver blocker"
+    );
+    assert_eq!(audit.source_function_method_outcomes.len(), 25);
 
     let missing_declared_type = audit
         .failures
@@ -839,6 +879,23 @@ fn pinned_scala39_local_definition_audit() {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    }
+    println!("source_function_method_outcomes:");
+    for (name, bucket) in &audit.source_function_outcomes {
+        println!(
+            "  {name}: count={}, files={}, examples=[{}]",
+            bucket.count,
+            bucket.files.len(),
+            bucket
+                .examples
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    for record in &audit.source_function_method_outcomes {
+        println!("  method={record}");
     }
     print_missing_declared_type_profile(&audit.missing_declared_type_profile);
     print_ranked_gaps(&audit.failures);
@@ -2020,7 +2077,7 @@ fn declared_type_tree_histogram_is_structural_and_deterministic() {
 
     let first = collect_declared_type_tree_histogram(&parsed.ast, &store.names);
     let second = collect_declared_type_tree_histogram(&parsed.ast, &store.names);
-    let (inventory, forms) = collect_declared_type_tree_inventory(&parsed.ast, &store.names);
+    let (inventory, forms, _) = collect_declared_type_tree_inventory(&parsed.ast, &store.names);
     assert_eq!(first, second);
     assert_eq!(first, inventory);
     assert!(forms.contains("InfixOp::|"));
@@ -2525,7 +2582,7 @@ fn audit_source_inner(
     audit.patdef_profile = collect_local_patdefs(&parsed.ast, &store.names, path);
     audit.expression_forms = collect_expression_histogram(&parsed.ast);
     audit.prefix_operator_forms = collect_prefix_operator_histogram(&parsed.ast, &store.names);
-    let (type_tree_forms, type_tree_form_names) =
+    let (type_tree_forms, type_tree_form_names, _type_tree_nodes) =
         collect_declared_type_tree_inventory(&parsed.ast, &store.names);
     audit.type_tree_forms = type_tree_forms;
     if !type_tree_form_names.is_empty() {
@@ -2768,7 +2825,7 @@ fn audit_source_inner(
         bucket.examples = bucket.examples.iter().take(5).cloned().collect();
     }
 
-    for (tree, range) in local_method_trees {
+    for (tree, range) in local_method_trees.clone() {
         if typer.source_typed_index().get(source, tree).is_some() {
             audit.typed_local_defdefs += 1;
         } else {
@@ -2812,6 +2869,20 @@ fn audit_source_inner(
             record_failure(&mut audit, kind, path);
         }
     }
+    collect_source_function_method_outcomes(
+        SourceFunctionMethodAudit {
+            arena: &parsed.ast,
+            source,
+            path,
+            source_text: text,
+            names: &typer.store().names,
+            methods: &local_method_trees,
+            root_failures: &root_failures,
+            typer: &typer,
+        },
+        &mut audit.source_function_method_outcomes,
+        &mut audit.source_function_outcomes,
+    );
     if let Some(classpath) = probe_classpath {
         let successes =
             probe_supported_match_cases(text, path, classpath, &mut audit.match_profile);
@@ -3827,6 +3898,232 @@ fn local_method_trees(
                 .then_some((tree, node.position?.span().range()))
         })
         .collect()
+}
+
+struct SourceFunctionMethodAudit<'a, 'typer> {
+    arena: &'a dotty_core::AstArena<Untyped>,
+    source: SourceId,
+    path: &'a str,
+    source_text: &'a str,
+    names: &'a dotty_core::names::NameInterner,
+    methods: &'a [(dotty_core::TreeId<Untyped>, TextRange)],
+    root_failures: &'a [(TextRange, FailureClassification, Option<u32>)],
+    typer: &'a SourceTyper<'typer>,
+}
+
+fn collect_source_function_method_outcomes(
+    audit: SourceFunctionMethodAudit<'_, '_>,
+    records: &mut BTreeSet<String>,
+    outcomes: &mut BTreeMap<String, FailureBucket>,
+) {
+    const BASELINE_METHODS: &[(&str, usize, &str, &str)] = &[
+        (
+            "expression::Function",
+            738,
+            "refersTo",
+            "compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala",
+        ),
+        (
+            "expression::Function",
+            753,
+            "removeSingleton",
+            "compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala",
+        ),
+        (
+            "expression::Function",
+            755,
+            "mapArg",
+            "compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala",
+        ),
+        (
+            "expression::Function",
+            759,
+            "elim",
+            "compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala",
+        ),
+        (
+            "expression::Function",
+            711,
+            "factoryManifest",
+            "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
+        ),
+        (
+            "expression::Function",
+            719,
+            "singletonManifest",
+            "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
+        ),
+        (
+            "expression::Function",
+            722,
+            "synthArrayManifest",
+            "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
+        ),
+        (
+            "expression::Function",
+            728,
+            "synthWildcardManifest",
+            "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
+        ),
+        (
+            "expression::Function",
+            732,
+            "synthArgManifests",
+            "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
+        ),
+        (
+            "expression::Function",
+            742,
+            "canManifest",
+            "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
+        ),
+        (
+            "expression::Function",
+            749,
+            "synthManifest",
+            "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
+        ),
+        (
+            "expression::Function",
+            771,
+            "manifestOfType",
+            "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
+        ),
+        (
+            "expression::Function",
+            775,
+            "synthesize",
+            "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
+        ),
+        (
+            "type::Function",
+            672,
+            "ifInit",
+            "compiler/src/dotty/tools/backend/jvm/BTypes.scala",
+        ),
+        (
+            "type::Function",
+            674,
+            "isJLO",
+            "compiler/src/dotty/tools/backend/jvm/BTypes.scala",
+        ),
+        (
+            "type::Function",
+            2388,
+            "genArgs",
+            "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        ),
+        (
+            "type::Function",
+            2389,
+            "genArgsAsClassCaptures",
+            "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        ),
+        (
+            "type::Function",
+            3387,
+            "genScalaArgs",
+            "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        ),
+        (
+            "type::Function",
+            3388,
+            "genJSArgs",
+            "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        ),
+        (
+            "type::Function",
+            311,
+            "argStr",
+            "compiler/src/dotty/tools/dotc/core/Denotations.scala",
+        ),
+        (
+            "type::Function",
+            3449,
+            "normalize",
+            "compiler/src/dotty/tools/dotc/core/Types.scala",
+        ),
+        (
+            "type::Function",
+            3396,
+            "maybeAscription",
+            "compiler/src/dotty/tools/dotc/parsing/Parsers.scala",
+        ),
+        (
+            "type::Function",
+            367,
+            "unusable",
+            "compiler/src/dotty/tools/dotc/transform/PostTyper.scala",
+        ),
+        (
+            "type::Function",
+            410,
+            "isPoly",
+            "compiler/src/dotty/tools/dotc/typer/ProtoTypes.scala",
+        ),
+        (
+            "type::Function",
+            417,
+            "fun",
+            "library/src/scala/util/control/Exception.scala",
+        ),
+    ];
+    for (method_tree, method_range) in audit.methods {
+        let node = audit.arena.get(*method_tree);
+        let TreeKind::DefDef(definition) = &node.kind else {
+            continue;
+        };
+        let method_name = audit
+            .names
+            .resolve(definition.name.as_name().text())
+            .to_owned();
+        let line = audit.source_text[..method_range.start() as usize]
+            .lines()
+            .count()
+            + 1;
+        let Some((form, _, _, _)) =
+            BASELINE_METHODS
+                .iter()
+                .find(|(_, baseline_line, baseline_name, baseline_path)| {
+                    *baseline_line == line
+                        && *baseline_name == method_name
+                        && *baseline_path == audit.path
+                })
+        else {
+            continue;
+        };
+        let typed = audit
+            .typer
+            .source_typed_index()
+            .get(audit.source, *method_tree)
+            .is_some();
+        let blocker = if typed {
+            "Typed"
+        } else {
+            audit
+                .root_failures
+                .iter()
+                .filter(|(parent, _, _)| {
+                    parent.start() <= method_range.start() && method_range.end() <= parent.end()
+                })
+                .min_by_key(|(parent, _, _)| parent.len())
+                .map_or("NoSuccessfulEnclosingMethodTyping", |(_, failure, _)| {
+                    failure.bucket.as_str()
+                })
+        };
+        records.insert(format!(
+            "{}:{line}:{method_name} baseline_form={form} first_blocker={blocker}",
+            audit.path
+        ));
+        let key = format!("{form}::{blocker}");
+        let bucket = outcomes.entry(key).or_default();
+        bucket.count += 1;
+        bucket.files.insert(audit.path.to_owned());
+        bucket
+            .examples
+            .insert(format!("{}:{line}:{method_name}", audit.path));
+        bucket.examples = bucket.examples.iter().take(5).cloned().collect();
+    }
 }
 
 fn local_stat_trees(arena: &dotty_core::AstArena<Untyped>) -> HashSet<dotty_core::TreeId<Untyped>> {
@@ -5376,7 +5673,11 @@ fn collect_declared_type_tree_histogram(
 fn collect_declared_type_tree_inventory(
     arena: &dotty_core::AstArena<Untyped>,
     names: &dotty_core::names::NameInterner,
-) -> (BTreeMap<String, usize>, BTreeSet<String>) {
+) -> (
+    BTreeMap<String, usize>,
+    BTreeSet<String>,
+    HashSet<dotty_core::TreeId<Untyped>>,
+) {
     let operators = source_operator_spellings(arena, names);
     let local_stats = local_stat_trees(arena);
     let mut roots = Vec::new();
@@ -5439,7 +5740,7 @@ fn collect_declared_type_tree_inventory(
         }
         pending.extend(type_tree_children(&node.kind));
     }
-    (histogram, forms)
+    (histogram, forms, visited)
 }
 
 fn type_tree_form(

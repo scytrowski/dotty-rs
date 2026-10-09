@@ -4175,6 +4175,57 @@ mod tests {
     }
 
     #[test]
+    fn missing_function_class_rolls_back_lambda_setup_and_all_published_mappings() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def bad: Int => Int = (x: Int) => x }");
+        let (owner, lambda) = method_definition_and_rhs(&parsed, &store, &index, source, "bad");
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parsed.ast.get(lambda).kind
+        else {
+            panic!("fixture should contain a function literal");
+        };
+        let parameter = function.params[0];
+        let parameter_tpt = match &parsed.ast.get(parameter).kind {
+            TreeKind::ValDef(parameter) => parameter.tpt,
+            _ => panic!("lambda parameter should be a value definition"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(owner).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+        let typed_count = typer.typed_ast().iter().count();
+
+        for _ in 0..2 {
+            assert!(matches!(
+                typer.type_expression(lambda, context),
+                Err(TyperError::SourceFunctionClassNotFound {
+                    kind: source_function::SourceFunctionKind::Ordinary,
+                    arity: 1,
+                })
+            ));
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+            assert_eq!(typer.typed_ast().iter().count(), typed_count);
+            assert_eq!(typer.function_literal_method_at(source, lambda), None);
+            assert_eq!(
+                typer.function_literal_parameter_symbol_at(source, parameter),
+                None
+            );
+            assert_eq!(typer.source_type_index().type_at(source, lambda), None);
+            assert_eq!(
+                typer.source_type_index().type_at(source, parameter_tpt),
+                None
+            );
+            assert_eq!(typer.source_typed_index().get(source, lambda), None);
+            assert_eq!(typer.source_typed_index().get(source, parameter), None);
+        }
+    }
+
+    #[test]
     fn failed_source_function_child_projection_rolls_back_and_missing_class_is_preserved() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class A; type Bad = (A, Missing) => A");
