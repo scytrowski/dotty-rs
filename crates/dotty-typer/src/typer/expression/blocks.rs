@@ -1196,7 +1196,12 @@ impl SourceTyper<'_> {
         }
         let typed_rhs = typed_rhs_result?;
         let rhs_type = self.typed_arena.get(typed_rhs).ty;
-        let actual = self.widen_expression_type_journaled(rhs_type, info_journal, 0)?;
+        let actual = match declared_type {
+            Some(expected) => {
+                self.adapt_expression_type_to_expected(rhs_type, expected, info_journal)?
+            }
+            None => self.widen_expression_type_journaled(rhs_type, info_journal, 0)?,
+        };
         let declared_type = if let Some(declared_type) = declared_type {
             match self.conforms(actual, declared_type) {
                 Ok(true) => {}
