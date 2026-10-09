@@ -84,13 +84,17 @@ The ranked list below excludes parser/namer and classpath-resolution failures, a
 | 9 | `MissingDeclaredType` | 10 / 3 |
 | 10 | `LocalBlockDeclarationDeferred::module definition` | 9 / 2 |
 
+### Recommended next Typer sprint
+
+Recommend one bounded `LocalMethodSignatureDeferred` increment. The refreshed audit found 14 occurrences in 3 files. Start by splitting the `feature` payload, then implement the most frequent supported signature form with a focused fixture. This reuses the shared signature builder and existing parameter/type-parameter scopes, and can unblock local method typing across all three files. The higher-ranked anonymous-class bucket is larger (32 / 15) but needs stable anonymous identity and ownership; the local val/var bucket (21 / 8) first needs a PatDef shape breakdown. The signature slice has the clearest bounded risk-to-reach balance; do not treat raw rank as the selection rule.
+
 ### Historical #825 next-sprint candidates (pre-#856)
 
 | Candidate | Smallest useful slice and owner | Prerequisites / reuse | Non-goals |
 | --- | --- | --- | --- |
 | `MissingDeclaredType` (34 / 15, historical) | #825 proposed immutable inferred class fields (14 occurrences / 7 files); implemented in #854–#856 and audited below. | Reused declaration source contexts, expression typing, widening, and completion rollback. | Current audit distinguishes first-blocker movement from completed semantics. |
 | `AnonymousClassInstantiationDeferred` (32 / 15) | Support one anonymous `new` with one concrete parent in `typer/expression/new.rs`. | Reuse ordinary `New` typing and parent projection; define stable anonymous symbol ownership and class info. | Closure capture, refinement synthesis, and general anonymous-class members. |
-| `UnsupportedSingletonReference` (22 / 1) | #880 profiled all 22 method blockers as one literal boolean singleton tree; #881 projects supported literals to `Type::Constant`, and #882 adds bounded exact-constant and underlying-type relations. | Reuse `Type::Constant`, literal expression typing, and existing stable-prefix validation. | Arbitrary paths, unstable prefixes, literal unions, and path-dependent relation redesign. |
+| `UnsupportedSingletonReference` (historical 22 / 1) | #880 profiled the baseline; #881–#883 now project, relate, and preserve supported literal constants. | Reuse `Type::Constant`, literal expression typing, bounded relations, expected adaptation, and stable-prefix validation. | Arbitrary paths, unstable prefixes, and path-dependent relation redesign. |
 | `LocalBlockDeclarationDeferred::val/var definition` (21 / 8) | Split remaining cases by PatDef root/binder shape in `typer/expression/blocks.rs`. | Reuse transactional PatDef lowering, local binders, and assignment support. | General destructuring and reopening supported PatDef forms. |
 | `LocalMethodSignatureDeferred` (14 / 3) | Split exact `feature` values and add one fixture for the most frequent unsupported signature in `typer/completion/local_methods.rs`. | Reuse the shared signature builder and existing parameter/type-parameter scopes. | General dependent results, erased/by-name expansion, or new method inference. |
 
@@ -194,7 +198,7 @@ The Scala 3.9.0 audit ran twice against revision `777528f19a58e794c9954a42f43337
 | `library/src/scala/collection/Iterator.scala#tree=3805` | `UnsupportedTypeTree::Annotated` |
 | `library/src/scala/collection/Iterator.scala#tree=3865` | `UnsupportedTypeTree::Annotated` |
 
-The top-ranked remaining gap is `AnonymousClassInstantiationDeferred` (32 occurrences across 15 files), but its implementation risk and anonymous-identity work are larger than the literal singleton slice. #880 traced 22 `UnsupportedSingletonReference` observations to one `true` declaration. #881 implemented literal-to-`Type::Constant` source projection, #882 added exact constant relations, and #883 preserves those constants for singleton expected types. Keep `null`, class literals, arbitrary paths, unstable prefixes, and path-dependent relation changes deferred.
+The top-ranked remaining gap is `AnonymousClassInstantiationDeferred` (32 occurrences across 15 files), but its implementation risk and anonymous-identity work are larger than the literal singleton slice. #880 traced 22 `UnsupportedSingletonReference` observations to one `true` declaration. #881 implemented literal-to-`Type::Constant` source projection, #882 added exact constant relations, and #883 preserves constants for singleton expected types. Keep `null`, class literals, arbitrary paths, unstable prefixes, and path-dependent relation changes deferred.
 
 ## #880 literal singleton blocker profile
 
@@ -219,15 +223,47 @@ All 22 were repeated observations of `val actionable: true = true` in `compiler/
 | Expected adaptation | Implemented in #883: preserve exact constants for singleton expected types, including singleton alternatives in unions; ordinary expectations still use the widened type. |
 | Explicit deferrals | Keep `null`, class literals, arbitrary paths, unstable prefixes, and path-dependent relation changes unsupported. |
 
-## #881–#883 literal singleton progress audit
+## #881–#884 literal singleton hardening audit
 
-The pinned Scala 3.9.0 audit compares the same 22 #880 method observations after literal projection, constant relations, and expected adaptation. Each baseline method is required to remain present, and the run fails if any still stops at `UnsupportedSingletonReference`. This measures first-blocker movement and does not claim successful method typing. Two normalized audit runs must match byte-for-byte.
+The pinned Scala 3.9.0 audit compares the same 22 #880 method observations after literal projection, constant relations, expected adaptation, and hardening. Each baseline method is required to remain present, and the run fails if any still stops at `UnsupportedSingletonReference`. A moved first blocker is not full method typing. Two normalized audit runs must match byte-for-byte.
 
 | Projection measure | Result |
 | --- | ---: |
 | baseline observations | 22 |
-| moved past projection | 22 |
+| no longer first blocked by singleton projection | 22 |
 | remaining UnsupportedSingletonReference | 0 |
+
+### Baseline outcome classification
+
+| Outcome | Count |
+| --- | ---: |
+| Deeper Typer semantic blocker | 0 |
+| Resolution or classpath blocker | 22 |
+| Residual singleton-specific blocker | 0 |
+| Fully typed baseline methods | 0 |
+
+Resolution or classpath first blockers do not show whether the corpus attempts reached singleton projection or expected-type adaptation. Focused fixtures establish those paths separately.
+
+### Singleton source inventory
+
+| Reference category | Singleton trees | Files | Source files |
+| --- | ---: | ---: | --- |
+| `literal` | 39 | 13 | compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/core/Periods.scala, compiler/src/dotty/tools/dotc/core/TypeComparer.scala, compiler/src/dotty/tools/dotc/reporting/trace.scala, compiler/src/dotty/tools/dotc/transform/CheckUnused.scala |
+| `this` | 987 | 117 | compiler/src/dotty/tools/backend/jvm/opt/FifoCache.scala, compiler/src/dotty/tools/dotc/ast/Positioned.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/ast/untpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala |
+| `identifier` | 930 | 122 | compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/core/Contexts.scala, compiler/src/dotty/tools/dotc/core/MacroClassLoader.scala, compiler/src/dotty/tools/dotc/core/NamerOps.scala |
+| `selection` | 44 | 17 | compiler/src/dotty/tools/dotc/Run.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Access.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Constant.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Signature.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Tree.scala |
+| `unsupported` | 12 | 1 | library/src/scala/util/Try.scala |
+
+#### Reference shapes, including unsupported AST nodes
+
+| Shape | Occurrences | Files | Source files |
+| --- | ---: | ---: | --- |
+| `Ident` | 930 | 122 | compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/core/Contexts.scala, compiler/src/dotty/tools/dotc/core/MacroClassLoader.scala, compiler/src/dotty/tools/dotc/core/NamerOps.scala |
+| `Literal(Boolean)` | 33 | 13 | compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/core/Periods.scala, compiler/src/dotty/tools/dotc/core/TypeComparer.scala, compiler/src/dotty/tools/dotc/reporting/trace.scala, compiler/src/dotty/tools/dotc/transform/CheckUnused.scala |
+| `Literal(Int)` | 6 | 2 | library/src/scala/NamedTuple.scala, library/src/scala/Tuple.scala |
+| `Other(Annotated)` | 12 | 1 | library/src/scala/util/Try.scala |
+| `Select` | 44 | 17 | compiler/src/dotty/tools/dotc/Run.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Access.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Constant.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Signature.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Tree.scala |
+| `This` | 987 | 117 | compiler/src/dotty/tools/backend/jvm/opt/FifoCache.scala, compiler/src/dotty/tools/dotc/ast/Positioned.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/ast/untpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala |
 
 | Current first blocker for baseline methods | Count |
 | --- | ---: |
@@ -901,9 +937,23 @@ singleton_reference_profile:
   singleton_source_trees:
   enclosing_declarations:
   reference_shapes:
+singleton_source_inventory:
+  total_singleton_type_trees=2012
+  literal_references=39 files=13 examples=[compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/core/Periods.scala, compiler/src/dotty/tools/dotc/core/TypeComparer.scala, compiler/src/dotty/tools/dotc/reporting/trace.scala, compiler/src/dotty/tools/dotc/transform/CheckUnused.scala]
+  this_references=987 files=117 examples=[compiler/src/dotty/tools/backend/jvm/opt/FifoCache.scala, compiler/src/dotty/tools/dotc/ast/Positioned.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/ast/untpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala]
+  identifier_references=930 files=122 examples=[compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/core/Contexts.scala, compiler/src/dotty/tools/dotc/core/MacroClassLoader.scala, compiler/src/dotty/tools/dotc/core/NamerOps.scala]
+  selection_references=44 files=17 examples=[compiler/src/dotty/tools/dotc/Run.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Access.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Constant.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Signature.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Tree.scala]
+  unsupported_references=12 files=1 examples=[library/src/scala/util/Try.scala]
+  reference_shapes:
+    Ident=930 files=122 examples=[compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/core/Contexts.scala, compiler/src/dotty/tools/dotc/core/MacroClassLoader.scala, compiler/src/dotty/tools/dotc/core/NamerOps.scala]
+    Literal(Boolean)=33 files=13 examples=[compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/core/Periods.scala, compiler/src/dotty/tools/dotc/core/TypeComparer.scala, compiler/src/dotty/tools/dotc/reporting/trace.scala, compiler/src/dotty/tools/dotc/transform/CheckUnused.scala]
+    Literal(Int)=6 files=2 examples=[library/src/scala/NamedTuple.scala, library/src/scala/Tuple.scala]
+    Other(Annotated)=12 files=1 examples=[library/src/scala/util/Try.scala]
+    Select=44 files=17 examples=[compiler/src/dotty/tools/dotc/Run.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Access.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Constant.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Signature.scala, compiler/src/dotty/tools/dotc/semanticdb/generated/Tree.scala]
+    This=987 files=117 examples=[compiler/src/dotty/tools/backend/jvm/opt/FifoCache.scala, compiler/src/dotty/tools/dotc/ast/Positioned.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/ast/untpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala]
 singleton_projection_baseline:
   baseline_observations=22
-  moved_past_projection=22
+  no_longer_first_blocked_by_singleton_projection=22
   remaining_UnsupportedSingletonReference=0
   current_first_blockers:
     ImportQualifierNotFound=22

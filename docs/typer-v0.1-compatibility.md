@@ -94,12 +94,15 @@ syntax. These unsupported semantic constant kinds return
 The #880 pinned audit identified 22 local-method first blockers from the one
 `true` singleton declaration `actionable` in `CheckUnused.scala`. The #881
 rerun moved all 22 past source type projection. #882 added exact constant
-relations, and #883 now preserves an expression's exact constant when the
-expected type contains a singleton alternative. This supports local value
-initializers, local method results, and method arguments while ordinary
-expected types continue to use the underlying widened type. Literal singleton
-annotations also reify into typed type trees. The audit measures first-blocker
-movement and does not claim full method typing.
+relations, #883 preserves an expression's exact constant when the expected
+type contains a singleton alternative, and #884 pins source singleton result
+annotations through projection and expected expression typing for `true`,
+`false`, and `1`. The rerun still stops these 22 corpus methods at
+`ImportQualifierNotFound`; it does not count them as fully typed. This supports
+local value initializers, local method results, and method arguments while
+ordinary expected types continue to use the underlying widened type. Literal
+singleton annotations also reify into typed type trees. The audit measures
+first-blocker movement and does not claim full method typing.
 
 The semantic model already has `Type::Constant`, and source literal
 expressions retain exact constant types. The bounded relation validates and

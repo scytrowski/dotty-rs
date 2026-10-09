@@ -24225,6 +24225,80 @@ mod tests {
     }
 
     #[test]
+    fn literal_singleton_method_results_project_and_type_end_to_end() {
+        let source_text =
+            "class C { def truth: true = true; def falsehood: false = false; def one: 1 = 1 }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let methods = ["truth", "falsehood", "one"].map(|name| {
+            let (symbol, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, name);
+            let tpt = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::DefDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == name =>
+                    {
+                        (index.symbol_at(source, tree) == Some(symbol)).then_some(definition.tpt)
+                    }
+                    _ => None,
+                })
+                .expect("method result type should be present");
+            (name, symbol, tpt, rhs)
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for (name, method, tpt, rhs) in methods {
+            let TreeKind::SingletonTypeTree(singleton) = &parsed.ast.get(tpt).kind else {
+                panic!("{name} result should use SingletonTypeTree");
+            };
+            let TreeKind::Literal(literal) = &parsed.ast.get(singleton.reference).kind else {
+                panic!("{name} singleton should refer to a literal");
+            };
+            let constant = literal.value.clone();
+            let context = index.declaration_context_of(method).unwrap();
+            let projected = typer.type_of_tpt(tpt, context).unwrap();
+            assert!(
+                matches!(
+                    typer.store().types.get(projected),
+                    Type::Constant(actual) if *actual == constant
+                ),
+                "{name}: projected result should preserve the literal constant"
+            );
+            assert_eq!(
+                typer.source_type_index().type_at(source, tpt),
+                Some(projected)
+            );
+
+            let expression_context = typer.expression_context_for(method).unwrap();
+            let typed_rhs = typer
+                .type_expression_expected(rhs, expression_context, projected)
+                .unwrap();
+            assert!(
+                matches!(
+                    typer
+                        .store()
+                        .types
+                        .get(typer.typed_ast().get(typed_rhs).ty),
+                    Type::Constant(actual) if *actual == constant
+                ),
+                "{name}: expected adaptation should preserve the exact literal"
+            );
+            assert_eq!(
+                typer.source_typed_index().get(source, rhs),
+                Some(typed_rhs),
+                "{name}: typed source mapping should be recorded"
+            );
+        }
+    }
+
+    #[test]
     fn local_singleton_values_and_singleton_method_arguments_conform() {
         let source_text = "class C { def consume(value: true): Unit = (); def use: Unit = { def exactMethod: true = true; val exact: true = exactMethod; val ordinary: Boolean = true; consume(true) } }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);

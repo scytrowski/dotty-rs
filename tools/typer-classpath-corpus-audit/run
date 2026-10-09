@@ -185,11 +185,13 @@ mkdir -p "$(dirname -- "$output_path")"
         }
     ' "$tmp_dir/first.report"
     printf '\n'
+    printf '### Recommended next Typer sprint\n\n'
+    printf 'Recommend one bounded `LocalMethodSignatureDeferred` increment. The refreshed audit found 14 occurrences in 3 files. Start by splitting the `feature` payload, then implement the most frequent supported signature form with a focused fixture. This reuses the shared signature builder and existing parameter/type-parameter scopes, and can unblock local method typing across all three files. The higher-ranked anonymous-class bucket is larger (32 / 15) but needs stable anonymous identity and ownership; the local val/var bucket (21 / 8) first needs a PatDef shape breakdown. The signature slice has the clearest bounded risk-to-reach balance; do not treat raw rank as the selection rule.\n\n'
     printf '### Historical #825 next-sprint candidates (pre-#856)\n\n'
     printf '| Candidate | Smallest useful slice and owner | Prerequisites / reuse | Non-goals |\n| --- | --- | --- | --- |\n'
     printf '| `MissingDeclaredType` (34 / 15, historical) | #825 proposed immutable inferred class fields (14 occurrences / 7 files); implemented in #854–#856 and audited below. | Reused declaration source contexts, expression typing, widening, and completion rollback. | Current audit distinguishes first-blocker movement from completed semantics. |\n'
     printf '| `AnonymousClassInstantiationDeferred` (32 / 15) | Support one anonymous `new` with one concrete parent in `typer/expression/new.rs`. | Reuse ordinary `New` typing and parent projection; define stable anonymous symbol ownership and class info. | Closure capture, refinement synthesis, and general anonymous-class members. |\n'
-    printf '| `UnsupportedSingletonReference` (22 / 1) | #880 profiled all 22 method blockers as one literal boolean singleton tree; #881 projects supported literals to `Type::Constant`, and #882 adds bounded exact-constant and underlying-type relations. | Reuse `Type::Constant`, literal expression typing, and existing stable-prefix validation. | Arbitrary paths, unstable prefixes, literal unions, and path-dependent relation redesign. |\n'
+    printf '| `UnsupportedSingletonReference` (historical 22 / 1) | #880 profiled the baseline; #881–#883 now project, relate, and preserve supported literal constants. | Reuse `Type::Constant`, literal expression typing, bounded relations, expected adaptation, and stable-prefix validation. | Arbitrary paths, unstable prefixes, and path-dependent relation redesign. |\n'
     printf '| `LocalBlockDeclarationDeferred::val/var definition` (21 / 8) | Split remaining cases by PatDef root/binder shape in `typer/expression/blocks.rs`. | Reuse transactional PatDef lowering, local binders, and assignment support. | General destructuring and reopening supported PatDef forms. |\n'
     printf '| `LocalMethodSignatureDeferred` (14 / 3) | Split exact `feature` values and add one fixture for the most frequent unsupported signature in `typer/completion/local_methods.rs`. | Reuse the shared signature builder and existing parameter/type-parameter scopes. | General dependent results, erased/by-name expansion, or new method inference. |\n\n'
     printf '## Historical #825 MissingDeclaredType producer profile (pre-#856)\n\n'
@@ -341,20 +343,95 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '| Type relation | Implemented in #882: compare exact supported constant payloads and relate constants to modeled primitive/Unit types. String constants compare exactly; String widening remains unsupported without a canonical source type. |\n'
     printf '| Expected adaptation | Implemented in #883: preserve exact constants for singleton expected types, including singleton alternatives in unions; ordinary expectations still use the widened type. |\n'
     printf '| Explicit deferrals | Keep `null`, class literals, arbitrary paths, unstable prefixes, and path-dependent relation changes unsupported. |\n\n'
-    printf '## #881–#883 literal singleton progress audit\n\n'
-    printf 'The pinned Scala 3.9.0 audit compares the same 22 #880 method observations after literal projection, constant relations, and expected adaptation. Each baseline method is required to remain present, and the run fails if any still stops at `UnsupportedSingletonReference`. This measures first-blocker movement and does not claim successful method typing. Two normalized audit runs must match byte-for-byte.\n\n'
+    printf '## #881–#884 literal singleton hardening audit\n\n'
+    printf 'The pinned Scala 3.9.0 audit compares the same 22 #880 method observations after literal projection, constant relations, expected adaptation, and hardening. Each baseline method is required to remain present, and the run fails if any still stops at `UnsupportedSingletonReference`. A moved first blocker is not full method typing. Two normalized audit runs must match byte-for-byte.\n\n'
     printf '| Projection measure | Result |\n| --- | ---: |\n'
     awk '
         /^singleton_projection_baseline:$/ { in_profile = 1; next }
         in_profile && /^  current_first_blockers:$/ { in_blockers = 1; next }
         in_profile && /^  methods:$/ { in_profile = 0; in_blockers = 0 }
-        in_profile && !in_blockers && /^  (baseline_observations|moved_past_projection|remaining_UnsupportedSingletonReference)=/ {
+        in_profile && !in_blockers && /^  (baseline_observations|no_longer_first_blocked_by_singleton_projection|remaining_UnsupportedSingletonReference)=/ {
             line = $0
             sub(/^  /, "", line)
             split(line, fields, "=")
             label = fields[1]
             gsub(/_/, " ", label)
             printf "| %s | %s |\n", label, fields[2]
+        }
+    ' "$tmp_dir/first.report"
+    printf '\n### Baseline outcome classification\n\n'
+    printf '| Outcome | Count |\n| --- | ---: |\n'
+    awk '
+        /^singleton_projection_baseline:$/ { in_profile = 1; next }
+        in_profile && /^  current_first_blockers:$/ { in_blockers = 1; next }
+        in_profile && /^  methods:$/ { in_profile = 0; in_blockers = 0 }
+        in_profile && in_blockers && /^    [^ ]+=[0-9]+$/ {
+            line = $0
+            sub(/^    /, "", line)
+            split(line, fields, "=")
+            name = fields[1]
+            count = fields[2]
+            if (name ~ /Singleton/) {
+                residual += count
+            } else if (name ~ /ImportQualifierNotFound|TypeNameNotFound|MemberLookup|Resolver|Classpath/) {
+                resolution += count
+            } else if (name == "typed") {
+                typed += count
+            } else {
+                deeper += count
+            }
+        }
+        END {
+            printf "| Deeper Typer semantic blocker | %d |\n", deeper
+            printf "| Resolution or classpath blocker | %d |\n", resolution
+            printf "| Residual singleton-specific blocker | %d |\n", residual
+            printf "| Fully typed baseline methods | %d |\n", typed
+        }
+    ' "$tmp_dir/first.report"
+    printf '\nResolution or classpath first blockers do not show whether the corpus attempts reached singleton projection or expected-type adaptation. Focused fixtures establish those paths separately.\n'
+    printf '\n### Singleton source inventory\n\n'
+    printf '| Reference category | Singleton trees | Files | Source files |\n| --- | ---: | ---: | --- |\n'
+    awk '
+        /^singleton_source_inventory:$/ { in_inventory = 1; next }
+        in_inventory && /^  reference_shapes:$/ { in_inventory = 0 }
+        in_inventory && /^  (literal|this|identifier|selection|unsupported)_references=/ {
+            line = $0
+            sub(/^  /, "", line)
+            separator = index(line, "=")
+            category = substr(line, 1, separator - 1)
+            sub(/_references$/, "", category)
+            values = substr(line, separator + 1)
+            count = values
+            sub(/ files=.*/, "", count)
+            file_count = values
+            sub(/^[0-9]+ files=/, "", file_count)
+            sub(/ examples=.*/, "", file_count)
+            examples = values
+            sub(/^.*examples=\[/, "", examples)
+            sub(/\]$/, "", examples)
+            printf "| `%s` | %s | %s | %s |\n", category, count, file_count, examples == "" ? "—" : examples
+        }
+    ' "$tmp_dir/first.report"
+    printf '\n#### Reference shapes, including unsupported AST nodes\n\n'
+    printf '| Shape | Occurrences | Files | Source files |\n| --- | ---: | ---: | --- |\n'
+    awk '
+        /^singleton_source_inventory:$/ { in_inventory = 1; next }
+        in_inventory && /^singleton_projection_baseline:$/ { in_inventory = 0 }
+        in_inventory && /^    .*=[0-9]+ files=[0-9]+/ {
+            line = $0
+            sub(/^    /, "", line)
+            separator = index(line, "=")
+            shape = substr(line, 1, separator - 1)
+            values = substr(line, separator + 1)
+            count = values
+            sub(/ files=.*/, "", count)
+            file_count = values
+            sub(/^[0-9]+ files=/, "", file_count)
+            sub(/ examples=.*/, "", file_count)
+            examples = values
+            sub(/^.*examples=\[/, "", examples)
+            sub(/\]$/, "", examples)
+            printf "| `%s` | %s | %s | %s |\n", shape, count, file_count, examples == "" ? "—" : examples
         }
     ' "$tmp_dir/first.report"
     printf '\n| Current first blocker for baseline methods | Count |\n| --- | ---: |\n'
