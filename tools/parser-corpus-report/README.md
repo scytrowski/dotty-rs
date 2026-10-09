@@ -512,3 +512,35 @@ Recreate it with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-861-shapeless3.json
 ```
+
+## Chimney corpus
+
+The expanded corpus includes Chimney
+[`2.1.0`](https://github.com/scalalandio/chimney/releases/tag/v2.1.0), pinned
+to `f0267f77c9337c0462b7d06db0c433c4bd4261c5`. This release's Scala 3
+artifacts target Scala 3.9.0. The runner discovers six tracked Scala
+`Compile` roots: `chimney/src/main/scala`, `chimney/src/main/scala-3`,
+`chimney-cats/src/main/scala`,
+`chimney-chimney-extension-test/src/main/scala`,
+`chimney-engine-test-extension/src/main/scala`, and
+`chimney-protobufs/src/main/scala`. The two extension-test modules contribute
+their compiled `src/main` support sources; actual `src/test` fixtures,
+benchmarks, docs, and generated targets remain excluded. Each source root is
+reported relative to the checkout, not its local cache path.
+
+`parser-post-issue-864-chimney.json` measures dotty-rs revision
+`954f4aea207e6711ff9b13657119abd1dc3747e1`. The combined corpus contains
+3,157 files: 1,236 Scala 3, 548 Cats, 266 Cats Effect, 916 Kyo, 10 Shapeless,
+and 181 Chimney. The parser reports 3,155 clean files and two recoverable
+files (both in Chimney, with 38 diagnostic occurrences); there are no hard
+failures, panics, or hangs. Dotty returned all 3,157 files without an oracle
+exception. All pre-existing source-set counts remain unchanged from the
+Shapeless baseline. Two complete runs at the same parser revision produced
+byte-identical reports (SHA-256
+`5fdb7907cd5de7cdd94184bb53bc9cda204b49472f232b9029e756bb8cfbfedb`).
+Recreate the report with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-864-chimney.json
+```
