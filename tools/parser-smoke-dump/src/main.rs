@@ -1444,8 +1444,59 @@ fn quote(value: impl AsRef<str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dotty_core::{ScannerEvent, TokenKind, TokenSource};
+
+    struct AdjacentEndMarkerSource(ContextualScanner);
+
+    impl AdjacentEndMarkerSource {
+        fn skip_newlines_before_end_marker(&mut self) {
+            while matches!(
+                self.0.current().kind,
+                TokenKind::Newline | TokenKind::Newlines | TokenKind::Outdent
+            ) && self.0.lookahead(1).kind == TokenKind::EndMarker
+            {
+                self.0.advance();
+            }
+        }
+    }
+
+    impl TokenSource for AdjacentEndMarkerSource {
+        fn current(&self) -> &dotty_core::Token {
+            self.0.current()
+        }
+
+        fn position(&self) -> usize {
+            self.0.position()
+        }
+
+        fn advance(&mut self) {
+            self.0.advance();
+            self.skip_newlines_before_end_marker();
+        }
+
+        fn lookahead(&mut self, offset: usize) -> &dotty_core::Token {
+            let mut raw_offset = 0;
+            for _ in 0..offset {
+                if matches!(
+                    self.0.lookahead(raw_offset).kind,
+                    TokenKind::Newline | TokenKind::Newlines | TokenKind::Outdent
+                ) && self.0.lookahead(raw_offset + 1).kind == TokenKind::EndMarker
+                {
+                    raw_offset += 2;
+                } else {
+                    raw_offset += 1;
+                }
+            }
+            self.0.lookahead(raw_offset)
+        }
+
+        fn observe(&mut self, event: ScannerEvent) {
+            self.0.observe(event);
+            self.skip_newlines_before_end_marker();
+        }
+    }
+    use dotty_core::HardKeyword;
     use dotty_core::ast::UntypedNode;
-    use dotty_core::{HardKeyword, TokenSource};
 
     fn parse_expression_fragment_for_test(source: &str) -> dotty_parser::ParseResult {
         let scanner = ContextualScanner::new(source).expect("source should scan cleanly");
@@ -3719,6 +3770,31 @@ mod tests {
                 .end(),
             SOURCE.len() as u32
         );
+    }
+
+    #[test]
+    fn nested_named_template_end_markers_close_their_owners() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/scala-parser-oracle/fixtures/compilation/nested-named-end-markers.scala"
+        );
+        let source = fs::read_to_string(fixture).expect("fixture should be readable");
+        let scanner = ContextualScanner::new(&source).expect("source should scan cleanly");
+        let source_text = SourceText::new(&source).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result = parse_compilation_unit(
+            source_text,
+            SourceId::from_index(0),
+            AdjacentEndMarkerSource(scanner),
+            &mut names,
+        );
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(result.ast.iter().any(|(_, tree)| matches!(
+            &tree.kind,
+            TreeKind::DefDef(definition)
+                if names.resolve(definition.name.as_name().text()) == "after"
+        )));
     }
 
     #[test]

@@ -276,6 +276,27 @@ where
                 // until after the next enclosing statement.
                 self.feedback_template_outdent(body_indent);
             }
+            if self.current().kind == TokenKind::EndMarker {
+                if expected_end_marker
+                    .is_some_and(|owner| self.current_end_marker_matches_name(owner))
+                    || self.current_end_marker_matches_ancestor()
+                    || self.current_end_marker_matches_active_construct()
+                {
+                    // A named marker may immediately follow a parsed member.
+                    // Hand it to the owning template before requiring a
+                    // separator between members.
+                    break;
+                }
+                if self.end_marker_matches_next(members.last().copied()) {
+                    if !self.consume_end_marker(members.last().copied()) {
+                        return TemplateBodyResult { self_val, members };
+                    }
+                } else if !self.consume_end_marker(members.last().copied()) {
+                    return TemplateBodyResult { self_val, members };
+                }
+                self.consume_template_separators(closing);
+                continue;
+            }
             if self.is_template_separator(self.current().kind) {
                 self.consume_template_separators(closing);
             } else if ended_nested_indented_body && !self.template_body_ended(closing) {
@@ -289,32 +310,6 @@ where
                 );
                 self.recover_until(RecoverySet::Statement);
                 self.consume_template_separators(closing);
-            }
-
-            while self.current().kind == TokenKind::EndMarker {
-                if expected_end_marker
-                    .is_some_and(|owner| self.current_end_marker_matches_name(owner))
-                {
-                    break;
-                }
-                if self.end_marker_matches_next(members.last().copied()) {
-                    if !self.consume_end_marker(members.last().copied()) {
-                        return TemplateBodyResult { self_val, members };
-                    }
-                    self.consume_template_separators(closing);
-                } else if self.current_end_marker_matches_ancestor() {
-                    // Leave enclosing markers to the template that owns them.
-                    break;
-                } else if self.current_end_marker_matches_active_construct() {
-                    // A marker such as `end new` belongs to the enclosing
-                    // expression, not to the final member of this template.
-                    break;
-                } else {
-                    if !self.consume_end_marker(members.last().copied()) {
-                        return TemplateBodyResult { self_val, members };
-                    }
-                    self.consume_template_separators(closing);
-                }
             }
         }
 
