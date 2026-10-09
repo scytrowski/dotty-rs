@@ -733,6 +733,29 @@ fn pinned_scala39_local_definition_audit() {
         singleton_reference_failures.count,
         "every singleton-reference blocker must have a distinct profile row"
     );
+    assert_eq!(
+        audit.singleton_reference_profile.singleton_source_trees,
+        [
+            "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } })".to_owned()
+        ]
+        .into_iter()
+        .collect(),
+        "all pinned blockers must refer to the expected source singleton tree"
+    );
+    assert_eq!(
+        audit.singleton_reference_profile.enclosing_declarations,
+        [
+            "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet=\"val actionable: true = true\"".to_owned()
+        ]
+        .into_iter()
+        .collect(),
+        "all pinned blockers must refer to the expected enclosing declaration"
+    );
+    assert_eq!(
+        audit.singleton_reference_profile.reference_shapes,
+        ["Literal(Boolean(true))".to_owned()].into_iter().collect(),
+        "all pinned blockers must have the expected literal reference shape"
+    );
 
     println!("AUDIT_REPORT_BEGIN");
     println!("scala_revision={revision}");
