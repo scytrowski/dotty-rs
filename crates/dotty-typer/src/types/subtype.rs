@@ -1,10 +1,10 @@
-//! Bounded nominal subtyping and conformance over the supported source types.
+//! Bounded subtyping and conformance over supported nominal and constant types.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use dotty_core::types::{ClassInfo, Type, TypeRefTarget};
-use dotty_core::{ScopeId, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TypeId};
+use dotty_core::{Constant, ScopeId, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TypeId};
 
 use crate::types::{SymbolInfoState, TypeNormalizeError, TypeNormalizer};
 use crate::{SourceTyper, TyperError};
@@ -74,12 +74,14 @@ impl SourceTyper<'_> {
     ///
     /// The relation reads already completed class information. Call
     /// [`SourceTyper::complete_symbol`] explicitly first when source class
-    /// completion is desired. `And`, methodic, refined, recursive, match,
-    /// wildcard, error, and name-designed structural types return
-    /// `Or` uses the bounded union rules documented on [`Self::conforms`];
-    /// intersection, methodic, refined, recursive, match, wildcard, error, and
-    /// name-designed structural types return [`TypeRelationError::UnsupportedType`]
-    /// instead of being treated as unrelated types.
+    /// completion is desired. Supported `Type::Constant` values compare by
+    /// exact payload and conform to their modeled builtin type. String
+    /// constants support exact equality but have no modeled underlying type.
+    /// `Or` uses the bounded union rules documented on [`Self::conforms`].
+    /// Intersection, methodic, refined, recursive, match, wildcard, error, and
+    /// name-designed structural types return
+    /// [`TypeRelationError::UnsupportedType`] instead of being treated as
+    /// unrelated types.
     pub fn is_subtype(
         &mut self,
         found: TypeId,
@@ -174,6 +176,20 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         }
         if self.is_builtin_class(found) && self.is_builtin_class(expected) {
             return Ok(false);
+        }
+
+        match (&found_node, &expected_node) {
+            (Type::Constant(found_constant), Type::Constant(expected_constant)) => {
+                return Ok(found_constant == expected_constant);
+            }
+            (_, Type::Constant(_)) => return Ok(false),
+            (Type::Constant(constant), _) => {
+                let Some(underlying) = self.typer.constant_underlying_type(constant) else {
+                    return Err(TypeRelationError::UnsupportedType { found, expected });
+                };
+                return self.is_subtype(underlying, expected);
+            }
+            _ => {}
         }
 
         if let (
@@ -622,6 +638,18 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                 children.push((tycon, true));
                 children.extend(args.into_iter().map(|argument| (argument, true)));
             }
+            Type::Constant(
+                Constant::Unit
+                | Constant::Boolean(_)
+                | Constant::Byte(_)
+                | Constant::Short(_)
+                | Constant::Char(_)
+                | Constant::Int(_)
+                | Constant::Long(_)
+                | Constant::FloatBits(_)
+                | Constant::DoubleBits(_)
+                | Constant::String(_),
+            ) => {}
             Type::Or { left, right } => {
                 children.push((left, true));
                 children.push((right, true));
@@ -717,6 +745,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                 self.equivalent(left_prefix, right_prefix, depth + 1)
             }
             (Type::ThisType { class: left }, Type::ThisType { class: right }) => Ok(left == right),
+            (Type::Constant(left), Type::Constant(right)) => Ok(left == right),
             (
                 Type::Applied {
                     tycon: left_tycon,

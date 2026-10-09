@@ -74,7 +74,7 @@ The ranked list below excludes parser/namer and classpath-resolution failures, a
 | Rank | First blocker | Count / files |
 | ---: | --- | ---: |
 | 1 | `AnonymousClassInstantiationDeferred` | 32 / 15 |
-| 2 | `LocalValueConformanceUnsupported` | 22 / 1 |
+| 2 | `LocalValueTypeMismatch` | 22 / 1 |
 | 3 | `LocalBlockDeclarationDeferred::val/var definition` | 21 / 8 |
 | 4 | `LocalMethodSignatureDeferred` | 14 / 3 |
 | 5 | `RecursiveInferredMethodResult` | 13 / 1 |
@@ -90,7 +90,7 @@ The ranked list below excludes parser/namer and classpath-resolution failures, a
 | --- | --- | --- | --- |
 | `MissingDeclaredType` (34 / 15, historical) | #825 proposed immutable inferred class fields (14 occurrences / 7 files); implemented in #854–#856 and audited below. | Reused declaration source contexts, expression typing, widening, and completion rollback. | Current audit distinguishes first-blocker movement from completed semantics. |
 | `AnonymousClassInstantiationDeferred` (32 / 15) | Support one anonymous `new` with one concrete parent in `typer/expression/new.rs`. | Reuse ordinary `New` typing and parent projection; define stable anonymous symbol ownership and class info. | Closure capture, refinement synthesis, and general anonymous-class members. |
-| `UnsupportedSingletonReference` (22 / 1) | #880 profiled all 22 method blockers as one literal boolean singleton tree; the narrow follow-up is `Literal -> Type::Constant` projection plus exact-constant and underlying-type relations. | Reuse `Type::Constant`, literal expression typing, and existing stable-prefix validation. | Arbitrary paths, unstable prefixes, literal unions, and path-dependent relation redesign. |
+| `UnsupportedSingletonReference` (22 / 1) | #880 profiled all 22 method blockers as one literal boolean singleton tree; #881 projects supported literals to `Type::Constant`, and #882 adds bounded exact-constant and underlying-type relations. | Reuse `Type::Constant`, literal expression typing, and existing stable-prefix validation. | Arbitrary paths, unstable prefixes, literal unions, and path-dependent relation redesign. |
 | `LocalBlockDeclarationDeferred::val/var definition` (21 / 8) | Split remaining cases by PatDef root/binder shape in `typer/expression/blocks.rs`. | Reuse transactional PatDef lowering, local binders, and assignment support. | General destructuring and reopening supported PatDef forms. |
 | `LocalMethodSignatureDeferred` (14 / 3) | Split exact `feature` values and add one fixture for the most frequent unsupported signature in `typer/completion/local_methods.rs`. | Reuse the shared signature builder and existing parameter/type-parameter scopes. | General dependent results, erased/by-name expansion, or new method inference. |
 
@@ -194,34 +194,34 @@ The Scala 3.9.0 audit ran twice against revision `777528f19a58e794c9954a42f43337
 | `library/src/scala/collection/Iterator.scala#tree=3805` | `UnsupportedTypeTree::Annotated` |
 | `library/src/scala/collection/Iterator.scala#tree=3865` | `UnsupportedTypeTree::Annotated` |
 
-The top-ranked remaining gap is `AnonymousClassInstantiationDeferred` (32 occurrences across 15 files), but its implementation risk and anonymous-identity work are larger than the literal singleton slice. #880 traced 22 `UnsupportedSingletonReference` observations to one `true` declaration. #881 implemented literal-to-`Type::Constant` source projection; all 22 baseline methods now reach `LocalValueConformanceUnsupported`. The next bounded slices are exact constant relations and expected singleton adaptation. Keep `null`, class literals, literal unions, arbitrary paths, unstable prefixes, and path-dependent relation changes deferred.
+The top-ranked remaining gap is `AnonymousClassInstantiationDeferred` (32 occurrences across 15 files), but its implementation risk and anonymous-identity work are larger than the literal singleton slice. #880 traced 22 `UnsupportedSingletonReference` observations to one `true` declaration. #881 implemented literal-to-`Type::Constant` source projection, and #882 adds exact constant relations for the bounded supported subset. The remaining singleton adaptation work is tracked by #883. Keep `null`, class literals, literal unions, arbitrary paths, unstable prefixes, and path-dependent relation changes deferred.
 
 ## #880 literal singleton blocker profile
 
-The pinned Scala 3.9.0 audit ran twice at revision `777528f19a58e794c9954a42f433373472ec57f8`; normalized output matched byte-for-byte. The current `UnsupportedSingletonReference` first-blocker bucket has 22 local-method observations, all pointing to one source singleton tree and one enclosing declaration. Each method identity, singleton/reference tree index, AST shape, span, declaration shape, and snippet is listed in the raw profile below.
+The #880 baseline audit ran twice at revision `777528f19a58e794c9954a42f433373472ec57f8`; normalized output matched byte-for-byte. Its 22 `UnsupportedSingletonReference` first-blocker observations all pointed to one source singleton tree and one enclosing declaration. The current values are reported separately under #881 below.
 
 | Profile measure | Result |
 | --- | ---: |
-| total first blockers | 0 |
-| profile entries | 0 |
-| distinct singleton source trees | 0 |
-| distinct enclosing declarations | 0 |
-| distinct reference shapes | 0 |
+| total first blockers | 22 |
+| profile entries | 22 |
+| distinct singleton source trees | 1 |
+| distinct enclosing declarations | 1 |
+| distinct reference shapes | 1 |
 
-All 22 are repeated observations of `val actionable: true = true` in `compiler/src/dotty/tools/dotc/transform/CheckUnused.scala`: singleton tree 2904, reference tree 2903, source span `[27444, 27448)`, and reference shape `Literal(Boolean(true))`. This is one declaration repeated through distinct methods, not 22 independent singleton declarations. Scala 3.9 and the dotty-rs parser both retain `SingletonTypeTree(reference = Literal(...))` for `true`, `false`, `1`, and `"foo"`. After #881, source projection accepts the pinned boolean, character, integer, long, float, double, and string literal forms as exact `Type::Constant` values. The current first-blocker movement is reported in the #881 section below.
+All 22 were repeated observations of `val actionable: true = true` in `compiler/src/dotty/tools/dotc/transform/CheckUnused.scala`: singleton tree 2904, reference tree 2903, source span `[27444, 27448)`, and reference shape `Literal(Boolean(true))`. This is one declaration repeated through distinct methods, not 22 independent singleton declarations. Scala 3.9 and the dotty-rs parser retain `SingletonTypeTree(reference = Literal(...))` for literal references. After #881, supported literal forms project to exact `Type::Constant` values.
 
 ### Narrow follow-up boundaries
 
 | Concern | Recommended boundary |
 | --- | --- |
 | Source type projection | Implemented in #881: supported source literals project directly to `Type::Constant` with the exact payload. |
-| Type relation | In #882, make equal constants equivalent; reject unequal constants; relate each supported constant to its underlying class. |
+| Type relation | Implemented in #882: compare exact supported constant payloads and relate constants to modeled primitive/Unit types. String constants compare exactly; String widening remains unsupported without a canonical source type. |
 | Expected adaptation | In #883, check the exact expression constant against a singleton expected type before widening; preserve ordinary underlying-type conformance. |
 | Explicit deferrals | Keep `null`, class literals, literal unions, arbitrary paths, unstable prefixes, and path-dependent relation changes unsupported. |
 
 ## #881 literal singleton projection audit
 
-The pinned Scala 3.9.0 audit compared the same 22 #880 method observations after projection. Each baseline method is required to remain present, and the run fails if any still stops at `UnsupportedSingletonReference`. All 22 moved to the next blocker, `LocalValueConformanceUnsupported`; this measures projection progress and does not claim successful method typing. Two normalized audit runs matched byte-for-byte.
+The pinned Scala 3.9.0 audit compares the same 22 #880 method observations after literal projection and constant relation support. Each baseline method is required to remain present, and the run fails if any still stops at `UnsupportedSingletonReference`. All 22 moved past projection; the current first blocker is `LocalValueTypeMismatch`, which #883 expected-type adaptation addresses. This measures progress and does not claim successful method typing. Two normalized audit runs matched byte-for-byte.
 
 | Projection measure | Result |
 | --- | ---: |
@@ -231,7 +231,7 @@ The pinned Scala 3.9.0 audit compared the same 22 #880 method observations after
 
 | Current first blocker for baseline methods | Count |
 | --- | ---: |
-| `LocalValueConformanceUnsupported` | 22 |
+| `LocalValueTypeMismatch` | 22 |
 
 The raw profile below lists the current first blocker for each of the 22 pinned method trees. These methods have not completed typing; their relation and expected-adaptation blockers remain for later issues.
 
@@ -490,7 +490,7 @@ local_defdef_failures:
   SymbolResolution [resolution/classpath environment]: 40 (17 files) [compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/core/Decorators.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala]
   NoSuccessfulEnclosingMethodTyping [other]: 34 (15 files) [compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/classpath/DirectoryClassPath.scala, compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala]
   AnonymousClassInstantiationDeferred [other]: 32 (15 files) [compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala]
-  LocalValueConformanceUnsupported [type relation/inference/completion]: 22 (1 files) [compiler/src/dotty/tools/dotc/transform/CheckUnused.scala]
+  LocalValueTypeMismatch [type relation/inference/completion]: 22 (1 files) [compiler/src/dotty/tools/dotc/transform/CheckUnused.scala]
   LocalBlockDeclarationDeferred::val/var definition [local declaration deferral]: 21 (8 files) [compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala]
   TermNameNotFound [resolution/classpath environment]: 20 (12 files) [compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/backend/jvm/opt/MethodMax.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala, compiler/src/dotty/tools/dotc/util/ClasspathFromClassloader.scala, compiler/src/dotty/tools/dotc/util/WeakHashSet.scala]
   LocalMethodSignatureDeferred [type relation/inference/completion]: 14 (3 files) [compiler/src/dotty/tools/dotc/core/SymUtils.scala, compiler/src/dotty/tools/dotc/transform/MegaPhase.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala]
@@ -567,7 +567,7 @@ missing_declared_type_records:
   compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala: failed_local_method_tree=4009 tree=175 error_tree_kind=TypeTree declaration_tree=177 declaration_tree_kind=ValDef declaration=value symbol_kind=Field owner_kind=ModuleClass context_owner_kind=ModuleClass shape=synthetic inferred TypeTree rhs=true modifiers=[Inline] semantic_mutable=false entry=complete_symbol_inner -> type_of_tpt_inner_journaled span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 2358, end: 2358 }, point: None } })
 top_semantic_gaps:
   1. AnonymousClassInstantiationDeferred: count=32, files=15, category=other, examples=compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala
-  2. LocalValueConformanceUnsupported: count=22, files=1, category=other, examples=compiler/src/dotty/tools/dotc/transform/CheckUnused.scala
+  2. LocalValueTypeMismatch: count=22, files=1, category=other, examples=compiler/src/dotty/tools/dotc/transform/CheckUnused.scala
   3. LocalBlockDeclarationDeferred::val/var definition: count=21, files=8, category=local declaration support, examples=compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala
   4. LocalMethodSignatureDeferred: count=14, files=3, category=other, examples=compiler/src/dotty/tools/dotc/core/SymUtils.scala, compiler/src/dotty/tools/dotc/transform/MegaPhase.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala
   5. RecursiveInferredMethodResult: count=13, files=1, category=other, examples=compiler/src/dotty/tools/dotc/typer/Typer.scala
@@ -578,7 +578,7 @@ top_semantic_gaps:
   10. MissingDeclaredType: count=10, files=3, category=other, examples=compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala
 top_gap_implementation_scope_notes:
   AnonymousClassInstantiationDeferred (32 occurrences, 15 files): first_slice=support one anonymous new with one concrete parent and explicit member ownership; owner=dotty-typer/src/typer/expression/new.rs; prerequisites=ordinary New typing, parent projection, and stable anonymous class identity; non_goals=closure capture, refinement synthesis, and general anonymous-class members
-  LocalValueConformanceUnsupported (22 occurrences, 1 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
+  LocalValueTypeMismatch (22 occurrences, 1 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
   LocalBlockDeclarationDeferred::val/var definition (21 occurrences, 8 files): first_slice=split remaining local definitions by PatDef root and binder shape before adding one form; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=transactional PatDef lowering, local binders, and assignment support; non_goals=general destructuring or reopening already supported PatDef forms
   LocalMethodSignatureDeferred (14 occurrences, 3 files): first_slice=split the feature payload and add a fixture for the most frequent unsupported signature; owner=dotty-typer/src/typer/completion/local_methods.rs; prerequisites=the shared signature builder and existing parameter/type-parameter scopes; non_goals=general dependent-result, erased/by-name, or method-inference redesign
   RecursiveInferredMethodResult (13 occurrences, 1 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
@@ -907,28 +907,28 @@ singleton_projection_baseline:
   moved_past_projection=22
   remaining_UnsupportedSingletonReference=0
   current_first_blockers:
-    LocalValueConformanceUnsupported=22
+    LocalValueTypeMismatch=22
   methods:
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=2930 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=2955 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3022 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3107 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3155 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3313 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3331 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3396 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3468 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3577 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3619 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3799 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3817 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3865 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4084 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4125 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4138 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4149 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4181 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4202 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4881 first_blocker=LocalValueConformanceUnsupported
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4981 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=2930 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=2955 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3022 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3107 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3155 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3313 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3331 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3396 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3468 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3577 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3619 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3799 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3817 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3865 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4084 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4125 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4138 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4149 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4181 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4202 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4881 first_blocker=LocalValueTypeMismatch
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4981 first_blocker=LocalValueTypeMismatch
 ```

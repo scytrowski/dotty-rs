@@ -1368,6 +1368,93 @@ mod tests {
     }
 
     #[test]
+    fn constant_types_use_exact_relations_and_modeled_underlying_types() {
+        let (arena, mut store, packages, definitions) = setup();
+        let source = SourceId::from_index(0);
+        let index = SourceSemanticIndex::new();
+        let bool_true = store
+            .types
+            .alloc(Type::Constant(dotty_core::Constant::Boolean(true)));
+        let bool_true_copy = store
+            .types
+            .alloc(Type::Constant(dotty_core::Constant::Boolean(true)));
+        let bool_false = store
+            .types
+            .alloc(Type::Constant(dotty_core::Constant::Boolean(false)));
+        let int_one = store
+            .types
+            .alloc(Type::Constant(dotty_core::Constant::Int(1)));
+        let int_one_copy = store
+            .types
+            .alloc(Type::Constant(dotty_core::Constant::Int(1)));
+        let int_two = store
+            .types
+            .alloc(Type::Constant(dotty_core::Constant::Int(2)));
+        let string_name = store.names.intern("foo");
+        let string_foo = store
+            .types
+            .alloc(Type::Constant(dotty_core::Constant::String(string_name)));
+        let string_foo_copy = store
+            .types
+            .alloc(Type::Constant(dotty_core::Constant::String(string_name)));
+        let string_bar_name = store.names.intern("bar");
+        let string_bar = store
+            .types
+            .alloc(Type::Constant(dotty_core::Constant::String(
+                string_bar_name,
+            )));
+        let bool_union = store.types.alloc(Type::Or {
+            left: bool_true,
+            right: bool_false,
+        });
+        let modeled_underlying_cases = [
+            (dotty_core::Constant::Unit, definitions.unit),
+            (dotty_core::Constant::Boolean(true), definitions.boolean),
+            (dotty_core::Constant::Byte(1), definitions.byte),
+            (dotty_core::Constant::Short(1), definitions.short),
+            (dotty_core::Constant::Char(1), definitions.char),
+            (dotty_core::Constant::Int(1), definitions.int),
+            (dotty_core::Constant::Long(1), definitions.long),
+            (dotty_core::Constant::float(1.0), definitions.float),
+            (dotty_core::Constant::double(1.0), definitions.double),
+        ]
+        .map(|(constant, underlying)| (store.types.alloc(Type::Constant(constant)), underlying));
+        let null = store
+            .types
+            .alloc(Type::Constant(dotty_core::Constant::Null));
+        let mut typer =
+            SourceTyper::new(&arena, source, &index, &mut store, definitions, &packages);
+
+        assert_ne!(bool_true, bool_true_copy);
+        assert!(typer.is_subtype(bool_true, bool_true_copy).unwrap());
+        assert!(!typer.is_subtype(bool_true, bool_false).unwrap());
+        assert!(typer.is_subtype(int_one, int_one_copy).unwrap());
+        assert!(!typer.is_subtype(int_one, int_two).unwrap());
+        assert!(typer.is_subtype(string_foo, string_foo_copy).unwrap());
+        assert!(!typer.is_subtype(string_foo, string_bar).unwrap());
+
+        assert!(typer.is_subtype(bool_true, definitions.boolean).unwrap());
+        assert!(typer.is_subtype(int_one, definitions.int).unwrap());
+        assert!(!typer.is_subtype(definitions.boolean, bool_true).unwrap());
+        assert!(!typer.is_subtype(definitions.int, int_one).unwrap());
+        assert!(typer.is_subtype(bool_true, bool_union).unwrap());
+        assert!(typer.is_subtype(bool_false, bool_union).unwrap());
+        for (constant, underlying) in modeled_underlying_cases {
+            assert!(typer.is_subtype(constant, underlying).unwrap());
+            assert!(!typer.is_subtype(underlying, constant).unwrap());
+        }
+
+        assert!(matches!(
+            typer.is_subtype(null, null),
+            Err(TypeRelationError::UnsupportedType { .. })
+        ));
+        assert!(matches!(
+            typer.is_subtype(string_foo, definitions.object_type),
+            Err(TypeRelationError::UnsupportedType { .. })
+        ));
+    }
+
+    #[test]
     fn semantic_type_refs_equivalent_across_distinct_type_ids() {
         let (arena, mut store, packages, definitions) = setup();
         let symbol = type_symbol(&store, definitions.int);

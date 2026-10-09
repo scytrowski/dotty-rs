@@ -94,24 +94,31 @@ syntax. These unsupported semantic constant kinds return
 The #880 pinned audit identified 22 local-method first blockers from the one
 `true` singleton declaration `actionable` in `CheckUnused.scala`. The #881
 rerun moved all 22 past source type projection. Their current first blocker is
-`LocalValueConformanceUnsupported`, which belongs to the separate constant
-relation and expected-adaptation work; this movement is not full method typing.
+`LocalValueTypeMismatch`: #882 now proves the type relation, while #883 will
+preserve the exact expression constant through expected-type adaptation. This
+movement is not full method typing.
 
-The semantic model already has `Type::Constant`; source literal expressions
-also retain exact constant types. `widen_expression_type` maps booleans and
-numeric constants to their builtin types, while string, null, and class
-constants are not yet widenable. `require_stable_selection_prefix` accepts
-constant types as stable prefixes. TASTy decoding maps wire constant types to
-the same `Type::Constant` representation. The current type relation does not
-yet compare constant payloads or relate a constant to its underlying builtin
-type. Expected expression adaptation widens before conformance, so singleton
-expected types need a path that preserves the exact constant until relation
-checking. #881 changes source projection only; the relation and expected
-adaptation remain separate follow-up boundaries.
+The semantic model already has `Type::Constant`, and source literal
+expressions retain exact constant types. The bounded relation validates and
+compares Unit, Boolean, Byte, Short, Char, Int, Long, Float, and Double
+constants by their semantic payload. Separately allocated constants with equal payloads
+are equivalent; unequal values are unrelated. These constants conform to the
+canonical builtin type already held by `Definitions`, while the reverse
+relation remains false. Constant alternatives also participate in the existing
+bounded union rules. Expression widening uses the same constant-to-builtin
+mapping as the relation.
 
-The next relation slice can recognize exact constant equality, reject unequal
-payloads such as `true` versus `false`, and relate supported constants to their
-underlying builtin types (`true <: Boolean`, `1 <: Int`, and `"foo" <: String`).
+String constants support exact equality, but the current `Definitions` has no
+canonical String type, so string-to-String conformance remains unsupported.
+UTF-16-only strings, Null, and Class constants remain outside the supported
+relation subset and return `TypeRelationError::UnsupportedType`. `Class`
+constants are not treated as nominal class views. `require_stable_selection_prefix`
+continues to accept supported constant types as stable prefixes. TASTy decoding
+maps wire constant types to the same `Type::Constant` representation. Expected
+expression adaptation still widens before conformance, so singleton expected
+types need a path that preserves the exact constant until relation checking;
+that is the separate #883 follow-up.
+
 Expected adaptation must compare the preserved expression constant before
 choosing the underlying widened type. Keep `null`, class literals, literal
 unions, and general constant folding unsupported until their own source and

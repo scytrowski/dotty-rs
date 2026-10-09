@@ -21,6 +21,26 @@ pub(super) use blocks::LocalMethodIndex;
 pub(super) use function::FunctionLiteralIndex;
 
 impl SourceTyper<'_> {
+    /// Returns the session-canonical widened type for constants whose
+    /// underlying source type is modeled by `Definitions`.
+    pub(in crate::typer) fn constant_underlying_type(&self, constant: &Constant) -> Option<TypeId> {
+        match constant {
+            Constant::Unit => Some(self.definitions.unit),
+            Constant::Boolean(_) => Some(self.definitions.boolean),
+            Constant::Byte(_) => Some(self.definitions.byte),
+            Constant::Short(_) => Some(self.definitions.short),
+            Constant::Char(_) => Some(self.definitions.char),
+            Constant::Int(_) => Some(self.definitions.int),
+            Constant::Long(_) => Some(self.definitions.long),
+            Constant::FloatBits(_) => Some(self.definitions.float),
+            Constant::DoubleBits(_) => Some(self.definitions.double),
+            Constant::String(_)
+            | Constant::StringUtf16(_)
+            | Constant::Null
+            | Constant::Class(_) => None,
+        }
+    }
+
     pub(super) fn type_prefix_expression(
         &mut self,
         tree: TreeId<Untyped>,
@@ -217,23 +237,10 @@ impl SourceTyper<'_> {
                 },
             ));
         };
-        use dotty_core::Constant;
         match expression_type {
-            Type::Constant(value) => match value {
-                Constant::Unit => Ok(self.definitions.unit),
-                Constant::Boolean(_) => Ok(self.definitions.boolean),
-                Constant::Byte(_) => Ok(self.definitions.byte),
-                Constant::Short(_) => Ok(self.definitions.short),
-                Constant::Char(_) => Ok(self.definitions.char),
-                Constant::Int(_) => Ok(self.definitions.int),
-                Constant::Long(_) => Ok(self.definitions.long),
-                Constant::FloatBits(_) => Ok(self.definitions.float),
-                Constant::DoubleBits(_) => Ok(self.definitions.double),
-                Constant::String(_)
-                | Constant::StringUtf16(_)
-                | Constant::Null
-                | Constant::Class(_) => Err(TyperError::ExpressionTypeCannotBeWidened { ty }),
-            },
+            Type::Constant(value) => self
+                .constant_underlying_type(&value)
+                .ok_or(TyperError::ExpressionTypeCannotBeWidened { ty }),
             Type::TermRef { prefix, target } => {
                 let TermRefTarget::Symbol(symbol) = target else {
                     return Err(TyperError::ExpressionTypeCannotBeWidened { ty });
