@@ -90,14 +90,14 @@ The 14 `LocalMethodSignatureDeferred` observations split into 3 direct signature
 
 ### #899 local method signature profile
 
-The profile counts local methods whose first blocker is a local signature failure. `direct_origins` identifies methods carrying that signature feature; `inherited_methods` are sibling methods attributed to the same enclosing failure. Thus 14 affected methods do not mean 14 independently unsupported signatures. The diagnostic run was repeated twice against the pinned Scala 3.9.0 sources and artifact jars using the available JDK 25; it is supplemental and does not replace the main JDK 21 pinned report above. It does not type additional methods.
+The profile counts local methods whose first blocker is a local signature failure. `direct_origins` identifies methods carrying that signature feature; `inherited_methods` are sibling methods attributed to the same enclosing failure. Thus 14 affected methods do not mean 14 independently unsupported signatures. The audit was run twice with JDK feature release 25 and the pinned Scala 3.9.0 source/artifact inputs; normalized output matched byte-for-byte. The profile is diagnostic only and does not type additional methods.
 
-| Signature feature | Affected methods | Files | Direct origins | Inherited methods | Origin shapes |
-| --- | ---: | ---: | ---: | ---: | --- |
-| `by-name parameters` | 8 | 2 | 2 | 6 | `instantiateCFT`: explicit result, one plain parameter clause; `cases`: inferred result, one plain parameter clause |
-| `parameter modifiers` | 6 | 1 | 1 | 5 | `inLocalContext`: explicit result, one type-parameter clause, plain and contextual value clauses, `Given` and `Inline` parameters |
+| Feature payload | Affected methods | Files | Distinct methods | Direct origins | Inherited methods | Blocker origins |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `by-name parameters` | 8 | 2 | 8 | 2 | 6 | 2 |
+| `parameter modifiers` | 6 | 1 | 6 | 1 | 5 | 1 |
 
-Every affected local method is listed below with its exact source shape, blocker origin, and attribution. The diagnostic audit was run twice against the pinned Scala 3.9.0 sources and artifact jars using the available JDK 25; this supplemental profile does not replace the main JDK 21 pinned report.
+Every affected local method is listed below with its source path, line/span, tree index, exact feature payload, signature shape, blocker origin, and direct/inherited attribution.
 
 ```text
 compiler/src/dotty/tools/dotc/core/SymUtils.scala:line=464 span=20134..20480 tree=1839 method=instantiateCFT feature="by-name parameters" type_parameter_clauses=0 value_parameter_clauses=1 clause_kinds=[plain] parameter_modifiers=[] by_name_parameter=true result_depends_on_parameter=false extension=false result=explicit blocker_origin=compiler/src/dotty/tools/dotc/core/SymUtils.scala#tree=1839:instantiateCFT attribution=direct

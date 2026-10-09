@@ -75,7 +75,7 @@ fi
 mkdir -p "$(dirname -- "$output_path")"
 {
     printf '# Typer classpath corpus audit: Scala 3.9.0\n\n'
-    printf 'The report is generated from two byte-identical runs of the pinned Scala 3.9.0 audit. It records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success. The source corpus, parser/namer setup, Scala revision, JDK 21, and classpath remain pinned.\n\n'
+    printf 'The report is generated from two byte-identical runs of the pinned Scala 3.9.0 audit. It records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success. The source corpus, parser/namer setup, Scala revision, JDK feature release %s, and classpath remain pinned.\n\n' "$jdk_release"
     printf 'Run `tools/typer-classpath-corpus-audit/run` with the environment documented in `docs/typer-v0.1-compatibility.md` to regenerate this report.\n\n'
     printf '## Historical #767–#771 expression sprint snapshot\n\n'
     printf 'At the #772 snapshot, first blockers for term prefix operators and term annotations had moved to zero. These historical measurements are retained here for context; current values and ranking come from the report below.\n\n'
@@ -188,8 +188,25 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '### Recommended next Typer sprint\n\n'
     printf 'The 14 `LocalMethodSignatureDeferred` observations split into 3 direct signature failures and 11 sibling local methods that inherit the first blocker from an enclosing failed body. The direct payloads are `by-name parameters` (2 origins; 8 affected methods across 2 files) and `parameter modifiers` (1 origin; 6 affected methods in 1 file). Recommend a narrow follow-up for local `inline` parameter signatures: the direct modifier origin is one method in `MegaPhase.scala`, and the shared signature builder already preserves `Inline` on parameter symbols. Keep inline expansion and argument evaluation out of scope. By-name signatures affect more methods, but one direct origin has an inferred result and by-name applications currently defer separately (`ByNameApplicationParameterDeferred`); that slice therefore has additional downstream blockers. Dependent-result signatures have no corpus first-blocker observations and remain covered only by focused fixtures. The other high-ranked buckets still need separate prerequisites: anonymous classes (32 / 15) need stable identity and ownership, while local values/variables (21 / 8) need a PatDef shape breakdown.\n\n'
     printf '### #899 local method signature profile\n\n'
-    printf 'The profile counts local methods whose first blocker is a local signature failure. `direct_origins` identifies methods carrying that signature feature; `inherited_methods` are sibling methods attributed to the same enclosing failure. Thus 14 affected methods do not mean 14 independently unsupported signatures. The profile is diagnostic only and does not type additional methods.\n\n'
-    printf 'Every affected method is listed below with its source path, line/span, tree index, feature payload, signature shape, blocker origin, and direct/inherited attribution.\n\n'
+    printf 'The profile counts local methods whose first blocker is a local signature failure. `direct_origins` identifies methods carrying that signature feature; `inherited_methods` are sibling methods attributed to the same enclosing failure. Thus 14 affected methods do not mean 14 independently unsupported signatures. The audit was run twice with JDK feature release %s and the pinned Scala 3.9.0 source/artifact inputs; normalized output matched byte-for-byte. The profile is diagnostic only and does not type additional methods.\n\n' "$jdk_release"
+    printf '| Feature payload | Affected methods | Files | Distinct methods | Direct origins | Inherited methods | Blocker origins |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n'
+    awk '
+        /^  features:$/ { in_features = 1; next }
+        /^  records:$/ { in_features = 0 }
+        in_features && /^    / {
+            line = $0
+            sub(/^    /, "", line)
+            separator = index(line, ": affected_local_methods=")
+            if (!separator) next
+            feature = substr(line, 1, separator - 1)
+            gsub(/^"|"$/, "", feature)
+            values = substr(line, separator + 2)
+            split(values, fields, " ")
+            for (i = 1; i <= 6; i++) sub(/^[^=]*=/, "", fields[i])
+            printf "| `%s` | %s | %s | %s | %s | %s | %s |\n", feature, fields[1], fields[2], fields[3], fields[4], fields[5], fields[6]
+        }
+    ' "$tmp_dir/first.report"
+    printf '\nEvery affected local method is listed below with its source path, line/span, tree index, exact feature payload, signature shape, blocker origin, and direct/inherited attribution.\n\n'
     printf '```text\n'
     awk '
         /^  records:$/ { in_records = 1; next }
