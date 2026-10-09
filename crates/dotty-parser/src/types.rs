@@ -2064,7 +2064,11 @@ where
 
     fn parse_type_operand(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
-        if self.current().kind == TokenKind::Operator && self.current_text_is("?") {
+        if (self.current().kind == TokenKind::Operator && self.current_text_is("?"))
+            || (self.allows_wildcard_type()
+                && self.current().kind == TokenKind::Identifier
+                && self.current_text_is("_"))
+        {
             let wildcard = self.parse_wildcard_type(mark);
             if self.allows_wildcard_type() {
                 return wildcard;
@@ -3996,6 +4000,78 @@ mod tests {
             panic!("expected an upper bound");
         };
         assert!(matches!(parser.ast().get(high).kind, TreeKind::Ident(_)));
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_legacy_underscore_wildcard_with_an_upper_bound() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "Class[_ <: Throwable]",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 5, 6),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Operator, 8, 10),
+                token(TokenKind::Identifier, 11, 20),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(ref applied) = parser.ast().get(id).kind else {
+            panic!("expected an applied type");
+        };
+        let TreeKind::TypeBoundsTree(bounds) = parser.ast().get(applied.args[0]).kind else {
+            panic!("expected a wildcard type argument");
+        };
+        let Some(high) = bounds.high else {
+            panic!("expected an upper bound");
+        };
+        let TreeKind::Ident(high) = parser.ast().get(high).kind else {
+            panic!("expected a type-name bound");
+        };
+        assert_eq!(parser.names.resolve(high.name.text()), "Throwable");
+        assert!(bounds.low.is_none() && bounds.alias.is_none());
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_legacy_underscore_wildcard_with_a_lower_bound() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "Class[_ >: Lower]",
+            vec![
+                token(TokenKind::Identifier, 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 5, 6),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Operator, 8, 10),
+                token(TokenKind::Identifier, 11, 16),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let id = parser.type_expr();
+        let TreeKind::AppliedTypeTree(ref applied) = parser.ast().get(id).kind else {
+            panic!("expected an applied type");
+        };
+        let TreeKind::TypeBoundsTree(bounds) = parser.ast().get(applied.args[0]).kind else {
+            panic!("expected a wildcard type argument");
+        };
+        let Some(low) = bounds.low else {
+            panic!("expected a lower bound");
+        };
+        let TreeKind::Ident(low) = parser.ast().get(low).kind else {
+            panic!("expected a type-name bound");
+        };
+        assert_eq!(parser.names.resolve(low.name.text()), "Lower");
+        assert!(bounds.high.is_none() && bounds.alias.is_none());
         assert!(parser.diagnostics().is_empty());
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }

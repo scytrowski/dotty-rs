@@ -1,0 +1,1 @@
+foo[Class[_ >: Lower]]
