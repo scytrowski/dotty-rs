@@ -10,6 +10,7 @@ from source_inventory import (
     iron_library_production_roots,
     kyo_scala3_production_roots,
     magnolia_scala3_production_roots,
+    scalatest_scala3_production_roots,
     shapeless3_compile_roots,
     tracked_scala_sources,
     zio_scala3_production_roots,
@@ -198,6 +199,26 @@ class TrackedScalaSourcesTests(unittest.TestCase):
             core.symlink_to(outside, target_is_directory=True)
             with self.assertRaisesRegex(ValueError, "outside checkout"):
                 magnolia_scala3_production_roots(self.repository)
+
+    def test_scalatest_includes_dotty_compile_roots_and_excludes_test_support(self):
+        core = self.repository / "dotty/core/src/main/scala"
+        matchers = self.repository / "dotty/matchers-core/src/main/scala"
+        common_test = self.repository / "dotty/common-test/src/main/scala"
+        scala_2 = self.repository / "jvm/core/src/main/scala"
+        roots = [core, matchers, common_test, scala_2]
+        for root in roots:
+            root.mkdir(parents=True)
+
+        selected = scalatest_scala3_production_roots(self.repository, roots)
+
+        self.assertEqual(selected, [core.resolve(), matchers.resolve()])
+
+    def test_scalatest_rejects_source_roots_outside_checkout(self):
+        with tempfile.TemporaryDirectory() as outside_dir:
+            outside = pathlib.Path(outside_dir)
+            outside.mkdir(exist_ok=True)
+            with self.assertRaisesRegex(ValueError, "outside ScalaTest checkout"):
+                scalatest_scala3_production_roots(self.repository, [outside])
 
 
 if __name__ == "__main__":

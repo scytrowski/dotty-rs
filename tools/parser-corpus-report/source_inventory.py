@@ -15,6 +15,27 @@ KYO_SCALA_2_12_PLUGIN_PREFIXES = (
 ZIO_NON_SCALA3_PROJECTS = ("zio-docs",)
 FS2_NON_LIBRARY_PROJECTS = ("benchmark",)
 IRON_NON_LIBRARY_PROJECTS = ("docs", "examples", "sandbox")
+SCALATEST_NON_PRODUCTION_PROJECTS = ("common-test",)
+
+
+def scalatest_scala3_production_roots(
+    repository: pathlib.Path, source_roots: list[pathlib.Path]
+) -> list[pathlib.Path]:
+    """Select tracked Scala 3 production roots, excluding shared test support."""
+    repository = repository.resolve(strict=True)
+    selected = []
+    for root in source_roots:
+        root = root.resolve(strict=True)
+        try:
+            relative = root.relative_to(repository)
+        except ValueError as error:
+            raise ValueError(f"source root is outside ScalaTest checkout: {root}") from error
+        if len(relative.parts) < 2 or relative.parts[0] != "dotty":
+            continue
+        if relative.parts[1] in SCALATEST_NON_PRODUCTION_PROJECTS:
+            continue
+        selected.append(root)
+    return sorted(set(selected))
 
 
 def magnolia_scala3_production_roots(repository: pathlib.Path) -> list[pathlib.Path]:

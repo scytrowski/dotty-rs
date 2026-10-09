@@ -29,6 +29,8 @@ iron_tag=v3.3.2
 iron_revision=229c85a15e8b00be77d9760db272e1c1de31e79c
 magnolia_tag=scala3-v1.3.23
 magnolia_revision=de417912ef93017814cee63797dc23ffcfd979c9
+scalatest_tag=release-3.2.20
+scalatest_revision=b4efe5a942fd290e9b1bb377a2efeb816b34ea21
 
 actual_scala3_revision=$(git -C "$scala3_root" rev-parse HEAD 2>/dev/null || true)
 if [[ "$actual_scala3_revision" != "$scala3_revision" ]]; then
@@ -47,6 +49,7 @@ zio_root=$(ensure_checkout zio https://github.com/zio/zio.git "$zio_tag" "$zio_r
 fs2_root=$(ensure_checkout fs2 https://github.com/typelevel/fs2.git "$fs2_tag" "$fs2_revision")
 iron_root=$(ensure_checkout iron https://github.com/Iltotore/iron.git "$iron_tag" "$iron_revision")
 magnolia_root=$(ensure_checkout magnolia https://github.com/softwaremill/magnolia.git "$magnolia_tag" "$magnolia_revision")
+scalatest_root=$(ensure_checkout scalatest https://github.com/scalatest/scalatest.git "$scalatest_tag" "$scalatest_revision")
 
 cd "$repo_dir"
 scala3_roots=("${scala3_root}/library/src" "${scala3_root}/compiler/src")
@@ -121,7 +124,20 @@ for root in magnolia_scala3_production_roots(pathlib.Path(sys.argv[1])):
 PY
 )
 mapfile -t magnolia_roots <<<"$magnolia_roots_output"
-if [[ ${#cats_roots[@]} -eq 0 || ${#cats_effect_roots[@]} -eq 0 || ${#kyo_roots[@]} -eq 0 || ${#shapeless_roots[@]} -eq 0 || ${#chimney_roots[@]} -eq 0 || ${#zio_roots[@]} -eq 0 || ${#fs2_roots[@]} -eq 0 || ${#iron_roots[@]} -eq 0 || ${#magnolia_roots[@]} -eq 0 ]]; then
+mapfile -t scalatest_discovered_roots < <(cargo run --quiet --locked -p dotty-parser-corpus-report -- --list-production-roots "$scalatest_root")
+scalatest_roots_output=$(PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "$scalatest_root" "${scalatest_discovered_roots[@]}" <<'PY'
+import pathlib
+import sys
+from source_inventory import scalatest_scala3_production_roots
+
+repository = pathlib.Path(sys.argv[1])
+roots = [pathlib.Path(root) for root in sys.argv[2:]]
+for root in scalatest_scala3_production_roots(repository, roots):
+    print(root)
+PY
+)
+mapfile -t scalatest_roots <<<"$scalatest_roots_output"
+if [[ ${#cats_roots[@]} -eq 0 || ${#cats_effect_roots[@]} -eq 0 || ${#kyo_roots[@]} -eq 0 || ${#shapeless_roots[@]} -eq 0 || ${#chimney_roots[@]} -eq 0 || ${#zio_roots[@]} -eq 0 || ${#fs2_roots[@]} -eq 0 || ${#iron_roots[@]} -eq 0 || ${#magnolia_roots[@]} -eq 0 || ${#scalatest_roots[@]} -eq 0 ]]; then
   echo "no production source roots found in a pinned corpus checkout" >&2
   exit 1
 fi
@@ -143,7 +159,7 @@ manifest=$(mktemp "${tmp_root%/}/parser-corpus.XXXXXX.manifest")
 source_set_counts=$(mktemp "${tmp_root%/}/parser-corpus.XXXXXX.source-sets")
 trap 'rm -f "$manifest" "$source_set_counts"' EXIT
 
-all_roots=("${scala3_roots[@]}" "${cats_roots[@]}" "${cats_effect_roots[@]}" "${kyo_roots[@]}" "${shapeless_roots[@]}" "${chimney_roots[@]}" "${zio_roots[@]}" "${fs2_roots[@]}" "${iron_roots[@]}" "${magnolia_roots[@]}")
+all_roots=("${scala3_roots[@]}" "${cats_roots[@]}" "${cats_effect_roots[@]}" "${kyo_roots[@]}" "${shapeless_roots[@]}" "${chimney_roots[@]}" "${zio_roots[@]}" "${fs2_roots[@]}" "${iron_roots[@]}" "${magnolia_roots[@]}" "${scalatest_roots[@]}")
 for root in "${all_roots[@]}"; do
   if [[ ! -d "$root" ]]; then
     echo "corpus source root does not exist: $root" >&2
@@ -160,7 +176,8 @@ PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "${scala3_root}" "
   "${zio_root}" "${zio_roots[@]}" -- \
   "${fs2_root}" "${fs2_roots[@]}" -- \
   "${iron_root}" "${iron_roots[@]}" -- \
-  "${magnolia_root}" "${magnolia_roots[@]}" <<'PY'
+  "${magnolia_root}" "${magnolia_roots[@]}" -- \
+  "${scalatest_root}" "${scalatest_roots[@]}" <<'PY'
 import pathlib
 import subprocess
 import sys
@@ -174,8 +191,8 @@ while "--" in arguments:
     root_groups.append(arguments[:separator])
     arguments = arguments[separator + 1:]
 root_groups.append(arguments)
-if len(root_groups) != 10:
-    raise SystemExit(f"expected ten source-root groups, got {len(root_groups)}")
+if len(root_groups) != 11:
+    raise SystemExit(f"expected eleven source-root groups, got {len(root_groups)}")
 
 for group in root_groups:
     repository, roots = group[0], group[1:]
@@ -188,8 +205,8 @@ PY
 oracle_args=()
 if [[ "$skip_oracle" == 0 ]]; then
   PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "$manifest" "$source_set_counts" \
-    "$scala3_root" "$cats_root" "$cats_effect_root" "$kyo_root" "$shapeless_root" "$chimney_root" "$zio_root" "$fs2_root" "$iron_root" "$magnolia_root" \
-    "${scala3_roots[@]}" -- "${cats_roots[@]}" -- "${cats_effect_roots[@]}" -- "${kyo_roots[@]}" -- "${shapeless_roots[@]}" -- "${chimney_roots[@]}" -- "${zio_roots[@]}" -- "${fs2_roots[@]}" -- "${iron_roots[@]}" -- "${magnolia_roots[@]}" <<'PY'
+    "$scala3_root" "$cats_root" "$cats_effect_root" "$kyo_root" "$shapeless_root" "$chimney_root" "$zio_root" "$fs2_root" "$iron_root" "$magnolia_root" "$scalatest_root" \
+    "${scala3_roots[@]}" -- "${cats_roots[@]}" -- "${cats_effect_roots[@]}" -- "${kyo_roots[@]}" -- "${shapeless_roots[@]}" -- "${chimney_roots[@]}" -- "${zio_roots[@]}" -- "${fs2_roots[@]}" -- "${iron_roots[@]}" -- "${magnolia_roots[@]}" -- "${scalatest_roots[@]}" <<'PY'
 import pathlib
 import subprocess
 import sys
@@ -198,11 +215,11 @@ from source_inventory import tracked_scala_sources
 manifest_path = pathlib.Path(sys.argv[1])
 counts_path = pathlib.Path(sys.argv[2])
 roots_by_name = dict(zip(
-    ("scala3", "cats", "cats-effect", "kyo", "shapeless-3", "chimney", "zio", "fs2", "iron", "magnolia"),
-    map(pathlib.Path, sys.argv[3:13]),
+    ("scala3", "cats", "cats-effect", "kyo", "shapeless-3", "chimney", "zio", "fs2", "iron", "magnolia", "scalatest"),
+    map(pathlib.Path, sys.argv[3:14]),
     strict=True,
 ))
-arguments = sys.argv[13:]
+arguments = sys.argv[14:]
 root_groups = []
 while "--" in arguments:
     separator = arguments.index("--")
@@ -248,7 +265,7 @@ PY
     exit 1
   fi
   echo "$oracle_summary"
-  echo "Scala 3.9 parser oracle: $oracle_count files across Scala 3, Cats, Cats Effect, Kyo, Shapeless 3, Chimney, ZIO, FS2, Iron, and Magnolia"
+  echo "Scala 3.9 parser oracle: $oracle_count files across Scala 3, Cats, Cats Effect, Kyo, Shapeless 3, Chimney, ZIO, FS2, Iron, Magnolia, and ScalaTest"
   oracle_failures_total=$(awk -F '\t' '{ total += $3 } END { print total + 0 }' "$source_set_counts")
   oracle_args+=(--oracle-files "$oracle_count" --oracle-failures "$oracle_failures_total")
   while IFS=$'\t' read -r name count failures; do
@@ -314,6 +331,12 @@ PY
         repository=https://github.com/softwaremill/magnolia
         set_roots=("${magnolia_roots[@]}")
         ;;
+      scalatest)
+        version=$scalatest_tag
+        revision=$scalatest_revision
+        repository=https://github.com/scalatest/scalatest
+        set_roots=("${scalatest_roots[@]}")
+        ;;
     esac
     oracle_args+=(--source-set "$name@$version@$revision@$repository" --oracle-files "$count" --oracle-failures "$failures")
     for root in "${set_roots[@]}"; do
@@ -321,7 +344,7 @@ PY
     done
   done <"$source_set_counts"
 else
-  echo "Scala parser oracle skipped; all ten pinned source revisions are still verified"
+  echo "Scala parser oracle skipped; all eleven pinned source revisions are still verified"
   oracle_args=(
     --source-set "scala3@3.9.0@${scala3_revision}@https://github.com/scala/scala3"
     --root "${scala3_roots[0]}" --root "${scala3_roots[1]}"
@@ -344,6 +367,8 @@ else
   for root in "${iron_roots[@]}"; do oracle_args+=(--root "$root"); done
   oracle_args+=(--source-set "magnolia@${magnolia_tag}@${magnolia_revision}@https://github.com/softwaremill/magnolia")
   for root in "${magnolia_roots[@]}"; do oracle_args+=(--root "$root"); done
+  oracle_args+=(--source-set "scalatest@${scalatest_tag}@${scalatest_revision}@https://github.com/scalatest/scalatest")
+  for root in "${scalatest_roots[@]}"; do oracle_args+=(--root "$root"); done
 fi
 
 # These identify the primary source set even when oracle execution is skipped.
