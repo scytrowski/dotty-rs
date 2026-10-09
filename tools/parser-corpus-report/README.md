@@ -14,8 +14,15 @@ tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output /tmp/parser-corpus-3.9.0.json
 ```
 
+The Scala parser oracle is run in bounded batches (128 manifest entries each).
+Every batch must return exactly one valid JSON record per input before its
+counts are included in the report. This bounds the compiler process output and
+prevents a partial oracle run from being recorded as complete. The lower-level
+`tools/scala-parser-oracle/run --batch` command streams records instead of
+buffering a whole corpus response in a shell variable.
+
 The convenience runner creates one compilation-mode manifest and sends it to
-the Scala 3.9 oracle once. Each Rust source file is parsed in an isolated
+the Scala 3.9 oracle in bounded batches. Each Rust source file is parsed in an isolated
 worker process with a timeout. A worker/process failure, panic, or hang is
 reported as a hard failure; when a timeout occurs, the worker process is killed
 and reaped before the next file starts, so parser state and OS resources cannot
