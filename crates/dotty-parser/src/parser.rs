@@ -322,6 +322,12 @@ where
             || self.block_parent_locations.contains(&Location::InArgs)
     }
 
+    pub(crate) fn is_within_comma_delimited_expression(&self) -> bool {
+        self.is_within_argument_list()
+            || self.context.location == Location::InParens
+            || self.block_parent_locations.contains(&Location::InParens)
+    }
+
     /// Runs a nested parse with case/catch-body boundaries enabled.
     pub(crate) fn with_case_body<T>(&mut self, parse: impl FnOnce(&mut Self) -> T) -> T {
         let previous = self.context.case_body;
