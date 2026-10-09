@@ -189,7 +189,7 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '| Candidate | Smallest useful slice and owner | Prerequisites / reuse | Non-goals |\n| --- | --- | --- | --- |\n'
     printf '| `MissingDeclaredType` (34 / 15, historical) | #825 proposed immutable inferred class fields (14 occurrences / 7 files); implemented in #854–#856 and audited below. | Reused declaration source contexts, expression typing, widening, and completion rollback. | Current audit distinguishes first-blocker movement from completed semantics. |\n'
     printf '| `AnonymousClassInstantiationDeferred` (32 / 15) | Support one anonymous `new` with one concrete parent in `typer/expression/new.rs`. | Reuse ordinary `New` typing and parent projection; define stable anonymous symbol ownership and class info. | Closure capture, refinement synthesis, and general anonymous-class members. |\n'
-    printf '| `UnsupportedSingletonReference` (22 / 1) | Profile the single-file producer, then support one stable singleton reference shape in `typer/expression/references.rs` or `type_projection.rs`. | Reuse `TermRef`, `ThisType`, and stable-prefix checks. | Arbitrary paths, unstable prefixes, and path-dependent relation redesign. |\n'
+    printf '| `UnsupportedSingletonReference` (22 / 1) | #880 profiled all 22 method blockers as one literal boolean singleton tree; the narrow follow-up is `Literal -> Type::Constant` projection plus exact-constant and underlying-type relations. | Reuse `Type::Constant`, literal expression typing, and existing stable-prefix validation. | Arbitrary paths, unstable prefixes, literal unions, and path-dependent relation redesign. |\n'
     printf '| `LocalBlockDeclarationDeferred::val/var definition` (21 / 8) | Split remaining cases by PatDef root/binder shape in `typer/expression/blocks.rs`. | Reuse transactional PatDef lowering, local binders, and assignment support. | General destructuring and reopening supported PatDef forms. |\n'
     printf '| `LocalMethodSignatureDeferred` (14 / 3) | Split exact `feature` values and add one fixture for the most frequent unsupported signature in `typer/completion/local_methods.rs`. | Reuse the shared signature builder and existing parameter/type-parameter scopes. | General dependent results, erased/by-name expansion, or new method inference. |\n\n'
     printf '## Historical #825 MissingDeclaredType producer profile (pre-#856)\n\n'
@@ -316,6 +316,7 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '| Baseline mutable-field method attempt | Current first blocker |\n| --- | --- |\n'
     awk '
         /^mutable_class_field_baseline_method_outcomes:$/ { in_outcomes = 1; next }
+        in_outcomes && /^singleton_reference_profile:$/ { in_outcomes = 0 }
         in_outcomes && /^```/ { in_outcomes = 0 }
         in_outcomes && /^  / {
             line = $0
@@ -324,7 +325,29 @@ mkdir -p "$(dirname -- "$output_path")"
             printf "| `%s` | `%s` |\n", fields[1], fields[2]
         }
     ' "$tmp_dir/first.report"
-    printf '\nThe top-ranked remaining gap is `AnonymousClassInstantiationDeferred` (32 occurrences across 15 files). For the next sprint, prioritize one stable singleton-reference form from `CheckUnused.scala` (`UnsupportedSingletonReference`, 22 / 1): it has a concentrated producer and can reuse existing `TermRef`, `ThisType`, and stable-prefix checks without creating anonymous-class identities. Keep arbitrary paths, unstable prefixes, and path-dependent relation changes out of that slice.\n\n'
+    printf '\nThe top-ranked remaining gap is `AnonymousClassInstantiationDeferred` (32 occurrences across 15 files), but its implementation risk and anonymous-identity work are larger than the literal singleton slice. #880 profiled the `UnsupportedSingletonReference` bucket as 22 local-method blockers from one `true` singleton declaration. Recommend following with one `Literal -> Type::Constant` projection branch, then exact constant equality and constant-to-underlying conformance for booleans, integers, and strings. Expected-type adaptation must preserve literal constants until the relation checks them. Keep `null`, class literals, literal unions, arbitrary paths, unstable prefixes, and path-dependent relation changes deferred.\n\n'
+    printf '## #880 literal singleton blocker profile\n\n'
+    printf 'The pinned Scala 3.9.0 audit ran twice at revision `777528f19a58e794c9954a42f433373472ec57f8`; normalized output matched byte-for-byte. The current `UnsupportedSingletonReference` first-blocker bucket has 22 local-method observations, all pointing to one source singleton tree and one enclosing declaration. Each method identity, singleton/reference tree index, AST shape, span, declaration shape, and snippet is listed in the raw profile below.\n\n'
+    printf '| Profile measure | Result |\n| --- | ---: |\n'
+    awk '
+        /^singleton_reference_profile:$/ { in_profile = 1; next }
+        in_profile && /^  first_blockers:$/ { in_profile = 0 }
+        in_profile && /^  (total_first_blockers|profile_entries|distinct_singleton_source_trees|distinct_enclosing_declarations|distinct_reference_shapes)=/ {
+            line = $0
+            sub(/^  /, "", line)
+            split(line, fields, "=")
+            label = fields[1]
+            gsub(/_/, " ", label)
+            printf "| %s | %s |\n", label, fields[2]
+        }
+    ' "$tmp_dir/first.report"
+    printf '\nAll 22 are repeated observations of `val actionable: true = true` in `compiler/src/dotty/tools/dotc/transform/CheckUnused.scala`: singleton tree 2904, reference tree 2903, source span `[27444, 27448)`, and reference shape `Literal(Boolean(true))`. This is one declaration repeated through distinct methods, not 22 independent singleton declarations. Scala 3.9 and the dotty-rs parser both retain `SingletonTypeTree(reference = Literal(...))` for `true`, `false`, `1`, and `"foo"`. The source Typer still rejects literal singleton projection; this issue only profiles and pins the boundary.\n\n'
+    printf '### Narrow follow-up boundaries\n\n'
+    printf '| Concern | Recommended boundary |\n| --- | --- |\n'
+    printf '| Source type projection | Add `Literal -> Type::Constant` for boolean, numeric, and string literals, preserving the exact constant payload. |\n'
+    printf '| Type relation | Make equal constants equivalent; reject unequal constants; relate each supported constant to its underlying `Boolean`, `Int`/numeric, or `String` class. |\n'
+    printf '| Expected adaptation | Check the exact expression constant against a singleton expected type before widening; preserve ordinary underlying-type conformance. |\n'
+    printf '| Explicit deferrals | Keep `null`, class literals, literal unions, arbitrary paths, unstable prefixes, and path-dependent relation changes unsupported. |\n\n'
     printf '## Previous type projection snapshot\n\n'
     printf 'The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.\n\n'
     printf '```text\n'
