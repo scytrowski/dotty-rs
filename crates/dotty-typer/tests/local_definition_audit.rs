@@ -254,6 +254,7 @@ struct Audit {
     missing_declared_type_profile: MissingDeclaredTypeProfile,
     local_method_first_blockers: BTreeMap<String, String>,
     singleton_reference_profile: SingletonReferenceProfile,
+    singleton_source_inventory: SingletonSourceInventory,
     source_function_method_outcomes: BTreeSet<String>,
     source_function_outcomes: BTreeMap<String, FailureBucket>,
 }
@@ -290,6 +291,7 @@ impl Default for Audit {
             missing_declared_type_profile: MissingDeclaredTypeProfile::default(),
             local_method_first_blockers: BTreeMap::new(),
             singleton_reference_profile: SingletonReferenceProfile::default(),
+            singleton_source_inventory: SingletonSourceInventory::default(),
             source_function_method_outcomes: BTreeSet::new(),
             source_function_outcomes: BTreeMap::new(),
         }
@@ -436,6 +438,8 @@ impl Audit {
             .extend(other.local_method_first_blockers);
         self.singleton_reference_profile
             .merge(other.singleton_reference_profile);
+        self.singleton_source_inventory
+            .merge(other.singleton_source_inventory);
         for (name, count) in other.buckets {
             *self.buckets.entry(name).or_default() += count;
         }
@@ -487,6 +491,49 @@ impl SingletonReferenceProfile {
         self.enclosing_declarations
             .insert(detail.enclosing_declaration);
         self.reference_shapes.insert(detail.reference_shape);
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SingletonSourceInventory {
+    total: usize,
+    categories: BTreeMap<String, usize>,
+    category_files: BTreeMap<String, BTreeSet<String>>,
+    reference_shapes: BTreeMap<String, usize>,
+    reference_shape_files: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl SingletonSourceInventory {
+    fn merge(&mut self, other: Self) {
+        self.total += other.total;
+        merge_counts(&mut self.categories, other.categories);
+        for (category, files) in other.category_files {
+            self.category_files
+                .entry(category)
+                .or_default()
+                .extend(files);
+        }
+        merge_counts(&mut self.reference_shapes, other.reference_shapes);
+        for (shape, files) in other.reference_shape_files {
+            self.reference_shape_files
+                .entry(shape)
+                .or_default()
+                .extend(files);
+        }
+    }
+
+    fn record(&mut self, category: String, shape: String, path: &str) {
+        self.total += 1;
+        *self.categories.entry(category.clone()).or_default() += 1;
+        self.category_files
+            .entry(category)
+            .or_default()
+            .insert(path.to_owned());
+        *self.reference_shapes.entry(shape.clone()).or_default() += 1;
+        self.reference_shape_files
+            .entry(shape)
+            .or_default()
+            .insert(path.to_owned());
     }
 }
 
@@ -977,6 +1024,7 @@ fn pinned_scala39_local_definition_audit() {
     print_pinned_immutable_field_method_outcomes(&audit.local_method_first_blockers);
     print_pinned_mutable_field_method_outcomes(&audit.local_method_first_blockers);
     print_singleton_reference_profile(&audit.singleton_reference_profile);
+    print_singleton_source_inventory(&audit.singleton_source_inventory);
     print_singleton_projection_baseline(&singleton_projection_outcomes);
     println!("AUDIT_REPORT_END");
 }
@@ -1012,6 +1060,37 @@ fn print_singleton_reference_profile(profile: &SingletonReferenceProfile) {
     println!("  reference_shapes:");
     for shape in &profile.reference_shapes {
         println!("    {shape}");
+    }
+}
+
+fn print_singleton_source_inventory(inventory: &SingletonSourceInventory) {
+    println!("singleton_source_inventory:");
+    println!("  total_singleton_type_trees={}", inventory.total);
+    for category in ["literal", "this", "identifier", "selection", "unsupported"] {
+        let count = inventory
+            .categories
+            .get(category)
+            .copied()
+            .unwrap_or_default();
+        let files = inventory.category_files.get(category);
+        let file_count = files.map_or(0, BTreeSet::len);
+        let examples = files
+            .into_iter()
+            .flat_map(|files| files.iter().take(5).cloned())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  {category}_references={count} files={file_count} examples=[{examples}]");
+    }
+    println!("  reference_shapes:");
+    for (shape, count) in &inventory.reference_shapes {
+        let files = inventory.reference_shape_files.get(shape);
+        let file_count = files.map_or(0, BTreeSet::len);
+        let examples = files
+            .into_iter()
+            .flat_map(|files| files.iter().take(5).cloned())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("    {shape}={count} files={file_count} examples=[{examples}]");
     }
 }
 
@@ -3200,6 +3279,7 @@ fn audit_source_inner(
     audit.files_attempted = 1;
     audit.patdef_profile = collect_local_patdefs(&parsed.ast, &store.names, path);
     audit.expression_forms = collect_expression_histogram(&parsed.ast);
+    audit.singleton_source_inventory = collect_singleton_source_inventory(&parsed.ast, path);
     audit.prefix_operator_forms = collect_prefix_operator_histogram(&parsed.ast, &store.names);
     let (type_tree_forms, type_tree_form_names, _type_tree_nodes) =
         collect_declared_type_tree_inventory(&parsed.ast, &store.names);
@@ -5020,6 +5100,65 @@ fn singleton_reference_shape(kind: &TreeKind<Untyped>, names: &dotty_core::NameI
     }
 }
 
+fn singleton_reference_category(kind: &TreeKind<Untyped>) -> &'static str {
+    match kind {
+        TreeKind::Literal(_) => "literal",
+        TreeKind::This(_) => "this",
+        TreeKind::Ident(_) => "identifier",
+        TreeKind::Select(_) => "selection",
+        _ => "unsupported",
+    }
+}
+
+fn singleton_reference_inventory_shape(kind: &TreeKind<Untyped>) -> String {
+    match kind {
+        TreeKind::Literal(literal) => {
+            let constant = match literal.value {
+                dotty_core::Constant::Unit => "Unit",
+                dotty_core::Constant::Null => "Null",
+                dotty_core::Constant::Boolean(_) => "Boolean",
+                dotty_core::Constant::Byte(_) => "Byte",
+                dotty_core::Constant::Short(_) => "Short",
+                dotty_core::Constant::Char(_) => "Char",
+                dotty_core::Constant::Int(_) => "Int",
+                dotty_core::Constant::Long(_) => "Long",
+                dotty_core::Constant::FloatBits(_) => "Float",
+                dotty_core::Constant::DoubleBits(_) => "Double",
+                dotty_core::Constant::String(_) => "String",
+                dotty_core::Constant::StringUtf16(_) => "StringUtf16",
+                dotty_core::Constant::Class(_) => "Class",
+            };
+            format!("Literal({constant})")
+        }
+        TreeKind::This(_) => "This".to_owned(),
+        TreeKind::Ident(_) => "Ident".to_owned(),
+        TreeKind::Select(_) => "Select".to_owned(),
+        TreeKind::PhaseSpecific(UntypedNode::Parens(_)) => "Parens".to_owned(),
+        kind => format!("Other({})", tree_kind_label(kind)),
+    }
+}
+
+fn collect_singleton_source_inventory(
+    arena: &dotty_core::AstArena<Untyped>,
+    path: &str,
+) -> SingletonSourceInventory {
+    let mut inventory = SingletonSourceInventory::default();
+    for (_, node) in arena.iter() {
+        let TreeKind::SingletonTypeTree(singleton) = &node.kind else {
+            continue;
+        };
+        let (category, shape) = match arena.try_get(singleton.reference) {
+            Some(reference) => (
+                singleton_reference_category(&reference.kind).to_owned(),
+                singleton_reference_inventory_shape(&reference.kind),
+            ),
+            None => ("unsupported".to_owned(), "MissingReference".to_owned()),
+        };
+        inventory.record(category, shape, path);
+    }
+    inventory
+}
+
 #[test]
 fn singleton_profile_shapes_are_distinct_and_deterministically_ordered() {
     let source_text = "class Inner { val field: Int = 0 }; class C { val truth: true = true; val numeric: 1 = 1; val stable: Int = 1; val alias: stable.type = stable; val inner: Inner = new Inner; val selected: inner.field.type = inner.field }";
@@ -5093,6 +5232,53 @@ fn singleton_profile_shapes_are_distinct_and_deterministically_ordered() {
         .into_iter()
         .collect()
     );
+}
+
+#[test]
+fn singleton_source_inventory_counts_reference_categories_and_files() {
+    let source_text = "class Inner { val value: Int = 1 }; class C { val literal: true = true; val self: this.type = this; val stable: Int = 1; val identifier: stable.type = stable; val child: Inner = new Inner; val selected: child.value.type = child.value }";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let mut parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let unsupported_reference = parsed
+        .ast
+        .iter()
+        .find_map(|(_, node)| match &node.kind {
+            TreeKind::SingletonTypeTree(singleton) => {
+                matches!(parsed.ast.get(singleton.reference).kind, TreeKind::Ident(_))
+                    .then_some(singleton.reference)
+            }
+            _ => None,
+        })
+        .unwrap();
+    parsed.ast.get_mut(unsupported_reference).kind = TreeKind::TypeTree(Default::default());
+
+    let first = collect_singleton_source_inventory(&parsed.ast, "fixture.scala");
+    let second = collect_singleton_source_inventory(&parsed.ast, "fixture.scala");
+
+    assert_eq!(first, second);
+    assert_eq!(first.total, 4);
+    assert_eq!(first.categories.get("literal"), Some(&1));
+    assert_eq!(first.categories.get("this"), Some(&1));
+    assert_eq!(first.categories.get("selection"), Some(&1));
+    assert_eq!(first.categories.get("unsupported"), Some(&1));
+    assert_eq!(first.categories.get("identifier"), None);
+    assert_eq!(
+        first.category_files.get("unsupported"),
+        Some(&BTreeSet::from(["fixture.scala".to_owned()]))
+    );
+    assert_eq!(first.reference_shapes.get("Literal(Boolean)"), Some(&1));
+    assert_eq!(first.reference_shapes.get("This"), Some(&1));
+    assert_eq!(first.reference_shapes.get("Select"), Some(&1));
+    assert_eq!(first.reference_shapes.get("Other(TypeTree)"), Some(&1));
 }
 
 #[derive(Debug)]
