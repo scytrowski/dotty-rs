@@ -3919,151 +3919,151 @@ fn collect_source_function_method_outcomes(
     const BASELINE_METHODS: &[(&str, usize, &str, &str)] = &[
         (
             "expression::Function",
-            738,
+            737,
             "refersTo",
             "compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala",
         ),
         (
             "expression::Function",
-            753,
+            752,
             "removeSingleton",
             "compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala",
         ),
         (
             "expression::Function",
-            755,
+            754,
             "mapArg",
             "compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala",
         ),
         (
             "expression::Function",
-            759,
+            758,
             "elim",
             "compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala",
         ),
         (
             "expression::Function",
-            711,
+            710,
             "factoryManifest",
             "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
         ),
         (
             "expression::Function",
-            719,
+            718,
             "singletonManifest",
             "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
         ),
         (
             "expression::Function",
-            722,
+            721,
             "synthArrayManifest",
             "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
         ),
         (
             "expression::Function",
-            728,
+            727,
             "synthWildcardManifest",
             "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
         ),
         (
             "expression::Function",
-            732,
+            731,
             "synthArgManifests",
             "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
         ),
         (
             "expression::Function",
-            742,
+            741,
             "canManifest",
             "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
         ),
         (
             "expression::Function",
-            749,
+            748,
             "synthManifest",
             "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
         ),
         (
             "expression::Function",
-            771,
+            770,
             "manifestOfType",
             "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
         ),
         (
             "expression::Function",
-            775,
+            774,
             "synthesize",
             "compiler/src/dotty/tools/dotc/typer/Synthesizer.scala",
         ),
         (
             "type::Function",
-            672,
+            671,
             "ifInit",
             "compiler/src/dotty/tools/backend/jvm/BTypes.scala",
         ),
         (
             "type::Function",
-            674,
+            673,
             "isJLO",
             "compiler/src/dotty/tools/backend/jvm/BTypes.scala",
         ),
         (
             "type::Function",
-            2388,
+            2387,
             "genArgs",
             "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
         ),
         (
             "type::Function",
-            2389,
+            2388,
             "genArgsAsClassCaptures",
             "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
         ),
         (
             "type::Function",
-            3387,
+            3386,
             "genScalaArgs",
             "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
         ),
         (
             "type::Function",
-            3388,
+            3387,
             "genJSArgs",
             "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
         ),
         (
             "type::Function",
-            311,
+            310,
             "argStr",
             "compiler/src/dotty/tools/dotc/core/Denotations.scala",
         ),
         (
             "type::Function",
-            3449,
+            3448,
             "normalize",
             "compiler/src/dotty/tools/dotc/core/Types.scala",
         ),
         (
             "type::Function",
-            3396,
+            3395,
             "maybeAscription",
             "compiler/src/dotty/tools/dotc/parsing/Parsers.scala",
         ),
         (
             "type::Function",
-            367,
+            366,
             "unusable",
             "compiler/src/dotty/tools/dotc/transform/PostTyper.scala",
         ),
         (
             "type::Function",
-            410,
+            409,
             "isPoly",
             "compiler/src/dotty/tools/dotc/typer/ProtoTypes.scala",
         ),
         (
             "type::Function",
-            417,
+            416,
             "fun",
             "library/src/scala/util/control/Exception.scala",
         ),
@@ -4077,8 +4077,9 @@ fn collect_source_function_method_outcomes(
             .names
             .resolve(definition.name.as_name().text())
             .to_owned();
-        let line = audit.source_text[..method_range.start() as usize]
-            .lines()
+        let line = audit.source_text.as_bytes()[..method_range.start() as usize]
+            .iter()
+            .filter(|byte| **byte == b'\n')
             .count()
             + 1;
         let Some((form, _, _, _)) =

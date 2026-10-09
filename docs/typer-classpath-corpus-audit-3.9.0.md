@@ -19,39 +19,39 @@ The pre-#826 baseline at `89d84f41444a2a03a6a5bd39cf45176ca894a03b` and the post
 
 | Baseline family | New first blocker | Count / files | Representative methods |
 | --- | --- | ---: | --- |
-| `UnsupportedExpression::Function` | `ImportQualifierNotFound` | 4 / 1 | compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:738:refersTo, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:753:removeSingleton, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:755:mapArg, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:759:elim |
-| `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` | 9 / 1 | compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:711:factoryManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:719:singletonManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:722:synthArrayManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:728:synthWildcardManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:732:synthArgManifests |
-| `UnsupportedTypeTree::Function` | `SymbolResolution` | 12 / 8 | compiler/src/dotty/tools/backend/jvm/BTypes.scala:672:ifInit, compiler/src/dotty/tools/backend/jvm/BTypes.scala:674:isJLO, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgs, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2389:genArgsAsClassCaptures, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3387:genScalaArgs |
+| `UnsupportedExpression::Function` | `ImportQualifierNotFound` | 4 / 1 | compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:737:refersTo, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:752:removeSingleton, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:754:mapArg, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:758:elim |
+| `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` | 9 / 1 | compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:710:factoryManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:718:singletonManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:721:synthArrayManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:727:synthWildcardManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:731:synthArgManifests |
+| `UnsupportedTypeTree::Function` | `SymbolResolution` | 12 / 8 | compiler/src/dotty/tools/backend/jvm/BTypes.scala:671:ifInit, compiler/src/dotty/tools/backend/jvm/BTypes.scala:673:isJLO, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2387:genArgs, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgsAsClassCaptures, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3386:genScalaArgs |
 
 ### Same-method comparison
 
 | Method from the pre-#826 first-blocker set | Baseline family | First blocker after #829 |
 | --- | --- | --- |
-| `compiler/src/dotty/tools/backend/jvm/BTypes.scala:672:ifInit` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/backend/jvm/BTypes.scala:674:isJLO` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgs` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2389:genArgsAsClassCaptures` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3387:genScalaArgs` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3388:genJSArgs` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/dotc/core/Denotations.scala:311:argStr` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/dotc/core/Types.scala:3449:normalize` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:738:refersTo` | `UnsupportedExpression::Function` | `ImportQualifierNotFound` |
-| `compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:753:removeSingleton` | `UnsupportedExpression::Function` | `ImportQualifierNotFound` |
-| `compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:755:mapArg` | `UnsupportedExpression::Function` | `ImportQualifierNotFound` |
-| `compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:759:elim` | `UnsupportedExpression::Function` | `ImportQualifierNotFound` |
-| `compiler/src/dotty/tools/dotc/parsing/Parsers.scala:3396:maybeAscription` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/dotc/transform/PostTyper.scala:367:unusable` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/dotc/typer/ProtoTypes.scala:410:isPoly` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:711:factoryManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
-| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:719:singletonManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
-| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:722:synthArrayManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
-| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:728:synthWildcardManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
-| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:732:synthArgManifests` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
-| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:742:canManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
-| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:749:synthManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
-| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:771:manifestOfType` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
-| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:775:synthesize` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
-| `library/src/scala/util/control/Exception.scala:417:fun` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `compiler/src/dotty/tools/backend/jvm/BTypes.scala:671:ifInit` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `compiler/src/dotty/tools/backend/jvm/BTypes.scala:673:isJLO` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2387:genArgs` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgsAsClassCaptures` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3386:genScalaArgs` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3387:genJSArgs` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `compiler/src/dotty/tools/dotc/core/Denotations.scala:310:argStr` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `compiler/src/dotty/tools/dotc/core/Types.scala:3448:normalize` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:737:refersTo` | `UnsupportedExpression::Function` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:752:removeSingleton` | `UnsupportedExpression::Function` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:754:mapArg` | `UnsupportedExpression::Function` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:758:elim` | `UnsupportedExpression::Function` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/parsing/Parsers.scala:3395:maybeAscription` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `compiler/src/dotty/tools/dotc/transform/PostTyper.scala:366:unusable` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `compiler/src/dotty/tools/dotc/typer/ProtoTypes.scala:409:isPoly` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:710:factoryManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
+| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:718:singletonManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
+| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:721:synthArrayManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
+| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:727:synthWildcardManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
+| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:731:synthArgManifests` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
+| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:741:canManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
+| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:748:synthManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
+| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:770:manifestOfType` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
+| `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:774:synthesize` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
+| `library/src/scala/util/control/Exception.scala:416:fun` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
 
 The detailed rows are emitted from the same local-method attempts as the aggregate audit; the generated raw report below preserves all bucket counts and paths. `Typed` would mean the local method received a typed-tree mapping; none of these 25 rows did.
 
@@ -416,34 +416,34 @@ local_defdef_failures:
   MemberNotFound [resolution/classpath environment]: 1 (1 files) [compiler/src/dotty/tools/backend/jvm/BTypes.scala]
   PatternTypeRelationDeferred [other]: 1 (1 files) [library/src/scala/collection/immutable/List.scala]
 source_function_method_outcomes:
-  expression::Function::ImportQualifierNotFound: count=4, files=1, examples=[compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:738:refersTo, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:753:removeSingleton, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:755:mapArg, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:759:elim]
-  expression::Function::UnsupportedFunctionLiteralParameter: count=9, files=1, examples=[compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:711:factoryManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:719:singletonManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:722:synthArrayManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:728:synthWildcardManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:732:synthArgManifests]
-  type::Function::SymbolResolution: count=12, files=8, examples=[compiler/src/dotty/tools/backend/jvm/BTypes.scala:672:ifInit, compiler/src/dotty/tools/backend/jvm/BTypes.scala:674:isJLO, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgs, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2389:genArgsAsClassCaptures, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3387:genScalaArgs]
-  method=compiler/src/dotty/tools/backend/jvm/BTypes.scala:672:ifInit baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/backend/jvm/BTypes.scala:674:isJLO baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgs baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2389:genArgsAsClassCaptures baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3387:genScalaArgs baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3388:genJSArgs baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/dotc/core/Denotations.scala:311:argStr baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/dotc/core/Types.scala:3449:normalize baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:738:refersTo baseline_form=expression::Function first_blocker=ImportQualifierNotFound
-  method=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:753:removeSingleton baseline_form=expression::Function first_blocker=ImportQualifierNotFound
-  method=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:755:mapArg baseline_form=expression::Function first_blocker=ImportQualifierNotFound
-  method=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:759:elim baseline_form=expression::Function first_blocker=ImportQualifierNotFound
-  method=compiler/src/dotty/tools/dotc/parsing/Parsers.scala:3396:maybeAscription baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/dotc/transform/PostTyper.scala:367:unusable baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/dotc/typer/ProtoTypes.scala:410:isPoly baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:711:factoryManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
-  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:719:singletonManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
-  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:722:synthArrayManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
-  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:728:synthWildcardManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
-  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:732:synthArgManifests baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
-  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:742:canManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
-  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:749:synthManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
-  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:771:manifestOfType baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
-  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:775:synthesize baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
-  method=library/src/scala/util/control/Exception.scala:417:fun baseline_form=type::Function first_blocker=SymbolResolution
+  expression::Function::ImportQualifierNotFound: count=4, files=1, examples=[compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:737:refersTo, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:752:removeSingleton, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:754:mapArg, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:758:elim]
+  expression::Function::UnsupportedFunctionLiteralParameter: count=9, files=1, examples=[compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:710:factoryManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:718:singletonManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:721:synthArrayManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:727:synthWildcardManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:731:synthArgManifests]
+  type::Function::SymbolResolution: count=12, files=8, examples=[compiler/src/dotty/tools/backend/jvm/BTypes.scala:671:ifInit, compiler/src/dotty/tools/backend/jvm/BTypes.scala:673:isJLO, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2387:genArgs, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgsAsClassCaptures, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3386:genScalaArgs]
+  method=compiler/src/dotty/tools/backend/jvm/BTypes.scala:671:ifInit baseline_form=type::Function first_blocker=SymbolResolution
+  method=compiler/src/dotty/tools/backend/jvm/BTypes.scala:673:isJLO baseline_form=type::Function first_blocker=SymbolResolution
+  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2387:genArgs baseline_form=type::Function first_blocker=SymbolResolution
+  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgsAsClassCaptures baseline_form=type::Function first_blocker=SymbolResolution
+  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3386:genScalaArgs baseline_form=type::Function first_blocker=SymbolResolution
+  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3387:genJSArgs baseline_form=type::Function first_blocker=SymbolResolution
+  method=compiler/src/dotty/tools/dotc/core/Denotations.scala:310:argStr baseline_form=type::Function first_blocker=SymbolResolution
+  method=compiler/src/dotty/tools/dotc/core/Types.scala:3448:normalize baseline_form=type::Function first_blocker=SymbolResolution
+  method=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:737:refersTo baseline_form=expression::Function first_blocker=ImportQualifierNotFound
+  method=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:752:removeSingleton baseline_form=expression::Function first_blocker=ImportQualifierNotFound
+  method=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:754:mapArg baseline_form=expression::Function first_blocker=ImportQualifierNotFound
+  method=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:758:elim baseline_form=expression::Function first_blocker=ImportQualifierNotFound
+  method=compiler/src/dotty/tools/dotc/parsing/Parsers.scala:3395:maybeAscription baseline_form=type::Function first_blocker=SymbolResolution
+  method=compiler/src/dotty/tools/dotc/transform/PostTyper.scala:366:unusable baseline_form=type::Function first_blocker=SymbolResolution
+  method=compiler/src/dotty/tools/dotc/typer/ProtoTypes.scala:409:isPoly baseline_form=type::Function first_blocker=SymbolResolution
+  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:710:factoryManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
+  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:718:singletonManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
+  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:721:synthArrayManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
+  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:727:synthWildcardManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
+  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:731:synthArgManifests baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
+  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:741:canManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
+  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:748:synthManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
+  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:770:manifestOfType baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
+  method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:774:synthesize baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
+  method=library/src/scala/util/control/Exception.scala:416:fun baseline_form=type::Function first_blocker=SymbolResolution
 missing_declared_type_profile:
   first_blockers=34 distinct_declarations=17
   value::Field::owner=Class::synthetic inferred TypeTree::rhs=true::modifiers=::semantic_mutable=false: 14 (7 files) [compiler/src/dotty/tools/dotc/core/TypeErrors.scala, compiler/src/dotty/tools/dotc/inlines/Inliner.scala, compiler/src/dotty/tools/dotc/printing/ReplPrinter.scala, compiler/src/dotty/tools/dotc/reporting/Profile.scala, compiler/src/dotty/tools/dotc/rewrites/Rewrites.scala, compiler/src/dotty/tools/dotc/transform/Bridges.scala, compiler/src/dotty/tools/io/FileWriters.scala]
