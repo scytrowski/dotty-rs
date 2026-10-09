@@ -74,7 +74,7 @@ The ranked list below excludes parser/namer and classpath-resolution failures, a
 | Rank | First blocker | Count / files |
 | ---: | --- | ---: |
 | 1 | `AnonymousClassInstantiationDeferred` | 32 / 15 |
-| 2 | `UnsupportedSingletonReference` | 22 / 1 |
+| 2 | `LocalValueConformanceUnsupported` | 22 / 1 |
 | 3 | `LocalBlockDeclarationDeferred::val/var definition` | 21 / 8 |
 | 4 | `LocalMethodSignatureDeferred` | 14 / 3 |
 | 5 | `RecursiveInferredMethodResult` | 13 / 1 |
@@ -194,7 +194,7 @@ The Scala 3.9.0 audit ran twice against revision `777528f19a58e794c9954a42f43337
 | `library/src/scala/collection/Iterator.scala#tree=3805` | `UnsupportedTypeTree::Annotated` |
 | `library/src/scala/collection/Iterator.scala#tree=3865` | `UnsupportedTypeTree::Annotated` |
 
-The top-ranked remaining gap is `AnonymousClassInstantiationDeferred` (32 occurrences across 15 files), but its implementation risk and anonymous-identity work are larger than the literal singleton slice. #880 profiled the `UnsupportedSingletonReference` bucket as 22 local-method blockers from one `true` singleton declaration. Recommend following with one `Literal -> Type::Constant` projection branch, then exact constant equality and constant-to-underlying conformance for booleans, integers, and strings. Expected-type adaptation must preserve literal constants until the relation checks them. Keep `null`, class literals, literal unions, arbitrary paths, unstable prefixes, and path-dependent relation changes deferred.
+The top-ranked remaining gap is `AnonymousClassInstantiationDeferred` (32 occurrences across 15 files), but its implementation risk and anonymous-identity work are larger than the literal singleton slice. #880 traced 22 `UnsupportedSingletonReference` observations to one `true` declaration. #881 implemented literal-to-`Type::Constant` source projection; all 22 baseline methods now reach `LocalValueConformanceUnsupported`. The next bounded slices are exact constant relations and expected singleton adaptation. Keep `null`, class literals, literal unions, arbitrary paths, unstable prefixes, and path-dependent relation changes deferred.
 
 ## #880 literal singleton blocker profile
 
@@ -202,22 +202,38 @@ The pinned Scala 3.9.0 audit ran twice at revision `777528f19a58e794c9954a42f433
 
 | Profile measure | Result |
 | --- | ---: |
-| total first blockers | 22 |
-| profile entries | 22 |
-| distinct singleton source trees | 1 |
-| distinct enclosing declarations | 1 |
-| distinct reference shapes | 1 |
+| total first blockers | 0 |
+| profile entries | 0 |
+| distinct singleton source trees | 0 |
+| distinct enclosing declarations | 0 |
+| distinct reference shapes | 0 |
 
-All 22 are repeated observations of `val actionable: true = true` in `compiler/src/dotty/tools/dotc/transform/CheckUnused.scala`: singleton tree 2904, reference tree 2903, source span `[27444, 27448)`, and reference shape `Literal(Boolean(true))`. This is one declaration repeated through distinct methods, not 22 independent singleton declarations. Scala 3.9 and the dotty-rs parser both retain `SingletonTypeTree(reference = Literal(...))` for `true`, `false`, `1`, and `"foo"`. The source Typer still rejects literal singleton projection; this issue only profiles and pins the boundary.
+All 22 are repeated observations of `val actionable: true = true` in `compiler/src/dotty/tools/dotc/transform/CheckUnused.scala`: singleton tree 2904, reference tree 2903, source span `[27444, 27448)`, and reference shape `Literal(Boolean(true))`. This is one declaration repeated through distinct methods, not 22 independent singleton declarations. Scala 3.9 and the dotty-rs parser both retain `SingletonTypeTree(reference = Literal(...))` for `true`, `false`, `1`, and `"foo"`. After #881, source projection accepts the pinned boolean, character, integer, long, float, double, and string literal forms as exact `Type::Constant` values. The current first-blocker movement is reported in the #881 section below.
 
 ### Narrow follow-up boundaries
 
 | Concern | Recommended boundary |
 | --- | --- |
-| Source type projection | Add `Literal -> Type::Constant` for boolean, numeric, and string literals, preserving the exact constant payload. |
-| Type relation | Make equal constants equivalent; reject unequal constants; relate each supported constant to its underlying `Boolean`, `Int`/numeric, or `String` class. |
-| Expected adaptation | Check the exact expression constant against a singleton expected type before widening; preserve ordinary underlying-type conformance. |
+| Source type projection | Implemented in #881: supported source literals project directly to `Type::Constant` with the exact payload. |
+| Type relation | In #882, make equal constants equivalent; reject unequal constants; relate each supported constant to its underlying class. |
+| Expected adaptation | In #883, check the exact expression constant against a singleton expected type before widening; preserve ordinary underlying-type conformance. |
 | Explicit deferrals | Keep `null`, class literals, literal unions, arbitrary paths, unstable prefixes, and path-dependent relation changes unsupported. |
+
+## #881 literal singleton projection audit
+
+The pinned Scala 3.9.0 audit compared the same 22 #880 method observations after projection. Each baseline method is required to remain present, and the run fails if any still stops at `UnsupportedSingletonReference`. All 22 moved to the next blocker, `LocalValueConformanceUnsupported`; this measures projection progress and does not claim successful method typing. Two normalized audit runs matched byte-for-byte.
+
+| Projection measure | Result |
+| --- | ---: |
+| baseline observations | 22 |
+| moved past projection | 22 |
+| remaining UnsupportedSingletonReference | 0 |
+
+| Current first blocker for baseline methods | Count |
+| --- | ---: |
+| `LocalValueConformanceUnsupported` | 22 |
+
+The raw profile below lists the current first blocker for each of the 22 pinned method trees. These methods have not completed typing; their relation and expected-adaptation blockers remain for later issues.
 
 ## Previous type projection snapshot
 
@@ -463,9 +479,9 @@ import_qualifier_not_found=2827
 external_name_or_member_resolution_failures=202
 failure_families:
   resolution/classpath environment=3030
-  other=163
+  other=141
+  type relation/inference/completion=55
   local declaration deferral=46
-  type relation/inference/completion=33
   unsupported expression syntax/semantics=25
 local_defdef_failures:
   ImportQualifierNotFound [resolution/classpath environment]: 2827 (273 files) [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
@@ -474,7 +490,7 @@ local_defdef_failures:
   SymbolResolution [resolution/classpath environment]: 40 (17 files) [compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/core/Decorators.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala]
   NoSuccessfulEnclosingMethodTyping [other]: 34 (15 files) [compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/classpath/DirectoryClassPath.scala, compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala]
   AnonymousClassInstantiationDeferred [other]: 32 (15 files) [compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala]
-  UnsupportedSingletonReference [other]: 22 (1 files) [compiler/src/dotty/tools/dotc/transform/CheckUnused.scala]
+  LocalValueConformanceUnsupported [type relation/inference/completion]: 22 (1 files) [compiler/src/dotty/tools/dotc/transform/CheckUnused.scala]
   LocalBlockDeclarationDeferred::val/var definition [local declaration deferral]: 21 (8 files) [compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala]
   TermNameNotFound [resolution/classpath environment]: 20 (12 files) [compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/backend/jvm/opt/MethodMax.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala, compiler/src/dotty/tools/dotc/util/ClasspathFromClassloader.scala, compiler/src/dotty/tools/dotc/util/WeakHashSet.scala]
   LocalMethodSignatureDeferred [type relation/inference/completion]: 14 (3 files) [compiler/src/dotty/tools/dotc/core/SymUtils.scala, compiler/src/dotty/tools/dotc/transform/MegaPhase.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala]
@@ -551,7 +567,7 @@ missing_declared_type_records:
   compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala: failed_local_method_tree=4009 tree=175 error_tree_kind=TypeTree declaration_tree=177 declaration_tree_kind=ValDef declaration=value symbol_kind=Field owner_kind=ModuleClass context_owner_kind=ModuleClass shape=synthetic inferred TypeTree rhs=true modifiers=[Inline] semantic_mutable=false entry=complete_symbol_inner -> type_of_tpt_inner_journaled span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 2358, end: 2358 }, point: None } })
 top_semantic_gaps:
   1. AnonymousClassInstantiationDeferred: count=32, files=15, category=other, examples=compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala
-  2. UnsupportedSingletonReference: count=22, files=1, category=other, examples=compiler/src/dotty/tools/dotc/transform/CheckUnused.scala
+  2. LocalValueConformanceUnsupported: count=22, files=1, category=other, examples=compiler/src/dotty/tools/dotc/transform/CheckUnused.scala
   3. LocalBlockDeclarationDeferred::val/var definition: count=21, files=8, category=local declaration support, examples=compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala
   4. LocalMethodSignatureDeferred: count=14, files=3, category=other, examples=compiler/src/dotty/tools/dotc/core/SymUtils.scala, compiler/src/dotty/tools/dotc/transform/MegaPhase.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala
   5. RecursiveInferredMethodResult: count=13, files=1, category=other, examples=compiler/src/dotty/tools/dotc/typer/Typer.scala
@@ -562,7 +578,7 @@ top_semantic_gaps:
   10. MissingDeclaredType: count=10, files=3, category=other, examples=compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala
 top_gap_implementation_scope_notes:
   AnonymousClassInstantiationDeferred (32 occurrences, 15 files): first_slice=support one anonymous new with one concrete parent and explicit member ownership; owner=dotty-typer/src/typer/expression/new.rs; prerequisites=ordinary New typing, parent projection, and stable anonymous class identity; non_goals=closure capture, refinement synthesis, and general anonymous-class members
-  UnsupportedSingletonReference (22 occurrences, 1 files): first_slice=profile and type one stable singleton-reference shape from the reported producer; owner=dotty-typer/src/typer/expression/references.rs and dotty-typer/src/typer/type_projection.rs; prerequisites=existing TermRef, ThisType, and stable-prefix contracts; non_goals=arbitrary paths, unstable prefixes, and path-dependent relation redesign
+  LocalValueConformanceUnsupported (22 occurrences, 1 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
   LocalBlockDeclarationDeferred::val/var definition (21 occurrences, 8 files): first_slice=split remaining local definitions by PatDef root and binder shape before adding one form; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=transactional PatDef lowering, local binders, and assignment support; non_goals=general destructuring or reopening already supported PatDef forms
   LocalMethodSignatureDeferred (14 occurrences, 3 files): first_slice=split the feature payload and add a fixture for the most frequent unsupported signature; owner=dotty-typer/src/typer/completion/local_methods.rs; prerequisites=the shared signature builder and existing parameter/type-parameter scopes; non_goals=general dependent-result, erased/by-name, or method-inference redesign
   RecursiveInferredMethodResult (13 occurrences, 1 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
@@ -573,12 +589,13 @@ top_gap_implementation_scope_notes:
   MissingDeclaredType (10 occurrences, 3 files): first_slice=infer one ordinary or inline inferred module-class field after source class val/var inference; the remaining bucket is 10 occurrences across 3 files; owner=dotty-typer/src/typer/completion/mod.rs, completion/declarations.rs, type_projection.rs, and existing expression typing; prerequisites=module initialization context, RHS typing and widening, cycle behavior, and completion rollback; non_goals=class fields, method results, local PatDef, and generalized expected-type inference
 highest_ranked_semantic_gap: AnonymousClassInstantiationDeferred (32 occurrences in 15 files); count ranks the audit only and does not select a sprint increment; keep classpath materialization as a separate gate because the pinned audit resolved no external members
 match_readiness:
-  first_blocker_methods=278
-  structural_matches_in_first_blocker_methods=309
-  cases_in_first_blocker_methods=844
+  first_blocker_methods=279
+  structural_matches_in_first_blocker_methods=310
+  cases_in_first_blocker_methods=858
   guarded_cases=72
-  unguarded_cases=772
+  unguarded_cases=786
   first_blocker_errors:
+    ExtractorPatternConstraintDeferred=1 files=[library/src/scala/quoted/Quotes.scala]
     ExtractorQualifierMemberNotFound=26 files=[library/src/scala/collection/immutable/IntMap.scala, library/src/scala/collection/immutable/LongMap.scala]
     ExtractorQualifierNotFound=4 files=[compiler/src/dotty/tools/dotc/config/ScalaVersion.scala]
     ExtractorQualifierNotValueLike=5 files=[compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/scala/quoted/runtime/impl/QuoteMatcher.scala, library/src/scala/collection/immutable/IntMap.scala]
@@ -591,11 +608,11 @@ match_readiness:
     unknown: PatternTypeRelationDeferred=1 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala]
   pattern_root_shapes:
     alternative=11 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/transform/init/Semantic.scala]
-    extractor-looking Apply/TypeApply=118 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/ast/tpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala]
+    extractor-looking Apply/TypeApply=119 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/ast/tpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala]
     literal=9 files=[library/src/scala/collection/immutable/Map.scala]
     other=45 files=[compiler/src/dotty/tools/dotc/config/Settings.scala, compiler/src/dotty/tools/dotc/core/Types.scala, library/src/scala/collection/immutable/IntMap.scala, library/src/scala/collection/immutable/List.scala, library/src/scala/collection/immutable/LongMap.scala]
-    typed pattern=366 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CaptureSet.scala]
-    wildcard/identifier/bind=295 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/ast/tpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala]
+    typed pattern=378 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CaptureSet.scala]
+    wildcard/identifier/bind=296 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/ast/tpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala]
 match_corpus_profile:
   matches=7444
   cases=21835
@@ -639,6 +656,7 @@ match_corpus_profile:
     UnsupportedTypeTree=243
     AmbiguousTermReference=6 files=[compiler/src/dotty/tools/dotc/parsing/Parsers.scala]
     ApplicationCalleeNotMethod=7 files=[compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/transform/UnrollDefinitions.scala, compiler/src/dotty/tools/dotc/typer/Implicits.scala]
+    ExtractorPatternConstraintDeferred=3 files=[library/src/scala/quoted/Quotes.scala]
     ExtractorQualifierMemberNotFound=63 files=[compiler/src/dotty/tools/dotc/quoted/PickledQuotes.scala, library/src/scala/collection/immutable/IntMap.scala, library/src/scala/collection/immutable/LongMap.scala]
     ExtractorQualifierNotFound=42 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala, compiler/src/dotty/tools/dotc/util/DiffUtil.scala, compiler/src/dotty/tools/scripting/Main.scala]
     ExtractorQualifierNotValueLike=18 files=[compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/quoted/PickledQuotes.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala]
@@ -666,7 +684,6 @@ match_corpus_profile:
     UnsupportedBindPatternBody=9 files=[compiler/src/dotty/tools/backend/jvm/opt/Inliner.scala, compiler/src/dotty/tools/dotc/inlines/Inliner.scala, compiler/src/dotty/tools/dotc/parsing/xml/MarkupParsers.scala, compiler/src/dotty/tools/dotc/reporting/trace.scala, compiler/src/dotty/tools/dotc/typer/Applications.scala]
     UnsupportedConstructorInferenceShape=4 files=[library/src/scala/collection/immutable/IntMap.scala, library/src/scala/collection/immutable/LongMap.scala]
     UnsupportedExpression=370 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/BTypesFromClassfile.scala, compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala]
-    UnsupportedSingletonReference=3 files=[library/src/scala/quoted/Quotes.scala]
     UnsupportedTermReference=1 files=[compiler/src/dotty/tools/dotc/cc/CaptureSet.scala]
     UnsupportedTypeTree::Annotated=150 files=[compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/core/Symbols.scala, compiler/src/dotty/tools/dotc/transform/Erasure.scala, library/src/scala/collection/ArrayOps.scala, library/src/scala/collection/Iterable.scala]
     UnsupportedTypeTree::FunctionWithMods=31 files=[library/src/scala/collection/ArrayOps.scala, library/src/scala/collection/IterableOnce.scala, library/src/scala/collection/StrictOptimizedIterableOps.scala, library/src/scala/collection/StringOps.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala]
@@ -876,38 +893,42 @@ mutable_class_field_baseline_method_outcomes:
   library/src/scala/collection/Iterator.scala#tree=3805 outcome=UnsupportedTypeTree::Annotated
   library/src/scala/collection/Iterator.scala#tree=3865 outcome=UnsupportedTypeTree::Annotated
 singleton_reference_profile:
-  total_first_blockers=22
-  profile_entries=22
-  distinct_singleton_source_trees=1
-  distinct_enclosing_declarations=1
-  distinct_reference_shapes=1
+  total_first_blockers=0
+  profile_entries=0
+  distinct_singleton_source_trees=0
+  distinct_enclosing_declarations=0
+  distinct_reference_shapes=0
   first_blockers:
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:636:warnAt method_tree=2930 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:641:isMutated method_tree=2955 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:645:checkUnassigned method_tree=3022 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:657:checkPrivate method_tree=3107 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:674:checkParam method_tree=3331 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:676:allowed method_tree=3155 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:683:checkExplicit method_tree=3313 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:724:usedByDefaultGetter method_tree=3396 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:733:checkImplicit method_tree=3577 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:735:allowed method_tree=3468 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:769:checkLocal method_tree=3619 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:778:checkPatvars method_tree=3799 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:795:checkImports method_tree=4881 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:798:isUsed method_tree=3817 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:799:warnImport method_tree=3865 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:813:editPosAt method_tree=4084 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:841:actionsOf method_tree=4125 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:844:replace method_tree=4138 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:845:deletion method_tree=4149 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:846:textFor method_tree=4202 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:849:textAt method_tree=4181 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala:956:sortOrder method_tree=4981 singleton_tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) reference_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) singleton_span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } }) declaration=tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
   singleton_source_trees:
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } })
   enclosing_declarations:
-    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet="val actionable: true = true"
   reference_shapes:
-    Literal(Boolean(true))
+singleton_projection_baseline:
+  baseline_observations=22
+  moved_past_projection=22
+  remaining_UnsupportedSingletonReference=0
+  current_first_blockers:
+    LocalValueConformanceUnsupported=22
+  methods:
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=2930 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=2955 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3022 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3107 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3155 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3313 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3331 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3396 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3468 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3577 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3619 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3799 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3817 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=3865 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4084 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4125 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4138 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4149 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4181 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4202 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4881 first_blocker=LocalValueConformanceUnsupported
+    compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4981 first_blocker=LocalValueConformanceUnsupported
 ```
