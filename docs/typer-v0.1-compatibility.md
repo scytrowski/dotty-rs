@@ -984,14 +984,19 @@ field annotations continue through the declared-type completion path.
 
 The #856–#857 pinned Scala 3.9.0 corpus audit directly retried all seven
 distinct immutable class fields behind the baseline's 14 `MissingDeclaredType`
-occurrences. All seven moved to `ImportQualifierNotFound` in initializer
-imports; none completed in that probe. This is first-blocker movement, not
-successful corpus typing. The total `MissingDeclaredType` count fell from 34
+occurrences. Each direct field-completion attempt stops at
+`ImportQualifierNotFound` while resolving an import from the field's source
+context. In the pinned files, these imports are at file scope before the field
+declarations. This does not establish that the corresponding RHS was fully
+typed. It is first-blocker movement, not successful corpus typing. The total
+`MissingDeclaredType` count fell from 34
 occurrences in 15 files to 20 in 8 files; the remaining records are mutable
 class fields and ordinary or inline module-class fields. The direct probe and
 its per-declaration outcomes are recorded in the [classpath audit report](typer-classpath-corpus-audit-3.9.0.md#856-857-immutable-class-field-inference-audit).
 The same report separately tracks all 14 baseline local-method attempts by
 source path and method tree index; each now reaches `ImportQualifierNotFound`.
+Those are first blockers reached through the methods, not successful field RHS
+inferences.
 The cross-crate classpath regression also types an inferred field selection
 from an external `Ping` class, then checks that a missing external member rolls
 back loaded symbols, typed trees, symbol completion, and the inferred type
