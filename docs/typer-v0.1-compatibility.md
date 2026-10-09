@@ -100,9 +100,9 @@ annotations through projection and expected expression typing for `true`,
 `false`, and `1`. The rerun still stops these 22 corpus methods at
 `ImportQualifierNotFound`; it does not count them as fully typed. This supports
 local value initializers, local method results, and method arguments while
-ordinary expected types continue to use the underlying widened type. Literal singleton
-annotations also reify into typed type trees. The audit measures first-blocker
-movement and does not claim full method typing.
+ordinary expected types continue to use the underlying widened type. Literal
+singleton annotations also reify into typed type trees. The audit measures
+first-blocker movement and does not claim full method typing.
 
 The semantic model already has `Type::Constant`, and source literal
 expressions retain exact constant types. The bounded relation validates and
