@@ -45,6 +45,125 @@ impl SourceTyper<'_> {
         symbol: SymbolId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        let inferred_field = if self.store.symbols.contains(symbol) {
+            let field = self.store.symbols.get(symbol);
+            let eligible_owner = field.owner.is_some_and(|owner| {
+                self.store.symbols.contains(owner)
+                    && self.store.symbols.get(owner).kind == SymbolKind::Class
+            });
+            let eligible_flags = !field.flags.contains(SymbolFlags::MUTABLE)
+                && !field.flags.contains(SymbolFlags::LAZY)
+                && !field.flags.contains(SymbolFlags::INLINE);
+            if field.kind == SymbolKind::Field && eligible_owner && eligible_flags {
+                match self.index.definition_of(symbol) {
+                    Some(SourceDefinition::Canonical { source, tree })
+                        if source == self.source
+                            && self.index.symbol_at(source, tree) == Some(symbol)
+                            && matches!(
+                                self.arena
+                                    .try_get(tree)
+                                    .and_then(|node| match &node.kind {
+                                        TreeKind::ValDef(definition) => {
+                                            definition
+                                                .rhs
+                                                .and_then(|_| self.arena.try_get(definition.tpt))
+                                        }
+                                        _ => None,
+                                    })
+                                    .map(|node| &node.kind),
+                                Some(TreeKind::TypeTree(_))
+                            ) =>
+                    {
+                        Some((source, tree))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((source, tree)) = inferred_field {
+            return self.with_inferred_field_type(symbol, source, tree.index(), |typer| {
+                // This pass probes only for field cycles; keep the existing
+                // missing-type error for every other unsupported RHS shape.
+                if let Err(error) =
+                    typer.type_inferred_field_rhs_for_recursion(symbol, info_journal)
+                    && matches!(&error, TyperError::RecursiveInferredFieldType { .. })
+                {
+                    return Err(error);
+                }
+                typer.complete_symbol_inner_body(symbol, info_journal)
+            });
+        }
+        self.complete_symbol_inner_body(symbol, info_journal)
+    }
+
+    fn type_inferred_field_rhs_for_recursion(
+        &mut self,
+        field: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        let (_, tree) = self
+            .index
+            .definition_of(field)
+            .and_then(|definition| match definition {
+                SourceDefinition::Canonical { source, tree } if source == self.source => {
+                    Some((source, tree))
+                }
+                _ => None,
+            })
+            .ok_or(TyperError::SourceProvenanceMissing { symbol: field })?;
+        let Some(node) = self.arena.try_get(tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source: self.source,
+                tree_index: tree.index(),
+            });
+        };
+        let TreeKind::ValDef(definition) = &node.kind else {
+            return Err(TyperError::SymbolSourceKindMismatch {
+                source: self.source,
+                tree_index: tree.index(),
+                symbol: field,
+                kind: SymbolKind::Field,
+            });
+        };
+        let Some(rhs) = definition.rhs else {
+            return Ok(());
+        };
+        let context = self.field_initializer_context_for(field)?;
+        let mut new_mappings = Vec::new();
+        // The enclosing completion transaction rolls these tentative trees
+        // back because field type inference remains deferred in this increment.
+        self.type_value_expression_inner(rhs, context, info_journal, &mut new_mappings)?;
+        Ok(())
+    }
+
+    pub(super) fn with_inferred_field_type<T>(
+        &mut self,
+        symbol: SymbolId,
+        source: SourceId,
+        tree_index: u32,
+        operation: impl FnOnce(&mut Self) -> Result<T, TyperError>,
+    ) -> Result<T, TyperError> {
+        if !self.inferred_field_types_in_progress.insert(symbol) {
+            return Err(TyperError::RecursiveInferredFieldType {
+                symbol,
+                source,
+                tree_index,
+            });
+        }
+        let result = operation(self);
+        self.inferred_field_types_in_progress.remove(&symbol);
+        result
+    }
+
+    fn complete_symbol_inner_body(
+        &mut self,
+        symbol: SymbolId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
         let kind = self.store.symbols.get(symbol).kind;
         let (source, tree) = self
             .source_tree_for_symbol(symbol)
