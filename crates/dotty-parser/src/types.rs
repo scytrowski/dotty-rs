@@ -2353,7 +2353,7 @@ where
         }
     }
 
-    fn can_start_type_operand(&self, token: &dotty_core::Token) -> bool {
+    pub(crate) fn can_start_type_operand(&self, token: &dotty_core::Token) -> bool {
         match token.kind {
             TokenKind::Identifier
             | TokenKind::BackquotedIdentifier

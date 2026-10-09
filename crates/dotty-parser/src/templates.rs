@@ -460,11 +460,26 @@ where
                 }
                 return false;
             }
+            if matches!(token.kind, TokenKind::Newline | TokenKind::Newlines) {
+                let operator = self.cursor.lookahead(offset.saturating_sub(1)).clone();
+                if !self.is_infix_type_operator_token(&operator) {
+                    return false;
+                }
+                while matches!(
+                    self.cursor.lookahead(offset).kind,
+                    TokenKind::Newline | TokenKind::Newlines
+                ) {
+                    offset = offset.saturating_add(1);
+                }
+                let operand = self.cursor.lookahead(offset).clone();
+                if !self.can_start_type_operand(&operand) {
+                    return false;
+                }
+                continue;
+            }
             if matches!(
                 token.kind,
-                TokenKind::Newline
-                    | TokenKind::Newlines
-                    | TokenKind::Indent
+                TokenKind::Indent
                     | TokenKind::Outdent
                     | TokenKind::Eof
                     | TokenKind::Punctuation(Punctuation::RightBrace)
@@ -477,6 +492,23 @@ where
             }
             offset = offset.saturating_add(1);
         }
+    }
+
+    fn is_infix_type_operator_token(&self, token: &dotty_core::Token) -> bool {
+        if !matches!(
+            token.kind,
+            TokenKind::Identifier
+                | TokenKind::BackquotedIdentifier
+                | TokenKind::Operator
+                | TokenKind::ColonOp
+        ) {
+            return false;
+        }
+
+        !matches!(
+            self.source.slice(token.span).ok(),
+            Some("=" | "<-" | "=>" | "->" | "?=>" | "?->" | ":" | "<:" | ">:" | "#" | "^")
+        )
     }
 
     fn accept_self_colon(&mut self) -> bool {
@@ -781,6 +813,58 @@ mod tests {
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn template_self_type_allows_a_line_break_after_an_infix_type_operator() {
+        let source = "{ this: A & B &\n    hearth.MacroCommons => def member = 1 }";
+        let tokens = vec![
+            source_token(
+                source,
+                TokenKind::Punctuation(Punctuation::LeftBrace),
+                "{",
+                0,
+            ),
+            source_token(source, TokenKind::Keyword(HardKeyword::This), "this", 0),
+            source_token(source, TokenKind::ColonFollow, ":", 0),
+            source_token(source, TokenKind::Identifier, "A", 0),
+            source_token(source, TokenKind::Operator, "&", 0),
+            source_token(source, TokenKind::Identifier, "B", 0),
+            source_token(source, TokenKind::Operator, "&", 1),
+            source_token(source, TokenKind::Newline, "\n    ", 0),
+            source_token(source, TokenKind::Identifier, "hearth", 0),
+            source_token(source, TokenKind::Punctuation(Punctuation::Dot), ".", 0),
+            source_token(source, TokenKind::Identifier, "MacroCommons", 0),
+            source_token(source, TokenKind::Operator, "=>", 0),
+            source_token(source, TokenKind::Keyword(HardKeyword::Def), "def", 0),
+            source_token(source, TokenKind::Identifier, "member", 0),
+            source_token(source, TokenKind::Operator, "=", 0),
+            source_token(source, TokenKind::IntegerLiteral, "1", 0),
+            source_token(
+                source,
+                TokenKind::Punctuation(Punctuation::RightBrace),
+                "}",
+                0,
+            ),
+            token(TokenKind::Eof, source.len() as u32, source.len() as u32),
+        ];
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(source, tokens, &mut names);
+
+        let body = parser.parse_template_body(TemplateBody::Braced);
+
+        assert!(body.self_val.is_some());
+        assert_eq!(body.members.len(), 1);
+        assert!(matches!(
+            parser.ast().get(body.members[0]).kind,
+            TreeKind::DefDef(_)
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(
+            parser.diagnostics().is_empty(),
+            "{:?}",
+            parser.diagnostics()
+        );
     }
 
     #[test]
