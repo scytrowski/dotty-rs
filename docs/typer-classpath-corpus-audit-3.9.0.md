@@ -106,7 +106,7 @@ Before #856, the 34 first blockers across 15 files were all attributed to source
 | `value::Field::owner=ModuleClass::synthetic inferred TypeTree::rhs=true::modifiers=::semantic_mutable=false` | 6 / 2 | compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala |
 | `value::Field::owner=ModuleClass::synthetic inferred TypeTree::rhs=true::modifiers=Inline::semantic_mutable=false` | 4 / 1 | compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala |
 
-### Current #856 MissingDeclaredType profile
+### Current #858 MissingDeclaredType profile
 
 | Source declaration bucket | Occurrences / files | Representative paths |
 | --- | ---: | --- |
@@ -167,7 +167,19 @@ Each direct immutable field-completion attempt stops at `ImportQualifierNotFound
 
 ## #858 mutable class field inference audit
 
-The Scala 3.9.0 audit ran twice against revision `777528f19a58e794c9954a42f433373472ec57f8`; normalized reports matched byte-for-byte. All 10 pre-change mutable-class occurrences across 6 files are retained as individual local-method rows below. `MissingDeclaredType` fell from 20 occurrences in 8 files at the #856 snapshot to 10 in 3 files; the remaining records are 6 ordinary `ModuleClass` occurrences across 2 files and 4 inline `ModuleClass` occurrences in 1 file. These are first-blocker movements, not proof that all field RHS expressions or enclosing methods type successfully.
+The Scala 3.9.0 audit ran twice against revision `777528f19a58e794c9954a42f433373472ec57f8`; normalized reports matched byte-for-byte. All 10 pre-change mutable-class occurrences across 6 files are retained as individual local-method rows below, alongside direct completion outcomes for all 7 distinct fields (two fields are declared in `Scanners.scala`). `MissingDeclaredType` fell from 20 occurrences in 8 files at the #856 snapshot to 10 in 3 files; the remaining records are 6 ordinary `ModuleClass` occurrences across 2 files and 4 inline `ModuleClass` occurrences in 1 file. These are first-blocker movements, not proof that all field RHS expressions or enclosing methods type successfully.
+
+### Direct mutable field completion
+
+| Baseline mutable field | Weighted occurrences | Direct completion outcome |
+| --- | ---: | --- |
+| `CheckCaptures.scala:curEnv` | 2 | `ImportQualifierNotFound` |
+| `Scanners.scala:allowLeadingInfixOperators` | 1 | `completed` |
+| `Scanners.scala:skipping` | 1 | `completed` |
+| `Message.scala:disambi` | 2 | `completed` |
+| `Applications.scala:typedArgBuf` | 1 | `ImportQualifierNotFound` |
+| `WeakHashSet.scala:table` | 1 | `TypeNameNotFound` |
+| `Iterator.scala:currentHasNextChecked` | 2 | `completed` |
 
 | Baseline mutable-field method attempt | Current first blocker |
 | --- | --- |
@@ -806,6 +818,14 @@ immutable_class_field_completion_outcomes:
   compiler/src/dotty/tools/dotc/rewrites/Rewrites.scala: tree=82 field=pbuf baseline_occurrences=2 outcome=blocked::ImportQualifierNotFound::ImportQualifierNotFound { source: SourceId(0), import_tree_index: 10 }
   compiler/src/dotty/tools/dotc/transform/Bridges.scala: tree=152 field=bridgesScope baseline_occurrences=3 outcome=blocked::ImportQualifierNotFound::ImportQualifierNotFound { source: SourceId(0), import_tree_index: 5 }
   compiler/src/dotty/tools/io/FileWriters.scala: tree=1129 field=isWindows baseline_occurrences=1 outcome=blocked::ImportQualifierNotFound::ImportQualifierNotFound { source: SourceId(0), import_tree_index: 77 }
+mutable_class_field_completion_outcomes:
+  compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala: tree=895 field=curEnv baseline_occurrences=2 outcome=blocked::ImportQualifierNotFound::ImportQualifierNotFound { source: SourceId(0), import_tree_index: 5 }
+  compiler/src/dotty/tools/dotc/parsing/Scanners.scala: tree=524 field=allowLeadingInfixOperators baseline_occurrences=1 outcome=completed
+  compiler/src/dotty/tools/dotc/parsing/Scanners.scala: tree=937 field=skipping baseline_occurrences=1 outcome=completed
+  compiler/src/dotty/tools/dotc/reporting/Message.scala: tree=222 field=disambi baseline_occurrences=2 outcome=completed
+  compiler/src/dotty/tools/dotc/typer/Applications.scala: tree=4151 field=typedArgBuf baseline_occurrences=1 outcome=blocked::ImportQualifierNotFound::ImportQualifierNotFound { source: SourceId(0), import_tree_index: 5 }
+  compiler/src/dotty/tools/dotc/util/WeakHashSet.scala: tree=82 field=table baseline_occurrences=1 outcome=blocked::TypeNameNotFound::TypeNameNotFound { source: SourceId(0), tree_index: 71, name: Name { text: NameId(65), namespace: Type }, position: Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 1815, end: 1820 }, point: None } }) }
+  library/src/scala/collection/Iterator.scala: tree=3718 field=currentHasNextChecked baseline_occurrences=2 outcome=completed
 immutable_class_field_baseline_method_outcomes:
   compiler/src/dotty/tools/dotc/core/TypeErrors.scala#tree=695 outcome=ImportQualifierNotFound
   compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=1538 outcome=ImportQualifierNotFound

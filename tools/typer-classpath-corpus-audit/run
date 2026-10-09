@@ -200,7 +200,7 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '| `variable::Field::owner=Class::synthetic inferred TypeTree::rhs=true::modifiers=Var::semantic_mutable=true` | 10 / 6 | compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala, compiler/src/dotty/tools/dotc/reporting/Message.scala, compiler/src/dotty/tools/dotc/typer/Applications.scala, compiler/src/dotty/tools/dotc/util/WeakHashSet.scala, library/src/scala/collection/Iterator.scala |\n'
     printf '| `value::Field::owner=ModuleClass::synthetic inferred TypeTree::rhs=true::modifiers=::semantic_mutable=false` | 6 / 2 | compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala |\n'
     printf '| `value::Field::owner=ModuleClass::synthetic inferred TypeTree::rhs=true::modifiers=Inline::semantic_mutable=false` | 4 / 1 | compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala |\n'
-    printf '\n### Current #856 MissingDeclaredType profile\n\n'
+    printf '\n### Current #858 MissingDeclaredType profile\n\n'
     printf '| Source declaration bucket | Occurrences / files | Representative paths |\n| --- | ---: | --- |\n'
     awk '
         /^missing_declared_type_profile:$/ { in_profile = 1; next }
@@ -256,6 +256,7 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '| Baseline immutable `Class` field | Weighted occurrences | Direct completion outcome |\n| --- | ---: | --- |\n'
     awk '
         /^immutable_class_field_completion_outcomes:$/ { in_outcomes = 1; next }
+        /^mutable_class_field_completion_outcomes:$/ { in_outcomes = 0 }
         /^immutable_class_field_baseline_method_outcomes:$/ { in_outcomes = 0 }
         in_outcomes && /^```/ { in_outcomes = 0 }
         in_outcomes && /^  / {
@@ -288,7 +289,30 @@ mkdir -p "$(dirname -- "$output_path")"
     ' "$tmp_dir/first.report"
     printf '\nEach direct immutable field-completion attempt stops at `ImportQualifierNotFound` while resolving an import from the field source context. In the pinned sources these imports are at file scope before the field declarations; this does not establish that the corresponding RHS was fully typed. The 14 local-method outcomes are first blockers reached through those methods, not successful RHS inferences.\n\n'
     printf '## #858 mutable class field inference audit\n\n'
-    printf 'The Scala 3.9.0 audit ran twice against revision `777528f19a58e794c9954a42f433373472ec57f8`; normalized reports matched byte-for-byte. All 10 pre-change mutable-class occurrences across 6 files are retained as individual local-method rows below. `MissingDeclaredType` fell from 20 occurrences in 8 files at the #856 snapshot to 10 in 3 files; the remaining records are 6 ordinary `ModuleClass` occurrences across 2 files and 4 inline `ModuleClass` occurrences in 1 file. These are first-blocker movements, not proof that all field RHS expressions or enclosing methods type successfully.\n\n'
+    printf 'The Scala 3.9.0 audit ran twice against revision `777528f19a58e794c9954a42f433373472ec57f8`; normalized reports matched byte-for-byte. All 10 pre-change mutable-class occurrences across 6 files are retained as individual local-method rows below, alongside direct completion outcomes for all 7 distinct fields (two fields are declared in `Scanners.scala`). `MissingDeclaredType` fell from 20 occurrences in 8 files at the #856 snapshot to 10 in 3 files; the remaining records are 6 ordinary `ModuleClass` occurrences across 2 files and 4 inline `ModuleClass` occurrences in 1 file. These are first-blocker movements, not proof that all field RHS expressions or enclosing methods type successfully.\n\n'
+    printf '### Direct mutable field completion\n\n'
+    printf '| Baseline mutable field | Weighted occurrences | Direct completion outcome |\n| --- | ---: | --- |\n'
+    awk '
+        /^mutable_class_field_completion_outcomes:$/ { in_outcomes = 1; next }
+        /^immutable_class_field_baseline_method_outcomes:$/ { in_outcomes = 0 }
+        /^mutable_class_field_baseline_method_outcomes:$/ { in_outcomes = 0 }
+        in_outcomes && /^  / {
+            line = $0
+            sub(/^  /, "", line)
+            split(line, fields, ": tree=")
+            path = fields[1]
+            rest = fields[2]
+            match(rest, /field=[^ ]+/); field = substr(rest, RSTART + 6, RLENGTH - 6)
+            match(rest, /baseline_occurrences=[0-9]+/); weight = substr(rest, RSTART + 21, RLENGTH - 21)
+            outcome = rest
+            sub(/^.* outcome=blocked::/, "", outcome)
+            sub(/::.*/, "", outcome)
+            if (outcome == rest) sub(/^.* outcome=/, "", outcome)
+            sub(/^.*\//, "", path)
+            printf "| `%s:%s` | %s | `%s` |\n", path, field, weight, outcome
+        }
+    ' "$tmp_dir/first.report"
+    printf '\n'
     printf '| Baseline mutable-field method attempt | Current first blocker |\n| --- | --- |\n'
     awk '
         /^mutable_class_field_baseline_method_outcomes:$/ { in_outcomes = 1; next }

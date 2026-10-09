@@ -992,9 +992,13 @@ decreased from the #856 snapshot's 20 occurrences in 8 files to 10 in 3 files;
 the remaining records are ordinary and inline module-class fields. The moved
 first blockers include `ImportQualifierNotFound`, `MemberLookup`,
 `TypeNameNotFound`, and `UnsupportedTypeTree::Annotated`; these outcomes do not
-establish successful enclosing-method typing. See the
+establish successful enclosing-method typing. Direct `complete_symbol`
+probes cover all 7 distinct mutable fields in those 6 files: 4 fields (6
+weighted occurrences) complete, while 3 fields (4 occurrences) reach two
+`ImportQualifierNotFound` blockers and one `TypeNameNotFound`. See the
 [classpath audit report](typer-classpath-corpus-audit-3.9.0.md#858-mutable-class-field-inference-audit)
-for all 10 outcomes and the refreshed backlog recommendation.
+for the direct field results, all 10 method outcomes, and the refreshed
+backlog recommendation.
 The cross-crate classpath regression also types an inferred field selection
 from an external `Ping` class, then checks that a missing external member rolls
 back loaded symbols, typed trees, symbol completion, and the inferred type
