@@ -3785,6 +3785,8 @@ mod tests {
             "def block: Int => Int = (x: Int) => { val local: Int = x; local }; ",
             "def accept(function: Int => Int): Int = 1; ",
             "def argument: Int = accept((x: Int) => x); ",
+            "def localInitializer: Int = { val function = (x: Int) => x; 1 }; ",
+            "def nestedBlock: Int = { val wrapper = { val function = (x: Int) => x; 1 }; 1 }; ",
             "def outside: Int = x",
             " }",
         );
@@ -3947,6 +3949,56 @@ mod tests {
             TreeKind::Closure(_)
         ));
 
+        let (initializer_method, initializer_rhs) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "localInitializer");
+        let initializer_context = typer.expression_context_for(initializer_method).unwrap();
+        let initializer = typer
+            .type_expression(initializer_rhs, initializer_context)
+            .unwrap();
+        let TreeKind::Block(block) = &typer.typed_ast().get(initializer).kind else {
+            panic!("local function initializer should remain in its typed block");
+        };
+        let function_rhs = block.stats.iter().find_map(|stat| {
+            let TreeKind::ValDef(value) = &typer.typed_ast().get(*stat).kind else {
+                return None;
+            };
+            value.rhs
+        });
+        assert!(matches!(
+            function_rhs.map(|rhs| &typer.typed_ast().get(rhs).kind),
+            Some(TreeKind::Closure(_))
+        ));
+
+        let (nested_method, nested_rhs) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "nestedBlock");
+        let nested_context = typer.expression_context_for(nested_method).unwrap();
+        let nested = typer.type_expression(nested_rhs, nested_context).unwrap();
+        let TreeKind::Block(outer_block) = &typer.typed_ast().get(nested).kind else {
+            panic!("nested local function initializer should remain in its outer block");
+        };
+        let nested_block = outer_block.stats.iter().find_map(|stat| {
+            let TreeKind::ValDef(value) = &typer.typed_ast().get(*stat).kind else {
+                return None;
+            };
+            value.rhs
+        });
+        let Some(nested_block) = nested_block else {
+            panic!("outer block should retain the nested initializer");
+        };
+        let TreeKind::Block(inner_block) = &typer.typed_ast().get(nested_block).kind else {
+            panic!("local initializer should remain a nested block");
+        };
+        let nested_function_rhs = inner_block.stats.iter().find_map(|stat| {
+            let TreeKind::ValDef(value) = &typer.typed_ast().get(*stat).kind else {
+                return None;
+            };
+            value.rhs
+        });
+        assert!(matches!(
+            nested_function_rhs.map(|rhs| &typer.typed_ast().get(rhs).kind),
+            Some(TreeKind::Closure(_))
+        ));
+
         let (outside_method, outside_tree) =
             method_definition_and_rhs(&parsed, typer.store(), &index, source, "outside");
         let outside_context = typer.expression_context_for(outside_method).unwrap();
@@ -3958,26 +4010,31 @@ mod tests {
 
     #[test]
     fn inferred_function_literal_parameters_are_explicitly_unsupported() {
-        let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("class C { def bad = x => x }");
-        let (owner, lambda) = method_definition_and_rhs(&parsed, &store, &index, source, "bad");
-        let mut typer = SourceTyper::new(
-            &parsed.ast,
-            source,
-            &index,
-            &mut store,
-            definitions,
-            &packages,
-        );
-        let context = typer.expression_context_for(owner).unwrap();
+        for source_text in [
+            "class C { def bad = x => x }",
+            "class C { def bad = (x, y) => x }",
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (owner, lambda) = method_definition_and_rhs(&parsed, &store, &index, source, "bad");
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(owner).unwrap();
 
-        assert!(matches!(
-            typer.type_expression(lambda, context),
-            Err(TyperError::UnsupportedFunctionLiteralParameter {
-                reason: "an explicit parameter type is required",
-                ..
-            })
-        ));
+            assert!(matches!(
+                typer.type_expression(lambda, context),
+                Err(TyperError::UnsupportedFunctionLiteralParameter {
+                    reason: "an explicit parameter type is required",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
@@ -4115,6 +4172,57 @@ mod tests {
         ));
         assert_eq!(typer.store().checkpoint(), store_checkpoint);
         assert_eq!(typer.function_literal_method_at(source, lambda), None);
+    }
+
+    #[test]
+    fn missing_function_class_rolls_back_lambda_setup_and_all_published_mappings() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def bad: Int => Int = (x: Int) => x }");
+        let (owner, lambda) = method_definition_and_rhs(&parsed, &store, &index, source, "bad");
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parsed.ast.get(lambda).kind
+        else {
+            panic!("fixture should contain a function literal");
+        };
+        let parameter = function.params[0];
+        let parameter_tpt = match &parsed.ast.get(parameter).kind {
+            TreeKind::ValDef(parameter) => parameter.tpt,
+            _ => panic!("lambda parameter should be a value definition"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(owner).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+        let typed_count = typer.typed_ast().iter().count();
+
+        for _ in 0..2 {
+            assert!(matches!(
+                typer.type_expression(lambda, context),
+                Err(TyperError::SourceFunctionClassNotFound {
+                    kind: source_function::SourceFunctionKind::Ordinary,
+                    arity: 1,
+                })
+            ));
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+            assert_eq!(typer.typed_ast().iter().count(), typed_count);
+            assert_eq!(typer.function_literal_method_at(source, lambda), None);
+            assert_eq!(
+                typer.function_literal_parameter_symbol_at(source, parameter),
+                None
+            );
+            assert_eq!(typer.source_type_index().type_at(source, lambda), None);
+            assert_eq!(
+                typer.source_type_index().type_at(source, parameter_tpt),
+                None
+            );
+            assert_eq!(typer.source_typed_index().get(source, lambda), None);
+            assert_eq!(typer.source_typed_index().get(source, parameter), None);
+        }
     }
 
     #[test]
@@ -24795,6 +24903,30 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn contextual_function_projection_does_not_insert_a_contextual_application() {
+        let source_text = "class C { def use(function: Int ?=> Int): Int = function(1) }";
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name(source_text);
+        enter_scala_function_classes(&mut store, &mut packages, [1]);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let context = typer.expression_context_for(method).unwrap();
+        let result = typer.type_expression(rhs, context);
+        assert!(
+            matches!(&result, Err(TyperError::ApplicationCalleeNotMethod { .. })),
+            "{result:?}"
+        );
     }
 
     #[test]

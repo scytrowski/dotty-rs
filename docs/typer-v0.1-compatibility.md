@@ -1042,7 +1042,8 @@ functions remain distinct (`scala.FunctionN` versus
 above the bound return explicit typer errors. Scala 3.9 also synthesizes
 higher-arity source function classes and erases them through
 `scala.runtime.FunctionXXL`; this increment does not synthesize those classes.
-The API does not type function expressions or type lambda expressions. See the
+The API does not by itself type function expressions or apply contextual
+arguments. See the
 [pinned Scala 3.9 identity reference and fixture](../crates/dotty-typer/tests/fixtures/function-class-identities/FunctionClassIdentities.oracle.md).
 
 ## Source function type projection (#827)
@@ -1057,13 +1058,14 @@ forms, and other modifier combinations remain explicit unsupported type-tree
 errors. This does not add contextual argument search or contextual function
 expression typing.
 
-The pinned Scala 3.9 local-definition audit was run twice with byte-identical
-output after #827. `UnsupportedTypeTree::Function` moved from 12 occurrences in
-8 files to zero. `UnsupportedTypeTree::FunctionWithMods` remains at 13
-occurrences in 2 files; the bounded `Given` form is supported, while the
-remaining modifier-bearing cases stay deferred. This measures first-blocker
-movement, not full source semantic parity. The audit used the pinned source
-revision `777528f19a58e794c9954a42f433373472ec57f8` and the available JDK 25.
+The pinned Scala 3.9 local-definition audit after #829 was run twice with
+byte-identical output. `UnsupportedTypeTree::Function` moved from 12
+occurrences in 8 files at the #825 baseline to zero. The bucket
+`UnsupportedTypeTree::FunctionWithMods` remains at 13 occurrences in 2 files;
+the bounded `Given` form is supported, while the remaining modifier-bearing
+cases stay deferred. This measures first-blocker movement, not full source
+semantic parity. The audit used the pinned source revision
+`777528f19a58e794c9954a42f433373472ec57f8` and JDK 21.
 See the [pinned function-type reference and typed-tree fixture](../crates/dotty-typer/tests/fixtures/function-type-projection/FunctionTypeProjection.oracle.md).
 
 ## Explicitly typed function literals (#828)
@@ -1071,16 +1073,41 @@ See the [pinned function-type reference and typed-tree fixture](../crates/dotty-
 Ordinary function literals with explicit parameter types now type to a shared
 `Closure` node whose type is the canonical applied `scala.FunctionN` type.
 The closure references a typer-owned synthetic method definition. Each
-parameter is a method-owned `Parameter` symbol in an isolated lambda scope;
-the body is typed in that scope, and its widened type becomes the synthetic
-method result. The bounded slice covers zero, one, and multiple parameters,
-block bodies, and lambdas passed to an already-supported method application.
+parameter is a method-owned `Parameter` symbol in a lambda scope nested over
+the surrounding lexical scopes; the body is typed in that scope, and its
+widened type becomes the synthetic method result. The bounded slice covers
+zero, one, and multiple parameters, block bodies, local value initializers,
+and lambdas passed to an already-supported method application.
 
 Missing parameter types, parameter modifiers, annotations, and duplicate
-parameter names remain explicit errors. Expected-type-driven parameter
-inference, contextual or polymorphic lambdas, and capture analysis remain out
-of scope. The current closure environment is empty for the supported
-capture-free forms. Failed lambda typing rolls back its synthetic method,
-parameter symbols, scopes, typed nodes, and source mappings. The pinned
+parameter names remain explicit errors. Inferred one- and multi-parameter
+lambdas report `UnsupportedFunctionLiteralParameter`; this remains outside
+the increment even when the audit moves those inputs past the generic
+`UnsupportedExpression::Function` blocker. Contextual function types project
+to `ContextFunctionN`, but expression application, contextual argument search,
+and contextual lambda expressions are still unsupported. Captures requiring
+an environment are rejected explicitly; references to shared object-owned
+values do not count as closure captures. Failed lambda typing rolls back its
+synthetic method, parameter symbols, scopes, typed nodes, and source mappings. The pinned
 Scala 3.9.0 typer and `lambdaLift` shapes, including source positions, are
 recorded in the [function-literal fixture](../crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.oracle.md).
+The #829 rollback regression forces a late failure by omitting `scala.Function1`;
+after synthetic method and parameter setup, both the first attempt and retry
+return `SourceFunctionClassNotFound` with the store, typed AST, type cache, and
+source mappings restored to their checkpoints.
+
+The #829 comparison reran the pre-#826 baseline's same 25 local methods,
+matched by source path, line, and method name, against the post-#829 typer.
+For the 13 old `UnsupportedExpression::Function` cases, 9 now stop at
+`UnsupportedFunctionLiteralParameter` in `Synthesizer.scala`; the other 4
+stop at `ImportQualifierNotFound` in `Scala2Unpickler.scala`. None fully typed.
+For the 12 old `UnsupportedTypeTree::Function` cases, all now stop at
+`SymbolResolution` across the same 8 files; none fully typed. The separate
+`UnsupportedTypeTree::FunctionWithMods` bucket remains 13 in 2 files. The
+comparison records each method and its current first blocker in the [audit
+report](typer-classpath-corpus-audit-3.9.0.md#826-829-source-function-support).
+No local method fully typed in the full corpus run, and external member
+materialization remains zero. The refreshed audit ranks `MissingDeclaredType`
+(34 in 15 files) first and recommends the immutable inferred `Class` field
+slice already scoped in [#825](typer-classpath-corpus-audit-3.9.0.md#recommended-next-sprint).
+That is a separate follow-up; #829 does not implement it.

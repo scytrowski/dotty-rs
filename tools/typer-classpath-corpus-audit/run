@@ -82,6 +82,59 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '| First blocker | Before #767 | At #772 snapshot |\n| --- | ---: | ---: |\n'
     printf '| `UnsupportedExpression::PrefixOp` | 66 / 23 files | 0 / 0 |\n'
     printf '| `UnsupportedExpression::Annotated` (term expressions) | 64 / 14 files | 0 / 0 |\n\n'
+    printf '## #826–#829 source function support\n\n'
+    printf 'The pre-#826 baseline at `89d84f41444a2a03a6a5bd39cf45176ca894a03b` and the post-#829 audit were run against the same pinned Scala 3.9.0 corpus, JDK 21, and classpath. The post-#829 audit ran twice; normalized reports matched byte-for-byte. It tracks the same 25 local methods by source path, line, and name. The 13 expression cases now split into 9 explicit `UnsupportedFunctionLiteralParameter` deferrals and 4 `ImportQualifierNotFound` blockers; none fully typed. The 12 ordinary function-type cases now reach `SymbolResolution` in 8 files; none fully typed. `FunctionWithMods` remains 13 / 2 files. These are first-blocker movements, not semantic success. The corpus still typed zero local methods overall and materialized zero external member symbols.\n\n'
+    printf '| Baseline family | New first blocker | Count / files | Representative methods |\n| --- | --- | ---: | --- |\n'
+    awk '
+        /^source_function_method_outcomes:$/ { in_profile = 1; next }
+        /^missing_declared_type_profile:$/ { in_profile = 0 }
+        in_profile && /^  (expression::Function|type::Function)::/ {
+            line = $0
+            sub(/^  /, "", line)
+            separator = index(line, ": count=")
+            key = substr(line, 1, separator - 1)
+            family = key
+            if (family ~ /^expression::Function::/) {
+                sub(/^expression::Function::/, "", family)
+                baseline = "`UnsupportedExpression::Function`"
+            } else {
+                sub(/^type::Function::/, "", family)
+                baseline = "`UnsupportedTypeTree::Function`"
+            }
+            values = substr(line, separator + 8)
+            count = values
+            sub(/,.*/, "", count)
+            files = values
+            sub(/^[^,]*, files=/, "", files)
+            sub(/,.*/, "", files)
+            examples = values
+            sub(/^.*examples=\[/, "", examples)
+            sub(/\]$/, "", examples)
+            printf "| %s | `%s` | %s / %s | %s |\n", baseline, family, count, files, examples
+        }
+    ' "$tmp_dir/first.report"
+    printf '\n### Same-method comparison\n\n'
+    printf '| Method from the pre-#826 first-blocker set | Baseline family | First blocker after #829 |\n| --- | --- | --- |\n'
+    awk '
+        /^source_function_method_outcomes:$/ { in_profile = 1; next }
+        /^missing_declared_type_profile:$/ { in_profile = 0 }
+        in_profile && /^  method=/ {
+            record = $0
+            sub(/^  method=/, "", record)
+            location_end = index(record, " baseline_form=")
+            location = substr(record, 1, location_end - 1)
+            details = substr(record, location_end)
+            sub(/^ baseline_form=/, "", details)
+            form = details
+            sub(/ first_blocker=.*/, "", form)
+            blocker = details
+            sub(/^.* first_blocker=/, "", blocker)
+            if (form == "expression::Function") baseline = "`UnsupportedExpression::Function`"
+            else baseline = "`UnsupportedTypeTree::Function`"
+            printf "| `%s` | %s | `%s` |\n", location, baseline, blocker
+        }
+    ' "$tmp_dir/first.report"
+    printf '\nThe detailed rows are emitted from the same local-method attempts as the aggregate audit; the generated raw report below preserves all bucket counts and paths. `Typed` would mean the local method received a typed-tree mapping; none of these 25 rows did.\n\n'
     printf '## #802–#806 local extension hardening\n\n'
     printf 'The initial local-extension blocker was 25 occurrences in 5 files. The current audit splits extension-specific failures from ordinary local method signatures. It attempted 3,297 local method definitions and fully typed zero; moved failures are not counted as semantic success. Focused tests cover a fully typed local extension call, nominal-member precedence, local shadowing, unsupported receiver/signature forms, rollback, and bounded ambiguity.\n\n'
     printf '| Focused extension failure bucket | Count / files | Representative paths |\n| --- | ---: | --- |\n'
