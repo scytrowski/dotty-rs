@@ -992,6 +992,10 @@ class fields and ordinary or inline module-class fields. The direct probe and
 its per-declaration outcomes are recorded in the [classpath audit report](typer-classpath-corpus-audit-3.9.0.md#856-857-immutable-class-field-inference-audit).
 The same report separately tracks all 14 baseline local-method attempts by
 source path and method tree index; each now reaches `ImportQualifierNotFound`.
+The cross-crate classpath regression also types an inferred field selection
+from an external `Ping` class, then checks that a missing external member rolls
+back loaded symbols, typed trees, symbol completion, and the inferred type
+cache before a successful retry.
 
 Explicit positional type applications are supported for one resolved `Poly`
 callee. Type arguments use the expression's lexical context, require exact
