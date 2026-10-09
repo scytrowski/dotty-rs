@@ -489,11 +489,13 @@ tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
 
 The expanded corpus also includes Shapeless 3
 [`v3.6.0`](https://github.com/typelevel/shapeless-3/tree/v3.6.0), pinned to
-`1d89fac9c7a3af2ee4878171ce745ef122ed3291`. The runner discovers its two
-tracked production roots (`modules/deriving/src/main/scala` and
-`modules/typeable/src/main/scala`); tests and other non-production trees are
-not included. The checkout is validated against the pinned revision and
-tracked source inventory like the other external source sets.
+`1d89fac9c7a3af2ee4878171ce745ef122ed3291`. The runner includes three
+tracked Scala `Compile` roots: `modules/deriving/src/main/scala`,
+`modules/typeable/src/main/scala`, and `modules/test/src/main/scala`. The last
+is the Compile root of the `shapeless3-test` support project, not test fixtures
+under `src/test`. Other test and non-production trees are excluded. The
+checkout is validated against the pinned revision and tracked source
+inventory like the other external source sets.
 
 `parser-post-issue-861-shapeless3.json` measures dotty-rs revision
 `680052394a6c0c1c79c409172e3841b482fc60cc` against the existing Scala 3,

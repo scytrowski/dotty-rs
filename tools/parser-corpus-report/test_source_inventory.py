@@ -5,7 +5,11 @@ import unittest
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from source_inventory import kyo_scala3_production_roots, tracked_scala_sources
+from source_inventory import (
+    kyo_scala3_production_roots,
+    shapeless3_compile_roots,
+    tracked_scala_sources,
+)
 
 
 class TrackedScalaSourcesTests(unittest.TestCase):
@@ -91,6 +95,18 @@ class TrackedScalaSourcesTests(unittest.TestCase):
         )
 
         self.assertEqual(roots, [production.resolve()])
+
+    def test_shapeless_compile_roots_include_test_support_main_sources(self):
+        production = self.repository / "modules/deriving/src/main/scala"
+        test_support = self.repository / "modules/test/src/main/scala"
+        test_fixture = self.repository / "modules/test/src/test/scala"
+        production.mkdir(parents=True)
+        test_support.mkdir(parents=True)
+        test_fixture.mkdir(parents=True)
+
+        roots = shapeless3_compile_roots(self.repository, [production])
+
+        self.assertEqual(roots, [production.resolve(), test_support.resolve()])
 
 
 if __name__ == "__main__":

@@ -14,6 +14,36 @@ KYO_SCALA_2_12_PLUGIN_PREFIXES = (
 )
 
 
+def shapeless3_compile_roots(
+    repository: pathlib.Path, source_roots: list[pathlib.Path]
+) -> list[pathlib.Path]:
+    """Include Shapeless's Compile sources, including its test-support module."""
+    repository = repository.resolve(strict=True)
+    selected = []
+    for root in source_roots:
+        root = root.resolve(strict=True)
+        try:
+            root.relative_to(repository)
+        except ValueError as error:
+            raise ValueError(f"source root is outside Shapeless 3 checkout: {root}") from error
+        selected.append(root)
+
+    # This is the Compile source root of the `shapeless3-test` sbt project,
+    # not a test fixture tree. Generic discovery excludes paths named `test`.
+    test_support_root = repository / "modules/test/src/main/scala"
+    if test_support_root.is_dir():
+        test_support_root = test_support_root.resolve(strict=True)
+        try:
+            test_support_root.relative_to(repository)
+        except ValueError as error:
+            raise ValueError(
+                f"Shapeless 3 test-support source root is outside checkout: {test_support_root}"
+            ) from error
+        selected.append(test_support_root)
+
+    return sorted(set(selected))
+
+
 def kyo_scala3_production_roots(
     repository: pathlib.Path, source_roots: list[pathlib.Path]
 ) -> list[pathlib.Path]:
