@@ -1091,17 +1091,23 @@ values do not count as closure captures. Failed lambda typing rolls back its
 synthetic method, parameter symbols, scopes, typed nodes, and source mappings. The pinned
 Scala 3.9.0 typer and `lambdaLift` shapes, including source positions, are
 recorded in the [function-literal fixture](../crates/dotty-typer/tests/fixtures/function-literals/FunctionLiterals.oracle.md).
+The #829 rollback regression forces a late failure by omitting `scala.Function1`;
+after synthetic method and parameter setup, both the first attempt and retry
+return `SourceFunctionClassNotFound` with the store, typed AST, type cache, and
+source mappings restored to their checkpoints.
 
-The #829 corpus rerun moved `UnsupportedExpression::Function` from 13
-occurrences in 2 files at the #825 baseline to zero. Nine first blockers in
-one file moved to the explicit inferred-parameter boundary
-`UnsupportedFunctionLiteralParameter`; these cases are not typed
-successfully. `UnsupportedTypeTree::Function` moved from 12 in 8 files to
-zero, while `UnsupportedTypeTree::FunctionWithMods` remained 13 in 2 files.
-No local method fully typed in the corpus run, so these counts describe
-first-blocker movement only. The refreshed audit ranks `MissingDeclaredType`
+The #829 comparison reran the pre-#826 baseline's same 25 local methods,
+matched by source path, line, and method name, against the post-#829 typer.
+For the 13 old `UnsupportedExpression::Function` cases, 9 now stop at
+`UnsupportedFunctionLiteralParameter` in `Synthesizer.scala`; the other 4
+stop at `ImportQualifierNotFound` in `Scala2Unpickler.scala`. None fully typed.
+For the 12 old `UnsupportedTypeTree::Function` cases, all now stop at
+`SymbolResolution` across the same 8 files; none fully typed. The separate
+`UnsupportedTypeTree::FunctionWithMods` bucket remains 13 in 2 files. The
+comparison records each method and its current first blocker in the [audit
+report](typer-classpath-corpus-audit-3.9.0.md#826-829-source-function-support).
+No local method fully typed in the full corpus run, and external member
+materialization remains zero. The refreshed audit ranks `MissingDeclaredType`
 (34 in 15 files) first and recommends the immutable inferred `Class` field
 slice already scoped in [#825](typer-classpath-corpus-audit-3.9.0.md#recommended-next-sprint).
-That is a separate follow-up; #829 does not implement it. See the [current
-corpus audit](typer-classpath-corpus-audit-3.9.0.md) for the refreshed ranked
-backlog and environment limits.
+That is a separate follow-up; #829 does not implement it.
