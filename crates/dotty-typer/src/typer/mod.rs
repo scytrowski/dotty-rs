@@ -18539,25 +18539,23 @@ mod tests {
         assert_eq!(typer.type_index.type_at(source, inferred_tpt), None);
         assert_eq!(*typer.store().symbols.info(invalid), SymbolInfo::Missing);
 
-        for (source_text, field_name) in [("object O { val module = 1 }", "module")] {
-            let (parsed, mut store, packages, definitions, index, source) =
-                parse_and_name(source_text);
-            let (field, inferred_tpt) = val_symbol(&parsed, &store, &index, source, field_name);
-            let mut typer = SourceTyper::new(
-                &parsed.ast,
-                source,
-                &index,
-                &mut store,
-                definitions,
-                &packages,
-            );
-            assert!(matches!(
-                typer.complete_symbol(field),
-                Err(TyperError::MissingDeclaredType { .. })
-            ));
-            assert_eq!(typer.type_index.type_at(source, inferred_tpt), None);
-            assert_eq!(*typer.store().symbols.info(field), SymbolInfo::Missing);
-        }
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("object O { val module = 1 }");
+        let (field, inferred_tpt) = val_symbol(&parsed, &store, &index, source, "module");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.complete_symbol(field),
+            Err(TyperError::MissingDeclaredType { .. })
+        ));
+        assert_eq!(typer.type_index.type_at(source, inferred_tpt), None);
+        assert_eq!(*typer.store().symbols.info(field), SymbolInfo::Missing);
     }
 
     #[test]
