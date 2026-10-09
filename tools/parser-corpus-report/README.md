@@ -14,9 +14,16 @@ tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output /tmp/parser-corpus-3.9.0.json
 ```
 
+The Scala parser oracle is run in bounded batches (128 manifest entries each).
+Every batch must return exactly one valid JSON record per input before its
+counts are included in the report. This bounds the compiler process output and
+prevents a partial oracle run from being recorded as complete. The lower-level
+`tools/scala-parser-oracle/run --batch` command streams records instead of
+buffering a whole corpus response in a shell variable.
+
 The convenience runner creates one compilation-mode manifest and sends it to
-the Scala 3.9 oracle once. Each Rust source file is parsed in an isolated
-worker process with a timeout. A worker/process failure, panic, or hang is
+the Scala 3.9 oracle in bounded batches. Each Rust source file is parsed in an
+isolated worker process with a timeout. A worker/process failure, panic, or hang is
 reported as a hard failure; when a timeout occurs, the worker process is killed
 and reaped before the next file starts, so parser state and OS resources cannot
 accumulate in detached threads. A recoverable parser diagnostic does not make
@@ -618,4 +625,27 @@ improvement claim. Recreate the report with:
 ```text
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-888-iron.json
+```
+
+## Magnolia corpus
+
+The expanded corpus includes the Scala 3 release of Magnolia
+[`scala3-v1.3.23`](https://github.com/softwaremill/magnolia/releases/tag/scala3-v1.3.23),
+pinned to `de417912ef93017814cee63797dc23ffcfd979c9`. Its build targets Scala
+3.3.6. The corpus includes only the published `core/src/main/scala` library
+root (five tracked Scala files); the separate, unpublished `examples` and
+`test` projects are excluded. These sources are parsed by dotty-rs with the
+same pinned Scala 3.9.0 language baseline.
+
+`parser-post-issue-890-magnolia.json` measures dotty-rs revision
+`ad60e414651376e62b187ada4f29d6a2c5a25e67` with all ten source sets. The
+corpus contains 3,824 files: the previous 3,819 plus five Magnolia files. All
+3,824 parse without diagnostics; there are no hard failures, process failures,
+panics, hangs, or scanner diagnostics. The pinned Scala 3.9.0 oracle returned
+all 3,824 records with zero oracle failures, including all five Magnolia files.
+Recreate the report with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-890-magnolia.json
 ```

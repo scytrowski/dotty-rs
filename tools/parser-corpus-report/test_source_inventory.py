@@ -9,6 +9,7 @@ from source_inventory import (
     fs2_library_production_roots,
     iron_library_production_roots,
     kyo_scala3_production_roots,
+    magnolia_scala3_production_roots,
     shapeless3_compile_roots,
     tracked_scala_sources,
     zio_scala3_production_roots,
@@ -173,6 +174,30 @@ class TrackedScalaSourcesTests(unittest.TestCase):
         roots = iron_library_production_roots(self.repository)
 
         self.assertEqual(roots, [(self.repository / "module/src").resolve()])
+
+    def test_magnolia_includes_published_core_and_excludes_examples(self):
+        core = self.repository / "core/src/main/scala/magnolia1/Core.scala"
+        example = self.repository / "examples/src/main/scala/magnolia1/examples/Example.scala"
+        core.parent.mkdir(parents=True)
+        example.parent.mkdir(parents=True)
+        core.write_text("object Core\\n", encoding="utf-8")
+        example.write_text("object Example\\n", encoding="utf-8")
+
+        roots = magnolia_scala3_production_roots(self.repository)
+
+        self.assertEqual(roots, [(self.repository / "core/src/main/scala").resolve()])
+
+    def test_magnolia_rejects_source_root_outside_checkout(self):
+        core = self.repository / "core/src/main/scala"
+        core.mkdir(parents=True)
+        with tempfile.TemporaryDirectory() as outside_dir:
+            outside = pathlib.Path(outside_dir)
+            source = outside / "Core.scala"
+            source.write_text("object Core\\n", encoding="utf-8")
+            core.rmdir()
+            core.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "outside checkout"):
+                magnolia_scala3_production_roots(self.repository)
 
 
 if __name__ == "__main__":
