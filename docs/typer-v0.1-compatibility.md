@@ -639,9 +639,14 @@ local `inline` parameter. `source_method_flags` already preserves `Inline` on
 the parameter symbol and the shared method-signature builder represents its
 type and clause, so local inline-parameter signature completion is a bounded
 candidate for a follow-up. This would cover signature construction only;
-inline expansion and argument evaluation are separate behavior. By-name
-parameter support has a separate downstream blocker: applications that pass a
-by-name argument currently report `ByNameApplicationParameterDeferred`.
+inline expansion and argument evaluation are separate behavior. A focused
+application fixture reports `ByNameApplicationParameterDeferred` for a
+by-name method call. For the two direct corpus origins (`instantiateCFT` and
+`cases`), the current signature guard runs before their RHS or enclosing body
+is typed, so downstream status is unobserved; the report lists their likely
+application sites as hypotheses only. One origin has an explicit result and
+the other an inferred result, but neither result form has been validated in
+combination with by-name parameters.
 Parameter-dependent results have no corpus first-blocker observations and
 remain covered by a focused unsupported-case fixture. These are profile
 findings only; the #899 work does not change typer semantics.
