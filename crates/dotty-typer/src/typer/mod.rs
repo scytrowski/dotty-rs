@@ -18124,11 +18124,7 @@ mod tests {
                 typer.source_type_index().type_at(source, inferred_tpt),
                 Some(inferred)
             );
-            if name == "fromParameter" {
-                assert_eq!(inferred, definitions.int);
-            } else {
-                assert_eq!(inferred, definitions.int);
-            }
+            assert_eq!(inferred, definitions.int);
             if name == "literal" {
                 assert_eq!(typer.complete_symbol(field).unwrap(), inferred);
             }
