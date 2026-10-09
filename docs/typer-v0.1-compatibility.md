@@ -74,15 +74,28 @@ selections, and references outside identifier, selection, parenthesized, and
 effect of projecting a type. Failed projection uses the enclosing type
 projection transaction so symbol completion and type-cache mutations roll back.
 
-Literal singleton syntax also parses as `SingletonTypeTree` around an existing
-literal node. In the Scala 3.9.0 reference compiler, `true`, `false`, `1`, and
-`"foo"` retain those exact constant types, conform to their underlying
-`Boolean`, `Int`, and `String` types, and equal only the same constant value.
-Source type projection currently does not accept a `Literal` singleton
-reference; `project_stable_term_reference` reports
-`UnsupportedSingletonReference`. The #880 pinned audit attributes all 22 local
-method observations to the single `true` literal type on `actionable` in
-`CheckUnused.scala`, rather than 22 separate declarations.
+Literal singleton syntax parses as `SingletonTypeTree` around a `Literal`
+node. Scala 3.9.0 accepts Boolean, Char, Int, Long, Float, Double, and String
+literal singleton annotations; its typed-tree oracle covers `true`, `false`,
+`1`, `2`, `'a'`, `1L`, `1.0f`, `1.0d`, and `"foo"`. Source projection maps
+those forms directly to `Type::Constant`, preserving their exact payload.
+Projection caches the singleton type on the source type tree, repeated
+projection reuses that `TypeId`, and a failed enclosing transaction rolls the
+cache and type allocation back. Constant types pass the existing singleton
+stability check without creating term symbols.
+
+The source subset is explicit. Scala has no Byte or Short literal-type token;
+numeric literals retain their lexical Int, Long, Float, or Double constant
+kind. `null` is not a type-reference literal, `Unit` and `Null` are ordinary
+class types, and Class / UTF-16-only constants do not arise from source literal
+syntax. These unsupported semantic constant kinds return
+`UnsupportedSingletonLiteralKind` with a stable kind label.
+
+The #880 pinned audit identified 22 local-method first blockers from the one
+`true` singleton declaration `actionable` in `CheckUnused.scala`. The #881
+rerun moved all 22 past source type projection. Their current first blocker is
+`LocalValueConformanceUnsupported`, which belongs to the separate constant
+relation and expected-adaptation work; this movement is not full method typing.
 
 The semantic model already has `Type::Constant`; source literal expressions
 also retain exact constant types. `widen_expression_type` maps booleans and
@@ -93,19 +106,16 @@ the same `Type::Constant` representation. The current type relation does not
 yet compare constant payloads or relate a constant to its underlying builtin
 type. Expected expression adaptation widens before conformance, so singleton
 expected types need a path that preserves the exact constant until relation
-checking. These are the follow-up boundaries; #880 does not change source
-Typer semantics.
+checking. #881 changes source projection only; the relation and expected
+adaptation remain separate follow-up boundaries.
 
-The concrete next slice can be limited to boolean, numeric, and string literal
-references, all of which already have lossless `Constant` variants. Projection
-can add one `Literal` branch without changing identifier, selection, `this`, or
-parenthesized paths. The relation must recognize exact constant equality,
-reject unequal payloads such as `true` versus `false`, and relate a supported
-constant to its underlying builtin type (`true <: Boolean`, `1 <: Int`, and
-`"foo" <: String`). Expected adaptation must compare the preserved expression
-constant before choosing the underlying widened type. Keep `null`, class
-literals, literal unions, and general constant folding unsupported until their
-own source and relation contracts are specified.
+The next relation slice can recognize exact constant equality, reject unequal
+payloads such as `true` versus `false`, and relate supported constants to their
+underlying builtin types (`true <: Boolean`, `1 <: Int`, and `"foo" <: String`).
+Expected adaptation must compare the preserved expression constant before
+choosing the underlying widened type. Keep `null`, class literals, literal
+unions, and general constant folding unsupported until their own source and
+relation contracts are specified.
 
 ## Pattern typing foundation
 

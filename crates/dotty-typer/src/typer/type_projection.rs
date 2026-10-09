@@ -4,6 +4,28 @@ use super::*;
 
 pub(super) const MAX_SOURCE_TYPE_PROJECTION_DEPTH: usize = 256;
 
+fn source_singleton_literal_value(
+    constant: &dotty_core::Constant,
+) -> Result<dotty_core::Constant, &'static str> {
+    use dotty_core::Constant;
+
+    match constant {
+        Constant::Boolean(_)
+        | Constant::Char(_)
+        | Constant::Int(_)
+        | Constant::Long(_)
+        | Constant::FloatBits(_)
+        | Constant::DoubleBits(_)
+        | Constant::String(_) => Ok(constant.clone()),
+        Constant::Unit => Err("Unit"),
+        Constant::Null => Err("Null"),
+        Constant::Byte(_) => Err("Byte"),
+        Constant::Short(_) => Err("Short"),
+        Constant::StringUtf16(_) => Err("UTF-16 string"),
+        Constant::Class(_) => Err("Class"),
+    }
+}
+
 /// Resolves source-written type names without making the type-tree dispatcher
 /// depend on the details of lexical scopes, imports, or semantic lookups.
 struct SourceNameResolver<'typer, 'store> {
@@ -497,6 +519,17 @@ impl SourceTyper<'_> {
                 tree_index: tree.index(),
             })?;
         match source_tree.kind {
+            TreeKind::Literal(ref literal) => {
+                let constant =
+                    source_singleton_literal_value(&literal.value).map_err(|literal_kind| {
+                        TyperError::UnsupportedSingletonLiteralKind {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            literal_kind,
+                        }
+                    })?;
+                Ok(self.store.types.alloc(Type::Constant(constant)))
+            }
             TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => self
                 .project_stable_term_reference(
                     parens.inner,
@@ -785,6 +818,46 @@ impl SourceTyper<'_> {
                 })
             }
             _ => self.definitions.no_prefix,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::source_singleton_literal_value;
+    use dotty_core::{Constant, SemanticStore, Type};
+
+    #[test]
+    fn source_singleton_literal_kinds_are_explicitly_classified() {
+        let mut store = SemanticStore::new();
+        let text = store.names.intern("foo");
+        let class_type = store.types.alloc(Type::NoType);
+        let supported = [
+            Constant::Boolean(true),
+            Constant::Char(u16::from(b'a')),
+            Constant::Int(1),
+            Constant::Long(1),
+            Constant::float(1.0),
+            Constant::double(1.0),
+            Constant::String(text),
+        ];
+        for constant in supported {
+            assert_eq!(
+                source_singleton_literal_value(&constant),
+                Ok(constant.clone())
+            );
+        }
+
+        let unsupported = [
+            (Constant::Unit, "Unit"),
+            (Constant::Null, "Null"),
+            (Constant::Byte(1), "Byte"),
+            (Constant::Short(1), "Short"),
+            (Constant::StringUtf16(vec![0xD800]), "UTF-16 string"),
+            (Constant::Class(class_type), "Class"),
+        ];
+        for (constant, kind) in unsupported {
+            assert_eq!(source_singleton_literal_value(&constant), Err(kind));
         }
     }
 }

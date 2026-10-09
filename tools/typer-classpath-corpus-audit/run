@@ -325,14 +325,30 @@ mkdir -p "$(dirname -- "$output_path")"
             printf "| `%s` | `%s` |\n", fields[1], fields[2]
         }
     ' "$tmp_dir/first.report"
-    printf '\nThe top-ranked remaining gap is `AnonymousClassInstantiationDeferred` (32 occurrences across 15 files), but its implementation risk and anonymous-identity work are larger than the literal singleton slice. #880 profiled the `UnsupportedSingletonReference` bucket as 22 local-method blockers from one `true` singleton declaration. Recommend following with one `Literal -> Type::Constant` projection branch, then exact constant equality and constant-to-underlying conformance for booleans, integers, and strings. Expected-type adaptation must preserve literal constants until the relation checks them. Keep `null`, class literals, literal unions, arbitrary paths, unstable prefixes, and path-dependent relation changes deferred.\n\n'
+    printf '\nThe top-ranked remaining gap is `AnonymousClassInstantiationDeferred` (32 occurrences across 15 files), but its implementation risk and anonymous-identity work are larger than the literal singleton slice. #880 traced 22 `UnsupportedSingletonReference` observations to one `true` declaration. #881 implemented literal-to-`Type::Constant` source projection; all 22 baseline methods now reach `LocalValueConformanceUnsupported`. The next bounded slices are exact constant relations and expected singleton adaptation. Keep `null`, class literals, literal unions, arbitrary paths, unstable prefixes, and path-dependent relation changes deferred.\n\n'
     printf '## #880 literal singleton blocker profile\n\n'
-    printf 'The pinned Scala 3.9.0 audit ran twice at revision `777528f19a58e794c9954a42f433373472ec57f8`; normalized output matched byte-for-byte. The current `UnsupportedSingletonReference` first-blocker bucket has 22 local-method observations, all pointing to one source singleton tree and one enclosing declaration. Each method identity, singleton/reference tree index, AST shape, span, declaration shape, and snippet is listed in the raw profile below.\n\n'
+    printf 'The #880 baseline audit ran twice at revision `777528f19a58e794c9954a42f433373472ec57f8`; normalized output matched byte-for-byte. Its 22 `UnsupportedSingletonReference` first-blocker observations all pointed to one source singleton tree and one enclosing declaration. The current values are reported separately under #881 below.\n\n'
     printf '| Profile measure | Result |\n| --- | ---: |\n'
+    printf '| total first blockers | 22 |\n'
+    printf '| profile entries | 22 |\n'
+    printf '| distinct singleton source trees | 1 |\n'
+    printf '| distinct enclosing declarations | 1 |\n'
+    printf '| distinct reference shapes | 1 |\n'
+    printf '\nAll 22 were repeated observations of `val actionable: true = true` in `compiler/src/dotty/tools/dotc/transform/CheckUnused.scala`: singleton tree 2904, reference tree 2903, source span `[27444, 27448)`, and reference shape `Literal(Boolean(true))`. This is one declaration repeated through distinct methods, not 22 independent singleton declarations. Scala 3.9 and the dotty-rs parser retain `SingletonTypeTree(reference = Literal(...))` for literal references. After #881, supported literal forms project to exact `Type::Constant` values.\n\n'
+    printf '### Narrow follow-up boundaries\n\n'
+    printf '| Concern | Recommended boundary |\n| --- | --- |\n'
+    printf '| Source type projection | Implemented in #881: supported source literals project directly to `Type::Constant` with the exact payload. |\n'
+    printf '| Type relation | In #882, make equal constants equivalent; reject unequal constants; relate each supported constant to its underlying class. |\n'
+    printf '| Expected adaptation | In #883, check the exact expression constant against a singleton expected type before widening; preserve ordinary underlying-type conformance. |\n'
+    printf '| Explicit deferrals | Keep `null`, class literals, literal unions, arbitrary paths, unstable prefixes, and path-dependent relation changes unsupported. |\n\n'
+    printf '## #881 literal singleton projection audit\n\n'
+    printf 'The pinned Scala 3.9.0 audit compared the same 22 #880 method observations after projection. Each baseline method is required to remain present, and the run fails if any still stops at `UnsupportedSingletonReference`. All 22 moved to the next blocker, `LocalValueConformanceUnsupported`; this measures projection progress and does not claim successful method typing. Two normalized audit runs matched byte-for-byte.\n\n'
+    printf '| Projection measure | Result |\n| --- | ---: |\n'
     awk '
-        /^singleton_reference_profile:$/ { in_profile = 1; next }
-        in_profile && /^  first_blockers:$/ { in_profile = 0 }
-        in_profile && /^  (total_first_blockers|profile_entries|distinct_singleton_source_trees|distinct_enclosing_declarations|distinct_reference_shapes)=/ {
+        /^singleton_projection_baseline:$/ { in_profile = 1; next }
+        in_profile && /^  current_first_blockers:$/ { in_blockers = 1; next }
+        in_profile && /^  methods:$/ { in_profile = 0; in_blockers = 0 }
+        in_profile && !in_blockers && /^  (baseline_observations|moved_past_projection|remaining_UnsupportedSingletonReference)=/ {
             line = $0
             sub(/^  /, "", line)
             split(line, fields, "=")
@@ -341,13 +357,19 @@ mkdir -p "$(dirname -- "$output_path")"
             printf "| %s | %s |\n", label, fields[2]
         }
     ' "$tmp_dir/first.report"
-    printf '\nAll 22 are repeated observations of `val actionable: true = true` in `compiler/src/dotty/tools/dotc/transform/CheckUnused.scala`: singleton tree 2904, reference tree 2903, source span `[27444, 27448)`, and reference shape `Literal(Boolean(true))`. This is one declaration repeated through distinct methods, not 22 independent singleton declarations. Scala 3.9 and the dotty-rs parser both retain `SingletonTypeTree(reference = Literal(...))` for `true`, `false`, `1`, and `"foo"`. The source Typer still rejects literal singleton projection; this issue only profiles and pins the boundary.\n\n'
-    printf '### Narrow follow-up boundaries\n\n'
-    printf '| Concern | Recommended boundary |\n| --- | --- |\n'
-    printf '| Source type projection | Add `Literal -> Type::Constant` for boolean, numeric, and string literals, preserving the exact constant payload. |\n'
-    printf '| Type relation | Make equal constants equivalent; reject unequal constants; relate each supported constant to its underlying `Boolean`, `Int`/numeric, or `String` class. |\n'
-    printf '| Expected adaptation | Check the exact expression constant against a singleton expected type before widening; preserve ordinary underlying-type conformance. |\n'
-    printf '| Explicit deferrals | Keep `null`, class literals, literal unions, arbitrary paths, unstable prefixes, and path-dependent relation changes unsupported. |\n\n'
+    printf '\n| Current first blocker for baseline methods | Count |\n| --- | ---: |\n'
+    awk '
+        /^singleton_projection_baseline:$/ { in_profile = 1; next }
+        in_profile && /^  current_first_blockers:$/ { in_blockers = 1; next }
+        in_profile && /^  methods:$/ { in_profile = 0; in_blockers = 0 }
+        in_profile && in_blockers && /^    [^ ]+=[0-9]+$/ {
+            line = $0
+            sub(/^    /, "", line)
+            split(line, fields, "=")
+            printf "| `%s` | %s |\n", fields[1], fields[2]
+        }
+    ' "$tmp_dir/first.report"
+    printf '\nThe raw profile below lists the current first blocker for each of the 22 pinned method trees. These methods have not completed typing; their relation and expected-adaptation blockers remain for later issues.\n\n'
     printf '## Previous type projection snapshot\n\n'
     printf 'The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.\n\n'
     printf '```text\n'
