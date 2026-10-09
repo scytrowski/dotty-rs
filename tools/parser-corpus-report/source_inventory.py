@@ -17,6 +17,22 @@ FS2_NON_LIBRARY_PROJECTS = ("benchmark",)
 IRON_NON_LIBRARY_PROJECTS = ("docs", "examples", "sandbox")
 
 
+def magnolia_scala3_production_roots(repository: pathlib.Path) -> list[pathlib.Path]:
+    """Return Magnolia's published Scala 3 core sources, excluding examples."""
+    repository = repository.resolve(strict=True)
+    core_root = repository / "core" / "src" / "main" / "scala"
+    if not core_root.is_dir():
+        raise ValueError(f"Magnolia core source root is missing: {core_root}")
+    core_root = core_root.resolve(strict=True)
+    try:
+        core_root.relative_to(repository)
+    except ValueError as error:
+        raise ValueError(f"Magnolia source root is outside checkout: {core_root}") from error
+    if not any(core_root.rglob("*.scala")):
+        return []
+    return [core_root]
+
+
 def iron_library_production_roots(repository: pathlib.Path) -> list[pathlib.Path]:
     """Return Iron library module source roots, excluding examples and docs."""
     repository = repository.resolve(strict=True)

@@ -1863,6 +1863,7 @@ fn root_label(root: &Path) -> String {
             || part.starts_with("fs2-v")
             || part.starts_with("kyo-v")
             || part.starts_with("iron-v")
+            || part.starts_with("magnolia-scala3-v")
             || part.starts_with("shapeless-3-v")
             || part.starts_with("zio-v")
             || part.strip_prefix("chimney-").is_some_and(|version| {
@@ -2539,6 +2540,16 @@ mod tests {
         assert_eq!(
             root_label(Path::new("/tmp/cache/iron-v3.3.2/main/src")),
             "main/src"
+        );
+    }
+
+    #[test]
+    fn magnolia_root_label_does_not_include_the_local_checkout_directory() {
+        assert_eq!(
+            root_label(Path::new(
+                "/tmp/cache/magnolia-scala3-v1.3.23/core/src/main/scala",
+            )),
+            "core/src/main/scala"
         );
     }
 
