@@ -719,42 +719,29 @@ fn pinned_scala39_local_definition_audit() {
         missing_declared_type.count,
         "profile buckets must preserve the top-level MissingDeclaredType count"
     );
-    let singleton_reference_failures = audit
+    let singleton_reference_failure_count = audit
         .failures
         .get("UnsupportedSingletonReference")
-        .expect("the pinned audit should retain singleton-reference first blockers");
-    assert_eq!(singleton_reference_failures.count, 22);
+        .map_or(0, |bucket| bucket.count);
     assert_eq!(
-        audit.singleton_reference_profile.observations, singleton_reference_failures.count,
+        audit.singleton_reference_profile.observations, singleton_reference_failure_count,
         "every singleton-reference blocker must have a profile observation"
     );
     assert_eq!(
         audit.singleton_reference_profile.first_blockers.len(),
-        singleton_reference_failures.count,
+        singleton_reference_failure_count,
         "every singleton-reference blocker must have a distinct profile row"
     );
+    let singleton_projection_outcomes =
+        singleton_projection_baseline_outcomes(&audit.local_method_first_blockers);
+    let singleton_projection_moved = singleton_projection_outcomes
+        .values()
+        .filter(|outcome| outcome.as_str() != "UnsupportedSingletonReference")
+        .count();
+    assert_eq!(singleton_projection_outcomes.len(), 22);
     assert_eq!(
-        audit.singleton_reference_profile.singleton_source_trees,
-        [
-            "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala tree=2904 reference_tree=2903 reference_shape=Literal(Boolean(true)) span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 27444, end: 27448 }, point: None } })".to_owned()
-        ]
-        .into_iter()
-        .collect(),
-        "all pinned blockers must refer to the expected source singleton tree"
-    );
-    assert_eq!(
-        audit.singleton_reference_profile.enclosing_declarations,
-        [
-            "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala tree=2906 ValDef(name=actionable,rhs=true,mutable=false) snippet=\"val actionable: true = true\"".to_owned()
-        ]
-        .into_iter()
-        .collect(),
-        "all pinned blockers must refer to the expected enclosing declaration"
-    );
-    assert_eq!(
-        audit.singleton_reference_profile.reference_shapes,
-        ["Literal(Boolean(true))".to_owned()].into_iter().collect(),
-        "all pinned blockers must have the expected literal reference shape"
+        singleton_projection_moved, 22,
+        "all #880 singleton baseline method blockers must move past source projection"
     );
 
     println!("AUDIT_REPORT_BEGIN");
@@ -990,6 +977,7 @@ fn pinned_scala39_local_definition_audit() {
     print_pinned_immutable_field_method_outcomes(&audit.local_method_first_blockers);
     print_pinned_mutable_field_method_outcomes(&audit.local_method_first_blockers);
     print_singleton_reference_profile(&audit.singleton_reference_profile);
+    print_singleton_projection_baseline(&singleton_projection_outcomes);
     println!("AUDIT_REPORT_END");
 }
 
@@ -1024,6 +1012,139 @@ fn print_singleton_reference_profile(profile: &SingletonReferenceProfile) {
     println!("  reference_shapes:");
     for shape in &profile.reference_shapes {
         println!("    {shape}");
+    }
+}
+
+const BASELINE_LITERAL_SINGLETON_METHODS: [(&str, u32); 22] = [
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        2930,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        2955,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        3022,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        3107,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        3331,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        3155,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        3313,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        3396,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        3577,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        3468,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        3619,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        3799,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        4881,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        3817,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        3865,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        4084,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        4125,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        4138,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        4149,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        4202,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        4181,
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/CheckUnused.scala",
+        4981,
+    ),
+];
+
+fn singleton_projection_baseline_outcomes(
+    current_outcomes: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    BASELINE_LITERAL_SINGLETON_METHODS
+        .into_iter()
+        .map(|(path, tree_index)| {
+            let key = format!("{path}#tree={tree_index}");
+            let outcome = current_outcomes
+                .get(&key)
+                .unwrap_or_else(|| panic!("missing pinned singleton baseline method {key}"))
+                .clone();
+            (key, outcome)
+        })
+        .collect()
+}
+
+fn print_singleton_projection_baseline(outcomes: &BTreeMap<String, String>) {
+    let moved = outcomes
+        .values()
+        .filter(|outcome| outcome.as_str() != "UnsupportedSingletonReference")
+        .count();
+    let mut blockers = BTreeMap::<&str, usize>::new();
+    for outcome in outcomes.values() {
+        *blockers.entry(outcome.as_str()).or_default() += 1;
+    }
+    println!("singleton_projection_baseline:");
+    println!("  baseline_observations={}", outcomes.len());
+    println!("  moved_past_projection={moved}");
+    println!(
+        "  remaining_UnsupportedSingletonReference={}",
+        outcomes.len() - moved
+    );
+    println!("  current_first_blockers:");
+    for (blocker, count) in blockers {
+        println!("    {blocker}={count}");
+    }
+    println!("  methods:");
+    for (method, outcome) in outcomes {
+        println!("    {method} first_blocker={outcome}");
     }
 }
 
@@ -1580,10 +1701,10 @@ fn scope_note_for_bucket(bucket: &str) -> (&'static str, &'static str, &'static 
             "closure capture, refinement synthesis, and general anonymous-class members",
         ),
         "UnsupportedSingletonReference" => (
-            "profile and type one stable singleton-reference shape from the reported producer",
-            "dotty-typer/src/typer/expression/references.rs and dotty-typer/src/typer/type_projection.rs",
-            "existing TermRef, ThisType, and stable-prefix contracts",
-            "arbitrary paths, unstable prefixes, and path-dependent relation redesign",
+            "literal singleton projection landed in #881; next compare constant payloads and relate them to underlying types",
+            "dotty-typer/src/typer/type_projection.rs and the bounded type relation",
+            "Type::Constant projection, exact constant equality, and expected-type adaptation",
+            "arbitrary paths, unstable prefixes, literal unions, and path-dependent relation redesign",
         ),
         "LocalBlockDeclarationDeferred::val/var definition" => (
             "split remaining local definitions by PatDef root and binder shape before adding one form",
@@ -6048,6 +6169,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::TermReferencePrefixMismatch { .. } => "TermReferencePrefixMismatch",
         TyperError::UnstableSelectionPrefix { .. } => "UnstableSelectionPrefix",
         TyperError::UnsupportedSingletonReference { .. } => "UnsupportedSingletonReference",
+        TyperError::UnsupportedSingletonLiteralKind { .. } => "UnsupportedSingletonLiteralKind",
         TyperError::PatDefExpansionConflict { .. } => "PatDefExpansionConflict",
         TyperError::PatDefBinderInventoryConflict { .. } => "PatDefBinderInventoryConflict",
         TyperError::PatDefAggregateArityDeferred { .. } => "PatDefAggregateArityDeferred",

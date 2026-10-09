@@ -6499,13 +6499,19 @@ mod tests {
     #[test]
     fn literal_singleton_references_are_distinct_from_stable_paths() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class C { val boolTrue: true = true; val boolFalse: false = false; val number: 1 = 1; val string: \"foo\" = \"foo\"; val stable: Int = 1; val stableAlias: stable.type = stable }",
+            "class C { val boolTrue: true = true; val boolTrueAgain: true = true; val boolFalse: false = false; val number: 1 = 1; val numberTwo: 2 = 2; val charA: 'a' = 'a'; val longOne: 1L = 1L; val floatOne: 1.0f = 1.0f; val doubleOne: 1.0 = 1.0; val string: \"foo\" = \"foo\"; val stable: Int = 1; val stableAlias: stable.type = stable }",
         );
         let literal_cases = [
-            ("boolTrue", Some(dotty_core::Constant::Boolean(true))),
-            ("boolFalse", Some(dotty_core::Constant::Boolean(false))),
-            ("number", Some(dotty_core::Constant::Int(1))),
-            ("string", None),
+            "boolTrue",
+            "boolTrueAgain",
+            "boolFalse",
+            "number",
+            "numberTwo",
+            "charA",
+            "longOne",
+            "floatOne",
+            "doubleOne",
+            "string",
         ];
         let mut typer = SourceTyper::new(
             &parsed.ast,
@@ -6516,7 +6522,7 @@ mod tests {
             &packages,
         );
 
-        for (name, expected_literal) in literal_cases {
+        for name in literal_cases {
             let (symbol, singleton_type) = val_symbol(&parsed, typer.store(), &index, source, name);
             let TreeKind::SingletonTypeTree(singleton) = &parsed.ast.get(singleton_type).kind
             else {
@@ -6525,29 +6531,81 @@ mod tests {
             let TreeKind::Literal(literal) = &parsed.ast.get(singleton.reference).kind else {
                 panic!("literal singleton annotation `{name}` must reference Literal");
             };
-            if let Some(expected_literal) = expected_literal {
-                assert_eq!(literal.value, expected_literal, "{name}");
-            } else {
-                let dotty_core::Constant::String(text) = &literal.value else {
-                    panic!("string singleton annotation must retain a string constant");
-                };
-                assert_eq!(typer.store().names.resolve(*text), "foo");
-            }
+            let expected_literal = match name {
+                "boolTrue" | "boolTrueAgain" => dotty_core::Constant::Boolean(true),
+                "boolFalse" => dotty_core::Constant::Boolean(false),
+                "number" => dotty_core::Constant::Int(1),
+                "numberTwo" => dotty_core::Constant::Int(2),
+                "charA" => dotty_core::Constant::Char(u16::from(b'a')),
+                "longOne" => dotty_core::Constant::Long(1),
+                "floatOne" => dotty_core::Constant::float(1.0),
+                "doubleOne" => dotty_core::Constant::double(1.0),
+                "string" => {
+                    let dotty_core::Constant::String(text) = &literal.value else {
+                        panic!("string singleton annotation must retain a string constant");
+                    };
+                    assert_eq!(typer.store().names.resolve(*text), "foo");
+                    dotty_core::Constant::String(*text)
+                }
+                _ => unreachable!("literal case has a matching expected constant"),
+            };
+            assert_eq!(literal.value, expected_literal, "{name}");
             let context = index.declaration_context_of(symbol).unwrap();
-            let error = typer.type_of_tpt(singleton_type, context).unwrap_err();
+            let projected = typer.type_of_tpt(singleton_type, context).unwrap();
             assert!(
                 matches!(
-                    error,
-                    TyperError::UnsupportedSingletonReference {
-                        source: actual_source,
-                        tree_index,
-                        reference_kind: "expression or declaration tree",
-                    } if actual_source == source && tree_index == singleton.reference.index()
+                    typer.store().types.get(projected),
+                    Type::Constant(constant) if *constant == expected_literal
                 ),
-                "{name}: {error:?}; reference={:#?}",
+                "{name}: projected={:?}; reference={:#?}",
+                typer.store().types.get(projected),
                 parsed.ast.get(singleton.reference).kind
             );
+            assert_eq!(
+                typer.source_type_index().type_at(source, singleton_type),
+                Some(projected)
+            );
+            assert!(matches!(
+                typer.type_of_tpt(singleton_type, context),
+                Ok(actual) if actual == projected
+            ));
+            assert_eq!(
+                typer
+                    .source_type_index()
+                    .type_at(source, singleton.reference),
+                None
+            );
         }
+
+        let (_, first_true_type) = val_symbol(&parsed, typer.store(), &index, source, "boolTrue");
+        let (_, second_true_type) =
+            val_symbol(&parsed, typer.store(), &index, source, "boolTrueAgain");
+        let first_true = typer
+            .source_type_index()
+            .type_at(source, first_true_type)
+            .unwrap();
+        let second_true = typer
+            .source_type_index()
+            .type_at(source, second_true_type)
+            .unwrap();
+        assert_eq!(
+            typer.store().types.get(first_true),
+            typer.store().types.get(second_true)
+        );
+        let (_, number_type) = val_symbol(&parsed, typer.store(), &index, source, "number");
+        let (_, number_two_type) = val_symbol(&parsed, typer.store(), &index, source, "numberTwo");
+        let number = typer
+            .source_type_index()
+            .type_at(source, number_type)
+            .unwrap();
+        let number_two = typer
+            .source_type_index()
+            .type_at(source, number_two_type)
+            .unwrap();
+        assert_ne!(
+            typer.store().types.get(number),
+            typer.store().types.get(number_two)
+        );
 
         let (stable, stable_type) =
             val_symbol(&parsed, typer.store(), &index, source, "stableAlias");
@@ -6562,6 +6620,55 @@ mod tests {
         assert!(matches!(
             typer.type_of_tpt(stable_type, context),
             Ok(ty) if matches!(typer.store().types.get(ty), Type::TermRef { .. })
+        ));
+    }
+
+    #[test]
+    fn failed_enclosing_transaction_rolls_back_literal_singleton_projection() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val truth: true = true }");
+        let (truth, singleton_type) = val_symbol(&parsed, &store, &index, source, "truth");
+        let context = index.declaration_context_of(truth).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let before = typer.store().checkpoint();
+
+        let result: Result<(), TyperError> = typer.run_atomic(|typer, info_journal| {
+            let projected =
+                typer.type_of_tpt_inner_journaled(singleton_type, context, info_journal)?;
+            assert!(matches!(
+                typer.store().types.get(projected),
+                Type::Constant(dotty_core::Constant::Boolean(true))
+            ));
+            Err(TyperError::UnsupportedTypeTree {
+                source,
+                tree_index: singleton_type.index(),
+                tree_kind: "enclosing transaction rollback probe",
+            })
+        });
+
+        assert!(matches!(
+            result,
+            Err(TyperError::UnsupportedTypeTree { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(
+            typer.source_type_index().type_at(source, singleton_type),
+            None
+        );
+        assert!(matches!(
+            typer.type_of_tpt(singleton_type, context),
+            Ok(projected)
+                if matches!(
+                    typer.store().types.get(projected),
+                    Type::Constant(dotty_core::Constant::Boolean(true))
+                )
         ));
     }
 

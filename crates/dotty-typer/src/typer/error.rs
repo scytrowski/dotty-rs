@@ -1730,6 +1730,12 @@ pub enum TyperError {
         tree_index: u32,
         reference_kind: &'static str,
     },
+    /// A literal singleton uses a constant kind not supported by source syntax.
+    UnsupportedSingletonLiteralKind {
+        source: SourceId,
+        tree_index: u32,
+        literal_kind: &'static str,
+    },
 }
 
 /// Which side of an ordinary type-parameter bound an explicit argument broke.
