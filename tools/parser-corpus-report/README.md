@@ -649,3 +649,29 @@ Recreate the report with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-890-magnolia.json
 ```
+
+## ScalaTest corpus
+
+The expanded corpus includes ScalaTest [`release-3.2.20`](https://github.com/scalatest/scalatest/releases/tag/release-3.2.20),
+pinned to `b4efe5a942fd290e9b1bb377a2efeb816b34ea21`. Its build's Scala 3
+projects compile the tracked `dotty/*/src/main/scala` roots. The corpus
+includes the production module roots and excludes `dotty/common-test`, which
+is shared test support; generated sources, Scala 2 JVM roots, and test sources
+are not part of this tracked-source inventory. These sources are parsed with
+the pinned Scala 3.9.0 oracle, regardless of the Scala version used by the
+upstream release build.
+
+`parser-post-issue-895-scalatest.json` records the corpus after adding these
+ScalaTest sources at parser revision `c8fad718b9590025ddeb353716dfc111436f4e0c`.
+The corpus contains 3,860 files: the previous 3,824 plus 36 ScalaTest files.
+The parser reports 3,859 clean files and one recoverable file, with three
+diagnostics (`ExpectedToken`: 2, `UnexpectedToken`: 1) in
+`NumericString.scala`. There are no hard failures, process failures, panics,
+hangs, scanner diagnostics, or Dotty oracle failures; the oracle returned all
+3,860 trees. All 3,824 files from the prior source sets remain clean. Recreate
+the report with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-895-scalatest.json
+```
