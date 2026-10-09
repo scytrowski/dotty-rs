@@ -286,7 +286,9 @@ where
     fn simple_pattern(&mut self) -> TreeId<Untyped> {
         let mark = self.mark();
         let starts_qualified_this = self.current_starts_qualified_this();
-        let tree = match self.current().kind {
+        let starts_symbolic_extractor = self.current_starts_symbolic_pattern_extractor();
+        let current_kind = self.current().kind;
+        let tree = match current_kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier if starts_qualified_this => {
                 self.parse_qualified_this_reference(mark)
                     .unwrap_or_else(|| self.error_pattern(self.current_span()))
@@ -302,6 +304,19 @@ where
                     TreeKind::Ident(Ident {
                         name: *name.as_name(),
                         backquoted,
+                    }),
+                )
+            }
+            TokenKind::Operator | TokenKind::ColonOp if starts_symbolic_extractor => {
+                let Ok(name) = self.intern_current_term_name() else {
+                    return self.error_pattern(self.current_span());
+                };
+                self.advance();
+                self.alloc_from(
+                    mark,
+                    TreeKind::Ident(Ident {
+                        name: *name.as_name(),
+                        backquoted: false,
                     }),
                 )
             }
@@ -550,6 +565,10 @@ where
         Some(*self.intern_current_term_name().ok()?.as_name())
     }
 
+    fn current_starts_symbolic_pattern_extractor(&mut self) -> bool {
+        symbolic_pattern_extractor_at(self, 0)
+    }
+
     fn pattern_operand_offset(&mut self) -> Option<usize> {
         let offset = match self.cursor.lookahead(1).kind {
             TokenKind::Newline | TokenKind::Newlines => 2,
@@ -700,6 +719,7 @@ fn can_start_simple_pattern_at<S: TokenSource>(
     offset: usize,
 ) -> bool {
     can_start_simple_pattern_kind(parser.cursor.lookahead(offset).kind)
+        || symbolic_pattern_extractor_at(parser, offset)
         || (parser.cursor.lookahead(offset).kind == TokenKind::Operator
             && parser
                 .source
@@ -707,6 +727,26 @@ fn can_start_simple_pattern_at<S: TokenSource>(
                 .ok()
                 == Some("-")
             && is_numeric_literal(parser.cursor.lookahead(offset + 1).kind))
+}
+
+fn symbolic_pattern_extractor_at<S: TokenSource>(
+    parser: &mut Parser<'_, '_, S>,
+    offset: usize,
+) -> bool {
+    let token = parser.cursor.lookahead(offset);
+    if !matches!(token.kind, TokenKind::Operator | TokenKind::ColonOp) {
+        return false;
+    }
+    let Some(spelling) = parser.source.slice(token.span).ok() else {
+        return false;
+    };
+    if matches!(
+        spelling,
+        "=" | "=>" | "<-" | "<:" | ">:" | "<%" | "@" | "?=>" | "#" | "=>>" | "|" | ":"
+    ) {
+        return false;
+    }
+    parser.cursor.lookahead(offset + 1).kind == TokenKind::Punctuation(Punctuation::LeftParen)
 }
 
 #[cfg(test)]
@@ -811,6 +851,73 @@ mod tests {
             TextRange::new(0, 15).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_symbolic_colon_operator_extractor_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "::(head, tail)",
+            vec![
+                token(TokenKind::ColonOp, 0, 2),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 2, 3),
+                token(TokenKind::Identifier, 3, 7),
+                token(TokenKind::Punctuation(Punctuation::Comma), 7, 8),
+                token(TokenKind::Identifier, 9, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Eof, 14, 14),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::Apply(application) = &result.ast.get(result.root).kind else {
+            panic!("expected a source-level extractor application");
+        };
+        let TreeKind::Ident(function) = &result.ast.get(application.function).kind else {
+            panic!("expected the symbolic extractor name");
+        };
+        assert_eq!(names.resolve(function.name.text()), "::");
+        assert_eq!(application.args.len(), 2);
+        assert_eq!(
+            result.ast.get(result.root).position.unwrap().span().range(),
+            TextRange::new(0, 14).unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_a_symbolic_extractor_nested_in_a_named_extractor_pattern() {
+        let mut names = NameInterner::new();
+        let parser = parser_for(
+            "Left(::(e, es))",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 4, 5),
+                token(TokenKind::ColonOp, 5, 7),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 7, 8),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::Comma), 9, 10),
+                token(TokenKind::Identifier, 11, 13),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 13, 14),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+        let result = parser.parse_pattern_fragment();
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let TreeKind::Apply(outer) = &result.ast.get(result.root).kind else {
+            panic!("expected the outer extractor application");
+        };
+        let TreeKind::Apply(inner) = &result.ast.get(outer.args[0]).kind else {
+            panic!("expected the nested symbolic extractor application");
+        };
+        let TreeKind::Ident(function) = &result.ast.get(inner.function).kind else {
+            panic!("expected the symbolic extractor name");
+        };
+        assert_eq!(names.resolve(function.name.text()), "::");
     }
 
     #[test]
