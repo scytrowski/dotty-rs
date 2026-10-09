@@ -1860,6 +1860,7 @@ fn root_label(root: &Path) -> String {
     if let Some(index) = components.iter().rposition(|part| {
         part.starts_with("cats-v")
             || part.starts_with("cats-effect-v")
+            || part.starts_with("fs2-v")
             || part.starts_with("kyo-v")
             || part.starts_with("shapeless-3-v")
             || part.starts_with("zio-v")
@@ -2519,6 +2520,16 @@ mod tests {
                 "/tmp/cache/zio-v2.1.26/concurrent/src/main/scala",
             )),
             "concurrent/src/main/scala"
+        );
+    }
+
+    #[test]
+    fn fs2_root_label_does_not_include_the_local_checkout_directory() {
+        assert_eq!(
+            root_label(Path::new(
+                "/tmp/cache/fs2-v3.13.0/core/shared/src/main/scala",
+            )),
+            "core/shared/src/main/scala"
         );
     }
 

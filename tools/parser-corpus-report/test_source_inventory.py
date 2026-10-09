@@ -6,6 +6,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from source_inventory import (
+    fs2_library_production_roots,
     kyo_scala3_production_roots,
     shapeless3_compile_roots,
     tracked_scala_sources,
@@ -118,6 +119,20 @@ class TrackedScalaSourcesTests(unittest.TestCase):
         roots = zio_scala3_production_roots(self.repository, [production, docs])
 
         self.assertEqual(roots, [production.resolve()])
+
+    def test_fs2_excludes_benchmark_project_from_library_corpus(self):
+        production = self.repository / "core/shared/src/main/scala"
+        benchmark = self.repository / "benchmark/src/main/scala"
+        production.mkdir(parents=True)
+        benchmark.mkdir(parents=True)
+
+        roots = fs2_library_production_roots(self.repository, [production, benchmark])
+
+        self.assertEqual(roots, [production.resolve()])
+
+    def test_fs2_rejects_source_roots_outside_checkout(self):
+        with self.assertRaisesRegex(ValueError, "outside FS2 checkout"):
+            fs2_library_production_roots(self.repository, [pathlib.Path("/")])
 
 
 if __name__ == "__main__":

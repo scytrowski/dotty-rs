@@ -13,6 +13,25 @@ KYO_SCALA_2_12_PLUGIN_PREFIXES = (
     ("kyo-test", "sbt-publish"),
 )
 ZIO_NON_SCALA3_PROJECTS = ("zio-docs",)
+FS2_NON_LIBRARY_PROJECTS = ("benchmark",)
+
+
+def fs2_library_production_roots(
+    repository: pathlib.Path, source_roots: list[pathlib.Path]
+) -> list[pathlib.Path]:
+    """Exclude FS2's benchmark project from the library source corpus."""
+    repository = repository.resolve(strict=True)
+    selected = []
+    for root in source_roots:
+        root = root.resolve(strict=True)
+        try:
+            relative = root.relative_to(repository)
+        except ValueError as error:
+            raise ValueError(f"source root is outside FS2 checkout: {root}") from error
+        if relative.parts and relative.parts[0] in FS2_NON_LIBRARY_PROJECTS:
+            continue
+        selected.append(root)
+    return selected
 
 
 def shapeless3_compile_roots(
