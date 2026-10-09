@@ -982,6 +982,15 @@ return typed errors. Mutable, lazy, inline, given, implicit, and module-class
 fields remain deferred, as do unsupported initializer expressions. Explicit
 field annotations continue through the declared-type completion path.
 
+The #856–#857 pinned Scala 3.9.0 corpus audit directly retried all seven
+distinct immutable class fields behind the baseline's 14 `MissingDeclaredType`
+occurrences. All seven moved to `ImportQualifierNotFound` in initializer
+imports; none completed in that probe. This is first-blocker movement, not
+successful corpus typing. The total `MissingDeclaredType` count fell from 34
+occurrences in 15 files to 20 in 8 files; the remaining records are mutable
+class fields and ordinary or inline module-class fields. The direct probe and
+its per-declaration outcomes are recorded in the [classpath audit report](typer-classpath-corpus-audit-3.9.0.md#856-857-immutable-class-field-inference-audit).
+
 Explicit positional type applications are supported for one resolved `Poly`
 callee. Type arguments use the expression's lexical context, require exact
 arity, and are checked against ordinary lower and upper bounds before the Poly
