@@ -12,12 +12,19 @@ where
     S: dotty_core::TokenSource,
 {
     pub(crate) fn starts_legacy_implicit_block_lambda(&mut self) -> bool {
-        self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Implicit)
-            && !self.implicit_prefix_starts_definition()
-            && matches!(
-                self.cursor.lookahead(1).kind,
-                TokenKind::Identifier | TokenKind::BackquotedIdentifier
-            )
+        if self.current().kind != TokenKind::Keyword(dotty_core::HardKeyword::Implicit)
+            || self.implicit_prefix_starts_definition()
+        {
+            return false;
+        }
+
+        match self.cursor.lookahead(1).kind {
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier => true,
+            TokenKind::Punctuation(Punctuation::LeftParen) => {
+                self.lambda_arrow_after_parenthesized_params_at(1)
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn starts_legacy_implicit_expression_lambda(&mut self) -> bool {
