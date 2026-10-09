@@ -3914,4 +3914,75 @@ mod tests {
             SOURCE.len() as u32
         );
     }
+
+    #[test]
+    fn parses_an_indented_type_refinement_body() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/scala-parser-oracle/fixtures/compilation/indented-type-refinement.scala"
+        );
+        let source = fs::read_to_string(fixture).expect("fixture should be readable");
+        let scanner = ContextualScanner::new(&source).expect("source should scan cleanly");
+        let source_text = SourceText::new(&source).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let refinement = result.ast.iter().find_map(|(_, tree)| {
+            let TreeKind::TypeDef(alias) = &tree.kind else {
+                return None;
+            };
+            (names.resolve(alias.name.as_name().text()) == "Aux").then_some(alias.rhs)
+        });
+        let refinement = refinement.expect("the Aux type alias should be present");
+        let TreeKind::LambdaTypeTree(lambda) = &result.ast.get(refinement).kind else {
+            panic!("expected a polymorphic type alias RHS");
+        };
+        let TreeKind::RefinedTypeTree(refined) = &result.ast.get(lambda.body).kind else {
+            panic!("expected the alias body to be a refinement type");
+        };
+        assert!(refined.refinements.iter().any(|id| matches!(
+            &result.ast.get(*id).kind,
+            TreeKind::TypeDef(member)
+                if names.resolve(member.name.as_name().text()) == "AsTuple"
+        )));
+        assert!(result.ast.iter().any(|(_, tree)| matches!(
+            &tree.kind,
+            TreeKind::DefDef(definition)
+                if names.resolve(definition.name.as_name().text()) == "after"
+        )));
+    }
+
+    #[test]
+    fn recovers_a_missing_indented_refinement_body_before_the_next_member() {
+        const SOURCE: &str =
+            "object Fields:\n  type Aux[A, T] =\n    Fields[A]:\n  def after = 1\nend Fields";
+        let scanner = ContextualScanner::new(SOURCE).expect("source should scan cleanly");
+        let source_text = SourceText::new(SOURCE).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        let diagnostic = &result.diagnostics[0];
+        assert_eq!(
+            diagnostic.kind(),
+            dotty_parser::ParseDiagnosticKind::ExpectedToken
+        );
+        assert_eq!(
+            diagnostic.message(),
+            "expected an indented refinement body after `:`"
+        );
+        let next_member = SOURCE.find("def after").unwrap() as u32;
+        assert_eq!(
+            diagnostic.span(),
+            dotty_core::TextRange::new(next_member, next_member).unwrap()
+        );
+        assert!(result.ast.iter().any(|(_, tree)| matches!(
+            &tree.kind,
+            TreeKind::DefDef(definition)
+                if names.resolve(definition.name.as_name().text()) == "after"
+        )));
+    }
 }
