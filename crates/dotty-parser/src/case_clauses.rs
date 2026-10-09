@@ -299,8 +299,14 @@ where
 
         let (block_mark, stats, expr) = if self.current().kind == TokenKind::Indent {
             self.advance();
-            let result = self
-                .with_case_body(|parser| parser.parse_expression_block_body(TokenKind::Outdent));
+            let is_for_enumerator_rhs = self.for_enumerator_rhs;
+            let result = self.with_case_body(|parser| {
+                if is_for_enumerator_rhs && let Some((indent_offset, true)) = body_indent {
+                    parser.parse_region_feedback_expression_block_body(indent_offset)
+                } else {
+                    parser.parse_expression_block_body(TokenKind::Outdent)
+                }
+            });
             let closed_by_delimiter = matches!(
                 self.current().kind,
                 TokenKind::Punctuation(
