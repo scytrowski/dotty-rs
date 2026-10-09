@@ -969,8 +969,18 @@ and preceding imports. The expression owner remains the enclosing class, so
 `this` has class ownership; the Typer does not push a method or local block
 scope. Trait and module-class fields, fields without source provenance or an
 initializer, and malformed owner/context relationships are rejected with a
-focused context error. This entry point builds context only; it does not infer
-or publish field types or type field initializers as part of class completion.
+focused context error. This entry point builds context only; field completion
+uses it to type an initializer when inferring that field's type.
+
+`complete_symbol` infers ordinary immutable source fields owned by a class
+when their canonical `ValDef` has an initializer and a synthetic inferred
+`TypeTree`. It types the initializer in the field context, widens the result,
+validates it as a value type, and caches the inferred type for the source
+`TypeTree`. Short acyclic dependencies between inferred fields are supported;
+recursive dependencies and chains deeper than the fixed completion limit
+return typed errors. Mutable, lazy, inline, given, implicit, and module-class
+fields remain deferred, as do unsupported initializer expressions. Explicit
+field annotations continue through the declared-type completion path.
 
 Explicit positional type applications are supported for one resolved `Poly`
 callee. Type arguments use the expression's lexical context, require exact
@@ -1122,7 +1132,9 @@ For the 12 old `UnsupportedTypeTree::Function` cases, all now stop at
 comparison records each method and its current first blocker in the [audit
 report](typer-classpath-corpus-audit-3.9.0.md#826-829-source-function-support).
 No local method fully typed in the full corpus run, and external member
-materialization remains zero. The refreshed audit ranks `MissingDeclaredType`
-(34 in 15 files) first and recommends the immutable inferred `Class` field
-slice already scoped in [#825](typer-classpath-corpus-audit-3.9.0.md#recommended-next-sprint).
-That is a separate follow-up; #829 does not implement it.
+materialization remains zero. The refreshed pre-field-inference audit ranks
+`MissingDeclaredType` (34 in 15 files) first and recommends the immutable
+inferred `Class` field slice scoped in
+[#825](typer-classpath-corpus-audit-3.9.0.md#recommended-next-sprint). That
+slice is implemented in #856; the audit counts remain the baseline taken
+before field inference was added.

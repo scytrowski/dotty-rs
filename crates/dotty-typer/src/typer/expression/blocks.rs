@@ -1644,7 +1644,18 @@ impl SourceTyper<'_> {
         inferred: TypeId,
         tree_index: u32,
     ) -> Result<(), TyperError> {
-        if matches!(
+        if !self.is_valid_inferred_value_type(inferred) {
+            return Err(TyperError::InvalidInferredLocalValueType {
+                source: self.source,
+                tree_index,
+                inferred,
+            });
+        }
+        Ok(())
+    }
+
+    pub(in crate::typer) fn is_valid_inferred_value_type(&self, inferred: TypeId) -> bool {
+        !matches!(
             self.store.types.try_get(inferred),
             None | Some(
                 Type::NoType
@@ -1662,14 +1673,7 @@ impl SourceTyper<'_> {
                     | Type::MatchCase { .. }
                     | Type::ClassInfo(_)
             )
-        ) {
-            return Err(TyperError::InvalidInferredLocalValueType {
-                source: self.source,
-                tree_index,
-                inferred,
-            });
-        }
-        Ok(())
+        )
     }
 
     /// The parser uses an empty source `TypeTree` for a missing local annotation.
