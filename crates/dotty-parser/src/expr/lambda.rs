@@ -35,10 +35,7 @@ where
         }
 
         match self.cursor.lookahead(1).kind {
-            TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
-                self.cursor.lookahead(2).kind == TokenKind::Operator
-                    && self.lookahead_text_is(2, "=>")
-            }
+            TokenKind::Identifier | TokenKind::BackquotedIdentifier => self.lookahead_is_arrow(2),
             TokenKind::Punctuation(Punctuation::LeftParen) => {
                 self.lambda_arrow_after_parenthesized_params_at(1)
             }
@@ -162,8 +159,7 @@ where
     pub(super) fn starts_lambda(&mut self) -> bool {
         match self.current().kind {
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
-                self.cursor.lookahead(1).kind == TokenKind::Operator
-                    && (self.lookahead_text_is(1, "=>") || self.lookahead_text_is(1, "?=>"))
+                self.lookahead_is_arrow(1) || self.lookahead_is_context_arrow(1)
             }
             TokenKind::Punctuation(Punctuation::LeftParen) => {
                 self.lambda_arrow_after_parenthesized_params()
@@ -186,10 +182,8 @@ where
                 TokenKind::Punctuation(Punctuation::RightParen) => {
                     depth = depth.saturating_sub(1);
                     if depth == 0 {
-                        let next_kind = self.cursor.lookahead(offset + 1).kind;
-                        return next_kind == TokenKind::Operator
-                            && (self.lookahead_text_is(offset + 1, "=>")
-                                || self.lookahead_text_is(offset + 1, "?=>"));
+                        return self.lookahead_is_arrow(offset + 1)
+                            || self.lookahead_is_context_arrow(offset + 1);
                     }
                 }
                 TokenKind::Eof => return false,
@@ -655,6 +649,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_single_parameter_function_literal_with_a_unicode_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x ⇒ x",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Operator, 2, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(Function { params, body })) =
+            &parser.ast().get(tree).kind
+        else {
+            panic!("expected a function literal");
+        };
+        assert_eq!(params.len(), 1);
+        assert!(matches!(parser.ast().get(*body).kind, TreeKind::Ident(_)));
+        assert!(
+            parser.diagnostics().is_empty(),
+            "{:?}",
+            parser.diagnostics()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn parses_a_legacy_implicit_lambda_as_an_application_argument() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
@@ -699,6 +723,47 @@ mod tests {
                 .contains(&dotty_core::ast::Modifier::Implicit)
         );
         assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn parses_a_legacy_implicit_lambda_with_a_unicode_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "implicit x ⇒ x",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Implicit), 0, 8),
+                token(TokenKind::Identifier, 9, 10),
+                token(TokenKind::Operator, 11, 14),
+                token(TokenKind::Identifier, 15, 16),
+                token(TokenKind::Eof, 16, 16),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &parser.ast().get(tree).kind
+        else {
+            panic!("expected a legacy implicit function literal");
+        };
+        let TreeKind::ValDef(parameter) = &parser.ast().get(function.params[0]).kind else {
+            panic!("expected an implicit function parameter");
+        };
+        assert!(
+            parameter
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Implicit)
+        );
+        assert!(matches!(
+            parser.ast().get(function.body).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(
+            parser.diagnostics().is_empty(),
+            "{:?}",
+            parser.diagnostics()
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
