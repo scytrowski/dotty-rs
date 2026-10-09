@@ -1,0 +1,3 @@
+{
+  implicit (x: Int) => x
+}

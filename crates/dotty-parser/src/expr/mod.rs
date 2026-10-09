@@ -25,6 +25,8 @@ where
         let saved_placeholders = std::mem::take(&mut self.placeholder_params);
         let tree = if self.starts_poly_function() {
             self.parse_poly_function(mark)
+        } else if self.starts_legacy_implicit_expression_lambda() {
+            self.parse_legacy_implicit_block_lambda(mark)
         } else if self.starts_lambda() {
             self.parse_lambda(mark)
         } else {
