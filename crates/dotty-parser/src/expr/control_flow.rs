@@ -648,7 +648,7 @@ where
                     TokenKind::Punctuation(Punctuation::RightParen | Punctuation::RightBrace)
                 )
                 || (feedback_indent.is_some()
-                    && self.is_within_argument_list()
+                    && self.is_within_comma_delimited_expression()
                     && self.current().kind == TokenKind::Punctuation(Punctuation::Comma));
             if closed_by_delimiter {
                 self.observe_outdented_by_delimiter();
@@ -685,7 +685,7 @@ where
                 TokenKind::Punctuation(Punctuation::RightParen | Punctuation::RightBrace)
             )
             || (feedback_indent.is_some()
-                && self.is_within_argument_list()
+                && self.is_within_comma_delimited_expression()
                 && self.current().kind == TokenKind::Punctuation(Punctuation::Comma));
         if closed_by_delimiter {
             self.observe_outdented_by_delimiter();

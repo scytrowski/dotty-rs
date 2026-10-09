@@ -459,7 +459,7 @@ where
         if let Some(indent_offset) = self.feedback_block_indent {
             self.observe_outdented_region(indent_offset);
         }
-        let closes_enclosing_argument = self.is_within_argument_list()
+        let closes_enclosing_argument = self.is_within_comma_delimited_expression()
             && matches!(
                 self.current().kind,
                 TokenKind::Punctuation(

@@ -297,7 +297,11 @@ where
             }
 
             if let StatementSequenceBoundary::FeedbackRegionBlock { indent_offset, .. } = boundary {
-                self.observe_outdented_region(indent_offset);
+                let closes_at_comma = self.is_within_comma_delimited_expression()
+                    && self.current().kind == TokenKind::Punctuation(Punctuation::Comma);
+                if !closes_at_comma {
+                    self.observe_outdented_region(indent_offset);
+                }
             }
             if let StatementSequenceBoundary::LayoutRegionBlock { indent_offset, .. } = boundary {
                 self.observe_outdented_layout_region(indent_offset);
@@ -569,7 +573,7 @@ where
                         self.current().kind,
                         TokenKind::Punctuation(Punctuation::RightParen | Punctuation::RightBrace)
                     )
-                    || (self.is_within_argument_list()
+                    || (self.is_within_comma_delimited_expression()
                         && self.current().kind
                             == TokenKind::Punctuation(Punctuation::Comma))
                     || (self.context.case_body && self.is_case_body_terminator())
