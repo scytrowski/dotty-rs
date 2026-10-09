@@ -781,14 +781,14 @@ fn pinned_scala39_local_definition_audit() {
     );
     let singleton_projection_outcomes =
         singleton_projection_baseline_outcomes(&audit.local_method_first_blockers);
-    let singleton_projection_moved = singleton_projection_outcomes
+    let singleton_no_longer_first_blocked = singleton_projection_outcomes
         .values()
         .filter(|outcome| outcome.as_str() != "UnsupportedSingletonReference")
         .count();
     assert_eq!(singleton_projection_outcomes.len(), 22);
     assert_eq!(
-        singleton_projection_moved, 22,
-        "all #880 singleton baseline method blockers must move past source projection"
+        singleton_no_longer_first_blocked, 22,
+        "no #880 singleton baseline method may retain UnsupportedSingletonReference as its first blocker"
     );
 
     println!("AUDIT_REPORT_BEGIN");
@@ -1212,7 +1212,7 @@ fn print_singleton_projection_baseline(outcomes: &BTreeMap<String, String>) {
     }
     println!("singleton_projection_baseline:");
     println!("  baseline_observations={}", outcomes.len());
-    println!("  moved_past_projection={moved}");
+    println!("  no_longer_first_blocked_by_singleton_projection={moved}");
     println!(
         "  remaining_UnsupportedSingletonReference={}",
         outcomes.len() - moved

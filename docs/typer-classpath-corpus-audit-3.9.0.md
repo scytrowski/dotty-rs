@@ -230,18 +230,19 @@ The pinned Scala 3.9.0 audit compares the same 22 #880 method observations after
 | Projection measure | Result |
 | --- | ---: |
 | baseline observations | 22 |
-| moved past projection | 22 |
+| no longer first blocked by singleton projection | 22 |
 | remaining UnsupportedSingletonReference | 0 |
 
 ### Baseline outcome classification
 
 | Outcome | Count |
 | --- | ---: |
-| Passed singleton projection and adaptation | 22 |
 | Deeper Typer semantic blocker | 0 |
 | Resolution or classpath blocker | 22 |
 | Residual singleton-specific blocker | 0 |
 | Fully typed baseline methods | 0 |
+
+Resolution or classpath first blockers do not show whether the corpus attempts reached singleton projection or expected-type adaptation. Focused fixtures establish those paths separately.
 
 ### Singleton source inventory
 
@@ -952,7 +953,7 @@ singleton_source_inventory:
     This=987 files=117 examples=[compiler/src/dotty/tools/backend/jvm/opt/FifoCache.scala, compiler/src/dotty/tools/dotc/ast/Positioned.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/ast/untpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala]
 singleton_projection_baseline:
   baseline_observations=22
-  moved_past_projection=22
+  no_longer_first_blocked_by_singleton_projection=22
   remaining_UnsupportedSingletonReference=0
   current_first_blockers:
     ImportQualifierNotFound=22

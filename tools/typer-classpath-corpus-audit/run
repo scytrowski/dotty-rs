@@ -350,7 +350,7 @@ mkdir -p "$(dirname -- "$output_path")"
         /^singleton_projection_baseline:$/ { in_profile = 1; next }
         in_profile && /^  current_first_blockers:$/ { in_blockers = 1; next }
         in_profile && /^  methods:$/ { in_profile = 0; in_blockers = 0 }
-        in_profile && !in_blockers && /^  (baseline_observations|moved_past_projection|remaining_UnsupportedSingletonReference)=/ {
+        in_profile && !in_blockers && /^  (baseline_observations|no_longer_first_blocked_by_singleton_projection|remaining_UnsupportedSingletonReference)=/ {
             line = $0
             sub(/^  /, "", line)
             split(line, fields, "=")
@@ -371,22 +371,24 @@ mkdir -p "$(dirname -- "$output_path")"
             split(line, fields, "=")
             name = fields[1]
             count = fields[2]
-            if (name ~ /Singleton|UnsupportedSingleton|LocalValueTypeMismatch/) {
+            if (name ~ /Singleton/) {
                 residual += count
             } else if (name ~ /ImportQualifierNotFound|TypeNameNotFound|MemberLookup|Resolver|Classpath/) {
                 resolution += count
+            } else if (name == "typed") {
+                typed += count
             } else {
                 deeper += count
             }
         }
         END {
-            printf "| Passed singleton projection and adaptation | 22 |\n"
             printf "| Deeper Typer semantic blocker | %d |\n", deeper
             printf "| Resolution or classpath blocker | %d |\n", resolution
             printf "| Residual singleton-specific blocker | %d |\n", residual
-            printf "| Fully typed baseline methods | 0 |\n"
+            printf "| Fully typed baseline methods | %d |\n", typed
         }
     ' "$tmp_dir/first.report"
+    printf '\nResolution or classpath first blockers do not show whether the corpus attempts reached singleton projection or expected-type adaptation. Focused fixtures establish those paths separately.\n'
     printf '\n### Singleton source inventory\n\n'
     printf '| Reference category | Singleton trees | Files | Source files |\n| --- | ---: | ---: | --- |\n'
     awk '
