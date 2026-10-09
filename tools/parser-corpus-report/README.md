@@ -544,3 +544,31 @@ Recreate the report with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-864-chimney.json
 ```
+
+## ZIO corpus
+
+The expanded corpus includes ZIO [`v2.1.26`](https://github.com/zio/zio/releases/tag/v2.1.26),
+pinned to `f053ccf444dbb267dcfe6f6e6048977e568dd23d`. The runner discovers
+tracked `src/main/scala*` roots and records the 35 roots containing Scala
+sources. This includes the production compile sources of ZIO's modules and
+excludes `src/test`, benchmark, generated, and documentation trees. As with
+the other source sets, the pinned checkout is validated against its exact
+revision and untracked or modified Scala sources are rejected.
+
+`parser-post-issue-869-zio.json` measures dotty-rs revision
+`ace8f75c030ea8637ed3f85c5c27ec73a1af4ec6` against Scala 3.9.0 and all six
+previous external/internal source sets plus ZIO. The corpus contains 3,479
+files: 1,236 Scala 3, 548 Cats, 266 Cats Effect, 916 Kyo, 10 Shapeless 3, 181
+Chimney, and 322 ZIO. There are 3,472 clean files and seven recoverable files,
+all in ZIO, with 28 diagnostics total. There are no hard parser failures,
+process failures, panics, hangs, scanner diagnostics, or Dotty oracle failures;
+Dotty emitted a result for every file. The previously included source sets
+remain clean. This is a new expanded-corpus measurement, not a parser
+improvement claim.
+
+Recreate it with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-869-zio.json
+```
