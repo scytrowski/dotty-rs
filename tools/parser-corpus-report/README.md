@@ -503,8 +503,9 @@ Cats, Cats Effect, and Kyo cohorts plus Shapeless 3. The combined corpus has
 2,976 files: 1,236 Scala 3, 548 Cats, 266 Cats Effect, 916 Kyo, and 10
 Shapeless files. All 2,976 parse without diagnostics, hard failures, panics,
 or hangs; the Scala 3.9.0 oracle emitted all 2,976 results with no oracle
-failures. The report SHA-256 is
-`6e2b2134994f058e2615c02ff940d99950c0bc318db9aeefb2a4c2e84366f198`.
+failures. Two complete runs at the same parser revision produced byte-
+identical JSON (SHA-256
+`6e2b2134994f058e2615c02ff940d99950c0bc318db9aeefb2a4c2e84366f198`).
 Recreate it with:
 
 ```text
