@@ -316,6 +316,7 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '| Baseline mutable-field method attempt | Current first blocker |\n| --- | --- |\n'
     awk '
         /^mutable_class_field_baseline_method_outcomes:$/ { in_outcomes = 1; next }
+        in_outcomes && /^singleton_reference_profile:$/ { in_outcomes = 0 }
         in_outcomes && /^```/ { in_outcomes = 0 }
         in_outcomes && /^  / {
             line = $0
