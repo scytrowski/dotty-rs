@@ -660,8 +660,8 @@ fn pinned_scala39_local_definition_audit() {
         .failures
         .get("MissingDeclaredType")
         .expect("the pinned audit should retain MissingDeclaredType first blockers");
-    assert_eq!(missing_declared_type.count, 20);
-    assert_eq!(missing_declared_type.files.len(), 8);
+    assert_eq!(missing_declared_type.count, 10);
+    assert_eq!(missing_declared_type.files.len(), 3);
     assert_eq!(
         audit.missing_declared_type_profile.records.len(),
         missing_declared_type.count,
@@ -908,7 +908,35 @@ fn pinned_scala39_local_definition_audit() {
     print_resolver_metrics(&resolver_metrics.borrow());
     print_pinned_immutable_field_completion_outcomes(&root, classpath);
     print_pinned_immutable_field_method_outcomes(&audit.local_method_first_blockers);
+    print_pinned_mutable_field_method_outcomes(&audit.local_method_first_blockers);
     println!("AUDIT_REPORT_END");
+}
+
+fn print_pinned_mutable_field_method_outcomes(outcomes: &BTreeMap<String, String>) {
+    const BASELINE_ATTEMPTS: [(&str, u32); 10] = [
+        ("compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala", 5089),
+        ("compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala", 5879),
+        ("compiler/src/dotty/tools/dotc/parsing/Scanners.scala", 1474),
+        ("compiler/src/dotty/tools/dotc/parsing/Scanners.scala", 998),
+        ("compiler/src/dotty/tools/dotc/reporting/Message.scala", 291),
+        ("compiler/src/dotty/tools/dotc/reporting/Message.scala", 349),
+        (
+            "compiler/src/dotty/tools/dotc/typer/Applications.scala",
+            4248,
+        ),
+        ("compiler/src/dotty/tools/dotc/util/WeakHashSet.scala", 708),
+        ("library/src/scala/collection/Iterator.scala", 3805),
+        ("library/src/scala/collection/Iterator.scala", 3865),
+    ];
+
+    println!("mutable_class_field_baseline_method_outcomes:");
+    for (path, method_tree) in BASELINE_ATTEMPTS {
+        let key = format!("{path}#tree={method_tree}");
+        let outcome = outcomes
+            .get(&key)
+            .unwrap_or_else(|| panic!("mutable baseline local method attempt is missing: {key}"));
+        println!("  {key} outcome={outcome}");
+    }
 }
 
 fn print_pinned_immutable_field_method_outcomes(outcomes: &BTreeMap<String, String>) {
@@ -1258,10 +1286,10 @@ fn highest_ranked_gap_output_does_not_claim_to_recommend_a_sprint() {
 fn scope_note_for_bucket(bucket: &str) -> (&'static str, &'static str, &'static str, &'static str) {
     match bucket {
         "MissingDeclaredType" => (
-            "type one immutable inferred class field from its RHS; this bucket is 14 of 34 occurrences across 7 of 15 files",
+            "infer one ordinary or inline inferred module-class field after source class val/var inference; the remaining bucket is 10 occurrences across 3 files",
             "dotty-typer/src/typer/completion/mod.rs, completion/declarations.rs, type_projection.rs, and existing expression typing",
-            "the field declaration context, RHS typing and widening, and completion rollback",
-            "mutable or module-class fields, method results, local PatDef, and generalized expected-type inference",
+            "module initialization context, RHS typing and widening, cycle behavior, and completion rollback",
+            "class fields, method results, local PatDef, and generalized expected-type inference",
         ),
         "AnonymousClassInstantiationDeferred" => (
             "support one anonymous new with one concrete parent and explicit member ownership",
@@ -5133,6 +5161,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
             "ExpressionOwnerDeclarationContextMissing"
         }
         TyperError::FieldInitializerContextInvalid { .. } => "FieldInitializerContextInvalid",
+        TyperError::FieldMutabilityMismatch { .. } => "FieldMutabilityMismatch",
         TyperError::ExpressionLocalScopeMissing { .. } => "ExpressionLocalScopeMissing",
         TyperError::ExpressionLocalScopeStackMissing { .. } => "ExpressionLocalScopeStackMissing",
         TyperError::ExpressionLocalScopeStackForeign { .. } => "ExpressionLocalScopeStackForeign",

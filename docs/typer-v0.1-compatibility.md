@@ -958,7 +958,6 @@ constructor-body typing is not otherwise implemented. `push_local_scope` adds
 empty block scopes without changing the source-context graph.
 
 `SourceTyper::field_initializer_context_for` builds a separate context for an
-initialized `ValDef` field owned by an ordinary source class. Namer records
 initialized `ValDef` field owned by an ordinary source class. The semantic
 index keeps this separate from the field declaration context, which remains
 the source of truth for completing its declared type. Namer records the
@@ -972,31 +971,30 @@ initializer, and malformed owner/context relationships are rejected with a
 focused context error. This entry point builds context only; field completion
 uses it to type an initializer when inferring that field's type.
 
-`complete_symbol` infers ordinary immutable source fields owned by a class
-when their canonical `ValDef` has an initializer and a synthetic inferred
-`TypeTree`. It types the initializer in the field context, widens the result,
-validates it as a value type, and caches the inferred type for the source
-`TypeTree`. Short acyclic dependencies between inferred fields are supported;
-recursive dependencies and chains deeper than the fixed completion limit
-return typed errors. Mutable, lazy, inline, given, implicit, and module-class
-fields remain deferred, as do unsupported initializer expressions. Explicit
-field annotations continue through the declared-type completion path.
+`complete_symbol` infers ordinary source fields owned by a class when their
+canonical `ValDef` has an initializer and a synthetic inferred `TypeTree`.
+For inferred fields, source `var` syntax must agree with the semantic
+`MUTABLE` flag; a mismatch is a focused error. It types the initializer in the
+field context, widens the result, validates it as a value type, and caches the
+inferred type for the source `TypeTree`. Short acyclic dependencies between
+inferred fields are supported; recursive dependencies and chains deeper than
+the fixed completion limit return typed errors. Mutable field reads and
+assignments use the inferred type, so incompatible assignments are rejected
+when the existing type relation can prove the mismatch. Lazy, inline, given,
+implicit, and module-class fields remain deferred, as do unsupported
+initializer expressions. Explicit field annotations continue through the
+declared-type completion path.
 
-The #856–#857 pinned Scala 3.9.0 corpus audit directly retried all seven
-distinct immutable class fields behind the baseline's 14 `MissingDeclaredType`
-occurrences. Each direct field-completion attempt stops at
-`ImportQualifierNotFound` while resolving an import from the field's source
-context. In the pinned files, these imports are at file scope before the field
-declarations. This does not establish that the corresponding RHS was fully
-typed. It is first-blocker movement, not successful corpus typing. The total
-`MissingDeclaredType` count fell from 34
-occurrences in 15 files to 20 in 8 files; the remaining records are mutable
-class fields and ordinary or inline module-class fields. The direct probe and
-its per-declaration outcomes are recorded in the [classpath audit report](typer-classpath-corpus-audit-3.9.0.md#856-857-immutable-class-field-inference-audit).
-The same report separately tracks all 14 baseline local-method attempts by
-source path and method tree index; each now reaches `ImportQualifierNotFound`.
-Those are first blockers reached through the methods, not successful field RHS
-inferences.
+The #858 pinned Scala 3.9.0 corpus audit ran twice and produced byte-identical
+normalized reports. It tracks each of the 10 mutable-class occurrences across
+6 files by source path and local-method tree index. `MissingDeclaredType`
+decreased from the #856 snapshot's 20 occurrences in 8 files to 10 in 3 files;
+the remaining records are ordinary and inline module-class fields. The moved
+first blockers include `ImportQualifierNotFound`, `MemberLookup`,
+`TypeNameNotFound`, and `UnsupportedTypeTree::Annotated`; these outcomes do not
+establish successful enclosing-method typing. See the
+[classpath audit report](typer-classpath-corpus-audit-3.9.0.md#858-mutable-class-field-inference-audit)
+for all 10 outcomes and the refreshed backlog recommendation.
 The cross-crate classpath regression also types an inferred field selection
 from an external `Ping` class, then checks that a missing external member rolls
 back loaded symbols, typed trees, symbol completion, and the inferred type
