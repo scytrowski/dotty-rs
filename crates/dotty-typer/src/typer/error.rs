@@ -481,6 +481,13 @@ pub enum TyperError {
         source: SourceId,
         tree_index: u32,
     },
+    /// An inferred source field's widened RHS type is not a valid field value type.
+    InvalidInferredFieldType {
+        field: SymbolId,
+        source: SourceId,
+        tree_index: u32,
+        inferred: TypeId,
+    },
     /// Inferred source field completion exceeded its bounded dependency depth.
     InferredFieldTypeDepthExceeded {
         symbol: SymbolId,

@@ -17830,8 +17830,13 @@ mod tests {
 
         let acyclic = typer.complete_symbol(dependent);
         assert!(
-            matches!(&acyclic, Err(TyperError::MissingDeclaredType { .. })),
-            "acyclic completion should fail for the unsupported inferred type, got {acyclic:?}"
+            acyclic.is_ok(),
+            "acyclic dependency should be supported: {acyclic:?}"
+        );
+        let acyclic_type = acyclic.unwrap();
+        assert_eq!(
+            *typer.store().symbols.info(dependent),
+            SymbolInfo::Complete(acyclic_type)
         );
         assert!(typer.inferred_field_types_in_progress.is_empty());
 
@@ -17848,7 +17853,7 @@ mod tests {
         );
         assert!(matches!(
             typer.complete_symbol(unresolved),
-            Err(TyperError::MissingDeclaredType { .. })
+            Err(TyperError::TermNameNotFound { .. })
         ));
         assert!(typer.inferred_field_types_in_progress.is_empty());
     }
@@ -17988,8 +17993,9 @@ mod tests {
     fn explicit_field_type_breaks_an_inferred_field_cycle() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { val explicit: Int = inferred; val inferred = explicit }");
+        let int = definitions.int;
         let explicit = val_symbol(&parsed, &store, &index, source, "explicit").0;
-        let inferred = val_symbol(&parsed, &store, &index, source, "inferred").0;
+        let (inferred, inferred_tpt) = val_symbol(&parsed, &store, &index, source, "inferred");
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -18000,16 +18006,165 @@ mod tests {
         );
 
         typer.complete_symbol(explicit).unwrap();
-        assert!(matches!(
-            typer.complete_symbol(inferred),
-            Err(TyperError::MissingDeclaredType { .. })
-        ));
+        assert_eq!(typer.complete_symbol(inferred).unwrap(), int);
         assert!(matches!(
             *typer.store().symbols.info(explicit),
             SymbolInfo::Complete(_)
         ));
-        assert_eq!(*typer.store().symbols.info(inferred), SymbolInfo::Missing);
+        assert_eq!(
+            *typer.store().symbols.info(inferred),
+            SymbolInfo::Complete(int)
+        );
+        assert_eq!(typer.type_index.type_at(source, inferred_tpt), Some(int));
         assert!(typer.inferred_field_types_in_progress.is_empty());
+    }
+
+    #[test]
+    fn inferred_class_fields_complete_from_supported_initializer_shapes() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C(parameter: Int) { val literal = 42; val explicit: Int = notFound; val fromExplicit = explicit; val first = 1; val second = first; def helper(value: Int): Int = value; val fromMethod = helper(2); val fromThis = this.explicit; val fromConstructor = parameter; val fromBlock = { val local = 3; local } }",
+        );
+        let int = definitions.int;
+        let names = [
+            "literal",
+            "fromExplicit",
+            "second",
+            "fromMethod",
+            "fromThis",
+            "fromConstructor",
+            "fromBlock",
+        ];
+        let fields = names
+            .map(|name| (name, val_symbol(&parsed, &store, &index, source, name)))
+            .into_iter()
+            .collect::<Vec<_>>();
+        let explicit = val_symbol(&parsed, &store, &index, source, "explicit");
+        let first = val_symbol(&parsed, &store, &index, source, "first");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert_eq!(typer.complete_symbol(explicit.0).unwrap(), int);
+        for (name, (field, inferred_tpt)) in fields {
+            let inferred = typer
+                .complete_symbol(field)
+                .unwrap_or_else(|error| panic!("field `{name}` failed: {error:?}"));
+            assert_eq!(inferred, int, "field `{name}` should infer Int");
+            assert_eq!(
+                typer.type_index.type_at(source, inferred_tpt),
+                Some(inferred),
+                "field `{name}` inferred TypeTree should be cached"
+            );
+            assert_eq!(
+                *typer.store().symbols.info(field),
+                SymbolInfo::Complete(inferred)
+            );
+        }
+        assert_eq!(
+            *typer.store().symbols.info(first.0),
+            SymbolInfo::Complete(int)
+        );
+
+        let (literal, literal_tpt) = val_symbol(&parsed, typer.store(), &index, source, "literal");
+        let first_completion = *typer.store().symbols.info(literal);
+        let typed_tree_checkpoint = typer.typed_ast().checkpoint();
+        let source_mapping_checkpoint = typer.source_typed_index().len();
+        assert_eq!(typer.complete_symbol(literal).unwrap(), int);
+        assert_eq!(*typer.store().symbols.info(literal), first_completion);
+        assert_eq!(typer.typed_ast().checkpoint(), typed_tree_checkpoint);
+        assert_eq!(typer.source_typed_index().len(), source_mapping_checkpoint);
+        assert_eq!(typer.type_index.type_at(source, literal_tpt), Some(int));
+    }
+
+    #[test]
+    fn inferred_class_field_errors_and_unsupported_shapes_are_transactional() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val unresolved = notFound }");
+        let (unresolved, inferred_tpt) = val_symbol(&parsed, &store, &index, source, "unresolved");
+        let (_, _, unresolved_rhs) =
+            val_definition_and_rhs(&parsed, &store, &index, source, "unresolved");
+        let store_checkpoint = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let typed_tree_checkpoint = typer.typed_ast().checkpoint();
+        let source_mapping_checkpoint = typer.source_typed_index().len();
+        assert!(matches!(
+            typer.complete_symbol(unresolved),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.typed_ast().checkpoint(), typed_tree_checkpoint);
+        assert_eq!(typer.source_typed_index().len(), source_mapping_checkpoint);
+        assert_eq!(typer.source_typed_index().get(source, unresolved_rhs), None);
+        assert_eq!(typer.type_index.type_at(source, inferred_tpt), None);
+        assert_eq!(*typer.store().symbols.info(unresolved), SymbolInfo::Missing);
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def helper(value: Int): Int = value; val invalid = helper }");
+        let (invalid, inferred_tpt) = val_symbol(&parsed, &store, &index, source, "invalid");
+        let invalid_tree_index = match index.definition_of(invalid).unwrap() {
+            SourceDefinition::Canonical { tree, .. } => tree.index(),
+            SourceDefinition::Derived { .. } => panic!("field should be canonical"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let helper = method_symbol(&parsed, typer.store(), &index, source, "helper");
+        typer.complete_symbol(helper).unwrap();
+        assert!(matches!(
+            typer.complete_symbol(invalid),
+            Err(TyperError::InvalidInferredFieldType {
+                field,
+                source: actual_source,
+                tree_index,
+                inferred,
+            }) if field == invalid
+                && actual_source == source
+                && tree_index == invalid_tree_index
+                && matches!(typer.store().types.get(inferred), Type::Method(_))
+        ));
+        assert_eq!(typer.type_index.type_at(source, inferred_tpt), None);
+        assert_eq!(*typer.store().symbols.info(invalid), SymbolInfo::Missing);
+
+        for (source_text, field_name) in [
+            ("class C { var mutable = 1 }", "mutable"),
+            ("object O { val module = 1 }", "module"),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (field, inferred_tpt) = val_symbol(&parsed, &store, &index, source, field_name);
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            assert!(matches!(
+                typer.complete_symbol(field),
+                Err(TyperError::MissingDeclaredType { .. })
+            ));
+            assert_eq!(typer.type_index.type_at(source, inferred_tpt), None);
+            assert_eq!(*typer.store().symbols.info(field), SymbolInfo::Missing);
+        }
     }
 
     #[test]

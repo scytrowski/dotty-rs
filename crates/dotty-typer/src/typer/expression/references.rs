@@ -239,6 +239,9 @@ impl SourceTyper<'_> {
         tree_index: u32,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
+        if self.store.symbols.get(symbol).kind == SymbolKind::Local {
+            return Ok(self.definitions.no_prefix);
+        }
         let owner = self.store.symbols.get(symbol).owner;
         if !owner.is_some_and(|owner| {
             matches!(
