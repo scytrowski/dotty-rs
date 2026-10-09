@@ -9,6 +9,7 @@ from source_inventory import (
     kyo_scala3_production_roots,
     shapeless3_compile_roots,
     tracked_scala_sources,
+    zio_scala3_production_roots,
 )
 
 
@@ -107,6 +108,16 @@ class TrackedScalaSourcesTests(unittest.TestCase):
         roots = shapeless3_compile_roots(self.repository, [production])
 
         self.assertEqual(roots, [production.resolve(), test_support.resolve()])
+
+    def test_zio_excludes_mdoc_docs_project_from_scala3_corpus(self):
+        production = self.repository / "core/shared/src/main/scala"
+        docs = self.repository / "zio-docs/src/main/scala"
+        production.mkdir(parents=True)
+        docs.mkdir(parents=True)
+
+        roots = zio_scala3_production_roots(self.repository, [production, docs])
+
+        self.assertEqual(roots, [production.resolve()])
 
 
 if __name__ == "__main__":

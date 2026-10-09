@@ -186,8 +186,7 @@
     "test-sbt/jvm/src/main/scala",
     "test-sbt/jvm-native/src/main/scala",
     "test-sbt/shared/src/main/scala",
-    "test-scalacheck/src/main/scala",
-    "zio-docs/src/main/scala"
+    "test-scalacheck/src/main/scala"
   ],
   "source_version": "3.9.0",
   "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
@@ -484,13 +483,12 @@
         "test-sbt/jvm/src/main/scala",
         "test-sbt/jvm-native/src/main/scala",
         "test-sbt/shared/src/main/scala",
-        "test-scalacheck/src/main/scala",
-        "zio-docs/src/main/scala"
+        "test-scalacheck/src/main/scala"
       ],
-      "scala_oracle_files": 322,
+      "scala_oracle_files": 321,
       "scala_oracle_failures": 0,
-      "files_attempted": 322,
-      "files_parsed_without_diagnostics": 315,
+      "files_attempted": 321,
+      "files_parsed_without_diagnostics": 314,
       "files_parsed_with_recoverable_diagnostics": 7,
       "hard_parser_failures": 0,
       "scanner_diagnostics": 0,
@@ -527,11 +525,11 @@
       }
     }
   },
-  "parser_revision": "ace8f75c030ea8637ed3f85c5c27ec73a1af4ec6",
-  "scala_oracle_files": 3479,
+  "parser_revision": "9ae192bd451213fb390b310b39fbd20946843bb7",
+  "scala_oracle_files": 3478,
   "scala_oracle_failures": 0,
-  "files_attempted": 3479,
-  "files_parsed_without_diagnostics": 3472,
+  "files_attempted": 3478,
+  "files_parsed_without_diagnostics": 3471,
   "files_parsed_with_recoverable_diagnostics": 7,
   "hard_parser_failures": 0,
   "process_failures": 0,
@@ -570,8 +568,8 @@
   },
   "capture_checking_cohorts": {
     "disabled": {
-      "files": 3237,
-      "clean": 3230,
+      "files": 3236,
+      "clean": 3229,
       "recoverable": 7,
       "hard_failures": 0,
       "scanner_diagnostics": 0,

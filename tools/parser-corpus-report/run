@@ -86,7 +86,18 @@ PY
 )
 mapfile -t shapeless_roots <<<"$shapeless_roots_output"
 mapfile -t chimney_roots < <(cargo run --quiet --locked -p dotty-parser-corpus-report -- --list-production-roots "$chimney_root")
-mapfile -t zio_roots < <(cargo run --quiet --locked -p dotty-parser-corpus-report -- --list-production-roots "$zio_root")
+mapfile -t zio_discovered_roots < <(cargo run --quiet --locked -p dotty-parser-corpus-report -- --list-production-roots "$zio_root")
+zio_roots_output=$(PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}" python3 - "$zio_root" "${zio_discovered_roots[@]}" <<'PY'
+import pathlib
+import sys
+from source_inventory import zio_scala3_production_roots
+
+roots = [pathlib.Path(root) for root in sys.argv[2:]]
+for root in zio_scala3_production_roots(pathlib.Path(sys.argv[1]), roots):
+    print(root)
+PY
+)
+mapfile -t zio_roots <<<"$zio_roots_output"
 if [[ ${#cats_roots[@]} -eq 0 || ${#cats_effect_roots[@]} -eq 0 || ${#kyo_roots[@]} -eq 0 || ${#shapeless_roots[@]} -eq 0 || ${#chimney_roots[@]} -eq 0 || ${#zio_roots[@]} -eq 0 ]]; then
   echo "no production source roots found in a pinned corpus checkout" >&2
   exit 1
