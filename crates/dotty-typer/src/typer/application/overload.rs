@@ -584,7 +584,10 @@ impl SourceTyper<'_> {
             });
         }
         for (index, argument) in arguments.iter().enumerate() {
-            match self.conforms(argument.widened_type, method.params[index].ty) {
+            let expected = method.params[index].ty;
+            let actual =
+                self.adapt_expression_type_to_expected(argument.own_type, expected, info_journal)?;
+            match self.conforms(actual, expected) {
                 Ok(true) => {}
                 Ok(false) => return Ok(None),
                 Err(error) => {
@@ -592,8 +595,8 @@ impl SourceTyper<'_> {
                         source: self.source,
                         tree_index: application_tree_index,
                         argument_index: index,
-                        actual: argument.widened_type,
-                        expected: method.params[index].ty,
+                        actual,
+                        expected,
                         error: Box::new(error),
                     });
                 }
@@ -667,10 +670,10 @@ impl SourceTyper<'_> {
         for (tree, parameter) in argument_trees.iter().zip(&method.params) {
             let typed =
                 self.type_value_expression_inner(*tree, context, info_journal, new_mappings)?;
-            let actual = self.widen_expression_type_journaled(
+            let actual = self.adapt_expression_type_to_expected(
                 self.typed_arena.get(typed).ty,
+                parameter.ty,
                 info_journal,
-                0,
             )?;
             match self.conforms(actual, parameter.ty) {
                 Ok(true) => {}
@@ -1213,12 +1216,17 @@ impl SourceTyper<'_> {
             for (argument_index, (argument, parameter)) in
                 arguments.iter().zip(&method.params).enumerate()
             {
-                match self.conforms(argument.widened_type, parameter.ty) {
+                let actual = self.adapt_pre_widened_expression_type_to_expected(
+                    argument.own_type,
+                    argument.widened_type,
+                    parameter.ty,
+                )?;
+                match self.conforms(actual, parameter.ty) {
                     Ok(true) => {}
                     Ok(false) => {
                         argument_rejection = Some(OverloadRejection::ArgumentNonConformance {
                             argument_index,
-                            actual: argument.widened_type,
+                            actual,
                             expected: parameter.ty,
                         });
                         break;

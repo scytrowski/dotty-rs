@@ -345,7 +345,12 @@ impl SourceTyper<'_> {
                     self.typed_arena.get(typed_argument.typed).ty,
                     typed_argument.own_type
                 );
-                (typed_argument.typed, typed_argument.widened_type)
+                let actual = self.adapt_expression_type_to_expected(
+                    typed_argument.own_type,
+                    parameter.ty,
+                    info_journal,
+                )?;
+                (typed_argument.typed, actual)
             } else {
                 let argument = self.type_value_expression_inner(
                     *argument_tree,
@@ -354,8 +359,11 @@ impl SourceTyper<'_> {
                     new_mappings,
                 )?;
                 let argument_type = self.typed_arena.get(argument).ty;
-                let actual =
-                    self.widen_expression_type_journaled(argument_type, info_journal, 0)?;
+                let actual = self.adapt_expression_type_to_expected(
+                    argument_type,
+                    parameter.ty,
+                    info_journal,
+                )?;
                 (argument, actual)
             };
             match self.conforms(actual, parameter.ty) {

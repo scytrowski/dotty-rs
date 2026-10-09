@@ -93,10 +93,13 @@ syntax. These unsupported semantic constant kinds return
 
 The #880 pinned audit identified 22 local-method first blockers from the one
 `true` singleton declaration `actionable` in `CheckUnused.scala`. The #881
-rerun moved all 22 past source type projection. Their current first blocker is
-`LocalValueTypeMismatch`: #882 now proves the type relation, while #883 will
-preserve the exact expression constant through expected-type adaptation. This
-movement is not full method typing.
+rerun moved all 22 past source type projection. #882 added exact constant
+relations, and #883 now preserves an expression's exact constant when the
+expected type contains a singleton alternative. This supports local value
+initializers, local method results, and method arguments while ordinary
+expected types continue to use the underlying widened type. Literal singleton
+annotations also reify into typed type trees. The audit measures first-blocker
+movement and does not claim full method typing.
 
 The semantic model already has `Type::Constant`, and source literal
 expressions retain exact constant types. The bounded relation validates and
@@ -115,14 +118,14 @@ relation subset and return `TypeRelationError::UnsupportedType`. `Class`
 constants are not treated as nominal class views. `require_stable_selection_prefix`
 continues to accept supported constant types as stable prefixes. TASTy decoding
 maps wire constant types to the same `Type::Constant` representation. Expected
-expression adaptation still widens before conformance, so singleton expected
-types need a path that preserves the exact constant until relation checking;
-that is the separate #883 follow-up.
+expression adaptation preserves an exact constant only when the normalized
+expected type contains a constant singleton, including a union alternative;
+all other expectations use normal expression widening before conformance.
+This is intentionally limited to literal constants and does not add general
+bidirectional typing.
 
-Expected adaptation must compare the preserved expression constant before
-choosing the underlying widened type. Keep `null`, class literals, literal
-unions, and general constant folding unsupported until their own source and
-relation contracts are specified.
+`null`, class literals, and general constant folding remain unsupported until
+their own source and relation contracts are specified.
 
 ## Pattern typing foundation
 

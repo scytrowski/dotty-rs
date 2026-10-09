@@ -325,7 +325,7 @@ mkdir -p "$(dirname -- "$output_path")"
             printf "| `%s` | `%s` |\n", fields[1], fields[2]
         }
     ' "$tmp_dir/first.report"
-    printf '\nThe top-ranked remaining gap is `AnonymousClassInstantiationDeferred` (32 occurrences across 15 files), but its implementation risk and anonymous-identity work are larger than the literal singleton slice. #880 traced 22 `UnsupportedSingletonReference` observations to one `true` declaration. #881 implemented literal-to-`Type::Constant` source projection, and #882 adds exact constant relations for the bounded supported subset. The remaining singleton adaptation work is tracked by #883. Keep `null`, class literals, literal unions, arbitrary paths, unstable prefixes, and path-dependent relation changes deferred.\n\n'
+    printf '\nThe top-ranked remaining gap is `AnonymousClassInstantiationDeferred` (32 occurrences across 15 files), but its implementation risk and anonymous-identity work are larger than the literal singleton slice. #880 traced 22 `UnsupportedSingletonReference` observations to one `true` declaration. #881 implemented literal-to-`Type::Constant` source projection, #882 added exact constant relations, and #883 preserves constants for singleton expected types. Keep `null`, class literals, arbitrary paths, unstable prefixes, and path-dependent relation changes deferred.\n\n'
     printf '## #880 literal singleton blocker profile\n\n'
     printf 'The #880 baseline audit ran twice at revision `777528f19a58e794c9954a42f433373472ec57f8`; normalized output matched byte-for-byte. Its 22 `UnsupportedSingletonReference` first-blocker observations all pointed to one source singleton tree and one enclosing declaration. The current values are reported separately under #881 below.\n\n'
     printf '| Profile measure | Result |\n| --- | ---: |\n'
@@ -339,10 +339,10 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '| Concern | Recommended boundary |\n| --- | --- |\n'
     printf '| Source type projection | Implemented in #881: supported source literals project directly to `Type::Constant` with the exact payload. |\n'
     printf '| Type relation | Implemented in #882: compare exact supported constant payloads and relate constants to modeled primitive/Unit types. String constants compare exactly; String widening remains unsupported without a canonical source type. |\n'
-    printf '| Expected adaptation | In #883, check the exact expression constant against a singleton expected type before widening; preserve ordinary underlying-type conformance. |\n'
-    printf '| Explicit deferrals | Keep `null`, class literals, literal unions, arbitrary paths, unstable prefixes, and path-dependent relation changes unsupported. |\n\n'
-    printf '## #881 literal singleton projection audit\n\n'
-    printf 'The pinned Scala 3.9.0 audit compares the same 22 #880 method observations after literal projection and constant relation support. Each baseline method is required to remain present, and the run fails if any still stops at `UnsupportedSingletonReference`. All 22 moved past projection; the current first blocker is `LocalValueTypeMismatch`, which #883 expected-type adaptation addresses. This measures progress and does not claim successful method typing. Two normalized audit runs matched byte-for-byte.\n\n'
+    printf '| Expected adaptation | Implemented in #883: preserve exact constants for singleton expected types, including singleton alternatives in unions; ordinary expectations still use the widened type. |\n'
+    printf '| Explicit deferrals | Keep `null`, class literals, arbitrary paths, unstable prefixes, and path-dependent relation changes unsupported. |\n\n'
+    printf '## #881–#883 literal singleton progress audit\n\n'
+    printf 'The pinned Scala 3.9.0 audit compares the same 22 #880 method observations after literal projection, constant relations, and expected adaptation. Each baseline method is required to remain present, and the run fails if any still stops at `UnsupportedSingletonReference`. This measures first-blocker movement and does not claim successful method typing. Two normalized audit runs must match byte-for-byte.\n\n'
     printf '| Projection measure | Result |\n| --- | ---: |\n'
     awk '
         /^singleton_projection_baseline:$/ { in_profile = 1; next }
@@ -369,7 +369,7 @@ mkdir -p "$(dirname -- "$output_path")"
             printf "| `%s` | %s |\n", fields[1], fields[2]
         }
     ' "$tmp_dir/first.report"
-    printf '\nThe raw profile below lists the current first blocker for each of the 22 pinned method trees. These methods have not completed typing; their relation and expected-adaptation blockers remain for later issues.\n\n'
+    printf '\nThe raw profile below lists the current first blocker for each of the 22 pinned method trees. After #883, the former `LocalValueTypeMismatch` blocker moved to `ImportQualifierNotFound`; these observations show where typing stops and do not assert that the methods completed typing.\n\n'
     printf '## Previous type projection snapshot\n\n'
     printf 'The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.\n\n'
     printf '```text\n'

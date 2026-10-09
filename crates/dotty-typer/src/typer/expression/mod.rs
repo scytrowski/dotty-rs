@@ -174,7 +174,8 @@ impl SourceTyper<'_> {
     ) -> Result<TreeId<Typed>, TyperError> {
         let typed = self.type_value_expression_inner(tree, context, info_journal, new_mappings)?;
         let expression_type = self.typed_arena.get(typed).ty;
-        let mut actual = self.widen_expression_type_journaled(expression_type, info_journal, 0)?;
+        let mut actual =
+            self.adapt_expression_type_to_expected(expression_type, expected, info_journal)?;
         for (binder, parameters) in self.active_local_type_binders.iter().rev() {
             if !self.type_contains_param_ref(expected, *binder)? {
                 continue;
@@ -214,6 +215,76 @@ impl SourceTyper<'_> {
                 expected,
                 error: Box::new(error),
             }),
+        }
+    }
+
+    /// Preserves an exact constant only when the expected type contains a
+    /// singleton alternative that needs the literal's identity. Ordinary
+    /// expectations continue through normal expression widening.
+    pub(in crate::typer) fn adapt_expression_type_to_expected(
+        &mut self,
+        expression_type: TypeId,
+        expected: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        if matches!(
+            self.store.types.try_get(expression_type),
+            Some(Type::Constant(_))
+        ) && self.expected_type_contains_constant(expected, 0)?
+        {
+            Ok(expression_type)
+        } else {
+            self.widen_expression_type_journaled(expression_type, info_journal, 0)
+        }
+    }
+
+    /// Selects between an expression's exact and already computed widened
+    /// types without performing additional semantic mutations.
+    pub(in crate::typer) fn adapt_pre_widened_expression_type_to_expected(
+        &self,
+        expression_type: TypeId,
+        widened_type: TypeId,
+        expected: TypeId,
+    ) -> Result<TypeId, TyperError> {
+        if matches!(
+            self.store.types.try_get(expression_type),
+            Some(Type::Constant(_))
+        ) && self.expected_type_contains_constant(expected, 0)?
+        {
+            Ok(expression_type)
+        } else {
+            Ok(widened_type)
+        }
+    }
+
+    fn expected_type_contains_constant(
+        &self,
+        expected: TypeId,
+        depth: usize,
+    ) -> Result<bool, TyperError> {
+        if depth >= crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            return Err(TyperError::TypeNormalization(
+                crate::types::TypeNormalizeError::TooDeep,
+            ));
+        }
+        let expected = crate::types::TypeNormalizer::new(self.store)
+            .normalize_for_lookup(expected)
+            .map_err(TyperError::TypeNormalization)?;
+        let Some(node) = self.store.types.try_get(expected) else {
+            return Err(TyperError::TypeNormalization(
+                if self.store.types.contains(expected) {
+                    crate::types::TypeNormalizeError::UnfilledType { ty: expected }
+                } else {
+                    crate::types::TypeNormalizeError::InvalidType { ty: expected }
+                },
+            ));
+        };
+        match node {
+            Type::Constant(_) => Ok(true),
+            Type::Or { left, right } => Ok(self
+                .expected_type_contains_constant(*left, depth + 1)?
+                || self.expected_type_contains_constant(*right, depth + 1)?),
+            _ => Ok(false),
         }
     }
 
@@ -327,6 +398,7 @@ impl SourceTyper<'_> {
             TreeKind::Ident(ident) => ident.name.is_type(),
             TreeKind::Select(selection) => selection.name.is_type(),
             TreeKind::AppliedTypeTree(_) => true,
+            TreeKind::SingletonTypeTree(_) => true,
             _ => false,
         };
         if !supported {
