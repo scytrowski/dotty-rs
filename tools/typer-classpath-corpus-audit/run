@@ -245,14 +245,14 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '\n### Family assessment\n\n'
     printf '| Producer family | Smallest useful slice | Infrastructure and reuse | Main risks and non-goals |\n| --- | --- | --- | --- |\n'
     printf '| Immutable `Class` fields (14 / 7) | Implemented in #854–#856; this report measures whether the corpus shapes pass the bounded path. | Field initializer context, ordinary RHS typing, widening, recursion guard, cache, and rollback are now covered by focused tests. | Full-corpus `ImportQualifierNotFound` movement remains a blocker; do not count movement as semantic success. |\n'
-    printf '| Mutable `Class` fields (10 / 6) | Add `var` only after immutable field inference works. | Reuse the class initializer context and RHS inference; preserve the source `Var` modifier and semantic `MUTABLE` flag. | Assignment checks must use the inferred field type; check reads and writes during initialization. No changes to assignment typing in the first slice. |\n'
+    printf '| Mutable `Class` fields (10 / 6) | Implemented in #858; the pinned audit tracks all 10 source-method attempts individually. | Reuses the initializer context, RHS typing, widening, recursion guard, transactional completion, and assignment relation. | Corpus first-blocker movement is not semantic completion; module-class fields remain separate. |\n'
     printf '| Ordinary `ModuleClass` fields (6 / 2) | Infer one non-inline module member value after class fields. | Reuse field type inference with a module-class owner and the namer-provided lexical context. | Singleton initialization and module cycles differ from per-instance class initialization. Keep module values out of the first slice. |\n'
     printf '| Inline `ModuleClass` fields (4 / 1) | Add inline values as a separate follow-up after ordinary module values. | Reuse only the proven module initializer path and existing inline flags. | Compile-time constant and inline expansion rules add constraints. Do not assume ordinary runtime RHS typing is sufficient. |\n\n'
-    printf '\n`complete_symbol` reuses an already-complete symbol, and source type projection reuses a cached type-index entry before projection. At the pre-#856 baseline, a field cache miss reached generic projection and stopped before typing the RHS. #854–#856 now route only eligible immutable ordinary-class fields through the field initializer context, normal RHS typing, widening, recursion protection, and transactional publication. This audit records the newly exposed first blockers.\n\n'
+    printf '\n`complete_symbol` reuses an already-complete symbol, and source type projection reuses a cached type-index entry before projection. #854–#856 routed eligible immutable class fields through the initializer context, normal RHS typing, widening, recursion protection, and transactional publication. #858 extends that same bounded path to mutable class fields.\n\n'
     printf '### Historical #825 recommendation (pre-#856)\n\n'
-    printf 'The recommendation above is the historical #825 plan; the immutable `Class` field path landed in #854–#856. The following #856–#857 audit measures its corpus impact and records the exact first blocker for each baseline declaration.\n\n'
-    printf '## #856–#857 immutable class field inference audit\n\n'
-    printf 'The pinned corpus audit runs twice against Scala revision `777528f19a58e794c9954a42f433373472ec57f8` and compares normalized output byte-for-byte. The #825 baseline had 34 `MissingDeclaredType` first-blocker occurrences in 15 files. After #856, 20 remain in 8 files: the original immutable `Class` bucket (14 / 7) no longer stops at `MissingDeclaredType`, while 10 mutable `Class` occurrences (6 files), 6 ordinary `ModuleClass` occurrences (2 files), and 4 inline `ModuleClass` occurrences (1 file) remain.\n\n'
+    printf 'The recommendation above is the historical #825 plan; immutable `Class` field inference landed in #854–#856, followed by mutable fields in #858.\n\n'
+    printf '## Historical #856–#857 immutable class field inference audit\n\n'
+    printf 'At the #856 snapshot, the #825 baseline had 34 `MissingDeclaredType` first-blocker occurrences in 15 files. Immutable class fields accounted for 14 occurrences across 7 files and no longer stopped at `MissingDeclaredType`; 20 occurrences in 8 files remained, including 10 mutable `Class` occurrences across 6 files. The immutable field and method outcomes from that snapshot are retained below as historical measurements.\n\n'
     printf '| Baseline immutable `Class` field | Weighted occurrences | Direct completion outcome |\n| --- | ---: | --- |\n'
     awk '
         /^immutable_class_field_completion_outcomes:$/ { in_outcomes = 1; next }
@@ -274,9 +274,10 @@ mkdir -p "$(dirname -- "$output_path")"
         }
     ' "$tmp_dir/first.report"
     printf '\nThe following table tracks the 14 baseline local-method attempts independently from direct field completion. Method tree indexes are pinned to the same source revision and each row is asserted in the ignored audit test.\n\n'
-    printf '| Baseline local-method attempt | Current first blocker |\n| --- | --- |\n'
+    printf '| Baseline local-method attempt | First blocker at #857 |\n| --- | --- |\n'
     awk '
         /^immutable_class_field_baseline_method_outcomes:$/ { in_outcomes = 1; next }
+        /^mutable_class_field_baseline_method_outcomes:$/ { in_outcomes = 0 }
         in_outcomes && /^```/ { in_outcomes = 0 }
         in_outcomes && /^  / {
             line = $0
@@ -285,7 +286,21 @@ mkdir -p "$(dirname -- "$output_path")"
             printf "| `%s` | `%s` |\n", fields[1], fields[2]
         }
     ' "$tmp_dir/first.report"
-    printf '\nEach direct field-completion attempt stops at `ImportQualifierNotFound` while resolving an import from the field source context. In the pinned sources these imports are at file scope before the field declarations; this result does not establish that the corresponding RHS was fully typed. The 14 local-method outcomes above are first blockers reached through those methods, not 14 successful RHS inferences. Focused regressions separately cover constructor-parameter identity, generic construction, nested member selection, `this` prefixes, short field dependencies, cycles, and rollback. The audit does not implement mutable fields, module fields, or inline fields. The immutable path is structurally reusable for a future `var` slice, provided it separately verifies source `Var` against semantic `MUTABLE`, inferred assignment/read/write behavior, and initialization cycles. Existing assignment coverage only checks an explicitly typed generic mutable field, so it does not establish inferred-`var` readiness.\n\n'
+    printf '\nEach direct immutable field-completion attempt stops at `ImportQualifierNotFound` while resolving an import from the field source context. In the pinned sources these imports are at file scope before the field declarations; this does not establish that the corresponding RHS was fully typed. The 14 local-method outcomes are first blockers reached through those methods, not successful RHS inferences.\n\n'
+    printf '## #858 mutable class field inference audit\n\n'
+    printf 'The Scala 3.9.0 audit ran twice against revision `777528f19a58e794c9954a42f433373472ec57f8`; normalized reports matched byte-for-byte. All 10 pre-change mutable-class occurrences across 6 files are retained as individual local-method rows below. `MissingDeclaredType` fell from 20 occurrences in 8 files at the #856 snapshot to 10 in 3 files; the remaining records are 6 ordinary `ModuleClass` occurrences across 2 files and 4 inline `ModuleClass` occurrences in 1 file. These are first-blocker movements, not proof that all field RHS expressions or enclosing methods type successfully.\n\n'
+    printf '| Baseline mutable-field method attempt | Current first blocker |\n| --- | --- |\n'
+    awk '
+        /^mutable_class_field_baseline_method_outcomes:$/ { in_outcomes = 1; next }
+        in_outcomes && /^```/ { in_outcomes = 0 }
+        in_outcomes && /^  / {
+            line = $0
+            sub(/^  /, "", line)
+            split(line, fields, " outcome=")
+            printf "| `%s` | `%s` |\n", fields[1], fields[2]
+        }
+    ' "$tmp_dir/first.report"
+    printf '\nThe top-ranked remaining gap is `AnonymousClassInstantiationDeferred` (32 occurrences across 15 files). For the next sprint, prioritize one stable singleton-reference form from `CheckUnused.scala` (`UnsupportedSingletonReference`, 22 / 1): it has a concentrated producer and can reuse existing `TermRef`, `ThisType`, and stable-prefix checks without creating anonymous-class identities. Keep arbitrary paths, unstable prefixes, and path-dependent relation changes out of that slice.\n\n'
     printf '## Previous type projection snapshot\n\n'
     printf 'The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.\n\n'
     printf '```text\n'
