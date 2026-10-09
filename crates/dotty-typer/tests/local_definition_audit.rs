@@ -5465,11 +5465,7 @@ fn local_method_signature_record(
             else {
                 continue;
             };
-            if !extension
-                .methods
-                .iter()
-                .any(|method| *method == method_tree)
-            {
+            if !extension.methods.contains(&method_tree) {
                 continue;
             }
             for receiver in extension.param_clauses.iter().flatten() {
