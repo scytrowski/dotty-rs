@@ -441,6 +441,103 @@ fn source_typer_resolves_external_imports_and_types_member_applications() {
 }
 
 #[test]
+fn inferred_field_resolves_external_members_and_rolls_back_failed_classpath_completion() {
+    let stubs = TemporaryDirectory::new("inferred-field-classpath-stubs");
+    write_required_jdk_stubs(stubs.path());
+    let source = SourceId::from_index(20);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "class C(ping: external.Ping) { val broken = ping.missing; val pong = ping.other }",
+        source,
+        &mut store,
+        &mut packages,
+    );
+    let field = |name: &str, store: &SemanticStore| {
+        unit.parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::ValDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == name)
+                    .then(|| (unit.index.symbol_at(source, tree).unwrap(), definition.tpt))
+            })
+            .unwrap_or_else(|| panic!("source should define field {name}"))
+    };
+    let (broken, broken_tpt) = field("broken", &store);
+    let (pong, pong_tpt) = field("pong", &store);
+    let log = Rc::new(RefCell::new(ResolutionLog::default()));
+    let resolver = RecordingResolver::new(
+        ClasspathSymbolResolver::new(
+            class_path(&stubs),
+            definitions,
+            LoadingSession::with_packages(packages),
+        ),
+        Rc::clone(&log),
+    );
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    )
+    .with_resolver(Box::new(resolver));
+
+    let checkpoint = typer.store().checkpoint();
+    let typed_checkpoint = typer.typed_ast().checkpoint();
+    let error = typer
+        .complete_symbol(broken)
+        .expect_err("missing members in an inferred field initializer should fail");
+    assert!(matches!(error, TyperError::MemberNotFound { .. }));
+    assert_eq!(typer.store().checkpoint(), checkpoint);
+    assert_eq!(typer.store().symbols.info(broken), &SymbolInfo::Missing);
+    assert_eq!(typer.source_type_index().type_at(source, broken_tpt), None);
+    assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
+
+    let failed_ping = log
+        .borrow()
+        .members
+        .iter()
+        .find_map(|(name, symbol)| (name == "Ping").then_some(*symbol))
+        .expect("the failed field probe should load external.Ping");
+    assert!(
+        !typer.store().symbols.contains(failed_ping),
+        "failed field completion must roll back the loaded class symbol"
+    );
+
+    let inferred = typer
+        .complete_symbol(pong)
+        .expect("a valid external member should be usable in an inferred field");
+    assert_eq!(
+        typer.source_type_index().type_at(source, pong_tpt),
+        Some(inferred)
+    );
+    assert_eq!(
+        typer.store().symbols.info(pong),
+        &SymbolInfo::Complete(inferred)
+    );
+    assert!(matches!(
+        typer.store().types.get(inferred),
+        Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }
+            if typer.store().names.resolve(typer.store().symbols.get(*symbol).name.text()) == "Pong"
+    ));
+    assert!(
+        log.borrow()
+            .members
+            .iter()
+            .filter(|(name, _)| name == "Ping")
+            .any(|(_, symbol)| typer.store().symbols.contains(*symbol)),
+        "the successful retry must materialize a live external class symbol"
+    );
+}
+
+#[test]
 fn local_import_qualifiers_resolve_through_the_classpath() {
     let stubs = TemporaryDirectory::new("local-import-jdk-stubs");
     write_required_jdk_stubs(stubs.path());

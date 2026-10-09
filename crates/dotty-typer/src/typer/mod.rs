@@ -18082,6 +18082,144 @@ mod tests {
     }
 
     #[test]
+    fn inferred_field_corpus_mechanisms_cover_selection_construction_and_prefixes() {
+        let source_text = "class Denotation { val symbol: Int = 1 }; class Token; class Entry; class ProfileInfo; class Patch; class HashLike[K, V]; class LocalBuffer[A]; class DebugSetting { val value = true }; class Settings { val YprintDebug = new DebugSetting }; class Root { val thisType: Int = 1 }; class C(denot: Denotation, settings: Settings, root: Root) { val cycleSym = denot.symbol; val thisProxy = new HashLike[Token, Entry](); val debugPrint = settings.YprintDebug.value; val pinfo = new HashLike[Token, ProfileInfo](); val pbuf = new LocalBuffer[Patch](); val site = root.thisType; val isWindows = settings.YprintDebug.value; val first = 1; val selected = this.first }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let int = definitions.int;
+        let boolean = definitions.boolean;
+        let mechanism_names = [
+            "cycleSym",
+            "thisProxy",
+            "debugPrint",
+            "pinfo",
+            "pbuf",
+            "site",
+            "isWindows",
+        ];
+        let fields = mechanism_names
+            .map(|name| (name, val_symbol(&parsed, &store, &index, source, name)))
+            .into_iter()
+            .collect::<Vec<_>>();
+        let (cycle_sym, cycle_tree, _) =
+            val_definition_and_rhs(&parsed, &store, &index, source, "cycleSym");
+        let class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("class C should keep its semantic symbol");
+        let constructor = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "<init>"
+                        && index.symbol_at(source, tree).is_some_and(|symbol| {
+                            store.symbols.get(symbol).owner == Some(class)
+                        }) =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("class C should keep its primary-constructor symbol");
+        let denot_parameter = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "denot" =>
+                {
+                    index.derived_symbol_at(constructor, source, tree)
+                }
+                _ => None,
+            })
+            .expect("primary-constructor parameter should keep its scoped symbol");
+        let denot_name =
+            dotty_core::Name::new(store.names.intern("denot"), dotty_core::Namespace::Term);
+        let selected = val_symbol(&parsed, &store, &index, source, "selected").0;
+        let class = store.symbols.get(selected).owner.unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let field_context = typer.field_initializer_context_for(cycle_sym).unwrap();
+        let denot_candidates = typer
+            .expression_term_candidates(denot_name, field_context, cycle_tree.index(), None)
+            .unwrap();
+        assert_eq!(
+            denot_candidates,
+            vec![denot_parameter],
+            "field inference should reuse the primary-constructor parameter identity; candidate={:?}, indexed={:?}",
+            denot_candidates
+                .first()
+                .map(|symbol| typer.store().symbols.get(*symbol)),
+            typer.store().symbols.get(denot_parameter)
+        );
+
+        for (name, (field, inferred_tpt)) in fields {
+            let inferred = typer
+                .complete_symbol(field)
+                .unwrap_or_else(|error| panic!("corpus mechanism `{name}` failed: {error:?}"));
+            let expected = if matches!(name, "debugPrint" | "isWindows") {
+                boolean
+            } else if matches!(name, "cycleSym" | "site") {
+                int
+            } else {
+                let expected_arity = if name == "pbuf" { 1 } else { 2 };
+                assert!(
+                    matches!(
+                        typer.store().types.get(inferred),
+                        Type::Applied { args, .. } if args.len() == expected_arity
+                    ),
+                    "corpus mechanism `{name}` should infer an applied generic class type"
+                );
+                inferred
+            };
+            assert_eq!(inferred, expected, "unexpected inferred type for `{name}`");
+            assert_eq!(
+                typer.type_index.type_at(source, inferred_tpt),
+                Some(inferred)
+            );
+            assert_eq!(
+                *typer.store().symbols.info(field),
+                SymbolInfo::Complete(inferred)
+            );
+        }
+
+        typer.complete_symbol(selected).unwrap();
+        let selected_qualifier = typer
+            .typed_ast()
+            .iter()
+            .find_map(|(_, node)| match &node.kind {
+                TreeKind::Select(selection)
+                    if typer.store().names.resolve(selection.name.text()) == "first" =>
+                {
+                    Some(selection.qualifier)
+                }
+                _ => None,
+            })
+            .expect("the selected same-class member should remain in the typed RHS");
+        let qualifier_type = typer.typed_ast().get(selected_qualifier).ty;
+        assert_eq!(
+            typer.store().types.get(qualifier_type),
+            &Type::ThisType { class },
+            "same-class member access should keep the enclosing class as its prefix"
+        );
+    }
+
+    #[test]
     fn inferred_class_field_errors_and_unsupported_shapes_are_transactional() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { val unresolved = notFound }");

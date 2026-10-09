@@ -252,6 +252,7 @@ struct Audit {
     match_profile: MatchProfile,
     patdef_profile: PatDefProfile,
     missing_declared_type_profile: MissingDeclaredTypeProfile,
+    local_method_first_blockers: BTreeMap<String, String>,
     source_function_method_outcomes: BTreeSet<String>,
     source_function_outcomes: BTreeMap<String, FailureBucket>,
 }
@@ -286,6 +287,7 @@ impl Default for Audit {
             match_profile: MatchProfile::default(),
             patdef_profile: PatDefProfile::default(),
             missing_declared_type_profile: MissingDeclaredTypeProfile::default(),
+            local_method_first_blockers: BTreeMap::new(),
             source_function_method_outcomes: BTreeSet::new(),
             source_function_outcomes: BTreeMap::new(),
         }
@@ -428,6 +430,8 @@ impl Audit {
         self.patdef_profile.merge(other.patdef_profile);
         self.missing_declared_type_profile
             .merge(other.missing_declared_type_profile);
+        self.local_method_first_blockers
+            .extend(other.local_method_first_blockers);
         for (name, count) in other.buckets {
             *self.buckets.entry(name).or_default() += count;
         }
@@ -656,8 +660,8 @@ fn pinned_scala39_local_definition_audit() {
         .failures
         .get("MissingDeclaredType")
         .expect("the pinned audit should retain MissingDeclaredType first blockers");
-    assert_eq!(missing_declared_type.count, 34);
-    assert_eq!(missing_declared_type.files.len(), 15);
+    assert_eq!(missing_declared_type.count, 20);
+    assert_eq!(missing_declared_type.files.len(), 8);
     assert_eq!(
         audit.missing_declared_type_profile.records.len(),
         missing_declared_type.count,
@@ -902,7 +906,191 @@ fn pinned_scala39_local_definition_audit() {
     print_match_readiness(&audit.match_readiness);
     print_match_profile(&audit.match_profile);
     print_resolver_metrics(&resolver_metrics.borrow());
+    print_pinned_immutable_field_completion_outcomes(&root, classpath);
+    print_pinned_immutable_field_method_outcomes(&audit.local_method_first_blockers);
     println!("AUDIT_REPORT_END");
+}
+
+fn print_pinned_immutable_field_method_outcomes(outcomes: &BTreeMap<String, String>) {
+    const BASELINE_ATTEMPTS: [(&str, u32); 14] = [
+        ("compiler/src/dotty/tools/dotc/core/TypeErrors.scala", 695),
+        ("compiler/src/dotty/tools/dotc/inlines/Inliner.scala", 1538),
+        (
+            "compiler/src/dotty/tools/dotc/printing/ReplPrinter.scala",
+            396,
+        ),
+        ("compiler/src/dotty/tools/dotc/reporting/Profile.scala", 470),
+        ("compiler/src/dotty/tools/dotc/reporting/Profile.scala", 531),
+        ("compiler/src/dotty/tools/dotc/reporting/Profile.scala", 549),
+        ("compiler/src/dotty/tools/dotc/reporting/Profile.scala", 660),
+        ("compiler/src/dotty/tools/dotc/reporting/Profile.scala", 811),
+        ("compiler/src/dotty/tools/dotc/rewrites/Rewrites.scala", 235),
+        ("compiler/src/dotty/tools/dotc/rewrites/Rewrites.scala", 292),
+        ("compiler/src/dotty/tools/dotc/transform/Bridges.scala", 204),
+        ("compiler/src/dotty/tools/dotc/transform/Bridges.scala", 212),
+        ("compiler/src/dotty/tools/dotc/transform/Bridges.scala", 247),
+        ("compiler/src/dotty/tools/io/FileWriters.scala", 1156),
+    ];
+
+    println!("immutable_class_field_baseline_method_outcomes:");
+    for (path, method_tree) in BASELINE_ATTEMPTS {
+        let key = format!("{path}#tree={method_tree}");
+        let outcome = outcomes
+            .get(&key)
+            .unwrap_or_else(|| panic!("baseline local method attempt is missing: {key}"));
+        assert_eq!(
+            outcome, "ImportQualifierNotFound",
+            "the pinned baseline method should now reach its classpath blocker: {key}"
+        );
+        println!("  {key} outcome={outcome}");
+    }
+}
+
+fn print_pinned_immutable_field_completion_outcomes(root: &Path, classpath: SharedClassPath) {
+    const BASELINE_FIELDS: [(&str, u32, usize); 7] = [
+        (
+            "compiler/src/dotty/tools/dotc/core/TypeErrors.scala",
+            584,
+            1,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/inlines/Inliner.scala",
+            966,
+            1,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/printing/ReplPrinter.scala",
+            74,
+            1,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/reporting/Profile.scala",
+            231,
+            5,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/rewrites/Rewrites.scala",
+            82,
+            2,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/Bridges.scala",
+            152,
+            3,
+        ),
+        ("compiler/src/dotty/tools/io/FileWriters.scala", 1129, 1),
+    ];
+
+    println!("immutable_class_field_completion_outcomes:");
+    for (relative_path, expected_tree_index, baseline_occurrences) in BASELINE_FIELDS {
+        let text = fs::read_to_string(root.join(relative_path))
+            .unwrap_or_else(|error| panic!("cannot read {relative_path}: {error}"));
+        let source = SourceId::from_index(0);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let scanner = ContextualScanner::new(&text)
+            .unwrap_or_else(|error| panic!("cannot scan {relative_path}: {error}"));
+        let parsed = parse_compilation_unit(
+            SourceText::new(&text).expect("Scala source should be valid UTF-8"),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        let mut namer_packages = Packages::new();
+        let index = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            relative_path,
+            &mut store,
+            &mut namer_packages,
+        )
+        .unwrap_or_else(|error| panic!("cannot name {relative_path}: {error}"));
+        let (field_tree, field_name, field_type_tree) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                if tree.index() != expected_tree_index {
+                    return None;
+                }
+                let TreeKind::ValDef(definition) = &node.kind else {
+                    return None;
+                };
+                Some((
+                    tree,
+                    store
+                        .names
+                        .resolve(definition.name.as_name().text())
+                        .to_owned(),
+                    definition.tpt,
+                ))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{relative_path} no longer has the baseline field at tree {expected_tree_index}"
+                )
+            });
+        let field = index
+            .symbol_at(source, field_tree)
+            .expect("baseline field should retain its semantic symbol");
+        let owner = store
+            .symbols
+            .get(field)
+            .owner
+            .expect("baseline field should retain its class owner");
+        assert_eq!(
+            store.symbols.get(field).kind,
+            dotty_core::symbols::SymbolKind::Field
+        );
+        assert_eq!(
+            store.symbols.get(owner).kind,
+            dotty_core::symbols::SymbolKind::Class
+        );
+        assert!(
+            !store
+                .symbols
+                .get(field)
+                .flags
+                .contains(dotty_core::SymbolFlags::MUTABLE)
+        );
+
+        let typer_packages = Packages::new();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &typer_packages,
+        );
+        typer = typer.with_resolver(Box::new(AuditResolver {
+            inner: ClasspathSymbolResolver::new(
+                classpath.clone(),
+                definitions,
+                LoadingSession::with_packages(namer_packages),
+            ),
+            metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
+        }));
+        let outcome = match typer.complete_symbol(field) {
+            Ok(_) => {
+                assert!(matches!(
+                    *typer.store().symbols.info(field),
+                    dotty_core::symbols::SymbolInfo::Complete(_)
+                ));
+                assert!(
+                    typer
+                        .source_type_index()
+                        .type_at(source, field_type_tree)
+                        .is_some()
+                );
+                "completed".to_owned()
+            }
+            Err(error) => format!("blocked::{}::{error:?}", typer_error_name(&error)),
+        };
+        println!(
+            "  {relative_path}: tree={expected_tree_index} field={field_name} baseline_occurrences={baseline_occurrences} outcome={outcome}"
+        );
+    }
 }
 
 fn print_v1_deltas(audit: &Audit) {
@@ -2828,6 +3016,9 @@ fn audit_source_inner(
     for (tree, range) in local_method_trees.clone() {
         if typer.source_typed_index().get(source, tree).is_some() {
             audit.typed_local_defdefs += 1;
+            audit
+                .local_method_first_blockers
+                .insert(format!("{path}#tree={}", tree.index()), "typed".to_owned());
         } else {
             let (kind, missing_type_tree) = root_failures
                 .iter()
@@ -2845,6 +3036,9 @@ fn audit_source_inner(
                         None,
                     )
                 });
+            audit
+                .local_method_first_blockers
+                .insert(format!("{path}#tree={}", tree.index()), kind.bucket.clone());
             if kind.bucket == "MissingDeclaredType"
                 && let Some(tree_index) = missing_type_tree
             {
