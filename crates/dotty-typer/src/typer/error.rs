@@ -481,6 +481,13 @@ pub enum TyperError {
         source: SourceId,
         tree_index: u32,
     },
+    /// Inferred source field completion exceeded its bounded dependency depth.
+    InferredFieldTypeDepthExceeded {
+        symbol: SymbolId,
+        source: SourceId,
+        tree_index: u32,
+        max_depth: usize,
+    },
     /// An inferred-result method has no body from which to obtain a result.
     InferredMethodResultRightHandSideMissing {
         symbol: SymbolId,

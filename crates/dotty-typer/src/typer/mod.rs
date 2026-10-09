@@ -17917,6 +17917,74 @@ mod tests {
     }
 
     #[test]
+    fn inferred_field_completion_depth_is_bounded() {
+        let field_count = completion::MAX_INFERRED_FIELD_TYPE_COMPLETION_DEPTH + 1;
+        let definitions = (0..field_count)
+            .map(|index| {
+                let rhs = if index + 1 == field_count {
+                    "1".to_owned()
+                } else {
+                    format!("field{}", index + 1)
+                };
+                format!("val field{index} = {rhs}")
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let source_text = format!("class C {{ {definitions} }}");
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(&source_text);
+        let first = val_symbol(&parsed, &store, &index, source, "field0").0;
+        let depth_limited = val_symbol(
+            &parsed,
+            &store,
+            &index,
+            source,
+            &format!(
+                "field{}",
+                completion::MAX_INFERRED_FIELD_TYPE_COMPLETION_DEPTH
+            ),
+        )
+        .0;
+        let (limited_source, limited_tree) = match index.definition_of(depth_limited).unwrap() {
+            SourceDefinition::Canonical { source, tree } => (source, tree),
+            SourceDefinition::Derived { .. } => panic!("field should be canonical"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(first),
+            Err(TyperError::InferredFieldTypeDepthExceeded {
+                symbol,
+                source: actual_source,
+                tree_index,
+                max_depth,
+            }) if symbol == depth_limited
+                && actual_source == limited_source
+                && tree_index == limited_tree.index()
+                && max_depth == completion::MAX_INFERRED_FIELD_TYPE_COMPLETION_DEPTH
+        ));
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+        for field_index in 0..field_count {
+            let field = val_symbol(
+                &parsed,
+                typer.store(),
+                &index,
+                source,
+                &format!("field{field_index}"),
+            )
+            .0;
+            assert_eq!(*typer.store().symbols.info(field), SymbolInfo::Missing);
+        }
+    }
+
+    #[test]
     fn explicit_field_type_breaks_an_inferred_field_cycle() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { val explicit: Int = inferred; val inferred = explicit }");

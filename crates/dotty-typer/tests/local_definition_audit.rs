@@ -5019,6 +5019,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::InvalidCompletedBounds { .. } => "InvalidCompletedBounds",
         TyperError::OpaqueAliasDeferred { .. } => "OpaqueAliasDeferred",
         TyperError::RecursiveInferredFieldType { .. } => "RecursiveInferredFieldType",
+        TyperError::InferredFieldTypeDepthExceeded { .. } => "InferredFieldTypeDepthExceeded",
         TyperError::RecursiveInferredMethodResult { .. } => "RecursiveInferredMethodResult",
         TyperError::InferredMethodResultRightHandSideMissing { .. } => {
             "InferredMethodResultRightHandSideMissing"
@@ -5321,6 +5322,7 @@ fn is_type_relation_inference_or_completion(bucket: &str) -> bool {
             | "UnableToFinalizeRawGenericNewInstanceType"
             | "InvalidCompletedBounds"
             | "RecursiveInferredFieldType"
+            | "InferredFieldTypeDepthExceeded"
             | "RecursiveInferredMethodResult"
             | "InvalidInferredMethodResult"
             | "MethodParameterSymbolMissing"

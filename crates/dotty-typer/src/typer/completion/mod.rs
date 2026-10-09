@@ -7,6 +7,8 @@ mod declarations;
 mod local_methods;
 mod methods;
 
+pub(super) const MAX_INFERRED_FIELD_TYPE_COMPLETION_DEPTH: usize = 64;
+
 impl SourceTyper<'_> {
     /// Completes a source declaration, rolling back this call's mutations on failure.
     ///
@@ -90,7 +92,11 @@ impl SourceTyper<'_> {
                 // missing-type error for every other unsupported RHS shape.
                 if let Err(error) =
                     typer.type_inferred_field_rhs_for_recursion(symbol, info_journal)
-                    && matches!(&error, TyperError::RecursiveInferredFieldType { .. })
+                    && matches!(
+                        &error,
+                        TyperError::RecursiveInferredFieldType { .. }
+                            | TyperError::InferredFieldTypeDepthExceeded { .. }
+                    )
                 {
                     return Err(error);
                 }
@@ -147,13 +153,22 @@ impl SourceTyper<'_> {
         tree_index: u32,
         operation: impl FnOnce(&mut Self) -> Result<T, TyperError>,
     ) -> Result<T, TyperError> {
-        if !self.inferred_field_types_in_progress.insert(symbol) {
+        if self.inferred_field_types_in_progress.contains(&symbol) {
             return Err(TyperError::RecursiveInferredFieldType {
                 symbol,
                 source,
                 tree_index,
             });
         }
+        if self.inferred_field_types_in_progress.len() >= MAX_INFERRED_FIELD_TYPE_COMPLETION_DEPTH {
+            return Err(TyperError::InferredFieldTypeDepthExceeded {
+                symbol,
+                source,
+                tree_index,
+                max_depth: MAX_INFERRED_FIELD_TYPE_COMPLETION_DEPTH,
+            });
+        }
+        self.inferred_field_types_in_progress.insert(symbol);
         let result = operation(self);
         self.inferred_field_types_in_progress.remove(&symbol);
         result
