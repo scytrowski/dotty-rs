@@ -41,6 +41,8 @@ Fixtures under `fixtures/oracle-only/` exercise Dotty harness behavior that is
 not currently part of the Rust parser's AST-equivalence corpus. They must still
 produce a Scala syntax tree rather than an `OracleFailure`; `compare.sh` checks
 that condition while deliberately skipping tree equivalence for those fixtures.
+The Rust dump is best-effort for these fixtures and may include parser
+diagnostics; its tree is emitted only to keep the batch outputs aligned.
 The capture-checking fixture guards against regressions in the initialized
 definitions needed to build retaining annotations with multiple references.
 

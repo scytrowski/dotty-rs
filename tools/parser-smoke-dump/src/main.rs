@@ -117,7 +117,7 @@ fn dump_fixture(mode: &str, path: &str) -> Result<String, String> {
     } else {
         parse_expression_fragment(source_text, SourceId::from_index(0), scanner, &mut names)
     };
-    if !result.diagnostics.is_empty() {
+    if !result.diagnostics.is_empty() && mode != "oracle-only" {
         return Err(format!(
             "parser reported diagnostics for {path}: {:?}",
             result.diagnostics
