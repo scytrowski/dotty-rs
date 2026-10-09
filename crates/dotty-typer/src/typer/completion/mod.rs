@@ -53,32 +53,45 @@ impl SourceTyper<'_> {
                 self.store.symbols.contains(owner)
                     && self.store.symbols.get(owner).kind == SymbolKind::Class
             });
-            let eligible_flags = !field.flags.contains(SymbolFlags::MUTABLE)
-                && !field.flags.contains(SymbolFlags::LAZY)
+            let eligible_flags = !field.flags.contains(SymbolFlags::LAZY)
                 && !field.flags.contains(SymbolFlags::INLINE)
                 && !field.flags.contains(SymbolFlags::GIVEN)
                 && !field.flags.contains(SymbolFlags::IMPLICIT);
-            if field.kind == SymbolKind::Field && eligible_owner && eligible_flags {
+            if field.kind == SymbolKind::Field && eligible_owner {
                 match self.index.definition_of(symbol) {
                     Some(SourceDefinition::Canonical { source, tree })
                         if source == self.source
-                            && self.index.symbol_at(source, tree) == Some(symbol)
-                            && matches!(
-                                self.arena
-                                    .try_get(tree)
-                                    .and_then(|node| match &node.kind {
-                                        TreeKind::ValDef(definition) => {
-                                            definition
-                                                .rhs
-                                                .and_then(|_| self.arena.try_get(definition.tpt))
-                                        }
-                                        _ => None,
-                                    })
-                                    .map(|node| &node.kind),
-                                Some(TreeKind::TypeTree(_))
-                            ) =>
+                            && self.index.symbol_at(source, tree) == Some(symbol) =>
                     {
-                        Some((source, tree))
+                        let inferred_shape =
+                            self.arena.try_get(tree).and_then(|node| match &node.kind {
+                                TreeKind::ValDef(definition) if definition.rhs.is_some() => self
+                                    .arena
+                                    .try_get(definition.tpt)
+                                    .filter(|node| matches!(node.kind, TreeKind::TypeTree(_)))
+                                    .map(|_| {
+                                        definition
+                                            .metadata
+                                            .modifiers
+                                            .contains(&dotty_core::ast::Modifier::Var)
+                                    }),
+                                _ => None,
+                            });
+                        if let Some(source_mutable) = inferred_shape {
+                            let semantic_mutable = field.flags.contains(SymbolFlags::MUTABLE);
+                            if source_mutable != semantic_mutable {
+                                return Err(TyperError::FieldMutabilityMismatch {
+                                    symbol,
+                                    source,
+                                    tree_index: tree.index(),
+                                    source_mutable,
+                                    semantic_mutable,
+                                });
+                            }
+                            eligible_flags.then_some((source, tree))
+                        } else {
+                            None
+                        }
                     }
                     _ => None,
                 }

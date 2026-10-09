@@ -77,9 +77,6 @@ pub enum FieldInitializerContextIssue {
     SymbolMissing,
     /// The symbol is not a field.
     SymbolKind(SymbolKind),
-    /// The field is mutable; mutable field initializers are not supported by
-    /// the current initializer-context contract.
-    MutableField,
     /// The field is inline; inline field initializers are not supported by
     /// the current initializer-context contract.
     InlineField,
@@ -193,6 +190,14 @@ pub enum TyperError {
         field: SymbolId,
         tree_index: Option<u32>,
         issue: FieldInitializerContextIssue,
+    },
+    /// Source `var` syntax and semantic mutability disagree for an inferred field.
+    FieldMutabilityMismatch {
+        symbol: SymbolId,
+        source: SourceId,
+        tree_index: u32,
+        source_mutable: bool,
+        semantic_mutable: bool,
     },
     /// A local expression scope is outside the semantic store's scope arena.
     ExpressionLocalScopeMissing {

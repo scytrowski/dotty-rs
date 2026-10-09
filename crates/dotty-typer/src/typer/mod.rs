@@ -17725,40 +17725,39 @@ mod tests {
     }
 
     #[test]
-    fn field_initializer_context_rejects_mutable_and_inline_fields() {
-        for (source_text, name, expected_issue) in [
-            (
-                "class C { var value = 1 }",
-                "value",
-                FieldInitializerContextIssue::MutableField,
-            ),
-            (
-                "class C { inline val value = 1 }",
-                "value",
-                FieldInitializerContextIssue::InlineField,
-            ),
-        ] {
-            let (parsed, mut store, packages, definitions, index, source) =
-                parse_and_name(source_text);
-            let field = val_symbol(&parsed, &store, &index, source, name).0;
-            let typer = SourceTyper::new(
-                &parsed.ast,
-                source,
-                &index,
-                &mut store,
-                definitions,
-                &packages,
-            );
+    fn field_initializer_context_accepts_mutable_and_rejects_inline_fields() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { var value = 1 }");
+        let field = val_symbol(&parsed, &store, &index, source, "value").0;
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(typer.field_initializer_context_for(field).is_ok());
 
-            assert!(matches!(
-                typer.field_initializer_context_for(field),
-                Err(TyperError::FieldInitializerContextInvalid {
-                    field: actual_field,
-                    issue,
-                    ..
-                }) if actual_field == field && issue == expected_issue
-            ));
-        }
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { inline val value = 1 }");
+        let field = val_symbol(&parsed, &store, &index, source, "value").0;
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.field_initializer_context_for(field),
+            Err(TyperError::FieldInitializerContextInvalid {
+                field: actual_field,
+                issue: FieldInitializerContextIssue::InlineField,
+                ..
+            }) if actual_field == field
+        ));
     }
 
     #[test]
@@ -18082,6 +18081,269 @@ mod tests {
     }
 
     #[test]
+    fn inferred_mutable_class_fields_drive_reads_and_assignments() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C(parameter: Int) { var literal = 1; val sibling = 2; var fromParameter = parameter; var fromSibling = sibling; def read: Int = literal; def update: Unit = literal = 2; def mismatch: Unit = literal = true }",
+        );
+        let fields = ["literal", "fromParameter", "fromSibling"]
+            .map(|name| (name, val_symbol(&parsed, &store, &index, source, name)))
+            .into_iter()
+            .collect::<Vec<_>>();
+        let parameter_field = val_symbol(&parsed, &store, &index, source, "fromParameter").0;
+        let sibling_field = val_symbol(&parsed, &store, &index, source, "fromSibling").0;
+        let literal_field = val_symbol(&parsed, &store, &index, source, "literal").0;
+        let read = method_definition_and_rhs(&parsed, &store, &index, source, "read");
+        let update = method_definition_and_rhs(&parsed, &store, &index, source, "update");
+        let mismatch = method_definition_and_rhs(&parsed, &store, &index, source, "mismatch");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for (name, (field, inferred_tpt)) in fields {
+            let inferred = typer
+                .complete_symbol(field)
+                .unwrap_or_else(|error| panic!("mutable field `{name}` failed: {error:?}"));
+            assert_eq!(
+                *typer.store().symbols.info(field),
+                SymbolInfo::Complete(inferred)
+            );
+            assert!(
+                typer
+                    .store()
+                    .symbols
+                    .get(field)
+                    .flags
+                    .contains(SymbolFlags::MUTABLE)
+            );
+            assert_eq!(
+                typer.source_type_index().type_at(source, inferred_tpt),
+                Some(inferred)
+            );
+            if name == "fromParameter" {
+                assert_eq!(inferred, definitions.int);
+            } else {
+                assert_eq!(inferred, definitions.int);
+            }
+            if name == "literal" {
+                assert_eq!(typer.complete_symbol(field).unwrap(), inferred);
+            }
+        }
+
+        let read_context = typer.expression_context_for(read.0).unwrap();
+        let typed_read = typer.type_expression(read.1, read_context).unwrap();
+        let read_type = typer.typed_ast().get(typed_read).ty;
+        assert_eq!(
+            typer.widen_expression_type(read_type).unwrap(),
+            definitions.int
+        );
+        assert!(matches!(
+            typer.store().types.get(read_type),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == literal_field
+        ));
+
+        let update_context = typer.expression_context_for(update.0).unwrap();
+        let typed_update = typer.type_expression(update.1, update_context).unwrap();
+        assert_eq!(typer.typed_ast().get(typed_update).ty, definitions.unit);
+        let TreeKind::Assign(assignment) = &typer.typed_ast().get(typed_update).kind else {
+            panic!("expected the inferred mutable field assignment to type");
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(assignment.lhs).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == literal_field
+        ));
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(assignment.lhs).ty)
+                .unwrap(),
+            definitions.int
+        );
+
+        let store_checkpoint = typer.store().checkpoint();
+        let typed_checkpoint = typer.typed_ast().checkpoint();
+        let mismatch_context = typer.expression_context_for(mismatch.0).unwrap();
+        assert!(matches!(
+            typer.type_expression(mismatch.1, mismatch_context),
+            Err(TyperError::ExpectedExpressionTypeMismatch { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
+        assert_eq!(
+            *typer.store().symbols.info(parameter_field),
+            SymbolInfo::Complete(definitions.int)
+        );
+        assert_eq!(
+            *typer.store().symbols.info(sibling_field),
+            SymbolInfo::Complete(definitions.int)
+        );
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+    }
+
+    #[test]
+    fn inferred_mutable_field_cycles_and_failures_roll_back() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { var self = self; val first = second; var second = first }");
+        let self_field = val_symbol(&parsed, &store, &index, source, "self").0;
+        let first = val_symbol(&parsed, &store, &index, source, "first").0;
+        let second = val_symbol(&parsed, &store, &index, source, "second").0;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(self_field),
+            Err(TyperError::RecursiveInferredFieldType { symbol, .. }) if symbol == self_field
+        ));
+        assert!(matches!(
+            typer.complete_symbol(first),
+            Err(TyperError::RecursiveInferredFieldType { symbol, .. }) if symbol == first
+        ));
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+        for field in [self_field, first, second] {
+            assert_eq!(*typer.store().symbols.info(field), SymbolInfo::Missing);
+        }
+
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { var broken = notFound }");
+        let (broken, inferred_tpt) = val_symbol(&parsed, &store, &index, source, "broken");
+        let checkpoint = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(broken),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(typer.store().symbols.info(broken), &SymbolInfo::Missing);
+        assert_eq!(
+            typer.source_type_index().type_at(source, inferred_tpt),
+            None
+        );
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+        assert!(
+            typer
+                .store()
+                .symbols
+                .get(broken)
+                .flags
+                .contains(SymbolFlags::MUTABLE)
+        );
+    }
+
+    #[test]
+    fn inferred_field_source_and_semantic_mutability_must_agree() {
+        for (source_text, name, semantic_mutable, source_mutable) in [
+            ("class C { var broken = notFound }", "broken", false, true),
+            ("class C { val broken = notFound }", "broken", true, false),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (field, inferred_tpt) = val_symbol(&parsed, &store, &index, source, name);
+            let flags = store.symbols.get(field).flags;
+            store.symbols.get_mut(field).flags = if semantic_mutable {
+                flags | SymbolFlags::MUTABLE
+            } else {
+                flags.difference(SymbolFlags::MUTABLE)
+            };
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+
+            assert!(matches!(
+                typer.complete_symbol(field),
+                Err(TyperError::FieldMutabilityMismatch {
+                    symbol,
+                    source: actual_source,
+                    tree_index,
+                    source_mutable: actual_source_mutable,
+                    semantic_mutable: actual_semantic_mutable,
+                }) if symbol == field
+                    && actual_source == source
+                    && tree_index == match index.definition_of(field).unwrap() {
+                        SourceDefinition::Canonical { tree, .. } => tree.index(),
+                        SourceDefinition::Derived { .. } => unreachable!(),
+                    }
+                    && actual_source_mutable == source_mutable
+                    && actual_semantic_mutable == semantic_mutable
+            ));
+            assert_eq!(typer.store().symbols.info(field), &SymbolInfo::Missing);
+            assert_eq!(
+                typer.source_type_index().type_at(source, inferred_tpt),
+                None
+            );
+            assert!(typer.inferred_field_types_in_progress.is_empty());
+        }
+    }
+
+    #[test]
+    fn explicit_and_module_class_mutable_fields_keep_the_existing_boundary() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { var explicit: Int = notFound }; object O { var module = 1 }");
+        let (explicit, explicit_tpt) = val_symbol(&parsed, &store, &index, source, "explicit");
+        let (module, module_tpt) = val_symbol(&parsed, &store, &index, source, "module");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert_eq!(typer.complete_symbol(explicit).unwrap(), definitions.int);
+        assert_eq!(
+            typer.source_type_index().type_at(source, explicit_tpt),
+            Some(definitions.int)
+        );
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(
+            typer
+                .store()
+                .symbols
+                .get(explicit)
+                .flags
+                .contains(SymbolFlags::MUTABLE)
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(module),
+            Err(TyperError::MissingDeclaredType { .. })
+        ));
+        assert_eq!(typer.source_type_index().type_at(source, module_tpt), None);
+        assert_eq!(typer.store().symbols.info(module), &SymbolInfo::Missing);
+    }
+
+    #[test]
     fn inferred_field_corpus_mechanisms_cover_selection_construction_and_prefixes() {
         let source_text = "class Denotation { val symbol: Int = 1 }; class Token; class Entry; class ProfileInfo; class Patch; class HashLike[K, V]; class LocalBuffer[A]; class DebugSetting { val value = true }; class Settings { val YprintDebug = new DebugSetting }; class Root { val thisType: Int = 1 }; class C(denot: Denotation, settings: Settings, root: Root) { val cycleSym = denot.symbol; val thisProxy = new HashLike[Token, Entry](); val debugPrint = settings.YprintDebug.value; val pinfo = new HashLike[Token, ProfileInfo](); val pbuf = new LocalBuffer[Patch](); val site = root.thisType; val isWindows = settings.YprintDebug.value; val first = 1; val selected = this.first }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
@@ -18281,10 +18543,7 @@ mod tests {
         assert_eq!(typer.type_index.type_at(source, inferred_tpt), None);
         assert_eq!(*typer.store().symbols.info(invalid), SymbolInfo::Missing);
 
-        for (source_text, field_name) in [
-            ("class C { var mutable = 1 }", "mutable"),
-            ("object O { val module = 1 }", "module"),
-        ] {
+        for (source_text, field_name) in [("object O { val module = 1 }", "module")] {
             let (parsed, mut store, packages, definitions, index, source) =
                 parse_and_name(source_text);
             let (field, inferred_tpt) = val_symbol(&parsed, &store, &index, source, field_name);
