@@ -3819,6 +3819,27 @@ mod tests {
     }
 
     #[test]
+    fn anonymous_new_returns_to_same_line_closing_parenthesis() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/scala-parser-oracle/fixtures/compilation/anonymous-new-before-same-line-rparen.scala"
+        );
+        let source = fs::read_to_string(fixture).expect("fixture should be readable");
+        let scanner = ContextualScanner::new(&source).expect("source should scan cleanly");
+        let source_text = SourceText::new(&source).expect("source should be valid");
+        let mut names = NameInterner::new();
+        let result =
+            parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
+
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        assert!(result.ast.iter().any(|(_, tree)| matches!(
+            &tree.kind,
+            TreeKind::DefDef(definition)
+                if names.resolve(definition.name.as_name().text()) == "after"
+        )));
+    }
+
+    #[test]
     fn mismatched_extension_end_marker_is_diagnosed() {
         const SOURCE: &str = concat!(
             "object Outer:\n",
