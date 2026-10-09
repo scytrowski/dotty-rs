@@ -193,16 +193,25 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '| `LocalBlockDeclarationDeferred::val/var definition` (21 / 8) | Split remaining cases by PatDef root/binder shape in `typer/expression/blocks.rs`. | Reuse transactional PatDef lowering, local binders, and assignment support. | General destructuring and reopening supported PatDef forms. |\n'
     printf '| `LocalMethodSignatureDeferred` (14 / 3) | Split exact `feature` values and add one fixture for the most frequent unsupported signature in `typer/completion/local_methods.rs`. | Reuse the shared signature builder and existing parameter/type-parameter scopes. | General dependent results, erased/by-name expansion, or new method inference. |\n\n'
     printf '## Historical #825 MissingDeclaredType producer profile (pre-#856)\n\n'
-    printf 'Before #856, the 34 first blockers across 15 files were all attributed to source `ValDef` declarations with a right-hand side and a zero-width synthetic inferred `TypeTree`. They split into 24 immutable values and 10 mutable variables; all have semantic `Field` identity. Source `val` versus `var` comes from the AST modifier and is cross-checked against the semantic `MUTABLE` flag; `SymbolKind::Field` alone does not preserve that distinction. The owner kind is `Class` for 24 occurrences and `ModuleClass` for 10. Four immutable module-class values carry `Inline`. The baseline report retained each occurrence with the failed local method tree, type-tree and declaration tree indexes and kinds, source span, modifiers, semantic and context owner kinds, and typer entry path. Counts are downstream local-method first blockers, so one source declaration can appear more than once. The raw profile at the bottom of this report is the post-#856 measurement.\n\n'
+    printf 'Before #856, the 34 first blockers across 15 files were all attributed to source `ValDef` declarations with a right-hand side and a zero-width synthetic inferred `TypeTree`. They split into 24 immutable values and 10 mutable variables; all have semantic `Field` identity. Source `val` versus `var` comes from the AST modifier and is cross-checked against the semantic `MUTABLE` flag; `SymbolKind::Field` alone does not preserve that distinction. The owner kind is `Class` for 24 occurrences and `ModuleClass` for 10. Four immutable module-class values carry `Inline`. Counts are downstream local-method first blockers, so one source declaration can appear more than once. The baseline profile is frozen here; current profile values are listed separately below.\n\n'
+    printf '| Source declaration bucket | Occurrences / files | Representative paths |\n| --- | ---: | --- |\n'
+    printf '| Total (17 distinct declarations) | 34 / 15 | — |\n'
+    printf '| `value::Field::owner=Class::synthetic inferred TypeTree::rhs=true::modifiers=::semantic_mutable=false` | 14 / 7 | compiler/src/dotty/tools/dotc/core/TypeErrors.scala, compiler/src/dotty/tools/dotc/inlines/Inliner.scala, compiler/src/dotty/tools/dotc/printing/ReplPrinter.scala, compiler/src/dotty/tools/dotc/reporting/Profile.scala, compiler/src/dotty/tools/dotc/rewrites/Rewrites.scala, compiler/src/dotty/tools/dotc/transform/Bridges.scala, compiler/src/dotty/tools/io/FileWriters.scala |\n'
+    printf '| `variable::Field::owner=Class::synthetic inferred TypeTree::rhs=true::modifiers=Var::semantic_mutable=true` | 10 / 6 | compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala, compiler/src/dotty/tools/dotc/reporting/Message.scala, compiler/src/dotty/tools/dotc/typer/Applications.scala, compiler/src/dotty/tools/dotc/util/WeakHashSet.scala, library/src/scala/collection/Iterator.scala |\n'
+    printf '| `value::Field::owner=ModuleClass::synthetic inferred TypeTree::rhs=true::modifiers=::semantic_mutable=false` | 6 / 2 | compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala |\n'
+    printf '| `value::Field::owner=ModuleClass::synthetic inferred TypeTree::rhs=true::modifiers=Inline::semantic_mutable=false` | 4 / 1 | compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala |\n'
+    printf '\n### Current #856 MissingDeclaredType profile\n\n'
     printf '| Source declaration bucket | Occurrences / files | Representative paths |\n| --- | ---: | --- |\n'
     awk '
         /^missing_declared_type_profile:$/ { in_profile = 1; next }
-        /^missing_declared_type_records:$/ { in_profile = 0 }
+        /^missing_declared_type_records:$/ { in_profile = 0; in_records = 1; next }
+        /^top_semantic_gaps:$/ { in_records = 0 }
         in_profile && /^  first_blockers=/ {
             line = $0
             sub(/^  first_blockers=/, "", line)
             split(line, fields, " distinct_declarations=")
-            printf "| Total (%s distinct declarations) | %s / 8 | — |\n", fields[2], fields[1]
+            total = fields[1]
+            declarations = fields[2]
         }
         in_profile && /^  [^ ]/ && $0 !~ /^  first_blockers=/ {
             line = $0
@@ -219,7 +228,18 @@ mkdir -p "$(dirname -- "$output_path")"
             sub(/^[^]]*\) \[/, "", examples)
             sub(/^\[/, "", examples)
             sub(/\]$/, "", examples)
-            printf "| `%s` | %s / %s | %s |\n", name, count, files, examples
+            rows = rows sprintf("| `%s` | %s / %s | %s |\n", name, count, files, examples)
+        }
+        in_records && /^  / {
+            line = $0
+            sub(/^  /, "", line)
+            split(line, fields, ": failed_local_method_tree=")
+            unique_files[fields[1]] = 1
+        }
+        END {
+            file_count = 0
+            for (file in unique_files) file_count++
+            printf "| Total (%s distinct declarations) | %s / %s | — |\n%s", declarations, total, file_count, rows
         }
     ' "$tmp_dir/first.report"
     printf '\n### Family assessment\n\n'
