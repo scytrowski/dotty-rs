@@ -147,6 +147,20 @@ impl SourceTyper<'_> {
                 issue: FieldInitializerContextIssue::SymbolKind(field_symbol.kind),
             });
         }
+        if field_symbol.flags.contains(SymbolFlags::MUTABLE) {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index: None,
+                issue: FieldInitializerContextIssue::MutableField,
+            });
+        }
+        if field_symbol.flags.contains(SymbolFlags::INLINE) {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index: None,
+                issue: FieldInitializerContextIssue::InlineField,
+            });
+        }
         let Some(definition) = self.index.definition_of(field) else {
             return Err(TyperError::FieldInitializerContextInvalid {
                 field,

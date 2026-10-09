@@ -77,6 +77,12 @@ pub enum FieldInitializerContextIssue {
     SymbolMissing,
     /// The symbol is not a field.
     SymbolKind(SymbolKind),
+    /// The field is mutable; mutable field initializers are not supported by
+    /// the current initializer-context contract.
+    MutableField,
+    /// The field is inline; inline field initializers are not supported by
+    /// the current initializer-context contract.
+    InlineField,
     /// The symbol has no canonical source definition.
     SourceDefinitionMissing,
     /// The source definition belongs to a different source or is derived.

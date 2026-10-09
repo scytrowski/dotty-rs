@@ -17721,6 +17721,43 @@ mod tests {
     }
 
     #[test]
+    fn field_initializer_context_rejects_mutable_and_inline_fields() {
+        for (source_text, name, expected_issue) in [
+            (
+                "class C { var value = 1 }",
+                "value",
+                FieldInitializerContextIssue::MutableField,
+            ),
+            (
+                "class C { inline val value = 1 }",
+                "value",
+                FieldInitializerContextIssue::InlineField,
+            ),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let field = val_symbol(&parsed, &store, &index, source, name).0;
+            let typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+
+            assert!(matches!(
+                typer.field_initializer_context_for(field),
+                Err(TyperError::FieldInitializerContextInvalid {
+                    field: actual_field,
+                    issue,
+                    ..
+                }) if actual_field == field && issue == expected_issue
+            ));
+        }
+    }
+
+    #[test]
     fn field_initializer_context_rejects_missing_provenance_and_declaration_context() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { val value: Int = 1 }");
