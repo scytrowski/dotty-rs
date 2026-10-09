@@ -45,6 +45,8 @@ pub enum NamerError {
         existing: SourceContextId,
         attempted: SourceContextId,
     },
+    /// A source field was assigned more than one initializer context.
+    DuplicateFieldInitializerContext { field: SymbolId },
     /// A tree did not have the shape required by a naming routine.
     MalformedAstShape {
         tree_index: u32,
@@ -134,6 +136,11 @@ impl fmt::Display for NamerError {
                 existing.index(),
                 attempted.index()
             ),
+            Self::DuplicateFieldInitializerContext { field } => write!(
+                f,
+                "field {} already has an initializer context",
+                field.index()
+            ),
             Self::MalformedAstShape {
                 tree_index,
                 expected,
@@ -208,6 +215,9 @@ impl From<SourceSemanticIndexError> for NamerError {
                 existing,
                 attempted,
             },
+            SourceSemanticIndexError::DuplicateFieldInitializerContext { field } => {
+                Self::DuplicateFieldInitializerContext { field }
+            }
             SourceSemanticIndexError::DuplicateExtensionPrefixClauses { method } => {
                 Self::DuplicateExtensionPrefixClauses { method }
             }
@@ -1896,25 +1906,24 @@ impl Namer<'_> {
                         SymbolKind::Field,
                     )?;
                     let field = self.enter_symbol(*member, name, symbol, scope, spec)?;
+                    self.index
+                        .record_declaration_context(field, active_source_context)?;
                     // A class-field initializer is evaluated with the
-                    // primary-constructor parameters in scope. Keep the
-                    // declaration-point class context as its parent so
-                    // imports and class members remain visible, while the
-                    // constructor scope supplies the authoritative parameter
-                    // identities. The typer uses the enclosing class as the
-                    // expression owner independently of this lexical scope.
-                    let field_context = if self.store.symbols.get(symbol).kind == SymbolKind::Class
-                    {
-                        self.child_source_context(
+                    // primary-constructor parameters in scope. Preserve the
+                    // ordinary declaration context above for field type
+                    // completion, and record this distinct context for the
+                    // initializer. Its parent retains class members and
+                    // imports at the declaration point; the typer supplies
+                    // the enclosing class as the semantic expression owner.
+                    if self.store.symbols.get(symbol).kind == SymbolKind::Class {
+                        let initializer_context = self.child_source_context(
                             constructor_symbol,
                             constructor_scope,
                             Some(active_source_context),
-                        )
-                    } else {
-                        active_source_context
-                    };
-                    self.index
-                        .record_declaration_context(field, field_context)?;
+                        );
+                        self.index
+                            .record_field_initializer_context(field, initializer_context)?;
+                    }
                     nested_headers.push(EnteredHeader::Field {
                         tree: *member,
                         symbol: field,
@@ -5303,14 +5312,24 @@ mod tests {
         let constructor_scope = index.scope_of(constructor).unwrap();
         let class_scope = index.scope_of(class_symbol).unwrap();
         let field_symbol = index.symbol_at(source, field).unwrap();
-        let field_context_id = index.declaration_context_of(field_symbol).unwrap();
-        let field_context = index.source_context(field_context_id);
+        let declaration_context = index.declaration_context_of(field_symbol).unwrap();
+        let field_context =
+            index.source_context(index.field_initializer_context_of(field_symbol).unwrap());
         let class_context = index
             .try_source_context(field_context.parent.unwrap())
             .unwrap();
 
         assert_eq!(field_context.owner, constructor);
         assert_eq!(field_context.lexical_scope, constructor_scope);
+        assert_eq!(field_context.parent, Some(declaration_context));
+        assert_eq!(
+            index.source_context(declaration_context).owner,
+            class_symbol
+        );
+        assert_eq!(
+            index.source_context(declaration_context).lexical_scope,
+            class_scope
+        );
         assert_eq!(class_context.owner, class_symbol);
         assert_eq!(class_context.lexical_scope, class_scope);
         assert_eq!(

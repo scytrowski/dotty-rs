@@ -35,6 +35,8 @@ pub enum SourceSemanticIndexError {
         existing: SourceContextId,
         attempted: SourceContextId,
     },
+    /// A source field was assigned more than one initializer context.
+    DuplicateFieldInitializerContext { field: SymbolId },
     /// An extension method was assigned prefix-clause metadata more than once.
     DuplicateExtensionPrefixClauses { method: SymbolId },
     /// An export source tree was registered more than once.
@@ -136,6 +138,7 @@ pub struct SourceSemanticIndex {
     extension_prefix_clauses_by_method: HashMap<SymbolId, Vec<Vec<TreeId<Untyped>>>>,
     source_contexts: Vec<SourceContext>,
     declaration_contexts_by_symbol: HashMap<SymbolId, SourceContextId>,
+    field_initializer_contexts_by_symbol: HashMap<SymbolId, SourceContextId>,
     export_sites_by_tree: HashMap<(SourceId, TreeId<Untyped>), SourceExportSite>,
     export_sites_by_owner: HashMap<SymbolId, Vec<SourceExportSite>>,
 }
@@ -242,6 +245,18 @@ impl SourceSemanticIndex {
     /// Returns the source declaration context recorded for `symbol`.
     pub fn declaration_context_of(&self, symbol: SymbolId) -> Option<SourceContextId> {
         self.declaration_contexts_by_symbol.get(&symbol).copied()
+    }
+
+    /// Returns the lexical context recorded for a source field initializer.
+    ///
+    /// This is distinct from the field's declaration context, which is used
+    /// when completing its declared type. For ordinary source classes the
+    /// initializer context starts at the primary-constructor parameter scope
+    /// and chains to the declaration-point class context.
+    pub fn field_initializer_context_of(&self, field: SymbolId) -> Option<SourceContextId> {
+        self.field_initializer_contexts_by_symbol
+            .get(&field)
+            .copied()
     }
 
     /// Returns the export site represented by a source tree.
@@ -451,6 +466,33 @@ impl SourceSemanticIndex {
             }
         }
 
+        for (field, context) in &self.field_initializer_contexts_by_symbol {
+            if !store.symbols.contains(*field) {
+                violations.push(format!(
+                    "field initializer context refers to missing field {}",
+                    field.index()
+                ));
+            } else if store.symbols.get(*field).kind != SymbolKind::Field {
+                violations.push(format!(
+                    "field initializer context is attached to non-field symbol {}",
+                    field.index()
+                ));
+            }
+            if !self.declaration_contexts_by_symbol.contains_key(field) {
+                violations.push(format!(
+                    "field {} has an initializer context but no declaration context",
+                    field.index()
+                ));
+            }
+            if self.source_contexts.get(context.index() as usize).is_none() {
+                violations.push(format!(
+                    "field {} refers to missing initializer context {}",
+                    field.index(),
+                    context.index()
+                ));
+            }
+        }
+
         for site in self.export_sites_by_tree.values() {
             if !store.symbols.contains(site.owner) {
                 violations.push(format!(
@@ -503,6 +545,25 @@ impl SourceSemanticIndex {
             }),
             None => {
                 self.declaration_contexts_by_symbol.insert(symbol, context);
+                Ok(())
+            }
+        }
+    }
+
+    /// Records the separate lexical context used by a source field
+    /// initializer. Repeating the same association is idempotent; conflicting
+    /// contexts leave the first association intact.
+    pub fn record_field_initializer_context(
+        &mut self,
+        field: SymbolId,
+        context: SourceContextId,
+    ) -> Result<(), SourceSemanticIndexError> {
+        match self.field_initializer_contexts_by_symbol.get(&field) {
+            Some(existing) if *existing == context => Ok(()),
+            Some(_) => Err(SourceSemanticIndexError::DuplicateFieldInitializerContext { field }),
+            None => {
+                self.field_initializer_contexts_by_symbol
+                    .insert(field, context);
                 Ok(())
             }
         }
@@ -1039,6 +1100,41 @@ mod tests {
             })
         );
         assert_eq!(index.declaration_context_of(declaration), Some(first));
+    }
+
+    #[test]
+    fn field_initializer_context_is_idempotent_and_conflicts_do_not_replace_it() {
+        let mut store = SemanticStore::new();
+        let field = symbol(&mut store);
+        let constructor = symbol(&mut store);
+        let first_scope = store.scopes.alloc(Scope::new(Some(constructor)));
+        let second_scope = store.scopes.alloc(Scope::new(Some(constructor)));
+        let mut index = SourceSemanticIndex::new();
+        let first = index.alloc_source_context(SourceContext {
+            owner: constructor,
+            lexical_scope: first_scope,
+            parent: None,
+            import: None,
+        });
+        let second = index.alloc_source_context(SourceContext {
+            owner: constructor,
+            lexical_scope: second_scope,
+            parent: None,
+            import: None,
+        });
+
+        index
+            .record_field_initializer_context(field, first)
+            .unwrap();
+        index
+            .record_field_initializer_context(field, first)
+            .unwrap();
+
+        assert_eq!(
+            index.record_field_initializer_context(field, second),
+            Err(SourceSemanticIndexError::DuplicateFieldInitializerContext { field })
+        );
+        assert_eq!(index.field_initializer_context_of(field), Some(first));
     }
 
     #[test]
