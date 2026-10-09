@@ -619,3 +619,28 @@ improvement claim. Recreate the report with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-888-iron.json
 ```
+
+## Magnolia corpus
+
+The expanded corpus includes the Scala 3 release of Magnolia
+[`scala3-v1.3.23`](https://github.com/softwaremill/magnolia/releases/tag/scala3-v1.3.23),
+pinned to `de417912ef93017814cee63797dc23ffcfd979c9`. Its build targets Scala
+3.3.6. The corpus includes only the published `core/src/main/scala` library
+root (five tracked Scala files); the separate, unpublished `examples` and
+`test` projects are excluded. These sources are parsed by dotty-rs with the
+same pinned Scala 3.9.0 language baseline.
+
+`parser-post-issue-890-magnolia.json` measures dotty-rs revision
+`6721ebc591c9f39a6f2bf5dfe6e6e199b149b855` with all ten source sets. The
+corpus contains 3,824 files: the previous 3,819 plus five Magnolia files. All
+3,824 parse without diagnostics; there are no hard failures, process failures,
+panics, hangs, or scanner diagnostics. This report was generated with
+`--skip-oracle`: the full local 3,824-file Dotty batch did not return all
+records in this environment. Magnolia was separately run as a five-file batch
+against the pinned Scala 3.9.0 oracle; all five returned trees (zero oracle
+failures). Recreate the Rust corpus report with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 --skip-oracle \
+  --output tools/parser-corpus-report/parser-post-issue-890-magnolia.json
+```
