@@ -630,6 +630,21 @@ Scala 3.9.0 compiler by
 Parameter-dependent result
 types, erased and by-name parameters, higher-kinded and aliased type-parameter
 bounds, and unsupported parameter modifiers remain explicitly deferred.
+The #899 source-corpus profile splits the 14 `LocalMethodSignatureDeferred`
+first-blocker observations into 3 direct signature failures and 11 sibling
+methods that inherit an enclosing method's first blocker. The direct payloads
+are 2 by-name parameter origins (8 affected local methods across 2 files) and
+1 parameter-modifier origin (6 affected methods in 1 file). The latter is a
+local `inline` parameter. `source_method_flags` already preserves `Inline` on
+the parameter symbol and the shared method-signature builder represents its
+type and clause, so local inline-parameter signature completion is a bounded
+candidate for a follow-up. This would cover signature construction only;
+inline expansion and argument evaluation are separate behavior. By-name
+parameter support has a separate downstream blocker: applications that pass a
+by-name argument currently report `ByNameApplicationParameterDeferred`.
+Parameter-dependent results have no corpus first-blocker observations and
+remain covered by a focused unsupported-case fixture. These are profile
+findings only; the #899 work does not change typer semantics.
 Ordinary repeated parameters use `Type::Repeated` in parameter symbol info and
 the shared method-signature builder's `varargs` marker; references to them in
 method bodies remain deferred. A method body is typed in a method

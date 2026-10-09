@@ -86,7 +86,16 @@ The ranked list below excludes parser/namer and classpath-resolution failures, a
 
 ### Recommended next Typer sprint
 
-Recommend one bounded `LocalMethodSignatureDeferred` increment. The refreshed audit found 14 occurrences in 3 files. Start by splitting the `feature` payload, then implement the most frequent supported signature form with a focused fixture. This reuses the shared signature builder and existing parameter/type-parameter scopes, and can unblock local method typing across all three files. The higher-ranked anonymous-class bucket is larger (32 / 15) but needs stable anonymous identity and ownership; the local val/var bucket (21 / 8) first needs a PatDef shape breakdown. The signature slice has the clearest bounded risk-to-reach balance; do not treat raw rank as the selection rule.
+The 14 `LocalMethodSignatureDeferred` observations split into 3 direct signature failures and 11 sibling methods that inherit the first blocker from an enclosing failed body. The direct payloads are `by-name parameters` (2 origins; 8 affected methods across 2 files) and `parameter modifiers` (1 origin; 6 affected methods in 1 file). Recommend a narrow follow-up for local `inline` parameter signatures: the direct modifier origin is one method in `MegaPhase.scala`, and the shared signature builder already preserves `Inline` on parameter symbols. Keep inline expansion and argument evaluation out of scope. By-name signatures affect more methods, but one direct origin has an inferred result and by-name applications currently defer separately (`ByNameApplicationParameterDeferred`); that slice therefore has additional downstream blockers. Dependent-result signatures have no corpus first-blocker observations and remain covered only by focused fixtures. The other high-ranked buckets still need separate prerequisites: anonymous classes (32 / 15) need stable identity and ownership, while local values/variables (21 / 8) need a PatDef shape breakdown.
+
+### #899 local method signature profile
+
+The profile counts local methods whose first blocker is a local signature failure. `direct_origins` identifies methods carrying that signature feature; `inherited_methods` are sibling methods attributed to the same enclosing failure. Thus 14 affected methods do not mean 14 independently unsupported signatures. The diagnostic run was repeated twice against the pinned Scala 3.9.0 sources and artifact jars using the available JDK 25; it is supplemental and does not replace the main JDK 21 pinned report above. It does not type additional methods.
+
+| Signature feature | Affected methods | Files | Direct origins | Inherited methods | Origin shapes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `by-name parameters` | 8 | 2 | 2 | 6 | `instantiateCFT`: explicit result, one plain parameter clause; `cases`: inferred result, one plain parameter clause |
+| `parameter modifiers` | 6 | 1 | 1 | 5 | `inLocalContext`: explicit result, one type-parameter clause, plain and contextual value clauses, `Given` and `Inline` parameters |
 
 ### Historical #825 next-sprint candidates (pre-#856)
 
