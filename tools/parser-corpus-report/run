@@ -2,6 +2,7 @@
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "${script_dir}/source_checkout.sh"
 repo_dir=$(cd "${script_dir}/../.." && pwd)
 
 if [[ $# -lt 1 ]]; then
@@ -33,25 +34,6 @@ fi
 
 cache_dir=${DOTTY_PARSER_CORPUS_CACHE:-"${repo_dir}/target/parser-corpus-sources"}
 mkdir -p "$cache_dir"
-
-ensure_checkout() {
-  local name=$1
-  local repository=$2
-  local tag=$3
-  local revision=$4
-  local checkout="${cache_dir}/${name}-${tag}"
-  if [[ ! -e "$checkout" ]]; then
-    git clone --depth 1 --branch "$tag" "$repository" "$checkout"
-  fi
-  local actual
-  actual=$(git -C "$checkout" rev-parse HEAD 2>/dev/null || true)
-  if [[ "$actual" != "$revision" ]]; then
-    echo "$name checkout revision mismatch: expected $revision, got ${actual:-unknown} at $checkout" >&2
-    exit 1
-  fi
-  printf '%s\n' "$checkout"
-}
-
 cats_root=$(ensure_checkout cats https://github.com/typelevel/cats.git v2.13.0 "$cats_revision")
 cats_effect_root=$(ensure_checkout cats-effect https://github.com/typelevel/cats-effect.git v3.7.1 "$cats_effect_revision")
 kyo_root=$(ensure_checkout kyo https://github.com/getkyo/kyo.git "$kyo_tag" "$kyo_revision")
