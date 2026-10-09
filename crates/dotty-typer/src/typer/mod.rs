@@ -117,6 +117,7 @@ pub struct SourceTyper<'a> {
     active_local_import_scopes: Vec<(SourceContextId, Option<ExpressionScopeId>)>,
     active_local_type_binders: Vec<(TypeId, Vec<SymbolId>)>,
     initializing_local_symbols: HashSet<SymbolId>,
+    inferred_field_types_in_progress: HashSet<SymbolId>,
     inferred_method_results_in_progress: HashSet<SymbolId>,
     typed_arena: AstArena<Typed>,
     typed_index: SourceTypedIndex,
@@ -176,6 +177,7 @@ impl<'a> SourceTyper<'a> {
             active_local_import_scopes: Vec::new(),
             active_local_type_binders: Vec::new(),
             initializing_local_symbols: HashSet::new(),
+            inferred_field_types_in_progress: HashSet::new(),
             inferred_method_results_in_progress: HashSet::new(),
             typed_arena: AstArena::new(),
             typed_index: SourceTypedIndex::new(),
@@ -244,6 +246,7 @@ impl<'a> SourceTyper<'a> {
         let resolver_checkpoint = self.resolver.checkpoint();
         let package_entry_checkpoint = self.synthetic_package_entries.len();
         let type_index_checkpoint = self.type_index.checkpoint();
+        let inferred_field_types_checkpoint = self.inferred_field_types_in_progress.clone();
         let mut info_journal = Vec::new();
         let result = self.widen_expression_type_journaled(ty, &mut info_journal, 0);
         if result.is_err() {
@@ -256,6 +259,7 @@ impl<'a> SourceTyper<'a> {
             self.resolver.rollback_to(self.store, resolver_checkpoint);
             self.store.rollback_to(store_checkpoint);
             self.type_index.restore(type_index_checkpoint);
+            self.inferred_field_types_in_progress = inferred_field_types_checkpoint;
         }
         result
     }
@@ -17755,6 +17759,257 @@ mod tests {
                 }) if actual_field == field && issue == expected_issue
             ));
         }
+    }
+
+    #[test]
+    fn inferred_field_recursion_guard_reports_direct_and_indirect_cycles() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { val direct = direct; val first = second; val second = first; val a = b; val b = c; val c = a; val literal = 1; val dependent = literal }",
+        );
+        let field = |name| val_symbol(&parsed, &store, &index, source, name).0;
+        let location = |symbol| match index.definition_of(symbol).unwrap() {
+            SourceDefinition::Canonical { source, tree } => (source, tree),
+            SourceDefinition::Derived { .. } => panic!("field should be canonical"),
+        };
+        let direct = field("direct");
+        let first = field("first");
+        let second = field("second");
+        let a = field("a");
+        let b = field("b");
+        let c = field("c");
+        let dependent = field("dependent");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let (direct_source, direct_tree) = location(direct);
+        let direct_result = typer.complete_symbol(direct);
+        assert!(matches!(
+            direct_result,
+            Err(TyperError::RecursiveInferredFieldType {
+                symbol,
+                source: actual_source,
+                tree_index,
+            }) if symbol == direct
+                && actual_source == direct_source
+                && tree_index == direct_tree.index()
+        ));
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+        assert_eq!(*typer.store().symbols.info(direct), SymbolInfo::Missing);
+
+        let mutual_result = typer.complete_symbol(first);
+        assert!(matches!(
+            mutual_result,
+            Err(TyperError::RecursiveInferredFieldType { symbol, .. }) if symbol == first
+        ));
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+        assert_eq!(*typer.store().symbols.info(first), SymbolInfo::Missing);
+        assert_eq!(*typer.store().symbols.info(second), SymbolInfo::Missing);
+
+        let long_cycle_result = typer.complete_symbol(a);
+        assert!(matches!(
+            long_cycle_result,
+            Err(TyperError::RecursiveInferredFieldType { symbol, .. }) if symbol == a
+        ));
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+        for field in [a, b, c] {
+            assert_eq!(*typer.store().symbols.info(field), SymbolInfo::Missing);
+        }
+
+        let retry = typer.complete_symbol(direct);
+        assert!(matches!(
+            retry,
+            Err(TyperError::RecursiveInferredFieldType { symbol, .. }) if symbol == direct
+        ));
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+
+        let acyclic = typer.complete_symbol(dependent);
+        assert!(
+            matches!(&acyclic, Err(TyperError::MissingDeclaredType { .. })),
+            "acyclic completion should fail for the unsupported inferred type, got {acyclic:?}"
+        );
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val unresolved = notFound }");
+        let unresolved = val_symbol(&parsed, &store, &index, source, "unresolved").0;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.complete_symbol(unresolved),
+            Err(TyperError::MissingDeclaredType { .. })
+        ));
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+    }
+
+    #[test]
+    fn inferred_field_recursion_guard_is_transactional_and_scoped_to_inference() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { val first = 1; val second = first; val inferred = inferred; val explicit: Int = 1; def method: Int = 1 }",
+        );
+        let first = val_symbol(&parsed, &store, &index, source, "first").0;
+        let second = val_symbol(&parsed, &store, &index, source, "second").0;
+        let inferred = val_symbol(&parsed, &store, &index, source, "inferred").0;
+        let explicit = val_symbol(&parsed, &store, &index, source, "explicit").0;
+        let method = method_symbol(&parsed, &store, &index, source, "method");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.inferred_field_types_in_progress.insert(inferred);
+        let atomic_result: Result<(), TyperError> = typer.run_atomic(|typer, _| {
+            typer.inferred_field_types_in_progress.clear();
+            typer.inferred_field_types_in_progress.insert(explicit);
+            Err(TyperError::UnknownSymbol { symbol: explicit })
+        });
+        assert!(atomic_result.is_err());
+        assert_eq!(
+            typer.inferred_field_types_in_progress,
+            HashSet::from([inferred])
+        );
+
+        let expression_result: Result<(), TyperError> =
+            typer.run_expression_transaction(|typer, _, _| {
+                typer.inferred_field_types_in_progress.clear();
+                typer.inferred_field_types_in_progress.insert(explicit);
+                Err(TyperError::UnknownSymbol { symbol: explicit })
+            });
+        assert!(expression_result.is_err());
+        assert_eq!(
+            typer.inferred_field_types_in_progress,
+            HashSet::from([inferred])
+        );
+
+        typer.inferred_field_types_in_progress.clear();
+        for field in [first, second] {
+            let (field_source, field_tree) = match index.definition_of(field).unwrap() {
+                SourceDefinition::Canonical { source, tree } => (source, tree),
+                SourceDefinition::Derived { .. } => panic!("field should be canonical"),
+            };
+            let result = typer
+                .with_inferred_field_type(field, field_source, field_tree.index(), |typer| {
+                    assert!(typer.inferred_field_types_in_progress.contains(&field));
+                    Ok(field)
+                })
+                .unwrap();
+            assert_eq!(result, field);
+            assert!(typer.inferred_field_types_in_progress.is_empty());
+        }
+        typer.complete_symbol(explicit).unwrap();
+        typer.complete_symbol(method).unwrap();
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+    }
+
+    #[test]
+    fn inferred_field_completion_depth_is_bounded() {
+        let field_count = completion::MAX_INFERRED_FIELD_TYPE_COMPLETION_DEPTH + 1;
+        let definitions = (0..field_count)
+            .map(|index| {
+                let rhs = if index + 1 == field_count {
+                    "1".to_owned()
+                } else {
+                    format!("field{}", index + 1)
+                };
+                format!("val field{index} = {rhs}")
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let source_text = format!("class C {{ {definitions} }}");
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(&source_text);
+        let first = val_symbol(&parsed, &store, &index, source, "field0").0;
+        let depth_limited = val_symbol(
+            &parsed,
+            &store,
+            &index,
+            source,
+            &format!(
+                "field{}",
+                completion::MAX_INFERRED_FIELD_TYPE_COMPLETION_DEPTH
+            ),
+        )
+        .0;
+        let (limited_source, limited_tree) = match index.definition_of(depth_limited).unwrap() {
+            SourceDefinition::Canonical { source, tree } => (source, tree),
+            SourceDefinition::Derived { .. } => panic!("field should be canonical"),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(first),
+            Err(TyperError::InferredFieldTypeDepthExceeded {
+                symbol,
+                source: actual_source,
+                tree_index,
+                max_depth,
+            }) if symbol == depth_limited
+                && actual_source == limited_source
+                && tree_index == limited_tree.index()
+                && max_depth == completion::MAX_INFERRED_FIELD_TYPE_COMPLETION_DEPTH
+        ));
+        assert!(typer.inferred_field_types_in_progress.is_empty());
+        for field_index in 0..field_count {
+            let field = val_symbol(
+                &parsed,
+                typer.store(),
+                &index,
+                source,
+                &format!("field{field_index}"),
+            )
+            .0;
+            assert_eq!(*typer.store().symbols.info(field), SymbolInfo::Missing);
+        }
+    }
+
+    #[test]
+    fn explicit_field_type_breaks_an_inferred_field_cycle() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val explicit: Int = inferred; val inferred = explicit }");
+        let explicit = val_symbol(&parsed, &store, &index, source, "explicit").0;
+        let inferred = val_symbol(&parsed, &store, &index, source, "inferred").0;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.complete_symbol(explicit).unwrap();
+        assert!(matches!(
+            typer.complete_symbol(inferred),
+            Err(TyperError::MissingDeclaredType { .. })
+        ));
+        assert!(matches!(
+            *typer.store().symbols.info(explicit),
+            SymbolInfo::Complete(_)
+        ));
+        assert_eq!(*typer.store().symbols.info(inferred), SymbolInfo::Missing);
+        assert!(typer.inferred_field_types_in_progress.is_empty());
     }
 
     #[test]

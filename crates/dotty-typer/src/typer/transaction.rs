@@ -20,6 +20,7 @@ impl SourceTyper<'_> {
         let pattern_bindings_checkpoint = self.pattern_bindings.clone();
         let local_methods_checkpoint = self.local_methods.clone();
         let initializing_local_symbols_checkpoint = self.initializing_local_symbols.clone();
+        let inferred_field_types_checkpoint = self.inferred_field_types_in_progress.clone();
         let inferred_method_results_checkpoint = self.inferred_method_results_in_progress.clone();
         let expression_scope_checkpoint = self.expression_scopes.clone();
         let mut info_journal = Vec::new();
@@ -43,6 +44,7 @@ impl SourceTyper<'_> {
             self.pattern_bindings = pattern_bindings_checkpoint;
             self.local_methods = local_methods_checkpoint;
             self.initializing_local_symbols = initializing_local_symbols_checkpoint;
+            self.inferred_field_types_in_progress = inferred_field_types_checkpoint;
             self.inferred_method_results_in_progress = inferred_method_results_checkpoint;
             self.expression_scopes = expression_scope_checkpoint;
         }
@@ -70,6 +72,7 @@ impl SourceTyper<'_> {
         let pattern_bindings_checkpoint = self.pattern_bindings.clone();
         let local_methods_checkpoint = self.local_methods.clone();
         let initializing_local_symbols_checkpoint = self.initializing_local_symbols.clone();
+        let inferred_field_types_checkpoint = self.inferred_field_types_in_progress.clone();
         let expression_scope_checkpoint = self.expression_scopes.clone();
         let mut info_journal = Vec::new();
         let mut new_mappings = Vec::new();
@@ -93,6 +96,7 @@ impl SourceTyper<'_> {
                 self.pattern_bindings = pattern_bindings_checkpoint;
                 self.local_methods = local_methods_checkpoint;
                 self.initializing_local_symbols = initializing_local_symbols_checkpoint;
+                self.inferred_field_types_in_progress = inferred_field_types_checkpoint;
                 self.expression_scopes = expression_scope_checkpoint;
                 // Nested completion can type an inferred method body with its
                 // own mapping journal. Restore the full index so those
