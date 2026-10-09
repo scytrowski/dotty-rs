@@ -140,9 +140,8 @@ parser_revision=$(git -C "$repo_dir" rev-parse HEAD)
 tmp_root=${TMPDIR:-"${repo_dir}/target"}
 mkdir -p "$tmp_root"
 manifest=$(mktemp "${tmp_root%/}/parser-corpus.XXXXXX.manifest")
-scala_output=$(mktemp "${tmp_root%/}/parser-corpus.XXXXXX.scala-output")
 source_set_counts=$(mktemp "${tmp_root%/}/parser-corpus.XXXXXX.source-sets")
-trap 'rm -f "$manifest" "$scala_output" "$source_set_counts"' EXIT
+trap 'rm -f "$manifest" "$source_set_counts"' EXIT
 
 all_roots=("${scala3_roots[@]}" "${cats_roots[@]}" "${cats_effect_roots[@]}" "${kyo_roots[@]}" "${shapeless_roots[@]}" "${chimney_roots[@]}" "${zio_roots[@]}" "${fs2_roots[@]}" "${iron_roots[@]}" "${magnolia_roots[@]}")
 for root in "${all_roots[@]}"; do
@@ -240,45 +239,15 @@ with manifest_path.open("w", encoding="utf-8", newline="\n") as manifest:
 counts_path.write_text("".join(f"{name}\t{len(paths)}\n" for name, paths in groups.items()), encoding="utf-8")
 PY
   file_count=$(wc -l <"$manifest" | tr -d '[:space:]')
-  tools/scala-parser-oracle/run --batch "$manifest" >"$scala_output"
-  oracle_count=$(grep -c '^{"' "$scala_output" || true)
+  oracle_summary=$(python3 "$script_dir/oracle_batch.py" \
+    "$manifest" "$source_set_counts" "$repo_dir/tools/scala-parser-oracle/run" \
+    --batch-size 128)
+  oracle_count=$(awk -F '\t' '{ total += $2 } END { print total + 0 }' "$source_set_counts")
   if [[ "$oracle_count" != "$file_count" ]]; then
     echo "Scala oracle output count mismatch: expected $file_count, got $oracle_count" >&2
     exit 1
   fi
-  python3 - "$manifest" "$scala_output" "$source_set_counts" <<'PY'
-import json
-import pathlib
-import sys
-
-manifest = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").split("\n")
-output = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").split("\n")
-if manifest and manifest[-1] == "":
-    manifest.pop()
-if output and output[-1] == "":
-    output.pop()
-counts_path = pathlib.Path(sys.argv[3])
-counts = {name: [int(files), 0] for name, files in (line.split("\t") for line in counts_path.read_text(encoding="utf-8").splitlines())}
-if len(manifest) != len(output):
-    raise SystemExit(f"oracle output count mismatch: manifest={len(manifest)} output={len(output)}")
-boundaries = []
-end = 0
-for name, (files, _) in counts.items():
-    end += files
-    boundaries.append((end, name))
-for index, (entry, result) in enumerate(zip(manifest, output, strict=True)):
-    path = entry.split("\t", 1)[1]
-    # The manifest is emitted in source-set order; use counts rather than path names
-    # so an arbitrary Scala 3 checkout directory is supported.
-    name = next((name for boundary, name in boundaries if index < boundary), None)
-    if name is None:
-        raise SystemExit(f"could not associate oracle result with a source set: {path}")
-    if json.loads(result).get("kind") == "OracleFailure":
-        counts[name][1] += 1
-with counts_path.open("w", encoding="utf-8", newline="\n") as result:
-    for name, (files, failures) in counts.items():
-        result.write(f"{name}\t{files}\t{failures}\n")
-PY
+  echo "$oracle_summary"
   echo "Scala 3.9 parser oracle: $oracle_count files across Scala 3, Cats, Cats Effect, Kyo, Shapeless 3, Chimney, ZIO, FS2, Iron, and Magnolia"
   oracle_failures_total=$(awk -F '\t' '{ total += $3 } END { print total + 0 }' "$source_set_counts")
   oracle_args+=(--oracle-files "$oracle_count" --oracle-failures "$oracle_failures_total")
