@@ -806,13 +806,22 @@ where
         allow_brace_application: bool,
     ) -> TreeId<Untyped> {
         loop {
-            if self.cursor.at(TokenKind::Punctuation(Punctuation::Dot))
+            let starts_new_dedented_expression = !can_apply
+                && matches!(self.ast.get(qualifier).kind, TreeKind::New(_))
+                && self
+                    .cursor
+                    .at(TokenKind::Punctuation(Punctuation::LeftParen));
+            if (self.cursor.at(TokenKind::Punctuation(Punctuation::Dot))
+                || starts_new_dedented_expression)
                 && self
                     .has_physical_line_break(self.last_real_token_end, self.current().span.start())
             {
                 // A leading selector continues an expression unless it
-                // dedents out of an active layout body. Let the scanner close
-                // that body before deciding whether the dot is a suffix.
+                // dedents out of an active layout body. Likewise, a parenthesis
+                // after a completed anonymous `new` template can begin the
+                // next expression rather than another constructor application.
+                // Let the scanner close the body before deciding whether the
+                // token is a suffix.
                 self.observe_outdented();
             }
             let checkpoint = self.cursor.checkpoint();
