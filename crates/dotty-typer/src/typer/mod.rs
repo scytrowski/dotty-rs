@@ -6673,6 +6673,51 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_singleton_literal_reports_kind_and_rolls_back_projection() {
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val unsupported: true = true }");
+        let (unsupported, singleton_type) =
+            val_symbol(&parsed, &store, &index, source, "unsupported");
+        let TreeKind::SingletonTypeTree(singleton) = &parsed.ast.get(singleton_type).kind else {
+            panic!("literal singleton annotation must use SingletonTypeTree");
+        };
+        let literal_reference = singleton.reference;
+        let TreeKind::Literal(literal) = &mut parsed.ast.get_mut(literal_reference).kind else {
+            panic!("literal singleton annotation must reference Literal");
+        };
+        literal.value = dotty_core::Constant::Null;
+
+        let context = index.declaration_context_of(unsupported).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let before = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.type_of_tpt(singleton_type, context),
+            Err(TyperError::UnsupportedSingletonLiteralKind {
+                source: actual_source,
+                tree_index,
+                literal_kind: "Null",
+            }) if actual_source == source && tree_index == literal_reference.index()
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(
+            typer.source_type_index().type_at(source, singleton_type),
+            None
+        );
+        assert_eq!(
+            typer.source_type_index().type_at(source, literal_reference),
+            None
+        );
+    }
+
+    #[test]
     fn singleton_type_rejects_mutable_and_method_references() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { var mutable: Int = 1; def method: Int = 1; val bad1: mutable.type = mutable; val bad2: method.type = 1 }",
