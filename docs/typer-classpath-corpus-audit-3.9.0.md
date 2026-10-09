@@ -135,6 +135,25 @@ The pinned corpus audit runs twice against Scala revision `777528f19a58e794c9954
 | `Bridges.scala:bridgesScope` | 3 | `ImportQualifierNotFound` |
 | `FileWriters.scala:isWindows` | 1 | `ImportQualifierNotFound` |
 
+The following table tracks the 14 baseline local-method attempts independently from direct field completion. Method tree indexes are pinned to the same source revision and each row is asserted in the ignored audit test.
+
+| Baseline local-method attempt | Current first blocker |
+| --- | --- |
+| `compiler/src/dotty/tools/dotc/core/TypeErrors.scala#tree=695` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=1538` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/printing/ReplPrinter.scala#tree=396` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/reporting/Profile.scala#tree=470` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/reporting/Profile.scala#tree=531` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/reporting/Profile.scala#tree=549` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/reporting/Profile.scala#tree=660` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/reporting/Profile.scala#tree=811` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/rewrites/Rewrites.scala#tree=235` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/rewrites/Rewrites.scala#tree=292` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/transform/Bridges.scala#tree=204` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/transform/Bridges.scala#tree=212` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/transform/Bridges.scala#tree=247` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/io/FileWriters.scala#tree=1156` | `ImportQualifierNotFound` |
+
 All seven distinct baseline declarations, weighted by their 14 original downstream occurrences, now reach `ImportQualifierNotFound` in an import inside the initializer. Thus 0 / 14 completed in this direct corpus probe; the movement is a deeper first blocker, not semantic success. Focused regressions cover constructor-parameter identity, generic construction, nested member selection, `this` prefixes, short field dependencies, cycles, and rollback. The audit does not implement mutable fields, module fields, or inline fields. The immutable path is structurally reusable for a future `var` slice, provided it separately verifies source `Var` against semantic `MUTABLE`, inferred assignment/read/write behavior, and initialization cycles. Existing assignment coverage only checks an explicitly typed generic mutable field, so it does not establish inferred-`var` readiness.
 
 ## Previous type projection snapshot
@@ -768,4 +787,19 @@ immutable_class_field_completion_outcomes:
   compiler/src/dotty/tools/dotc/rewrites/Rewrites.scala: tree=82 field=pbuf baseline_occurrences=2 outcome=blocked::ImportQualifierNotFound::ImportQualifierNotFound { source: SourceId(0), import_tree_index: 10 }
   compiler/src/dotty/tools/dotc/transform/Bridges.scala: tree=152 field=bridgesScope baseline_occurrences=3 outcome=blocked::ImportQualifierNotFound::ImportQualifierNotFound { source: SourceId(0), import_tree_index: 5 }
   compiler/src/dotty/tools/io/FileWriters.scala: tree=1129 field=isWindows baseline_occurrences=1 outcome=blocked::ImportQualifierNotFound::ImportQualifierNotFound { source: SourceId(0), import_tree_index: 77 }
+immutable_class_field_baseline_method_outcomes:
+  compiler/src/dotty/tools/dotc/core/TypeErrors.scala#tree=695 outcome=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=1538 outcome=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/printing/ReplPrinter.scala#tree=396 outcome=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/reporting/Profile.scala#tree=470 outcome=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/reporting/Profile.scala#tree=531 outcome=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/reporting/Profile.scala#tree=549 outcome=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/reporting/Profile.scala#tree=660 outcome=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/reporting/Profile.scala#tree=811 outcome=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/rewrites/Rewrites.scala#tree=235 outcome=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/rewrites/Rewrites.scala#tree=292 outcome=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/transform/Bridges.scala#tree=204 outcome=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/transform/Bridges.scala#tree=212 outcome=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/transform/Bridges.scala#tree=247 outcome=ImportQualifierNotFound
+  compiler/src/dotty/tools/io/FileWriters.scala#tree=1156 outcome=ImportQualifierNotFound
 ```

@@ -252,6 +252,7 @@ struct Audit {
     match_profile: MatchProfile,
     patdef_profile: PatDefProfile,
     missing_declared_type_profile: MissingDeclaredTypeProfile,
+    local_method_first_blockers: BTreeMap<String, String>,
     source_function_method_outcomes: BTreeSet<String>,
     source_function_outcomes: BTreeMap<String, FailureBucket>,
 }
@@ -286,6 +287,7 @@ impl Default for Audit {
             match_profile: MatchProfile::default(),
             patdef_profile: PatDefProfile::default(),
             missing_declared_type_profile: MissingDeclaredTypeProfile::default(),
+            local_method_first_blockers: BTreeMap::new(),
             source_function_method_outcomes: BTreeSet::new(),
             source_function_outcomes: BTreeMap::new(),
         }
@@ -428,6 +430,8 @@ impl Audit {
         self.patdef_profile.merge(other.patdef_profile);
         self.missing_declared_type_profile
             .merge(other.missing_declared_type_profile);
+        self.local_method_first_blockers
+            .extend(other.local_method_first_blockers);
         for (name, count) in other.buckets {
             *self.buckets.entry(name).or_default() += count;
         }
@@ -903,7 +907,43 @@ fn pinned_scala39_local_definition_audit() {
     print_match_profile(&audit.match_profile);
     print_resolver_metrics(&resolver_metrics.borrow());
     print_pinned_immutable_field_completion_outcomes(&root, classpath);
+    print_pinned_immutable_field_method_outcomes(&audit.local_method_first_blockers);
     println!("AUDIT_REPORT_END");
+}
+
+fn print_pinned_immutable_field_method_outcomes(outcomes: &BTreeMap<String, String>) {
+    const BASELINE_ATTEMPTS: [(&str, u32); 14] = [
+        ("compiler/src/dotty/tools/dotc/core/TypeErrors.scala", 695),
+        ("compiler/src/dotty/tools/dotc/inlines/Inliner.scala", 1538),
+        (
+            "compiler/src/dotty/tools/dotc/printing/ReplPrinter.scala",
+            396,
+        ),
+        ("compiler/src/dotty/tools/dotc/reporting/Profile.scala", 470),
+        ("compiler/src/dotty/tools/dotc/reporting/Profile.scala", 531),
+        ("compiler/src/dotty/tools/dotc/reporting/Profile.scala", 549),
+        ("compiler/src/dotty/tools/dotc/reporting/Profile.scala", 660),
+        ("compiler/src/dotty/tools/dotc/reporting/Profile.scala", 811),
+        ("compiler/src/dotty/tools/dotc/rewrites/Rewrites.scala", 235),
+        ("compiler/src/dotty/tools/dotc/rewrites/Rewrites.scala", 292),
+        ("compiler/src/dotty/tools/dotc/transform/Bridges.scala", 204),
+        ("compiler/src/dotty/tools/dotc/transform/Bridges.scala", 212),
+        ("compiler/src/dotty/tools/dotc/transform/Bridges.scala", 247),
+        ("compiler/src/dotty/tools/io/FileWriters.scala", 1156),
+    ];
+
+    println!("immutable_class_field_baseline_method_outcomes:");
+    for (path, method_tree) in BASELINE_ATTEMPTS {
+        let key = format!("{path}#tree={method_tree}");
+        let outcome = outcomes
+            .get(&key)
+            .unwrap_or_else(|| panic!("baseline local method attempt is missing: {key}"));
+        assert_eq!(
+            outcome, "ImportQualifierNotFound",
+            "the pinned baseline method should now reach its classpath blocker: {key}"
+        );
+        println!("  {key} outcome={outcome}");
+    }
 }
 
 fn print_pinned_immutable_field_completion_outcomes(root: &Path, classpath: SharedClassPath) {
@@ -2976,6 +3016,9 @@ fn audit_source_inner(
     for (tree, range) in local_method_trees.clone() {
         if typer.source_typed_index().get(source, tree).is_some() {
             audit.typed_local_defdefs += 1;
+            audit
+                .local_method_first_blockers
+                .insert(format!("{path}#tree={}", tree.index()), "typed".to_owned());
         } else {
             let (kind, missing_type_tree) = root_failures
                 .iter()
@@ -2993,6 +3036,9 @@ fn audit_source_inner(
                         None,
                     )
                 });
+            audit
+                .local_method_first_blockers
+                .insert(format!("{path}#tree={}", tree.index()), kind.bucket.clone());
             if kind.bucket == "MissingDeclaredType"
                 && let Some(tree_index) = missing_type_tree
             {

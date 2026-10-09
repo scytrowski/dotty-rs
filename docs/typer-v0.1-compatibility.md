@@ -990,6 +990,8 @@ successful corpus typing. The total `MissingDeclaredType` count fell from 34
 occurrences in 15 files to 20 in 8 files; the remaining records are mutable
 class fields and ordinary or inline module-class fields. The direct probe and
 its per-declaration outcomes are recorded in the [classpath audit report](typer-classpath-corpus-audit-3.9.0.md#856-857-immutable-class-field-inference-audit).
+The same report separately tracks all 14 baseline local-method attempts by
+source path and method tree index; each now reaches `ImportQualifierNotFound`.
 
 Explicit positional type applications are supported for one resolved `Poly`
 callee. Type arguments use the expression's lexical context, require exact
