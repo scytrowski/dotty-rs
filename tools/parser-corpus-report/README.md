@@ -484,3 +484,28 @@ Recreate the report with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-712-scala3-3.9.0.json
 ```
+
+## Shapeless 3 corpus
+
+The expanded corpus also includes Shapeless 3
+[`v3.6.0`](https://github.com/typelevel/shapeless-3/tree/v3.6.0), pinned to
+`1d89fac9c7a3af2ee4878171ce745ef122ed3291`. The runner discovers its two
+tracked production roots (`modules/deriving/src/main/scala` and
+`modules/typeable/src/main/scala`); tests and other non-production trees are
+not included. The checkout is validated against the pinned revision and
+tracked source inventory like the other external source sets.
+
+`parser-post-issue-861-shapeless3.json` measures dotty-rs revision
+`680052394a6c0c1c79c409172e3841b482fc60cc` against the existing Scala 3,
+Cats, Cats Effect, and Kyo cohorts plus Shapeless 3. The combined corpus has
+2,974 files: 1,236 Scala 3, 548 Cats, 266 Cats Effect, 916 Kyo, and 8
+Shapeless files. All 2,974 parse without diagnostics, hard failures, panics,
+or hangs; the Scala 3.9.0 oracle emitted all 2,974 results with no oracle
+failures. Two complete runs produced byte-identical JSON (SHA-256
+`0d142d549879432f9af1007b03eceb8e30eb3af2556d4fbf3e235b90248066c5`).
+Recreate the report with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-861-shapeless3.json
+```
