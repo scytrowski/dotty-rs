@@ -24256,6 +24256,71 @@ mod tests {
     }
 
     #[test]
+    fn overloaded_application_keeps_string_singleton_arguments_unwidened() {
+        let source_text = "class C { def consume(value: \"foo\", count: Int): Int = 1; def consume(value: \"foo\", enabled: Boolean): Int = 2; def use: Int = consume(\"foo\", 1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Apply(application) = &parsed.ast.get(rhs).kind else {
+            panic!("use body should be an application");
+        };
+        let string_argument = application.args[0];
+        let TreeKind::Literal(literal) = &parsed.ast.get(string_argument).kind else {
+            panic!("first argument should be a string literal");
+        };
+        let dotty_core::Constant::String(string_name) = literal.value else {
+            panic!("first argument should carry a string constant");
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        // Source string-expression typing is separately deferred; seed its
+        // typed literal so this test isolates overload adaptation.
+        let string_constant = typer
+            .store
+            .types
+            .alloc(Type::Constant(dotty_core::Constant::String(string_name)));
+        let typed_argument = TypedAstBuilder::new(&mut typer.typed_arena, &typer.store.types)
+            .literal(
+                dotty_core::Constant::String(string_name),
+                string_constant,
+                parsed.ast.get(string_argument).position,
+            );
+        typer
+            .typed_index
+            .insert(source, string_argument, typed_argument)
+            .unwrap();
+
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("overloaded invocation should produce a typed Apply");
+        };
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(selected),
+            ..
+        } = typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.function).ty)
+        else {
+            panic!("overloaded function should preserve its selected method");
+        };
+        let selected_info = typer.complete_symbol(*selected).unwrap();
+        assert!(matches!(
+            typer.store().types.get(selected_info),
+            Type::Method(method)
+                if method.params.len() == 2 && method.params[1].ty == definitions.int
+        ));
+    }
+
+    #[test]
     fn incompatible_expected_expression_type_rolls_back_expression_state() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def use: Int = 1 }");

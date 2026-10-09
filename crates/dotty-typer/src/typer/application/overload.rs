@@ -324,7 +324,18 @@ impl SourceTyper<'_> {
                 new_mappings,
             )?;
             let own_type = self.typed_arena.get(typed).ty;
-            let widened_type = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+            // String constants have exact singleton relations but no modeled
+            // underlying String type to widen to. Keep the raw type until a
+            // candidate's parameter type determines whether the constant is
+            // needed.
+            let widened_type = if matches!(
+                self.store.types.try_get(own_type),
+                Some(Type::Constant(dotty_core::Constant::String(_)))
+            ) {
+                own_type
+            } else {
+                self.widen_expression_type_journaled(own_type, info_journal, 0)?
+            };
             arguments.push(TypedArgument {
                 typed,
                 own_type,
