@@ -6497,6 +6497,75 @@ mod tests {
     }
 
     #[test]
+    fn literal_singleton_references_are_distinct_from_stable_paths() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { val boolTrue: true = true; val boolFalse: false = false; val number: 1 = 1; val string: \"foo\" = \"foo\"; val stable: Int = 1; val stableAlias: stable.type = stable }",
+        );
+        let literal_cases = [
+            ("boolTrue", Some(dotty_core::Constant::Boolean(true))),
+            ("boolFalse", Some(dotty_core::Constant::Boolean(false))),
+            ("number", Some(dotty_core::Constant::Int(1))),
+            ("string", None),
+        ];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for (name, expected_literal) in literal_cases {
+            let (symbol, singleton_type) = val_symbol(&parsed, typer.store(), &index, source, name);
+            let TreeKind::SingletonTypeTree(singleton) = &parsed.ast.get(singleton_type).kind
+            else {
+                panic!("literal singleton annotation `{name}` must use SingletonTypeTree");
+            };
+            let TreeKind::Literal(literal) = &parsed.ast.get(singleton.reference).kind else {
+                panic!("literal singleton annotation `{name}` must reference Literal");
+            };
+            if let Some(expected_literal) = expected_literal {
+                assert_eq!(literal.value, expected_literal, "{name}");
+            } else {
+                let dotty_core::Constant::String(text) = &literal.value else {
+                    panic!("string singleton annotation must retain a string constant");
+                };
+                assert_eq!(typer.store().names.resolve(*text), "foo");
+            }
+            let context = index.declaration_context_of(symbol).unwrap();
+            let error = typer.type_of_tpt(singleton_type, context).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    TyperError::UnsupportedSingletonReference {
+                        source: actual_source,
+                        tree_index,
+                        reference_kind: "expression or declaration tree",
+                    } if actual_source == source && tree_index == singleton.reference.index()
+                ),
+                "{name}: {error:?}; reference={:#?}",
+                parsed.ast.get(singleton.reference).kind
+            );
+        }
+
+        let (stable, stable_type) =
+            val_symbol(&parsed, typer.store(), &index, source, "stableAlias");
+        let TreeKind::SingletonTypeTree(singleton) = &parsed.ast.get(stable_type).kind else {
+            panic!("stable identifier singleton must use SingletonTypeTree");
+        };
+        assert!(matches!(
+            &parsed.ast.get(singleton.reference).kind,
+            TreeKind::Ident(_)
+        ));
+        let context = index.declaration_context_of(stable).unwrap();
+        assert!(matches!(
+            typer.type_of_tpt(stable_type, context),
+            Ok(ty) if matches!(typer.store().types.get(ty), Type::TermRef { .. })
+        ));
+    }
+
+    #[test]
     fn singleton_type_rejects_mutable_and_method_references() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class C { var mutable: Int = 1; def method: Int = 1; val bad1: mutable.type = mutable; val bad2: method.type = 1 }",
