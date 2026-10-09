@@ -75,11 +75,27 @@ def run_batches(
                     f"with exit code {completed.returncode}: {detail}"
                 )
 
-            output_lines = completed.stdout.splitlines()
+            # JSON strings may contain U+2028/U+2029. Python's splitlines()
+            # treats those as separators even though the oracle protocol uses
+            # only physical LF bytes between records.
+            output_lines = completed.stdout.split("\n")
+            if output_lines and output_lines[-1] == "":
+                output_lines.pop()
             if len(output_lines) != len(batch_entries):
+                extra_records = []
+                for output_line in output_lines[len(batch_entries) :]:
+                    try:
+                        record = json.loads(output_line)
+                    except json.JSONDecodeError:
+                        extra_records.append(output_line[:160])
+                    else:
+                        extra_records.append(
+                            f"{record.get('kind', '<unknown>')}: {record.get('path', '<no path>')}"
+                        )
                 raise ValueError(
                     f"Scala oracle batch starting at entry {start} returned "
-                    f"{len(output_lines)} records for {len(batch_entries)} inputs"
+                    f"{len(output_lines)} records for {len(batch_entries)} inputs; "
+                    f"extra records: {extra_records}"
                 )
 
             for offset, output_line in enumerate(output_lines):
@@ -101,15 +117,14 @@ def run_batches(
                     source_set_end += int(source_sets[source_set_index][1])
                 if global_index >= source_set_end:
                     raise ValueError(f"could not assign oracle record {global_index + 1} to a source set")
-            if record["kind"] == "OracleFailure":
-                source_sets[source_set_index][2] = str(int(source_sets[source_set_index][2]) + 1)
-                failures += 1
-            if offset + 1 == len(output_lines):
-                print(
-                    f"Scala oracle batch: {start + len(batch_entries)}/{len(entries)} files validated",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                if record["kind"] == "OracleFailure":
+                    source_sets[source_set_index][2] = str(int(source_sets[source_set_index][2]) + 1)
+                    failures += 1
+            print(
+                f"Scala oracle batch: {start + len(batch_entries)}/{len(entries)} files validated",
+                file=sys.stderr,
+                flush=True,
+            )
 
     counts_path.write_text(
         "".join("\t".join(source_set) + "\n" for source_set in source_sets),

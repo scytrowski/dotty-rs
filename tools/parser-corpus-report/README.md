@@ -22,8 +22,8 @@ prevents a partial oracle run from being recorded as complete. The lower-level
 buffering a whole corpus response in a shell variable.
 
 The convenience runner creates one compilation-mode manifest and sends it to
-the Scala 3.9 oracle in bounded batches. Each Rust source file is parsed in an isolated
-worker process with a timeout. A worker/process failure, panic, or hang is
+the Scala 3.9 oracle in bounded batches. Each Rust source file is parsed in an
+isolated worker process with a timeout. A worker/process failure, panic, or hang is
 reported as a hard failure; when a timeout occurs, the worker process is killed
 and reaped before the next file starts, so parser state and OS resources cannot
 accumulate in detached threads. A recoverable parser diagnostic does not make
@@ -638,16 +638,14 @@ root (five tracked Scala files); the separate, unpublished `examples` and
 same pinned Scala 3.9.0 language baseline.
 
 `parser-post-issue-890-magnolia.json` measures dotty-rs revision
-`6721ebc591c9f39a6f2bf5dfe6e6e199b149b855` with all ten source sets. The
+`ad60e414651376e62b187ada4f29d6a2c5a25e67` with all ten source sets. The
 corpus contains 3,824 files: the previous 3,819 plus five Magnolia files. All
 3,824 parse without diagnostics; there are no hard failures, process failures,
-panics, hangs, or scanner diagnostics. This report was generated with
-`--skip-oracle`: the full local 3,824-file Dotty batch did not return all
-records in this environment. Magnolia was separately run as a five-file batch
-against the pinned Scala 3.9.0 oracle; all five returned trees (zero oracle
-failures). Recreate the Rust corpus report with:
+panics, hangs, or scanner diagnostics. The pinned Scala 3.9.0 oracle returned
+all 3,824 records with zero oracle failures, including all five Magnolia files.
+Recreate the report with:
 
 ```text
-tools/parser-corpus-report/run /tmp/scala3-3.9.0 --skip-oracle \
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-890-magnolia.json
 ```

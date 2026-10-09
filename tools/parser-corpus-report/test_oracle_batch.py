@@ -46,6 +46,35 @@ class OracleBatchTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertEqual(self.counts.read_text(encoding="utf-8"), "scala3\t2\t1\ncats\t3\t1\n")
 
+    def test_unicode_line_separators_inside_json_do_not_split_records(self):
+        def unicode_run(command, **kwargs):
+            entries = pathlib.Path(command[2]).read_text(encoding="utf-8").splitlines()
+            records = [
+                json.dumps(
+                    {"kind": "PackageDef", "text": "before\u2028middle\u2029after"},
+                    ensure_ascii=False,
+                )
+                for _ in entries
+            ]
+            return subprocess.CompletedProcess(command, 0, "\n".join(records) + "\n", "")
+
+        self.assertEqual(
+            oracle_batch.run_batches(self.manifest, self.counts, "oracle", 2, unicode_run),
+            (5, 0),
+        )
+
+    def test_counts_every_oracle_failure_in_each_batch(self):
+        def failing_run(command, **kwargs):
+            entries = pathlib.Path(command[2]).read_text(encoding="utf-8").splitlines()
+            records = [json.dumps({"kind": "OracleFailure"}) for _ in entries]
+            return subprocess.CompletedProcess(command, 0, "\n".join(records) + "\n", "")
+
+        self.assertEqual(
+            oracle_batch.run_batches(self.manifest, self.counts, "oracle", 2, failing_run),
+            (5, 5),
+        )
+        self.assertEqual(self.counts.read_text(encoding="utf-8"), "scala3\t2\t2\ncats\t3\t3\n")
+
     def test_rejects_truncated_batch_without_replacing_source_counts(self):
         original_counts = self.counts.read_text(encoding="utf-8")
 

@@ -252,8 +252,8 @@
         "laws/src/main/scala",
         "testkit/src/main/scala"
       ],
-      "scala_oracle_files": null,
-      "scala_oracle_failures": null,
+      "scala_oracle_files": 548,
+      "scala_oracle_failures": 0,
       "files_attempted": 548,
       "files_parsed_without_diagnostics": 548,
       "files_parsed_with_recoverable_diagnostics": 0,
@@ -290,8 +290,8 @@
         "std/shared/src/main/scala",
         "testkit/shared/src/main/scala"
       ],
-      "scala_oracle_files": null,
-      "scala_oracle_failures": null,
+      "scala_oracle_files": 266,
+      "scala_oracle_failures": 0,
       "files_attempted": 266,
       "files_parsed_without_diagnostics": 266,
       "files_parsed_with_recoverable_diagnostics": 0,
@@ -313,8 +313,8 @@
         "chimney-engine-test-extension/src/main/scala",
         "chimney-protobufs/src/main/scala"
       ],
-      "scala_oracle_files": null,
-      "scala_oracle_failures": null,
+      "scala_oracle_files": 181,
+      "scala_oracle_failures": 0,
       "files_attempted": 181,
       "files_parsed_without_diagnostics": 181,
       "files_parsed_with_recoverable_diagnostics": 0,
@@ -348,8 +348,8 @@
         "reactive-streams/src/main/scala",
         "scodec/shared/src/main/scala"
       ],
-      "scala_oracle_files": null,
-      "scala_oracle_failures": null,
+      "scala_oracle_files": 289,
+      "scala_oracle_failures": 0,
       "files_attempted": 289,
       "files_parsed_without_diagnostics": 289,
       "files_parsed_with_recoverable_diagnostics": 0,
@@ -383,8 +383,8 @@
         "zio/src",
         "zioJson/src"
       ],
-      "scala_oracle_files": null,
-      "scala_oracle_failures": null,
+      "scala_oracle_files": 52,
+      "scala_oracle_failures": 0,
       "files_attempted": 52,
       "files_parsed_without_diagnostics": 52,
       "files_parsed_with_recoverable_diagnostics": 0,
@@ -502,8 +502,8 @@
         "kyo-zio/shared/src/main/scala",
         "kyo-zio-test/shared/src/main/scala"
       ],
-      "scala_oracle_files": null,
-      "scala_oracle_failures": null,
+      "scala_oracle_files": 916,
+      "scala_oracle_failures": 0,
       "files_attempted": 916,
       "files_parsed_without_diagnostics": 916,
       "files_parsed_with_recoverable_diagnostics": 0,
@@ -520,8 +520,8 @@
       "corpus_roots": [
         "core/src/main/scala"
       ],
-      "scala_oracle_files": null,
-      "scala_oracle_failures": null,
+      "scala_oracle_files": 5,
+      "scala_oracle_failures": 0,
       "files_attempted": 5,
       "files_parsed_without_diagnostics": 5,
       "files_parsed_with_recoverable_diagnostics": 0,
@@ -539,8 +539,8 @@
         "library/src",
         "compiler/src"
       ],
-      "scala_oracle_files": null,
-      "scala_oracle_failures": null,
+      "scala_oracle_files": 1236,
+      "scala_oracle_failures": 0,
       "files_attempted": 1236,
       "files_parsed_without_diagnostics": 1236,
       "files_parsed_with_recoverable_diagnostics": 0,
@@ -559,8 +559,8 @@
         "modules/test/src/main/scala",
         "modules/typeable/src/main/scala"
       ],
-      "scala_oracle_files": null,
-      "scala_oracle_failures": null,
+      "scala_oracle_files": 10,
+      "scala_oracle_failures": 0,
       "files_attempted": 10,
       "files_parsed_without_diagnostics": 10,
       "files_parsed_with_recoverable_diagnostics": 0,
@@ -610,8 +610,8 @@
         "test-sbt/shared/src/main/scala",
         "test-scalacheck/src/main/scala"
       ],
-      "scala_oracle_files": null,
-      "scala_oracle_failures": null,
+      "scala_oracle_files": 321,
+      "scala_oracle_failures": 0,
       "files_attempted": 321,
       "files_parsed_without_diagnostics": 321,
       "files_parsed_with_recoverable_diagnostics": 0,
@@ -622,9 +622,9 @@
       "first_failure_histogram": {}
     }
   },
-  "parser_revision": "6721ebc591c9f39a6f2bf5dfe6e6e199b149b855",
-  "scala_oracle_files": null,
-  "scala_oracle_failures": null,
+  "parser_revision": "ad60e414651376e62b187ada4f29d6a2c5a25e67",
+  "scala_oracle_files": 3824,
+  "scala_oracle_failures": 0,
   "files_attempted": 3824,
   "files_parsed_without_diagnostics": 3824,
   "files_parsed_with_recoverable_diagnostics": 0,
