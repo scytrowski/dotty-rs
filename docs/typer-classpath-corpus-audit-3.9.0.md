@@ -203,6 +203,7 @@ The pinned Scala 3.9.0 audit ran twice at revision `777528f19a58e794c9954a42f433
 | Profile measure | Result |
 | --- | ---: |
 | total first blockers | 22 |
+| profile entries | 22 |
 | distinct singleton source trees | 1 |
 | distinct enclosing declarations | 1 |
 | distinct reference shapes | 1 |
@@ -876,6 +877,7 @@ mutable_class_field_baseline_method_outcomes:
   library/src/scala/collection/Iterator.scala#tree=3865 outcome=UnsupportedTypeTree::Annotated
 singleton_reference_profile:
   total_first_blockers=22
+  profile_entries=22
   distinct_singleton_source_trees=1
   distinct_enclosing_declarations=1
   distinct_reference_shapes=1

@@ -332,7 +332,7 @@ mkdir -p "$(dirname -- "$output_path")"
     awk '
         /^singleton_reference_profile:$/ { in_profile = 1; next }
         in_profile && /^  first_blockers:$/ { in_profile = 0 }
-        in_profile && /^  (total_first_blockers|distinct_singleton_source_trees|distinct_enclosing_declarations|distinct_reference_shapes)=/ {
+        in_profile && /^  (total_first_blockers|profile_entries|distinct_singleton_source_trees|distinct_enclosing_declarations|distinct_reference_shapes)=/ {
             line = $0
             sub(/^  /, "", line)
             split(line, fields, "=")

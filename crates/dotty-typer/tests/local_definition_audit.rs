@@ -462,6 +462,7 @@ impl Audit {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct SingletonReferenceProfile {
+    observations: usize,
     first_blockers: BTreeSet<String>,
     singleton_source_trees: BTreeSet<String>,
     enclosing_declarations: BTreeSet<String>,
@@ -470,6 +471,7 @@ struct SingletonReferenceProfile {
 
 impl SingletonReferenceProfile {
     fn merge(&mut self, other: Self) {
+        self.observations += other.observations;
         self.first_blockers.extend(other.first_blockers);
         self.singleton_source_trees
             .extend(other.singleton_source_trees);
@@ -479,6 +481,7 @@ impl SingletonReferenceProfile {
     }
 
     fn record(&mut self, detail: SingletonReferenceDetail) {
+        self.observations += 1;
         self.first_blockers.insert(detail.first_blocker);
         self.singleton_source_trees.insert(detail.singleton_tree);
         self.enclosing_declarations
@@ -715,6 +718,20 @@ fn pinned_scala39_local_definition_audit() {
             .sum::<usize>(),
         missing_declared_type.count,
         "profile buckets must preserve the top-level MissingDeclaredType count"
+    );
+    let singleton_reference_failures = audit
+        .failures
+        .get("UnsupportedSingletonReference")
+        .expect("the pinned audit should retain singleton-reference first blockers");
+    assert_eq!(singleton_reference_failures.count, 22);
+    assert_eq!(
+        audit.singleton_reference_profile.observations, singleton_reference_failures.count,
+        "every singleton-reference blocker must have a profile observation"
+    );
+    assert_eq!(
+        audit.singleton_reference_profile.first_blockers.len(),
+        singleton_reference_failures.count,
+        "every singleton-reference blocker must have a distinct profile row"
     );
 
     println!("AUDIT_REPORT_BEGIN");
@@ -955,7 +972,8 @@ fn pinned_scala39_local_definition_audit() {
 
 fn print_singleton_reference_profile(profile: &SingletonReferenceProfile) {
     println!("singleton_reference_profile:");
-    println!("  total_first_blockers={}", profile.first_blockers.len());
+    println!("  total_first_blockers={}", profile.observations);
+    println!("  profile_entries={}", profile.first_blockers.len());
     println!(
         "  distinct_singleton_source_trees={}",
         profile.singleton_source_trees.len()
@@ -3310,17 +3328,21 @@ fn audit_source_inner(
                         None,
                     )
                 });
-            if kind.bucket == "UnsupportedSingletonReference"
-                && let Some(reference_tree) = singleton_reference_tree
-                && let Some(detail) = singleton_reference_detail(
-                    &parsed.ast,
-                    &typer.store().names,
-                    path,
-                    text,
-                    tree,
-                    reference_tree,
-                )
-            {
+            if kind.bucket == "UnsupportedSingletonReference" {
+                let detail = singleton_reference_tree
+                    .and_then(|reference_tree| {
+                        singleton_reference_detail(
+                            &parsed.ast,
+                            &typer.store().names,
+                            path,
+                            text,
+                            tree,
+                            reference_tree,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        singleton_reference_fallback_detail(path, tree, singleton_reference_tree)
+                    });
                 audit.singleton_reference_profile.record(detail);
             }
             audit
@@ -4808,6 +4830,23 @@ fn singleton_reference_detail(
     })
 }
 
+fn singleton_reference_fallback_detail(
+    path: &str,
+    method: dotty_core::TreeId<Untyped>,
+    reference_index: Option<u32>,
+) -> SingletonReferenceDetail {
+    let reason = match reference_index {
+        Some(index) => format!("details unavailable for reference_tree={index}"),
+        None => "singleton reference tree index unavailable".to_owned(),
+    };
+    SingletonReferenceDetail {
+        first_blocker: format!("{path}:fallback method_tree={} {reason}", method.index()),
+        singleton_tree: format!("{path} fallback method_tree={} {reason}", method.index()),
+        enclosing_declaration: format!("{path} fallback declaration ({reason})"),
+        reference_shape: format!("Fallback({reason})"),
+    }
+}
+
 fn singleton_reference_shape(kind: &TreeKind<Untyped>, names: &dotty_core::NameInterner) -> String {
     match kind {
         TreeKind::Literal(literal) => match &literal.value {
@@ -4877,6 +4916,7 @@ fn singleton_profile_shapes_are_distinct_and_deterministically_ordered() {
         "Other(TypeTree)"
     );
 
+    let method_tree = parsed.ast.iter().next().unwrap().0;
     let mut first = SingletonReferenceProfile::default();
     for id in [2, 1] {
         first.record(SingletonReferenceDetail {
@@ -4886,11 +4926,29 @@ fn singleton_profile_shapes_are_distinct_and_deterministically_ordered() {
             reference_shape: "Literal(Boolean(true))".to_owned(),
         });
     }
+    first.record(singleton_reference_fallback_detail(
+        "fixture.scala",
+        method_tree,
+        None,
+    ));
     let records = first.first_blockers.iter().cloned().collect::<Vec<_>>();
-    assert_eq!(records, ["method=1", "method=2"]);
-    assert_eq!(first.singleton_source_trees.len(), 1);
-    assert_eq!(first.enclosing_declarations.len(), 1);
-    assert_eq!(first.reference_shapes.len(), 1);
+    assert_eq!(records.len(), 3);
+    assert!(records[0].contains(&format!(
+        "fixture.scala:fallback method_tree={}",
+        method_tree.index()
+    )));
+    assert_eq!(first.observations, 3);
+    assert_eq!(first.singleton_source_trees.len(), 2);
+    assert_eq!(first.enclosing_declarations.len(), 2);
+    assert_eq!(
+        first.reference_shapes,
+        [
+            "Fallback(singleton reference tree index unavailable)".to_owned(),
+            "Literal(Boolean(true))".to_owned()
+        ]
+        .into_iter()
+        .collect()
+    );
 }
 
 #[derive(Debug)]
