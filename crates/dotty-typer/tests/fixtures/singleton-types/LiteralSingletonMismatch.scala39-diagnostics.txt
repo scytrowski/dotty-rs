@@ -1,0 +1,15 @@
+-- [E007] Type Mismatch Error: LiteralSingletonMismatch.scala:2:44
+2 |  def booleanMismatch(value: false): true = value
+  |                                            ^^^^^
+  |                                     Found:    (value : (false : Boolean))
+  |                                     Required: (true : Boolean)
+  |
+  | longer explanation available when compiling with `-explain`
+-- [E007] Type Mismatch Error: LiteralSingletonMismatch.scala:3:37
+3 |  def numericMismatch(value: 2): 1 = value
+  |                                     ^^^^^
+  |                                     Found:    (value : (2 : Int))
+  |                                     Required: (1 : Int)
+  |
+  | longer explanation available when compiling with `-explain`
+2 errors found

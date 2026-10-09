@@ -253,6 +253,7 @@ struct Audit {
     patdef_profile: PatDefProfile,
     missing_declared_type_profile: MissingDeclaredTypeProfile,
     local_method_first_blockers: BTreeMap<String, String>,
+    singleton_reference_profile: SingletonReferenceProfile,
     source_function_method_outcomes: BTreeSet<String>,
     source_function_outcomes: BTreeMap<String, FailureBucket>,
 }
@@ -288,6 +289,7 @@ impl Default for Audit {
             patdef_profile: PatDefProfile::default(),
             missing_declared_type_profile: MissingDeclaredTypeProfile::default(),
             local_method_first_blockers: BTreeMap::new(),
+            singleton_reference_profile: SingletonReferenceProfile::default(),
             source_function_method_outcomes: BTreeSet::new(),
             source_function_outcomes: BTreeMap::new(),
         }
@@ -432,6 +434,8 @@ impl Audit {
             .merge(other.missing_declared_type_profile);
         self.local_method_first_blockers
             .extend(other.local_method_first_blockers);
+        self.singleton_reference_profile
+            .merge(other.singleton_reference_profile);
         for (name, count) in other.buckets {
             *self.buckets.entry(name).or_default() += count;
         }
@@ -454,6 +458,41 @@ impl Audit {
             target.examples = target.examples.iter().take(5).cloned().collect();
         }
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SingletonReferenceProfile {
+    first_blockers: BTreeSet<String>,
+    singleton_source_trees: BTreeSet<String>,
+    enclosing_declarations: BTreeSet<String>,
+    reference_shapes: BTreeSet<String>,
+}
+
+impl SingletonReferenceProfile {
+    fn merge(&mut self, other: Self) {
+        self.first_blockers.extend(other.first_blockers);
+        self.singleton_source_trees
+            .extend(other.singleton_source_trees);
+        self.enclosing_declarations
+            .extend(other.enclosing_declarations);
+        self.reference_shapes.extend(other.reference_shapes);
+    }
+
+    fn record(&mut self, detail: SingletonReferenceDetail) {
+        self.first_blockers.insert(detail.first_blocker);
+        self.singleton_source_trees.insert(detail.singleton_tree);
+        self.enclosing_declarations
+            .insert(detail.enclosing_declaration);
+        self.reference_shapes.insert(detail.reference_shape);
+    }
+}
+
+#[derive(Debug)]
+struct SingletonReferenceDetail {
+    first_blocker: String,
+    singleton_tree: String,
+    enclosing_declaration: String,
+    reference_shape: String,
 }
 
 impl MissingDeclaredTypeProfile {
@@ -910,7 +949,41 @@ fn pinned_scala39_local_definition_audit() {
     print_pinned_mutable_field_completion_outcomes(&root, classpath);
     print_pinned_immutable_field_method_outcomes(&audit.local_method_first_blockers);
     print_pinned_mutable_field_method_outcomes(&audit.local_method_first_blockers);
+    print_singleton_reference_profile(&audit.singleton_reference_profile);
     println!("AUDIT_REPORT_END");
+}
+
+fn print_singleton_reference_profile(profile: &SingletonReferenceProfile) {
+    println!("singleton_reference_profile:");
+    println!("  total_first_blockers={}", profile.first_blockers.len());
+    println!(
+        "  distinct_singleton_source_trees={}",
+        profile.singleton_source_trees.len()
+    );
+    println!(
+        "  distinct_enclosing_declarations={}",
+        profile.enclosing_declarations.len()
+    );
+    println!(
+        "  distinct_reference_shapes={}",
+        profile.reference_shapes.len()
+    );
+    println!("  first_blockers:");
+    for record in &profile.first_blockers {
+        println!("    {record}");
+    }
+    println!("  singleton_source_trees:");
+    for tree in &profile.singleton_source_trees {
+        println!("    {tree}");
+    }
+    println!("  enclosing_declarations:");
+    for declaration in &profile.enclosing_declarations {
+        println!("    {declaration}");
+    }
+    println!("  reference_shapes:");
+    for shape in &profile.reference_shapes {
+        println!("    {shape}");
+    }
 }
 
 fn print_pinned_mutable_field_method_outcomes(outcomes: &BTreeMap<String, String>) {
@@ -3140,7 +3213,11 @@ fn audit_source_inner(
                 TyperError::MissingDeclaredType { tree_index, .. } => Some(*tree_index),
                 _ => None,
             };
-            root_failures.push((range, failure, missing_type_tree));
+            let singleton_reference_tree = match &error {
+                TyperError::UnsupportedSingletonReference { tree_index, .. } => Some(*tree_index),
+                _ => None,
+            };
+            root_failures.push((range, failure, missing_type_tree, singleton_reference_tree));
         }
     }
 
@@ -3216,13 +3293,13 @@ fn audit_source_inner(
                 .local_method_first_blockers
                 .insert(format!("{path}#tree={}", tree.index()), "typed".to_owned());
         } else {
-            let (kind, missing_type_tree) = root_failures
+            let (kind, missing_type_tree, singleton_reference_tree) = root_failures
                 .iter()
-                .filter(|(parent, _, _)| {
+                .filter(|(parent, _, _, _)| {
                     parent.start() <= range.start() && range.end() <= parent.end()
                 })
-                .min_by_key(|(parent, _, _)| parent.end().saturating_sub(parent.start()))
-                .map(|(_, failure, tree)| (failure.clone(), *tree))
+                .min_by_key(|(parent, _, _, _)| parent.end().saturating_sub(parent.start()))
+                .map(|(_, failure, tree, singleton)| (failure.clone(), *tree, *singleton))
                 .unwrap_or_else(|| {
                     (
                         FailureClassification {
@@ -3230,8 +3307,22 @@ fn audit_source_inner(
                             family: FailureFamily::Other,
                         },
                         None,
+                        None,
                     )
                 });
+            if kind.bucket == "UnsupportedSingletonReference"
+                && let Some(reference_tree) = singleton_reference_tree
+                && let Some(detail) = singleton_reference_detail(
+                    &parsed.ast,
+                    &typer.store().names,
+                    path,
+                    text,
+                    tree,
+                    reference_tree,
+                )
+            {
+                audit.singleton_reference_profile.record(detail);
+            }
             audit
                 .local_method_first_blockers
                 .insert(format!("{path}#tree={}", tree.index()), kind.bucket.clone());
@@ -4297,7 +4388,7 @@ struct SourceFunctionMethodAudit<'a, 'typer> {
     source_text: &'a str,
     names: &'a dotty_core::names::NameInterner,
     methods: &'a [(dotty_core::TreeId<Untyped>, TextRange)],
-    root_failures: &'a [(TextRange, FailureClassification, Option<u32>)],
+    root_failures: &'a [(TextRange, FailureClassification, Option<u32>, Option<u32>)],
     typer: &'a SourceTyper<'typer>,
 }
 
@@ -4494,11 +4585,11 @@ fn collect_source_function_method_outcomes(
             audit
                 .root_failures
                 .iter()
-                .filter(|(parent, _, _)| {
+                .filter(|(parent, _, _, _)| {
                     parent.start() <= method_range.start() && method_range.end() <= parent.end()
                 })
-                .min_by_key(|(parent, _, _)| parent.len())
-                .map_or("NoSuccessfulEnclosingMethodTyping", |(_, failure, _)| {
+                .min_by_key(|(parent, _, _, _)| parent.len())
+                .map_or("NoSuccessfulEnclosingMethodTyping", |(_, failure, _, _)| {
                     failure.bucket.as_str()
                 })
         };
@@ -4618,6 +4709,188 @@ fn record_failure(audit: &mut Audit, failure: FailureClassification, path: &str)
     bucket.files.insert(path.to_owned());
     bucket.examples.insert(path.to_owned());
     bucket.examples = bucket.examples.iter().take(5).cloned().collect();
+}
+
+fn singleton_reference_detail(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::NameInterner,
+    path: &str,
+    source_text: &str,
+    method: dotty_core::TreeId<Untyped>,
+    reference_index: u32,
+) -> Option<SingletonReferenceDetail> {
+    let (reference, reference_node) = arena
+        .iter()
+        .find(|(tree, _)| tree.index() == reference_index)?;
+    let singleton = arena.iter().find_map(|(tree, node)| match &node.kind {
+        TreeKind::SingletonTypeTree(singleton) if singleton.reference == reference => {
+            Some((tree, singleton))
+        }
+        _ => None,
+    })?;
+    let method_node = arena.try_get(method)?;
+    let TreeKind::DefDef(method_def) = &method_node.kind else {
+        return None;
+    };
+    let method_name = names.resolve(method_def.name.as_name().text());
+    let method_range = method_node.position?.span().range();
+    let method_line = source_text.as_bytes()[..method_range.start() as usize]
+        .iter()
+        .filter(|byte| **byte == b'\n')
+        .count()
+        + 1;
+
+    let (declaration, declaration_shape, snippet) = arena
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::ValDef(definition) if definition.tpt == singleton.0 => {
+                let name = names.resolve(definition.name.as_name().text());
+                let mutable = definition
+                    .metadata
+                    .modifiers
+                    .contains(&dotty_core::ast::Modifier::Var);
+                let shape = format!(
+                    "tree={} ValDef(name={name},rhs={},mutable={mutable})",
+                    tree.index(),
+                    definition.rhs.is_some()
+                );
+                let snippet = node
+                    .position
+                    .and_then(|position| {
+                        let range = position.span().range();
+                        source_text.get(range.start() as usize..range.end() as usize)
+                    })
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned();
+                Some((shape.clone(), shape, snippet))
+            }
+            TreeKind::TypeDef(definition) if definition.rhs == singleton.0 => {
+                let name = names.resolve(definition.name.as_name().text());
+                let shape = format!("tree={} TypeDef(name={name})", tree.index());
+                let snippet = node
+                    .position
+                    .and_then(|position| {
+                        let range = position.span().range();
+                        source_text.get(range.start() as usize..range.end() as usize)
+                    })
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned();
+                Some((shape.clone(), shape, snippet))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            (
+                format!("unowned singleton tree {}", singleton.0.index()),
+                "unknown enclosing declaration".to_owned(),
+                String::new(),
+            )
+        });
+    let reference_shape = singleton_reference_shape(&reference_node.kind, names);
+    let reference_span = reference_node.position;
+    let singleton_span = arena.get(singleton.0).position;
+    Some(SingletonReferenceDetail {
+        first_blocker: format!(
+            "{path}:{method_line}:{method_name} method_tree={} singleton_tree={} reference_tree={} reference_shape={reference_shape} reference_span={reference_span:?} singleton_span={singleton_span:?} declaration={declaration} snippet={snippet:?}",
+            method.index(),
+            singleton.0.index(),
+            reference.index()
+        ),
+        singleton_tree: format!(
+            "{path} tree={} reference_tree={} reference_shape={reference_shape} span={singleton_span:?}",
+            singleton.0.index(),
+            reference.index()
+        ),
+        enclosing_declaration: format!("{path} {declaration_shape} snippet={snippet:?}"),
+        reference_shape,
+    })
+}
+
+fn singleton_reference_shape(kind: &TreeKind<Untyped>, names: &dotty_core::NameInterner) -> String {
+    match kind {
+        TreeKind::Literal(literal) => match &literal.value {
+            dotty_core::Constant::Unit => "Literal(Unit)".to_owned(),
+            dotty_core::Constant::Null => "Literal(Null)".to_owned(),
+            dotty_core::Constant::Boolean(value) => format!("Literal(Boolean({value}))"),
+            dotty_core::Constant::Byte(value) => format!("Literal(Byte({value}))"),
+            dotty_core::Constant::Short(value) => format!("Literal(Short({value}))"),
+            dotty_core::Constant::Char(value) => format!("Literal(Char({value}))"),
+            dotty_core::Constant::Int(value) => format!("Literal(Int({value}))"),
+            dotty_core::Constant::Long(value) => format!("Literal(Long({value}))"),
+            dotty_core::Constant::FloatBits(value) => format!("Literal(FloatBits({value}))"),
+            dotty_core::Constant::DoubleBits(value) => format!("Literal(DoubleBits({value}))"),
+            dotty_core::Constant::String(value) => {
+                format!("Literal(String({:?}))", names.resolve(*value))
+            }
+            dotty_core::Constant::StringUtf16(value) => {
+                format!("Literal(StringUtf16({value:?}))")
+            }
+            dotty_core::Constant::Class(value) => format!("Literal(Class({value:?}))"),
+        },
+        TreeKind::Ident(_) => "Ident".to_owned(),
+        TreeKind::Select(_) => "Select".to_owned(),
+        TreeKind::This(_) => "This".to_owned(),
+        TreeKind::PhaseSpecific(UntypedNode::Parens(_)) => "Parens".to_owned(),
+        kind => format!("Other({})", tree_kind_label(kind)),
+    }
+}
+
+#[test]
+fn singleton_profile_shapes_are_distinct_and_deterministically_ordered() {
+    let source_text = "class Inner { val field: Int = 0 }; class C { val truth: true = true; val numeric: 1 = 1; val stable: Int = 1; val alias: stable.type = stable; val inner: Inner = new Inner; val selected: inner.field.type = inner.field }";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let mut shapes = parsed
+        .ast
+        .iter()
+        .filter_map(|(_, node)| match &node.kind {
+            TreeKind::SingletonTypeTree(singleton) => Some(singleton_reference_shape(
+                &parsed.ast.get(singleton.reference).kind,
+                &store.names,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    shapes.sort();
+    assert_eq!(
+        shapes,
+        [
+            "Ident",
+            "Literal(Boolean(true))",
+            "Literal(Int(1))",
+            "Select",
+        ]
+    );
+    assert_eq!(
+        singleton_reference_shape(&TreeKind::TypeTree(Default::default()), &store.names),
+        "Other(TypeTree)"
+    );
+
+    let mut first = SingletonReferenceProfile::default();
+    for id in [2, 1] {
+        first.record(SingletonReferenceDetail {
+            first_blocker: format!("method={id}"),
+            singleton_tree: "source-tree=7".to_owned(),
+            enclosing_declaration: "declaration=3".to_owned(),
+            reference_shape: "Literal(Boolean(true))".to_owned(),
+        });
+    }
+    let records = first.first_blockers.iter().cloned().collect::<Vec<_>>();
+    assert_eq!(records, ["method=1", "method=2"]);
+    assert_eq!(first.singleton_source_trees.len(), 1);
+    assert_eq!(first.enclosing_declarations.len(), 1);
+    assert_eq!(first.reference_shapes.len(), 1);
 }
 
 #[derive(Debug)]

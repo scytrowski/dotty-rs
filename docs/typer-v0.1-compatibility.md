@@ -74,6 +74,39 @@ selections, and references outside identifier, selection, parenthesized, and
 effect of projecting a type. Failed projection uses the enclosing type
 projection transaction so symbol completion and type-cache mutations roll back.
 
+Literal singleton syntax also parses as `SingletonTypeTree` around an existing
+literal node. In the Scala 3.9.0 reference compiler, `true`, `false`, `1`, and
+`"foo"` retain those exact constant types, conform to their underlying
+`Boolean`, `Int`, and `String` types, and equal only the same constant value.
+Source type projection currently does not accept a `Literal` singleton
+reference; `project_stable_term_reference` reports
+`UnsupportedSingletonReference`. The #880 pinned audit attributes all 22 local
+method observations to the single `true` literal type on `actionable` in
+`CheckUnused.scala`, rather than 22 separate declarations.
+
+The semantic model already has `Type::Constant`; source literal expressions
+also retain exact constant types. `widen_expression_type` maps booleans and
+numeric constants to their builtin types, while string, null, and class
+constants are not yet widenable. `require_stable_selection_prefix` accepts
+constant types as stable prefixes. TASTy decoding maps wire constant types to
+the same `Type::Constant` representation. The current type relation does not
+yet compare constant payloads or relate a constant to its underlying builtin
+type. Expected expression adaptation widens before conformance, so singleton
+expected types need a path that preserves the exact constant until relation
+checking. These are the follow-up boundaries; #880 does not change source
+Typer semantics.
+
+The concrete next slice can be limited to boolean, numeric, and string literal
+references, all of which already have lossless `Constant` variants. Projection
+can add one `Literal` branch without changing identifier, selection, `this`, or
+parenthesized paths. The relation must recognize exact constant equality,
+reject unequal payloads such as `true` versus `false`, and relate a supported
+constant to its underlying builtin type (`true <: Boolean`, `1 <: Int`, and
+`"foo" <: String`). Expected adaptation must compare the preserved expression
+constant before choosing the underlying widened type. Keep `null`, class
+literals, literal unions, and general constant folding unsupported until their
+own source and relation contracts are specified.
+
 ## Pattern typing foundation
 
 Pattern typing has its own recursive-ready entry point under
