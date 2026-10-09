@@ -12,6 +12,7 @@ KYO_SCALA_2_12_PLUGIN_PREFIXES = (
     ("kyo-test", "sbt"),
     ("kyo-test", "sbt-publish"),
 )
+ZIO_NON_SCALA3_PROJECTS = ("zio-docs",)
 
 
 def shapeless3_compile_roots(
@@ -60,6 +61,24 @@ def kyo_scala3_production_roots(
             relative.parts[: len(prefix)] == prefix
             for prefix in KYO_SCALA_2_12_PLUGIN_PREFIXES
         ):
+            continue
+        selected.append(root)
+    return selected
+
+
+def zio_scala3_production_roots(
+    repository: pathlib.Path, source_roots: list[pathlib.Path]
+) -> list[pathlib.Path]:
+    """Exclude ZIO's mdoc project, which does not build with Scala 3."""
+    repository = repository.resolve(strict=True)
+    selected = []
+    for root in source_roots:
+        root = root.resolve(strict=True)
+        try:
+            relative = root.relative_to(repository)
+        except ValueError as error:
+            raise ValueError(f"source root is outside ZIO checkout: {root}") from error
+        if relative.parts and relative.parts[0] in ZIO_NON_SCALA3_PROJECTS:
             continue
         selected.append(root)
     return selected
