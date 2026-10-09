@@ -365,8 +365,9 @@ In `using` clauses, the named-parameter lookahead also recognizes annotation
 and supported modifier prefixes (including constructor `val`/`var` accessors),
 while a bare `using T` remains an anonymous context parameter.
 Ordinary named method and non-accessor class-constructor parameters also
-support by-name types (`x: => T`). The parser represents these with the shared
-`ByNameTypeTree`, wrapping the supported type grammar after `=>`; this is
+support by-name types (`x: => T`), including Scala 3.9's deprecated Unicode
+arrow alias (`x: ⇒ T`). The parser represents these with the shared
+`ByNameTypeTree`, wrapping the supported type grammar after the arrow; this is
 source syntax only and does not lower the parameter to a thunk. By-name
 arguments in ordinary function types remain a separate grammar production.
 class, trait, object, case class, case object, and enum definitions with type

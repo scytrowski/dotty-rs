@@ -643,9 +643,9 @@ where
         self.current_text().ok() == Some(expected)
     }
 
-    /// Returns whether a token is the ordinary case arrow `=>`.
+    /// Returns whether a token is the ordinary arrow `=>` or its Unicode alias `⇒`.
     pub(crate) fn is_arrow_token(&self, token: &Token) -> bool {
-        token.kind == TokenKind::Operator && self.token_text(token).ok() == Some("=>")
+        token.kind == TokenKind::Operator && matches!(self.token_text(token).ok(), Some("=>" | "⇒"))
     }
 
     /// Returns whether a token is the context-function arrow `?=>`.

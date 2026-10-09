@@ -1683,7 +1683,11 @@ mod tests {
             parser.ast().get(by_name.result).kind,
             TreeKind::Ident(identifier) if identifier.name.is_type()
         ));
-        assert!(parser.diagnostics().is_empty(), "{:?}", parser.diagnostics());
+        assert!(
+            parser.diagnostics().is_empty(),
+            "{:?}",
+            parser.diagnostics()
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
