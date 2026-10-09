@@ -923,6 +923,18 @@ mod tests {
         drop(parser);
 
         let parser = parser_with_tokens(
+            "⇒",
+            vec![
+                token(TokenKind::Operator, 0, 3),
+                token(TokenKind::Eof, 3, 3),
+            ],
+            &mut names,
+        );
+        assert!(parser.current_is_arrow());
+        assert!(parser.current_is_structural_operator());
+        drop(parser);
+
+        let parser = parser_with_tokens(
             "?=>",
             vec![
                 token(TokenKind::Operator, 0, 3),

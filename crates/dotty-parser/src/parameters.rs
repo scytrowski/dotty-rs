@@ -1655,6 +1655,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_unicode_by_name_type_on_a_named_method_parameter() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(z: ⇒ B)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Operator, 4, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+        let TreeKind::ValDef(parameter) = &parser.ast().get(clauses[0][0]).kind else {
+            panic!("expected a method parameter");
+        };
+        let TreeKind::ByNameTypeTree(by_name) = &parser.ast().get(parameter.tpt).kind else {
+            panic!("expected a by-name parameter type");
+        };
+
+        assert!(matches!(
+            parser.ast().get(by_name.result).kind,
+            TreeKind::Ident(identifier) if identifier.name.is_type()
+        ));
+        assert!(parser.diagnostics().is_empty(), "{:?}", parser.diagnostics());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn parses_pure_by_name_parameter_types_with_capture_checking_enabled() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
