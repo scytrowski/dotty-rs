@@ -1862,6 +1862,7 @@ fn root_label(root: &Path) -> String {
             || part.starts_with("cats-effect-v")
             || part.starts_with("kyo-v")
             || part.starts_with("shapeless-3-v")
+            || part.starts_with("chimney-")
     }) {
         return components[index + 1..].join("/");
     }
@@ -2494,6 +2495,14 @@ mod tests {
                 "/tmp/cache/shapeless-3-v3.6.0/modules/deriving/src/main/scala",
             )),
             "modules/deriving/src/main/scala"
+        );
+    }
+
+    #[test]
+    fn chimney_root_label_does_not_include_the_local_checkout_directory() {
+        assert_eq!(
+            root_label(Path::new("/tmp/cache/chimney-2.1.0/chimney/src/main/scala",)),
+            "chimney/src/main/scala"
         );
     }
 
