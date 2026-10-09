@@ -381,7 +381,7 @@ where
 
     fn starts_unsupported_self_type_tail(&mut self) -> bool {
         match self.current().kind {
-            TokenKind::Operator | TokenKind::ColonOp => !self.current_text_is("=>"),
+            TokenKind::Operator | TokenKind::ColonOp => !self.current_is_arrow(),
             TokenKind::Keyword(HardKeyword::With) => true,
             TokenKind::Punctuation(Punctuation::LeftBracket) => true,
             TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
@@ -424,9 +424,7 @@ where
         if !is_name {
             return false;
         }
-        if self.cursor.lookahead(1).kind == TokenKind::Operator
-            && self.source.slice(self.cursor.lookahead(1).span).ok() == Some("=>")
-        {
+        if self.lookahead_is_arrow(1) {
             return true;
         }
         if !is_self_colon(self.cursor.lookahead(1).kind) {
@@ -486,8 +484,7 @@ where
             ) {
                 return false;
             }
-            if token.kind == TokenKind::Operator && self.source.slice(token.span).ok() == Some("=>")
-            {
+            if self.lookahead_is_arrow(offset) {
                 return true;
             }
             offset = offset.saturating_add(1);
@@ -505,10 +502,11 @@ where
             return false;
         }
 
-        !matches!(
-            self.source.slice(token.span).ok(),
-            Some("=" | "<-" | "=>" | "->" | "?=>" | "?->" | ":" | "<:" | ">:" | "#" | "^")
-        )
+        !self.is_arrow_token(token)
+            && !matches!(
+                self.source.slice(token.span).ok(),
+                Some("=" | "<-" | "->" | "?=>" | "?->" | ":" | "<:" | ">:" | "#" | "^")
+            )
     }
 
     fn accept_self_colon(&mut self) -> bool {
@@ -1177,6 +1175,37 @@ mod tests {
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_template_self_type_with_a_unicode_arrow() {
+        let source = "{ self: T ⇒ value }";
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            source,
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 0, 1),
+                token(TokenKind::Identifier, 2, 6),
+                token(TokenKind::Punctuation(Punctuation::Colon), 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Operator, 10, 13),
+                token(TokenKind::Identifier, 14, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 20, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let result = parser.parse_template_body(TemplateBody::Braced);
+
+        assert!(result.self_val.is_some());
+        assert_eq!(result.members.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert!(
+            parser.diagnostics().is_empty(),
+            "{:?}",
+            parser.diagnostics()
+        );
     }
 
     #[test]
