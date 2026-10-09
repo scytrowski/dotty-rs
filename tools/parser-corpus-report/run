@@ -145,7 +145,7 @@ roots_by_name = dict(zip(
     map(pathlib.Path, sys.argv[3:8]),
     strict=True,
 ))
-arguments = sys.argv[7:]
+arguments = sys.argv[8:]
 root_groups = []
 while "--" in arguments:
     separator = arguments.index("--")
