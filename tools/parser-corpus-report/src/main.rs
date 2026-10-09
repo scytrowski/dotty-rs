@@ -1858,7 +1858,10 @@ fn root_label(root: &Path) -> String {
         .filter_map(|part| part.as_os_str().to_str())
         .collect::<Vec<_>>();
     if let Some(index) = components.iter().rposition(|part| {
-        part.starts_with("cats-v") || part.starts_with("cats-effect-v") || part.starts_with("kyo-v")
+        part.starts_with("cats-v")
+            || part.starts_with("cats-effect-v")
+            || part.starts_with("kyo-v")
+            || part.starts_with("shapeless-3-v")
     }) {
         return components[index + 1..].join("/");
     }
@@ -2481,6 +2484,16 @@ mod tests {
                 "/tmp/cache/kyo-v1.0.0-RC4/kyo-caliban/src/main/scala",
             )),
             "kyo-caliban/src/main/scala"
+        );
+    }
+
+    #[test]
+    fn shapeless_root_label_does_not_include_the_local_checkout_directory() {
+        assert_eq!(
+            root_label(Path::new(
+                "/tmp/cache/shapeless-3-v3.6.0/modules/deriving/src/main/scala",
+            )),
+            "modules/deriving/src/main/scala"
         );
     }
 
