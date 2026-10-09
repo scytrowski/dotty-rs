@@ -75,14 +75,19 @@ fi
 
 if [[ -n "${batch_manifest}" ]]; then
   # SBT can emit JSON-looking lines of its own. Only the explicit batch marker
-  # identifies records written by the parser oracle.
-  json=$(grep -a '^__DOTTY_PARSER_ORACLE_RECORD__' "${sbt_output}" | sed 's/^__DOTTY_PARSER_ORACLE_RECORD__//' || true)
+  # identifies records written by the parser oracle. Stream them instead of
+  # collecting the entire corpus response in one shell variable.
+  if ! grep -a '^__DOTTY_PARSER_ORACLE_RECORD__' "${sbt_output}" | sed 's/^__DOTTY_PARSER_ORACLE_RECORD__//'; then
+    cat "${sbt_output}" >&2
+    echo "scala-parser-oracle did not produce batch records" >&2
+    exit 1
+  fi
 else
   json=$(grep -a '^{"kind":' "${sbt_output}" | tail -n 1 || true)
+  if [[ -z "${json}" ]]; then
+    cat "${sbt_output}" >&2
+    echo "scala-parser-oracle did not produce JSON" >&2
+    exit 1
+  fi
+  printf '%s\n' "${json}"
 fi
-if [[ -z "${json}" ]]; then
-  cat "${sbt_output}" >&2
-  echo "scala-parser-oracle did not produce JSON" >&2
-  exit 1
-fi
-printf '%s\n' "${json}"
