@@ -596,3 +596,26 @@ also remain clean at this main revision. Recreate the report with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-885-fs2.json
 ```
+
+## Iron corpus
+
+The expanded corpus includes Iron [`v3.3.2`](https://github.com/Iltotore/iron/releases/tag/v3.3.2),
+pinned to `229c85a15e8b00be77d9760db272e1c1de31e79c`. Iron's build targets
+Scala 3.3.6. Its production code is stored in module-level `*/src` roots
+rather than `src/main/scala`; the runner selects the 18 library and integration
+module roots, and excludes `examples`, `sandbox`, docs, and test trees. These
+sources are parsed against the pinned Scala 3.9.0 oracle. The checkout must be
+clean and match its exact pinned revision.
+
+`parser-post-issue-888-iron.json` measures dotty-rs revision
+`52fcc608ae0caeb6e986d995a079dbc582c022bb` with all nine source sets. The
+corpus contains 3,819 files: the previous 3,767 plus 52 Iron files. All 3,819
+parse without diagnostics; there are no hard failures, process failures,
+panics, hangs, scanner diagnostics, or Dotty oracle failures. All pre-existing
+source sets remain clean. This records the larger corpus and is not a parser
+improvement claim. Recreate the report with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-888-iron.json
+```

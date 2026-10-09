@@ -14,6 +14,25 @@ KYO_SCALA_2_12_PLUGIN_PREFIXES = (
 )
 ZIO_NON_SCALA3_PROJECTS = ("zio-docs",)
 FS2_NON_LIBRARY_PROJECTS = ("benchmark",)
+IRON_NON_LIBRARY_PROJECTS = ("docs", "examples", "sandbox")
+
+
+def iron_library_production_roots(repository: pathlib.Path) -> list[pathlib.Path]:
+    """Return Iron library module source roots, excluding examples and docs."""
+    repository = repository.resolve(strict=True)
+    selected = []
+    for module in sorted(repository.iterdir()):
+        if not module.is_dir() or module.name in IRON_NON_LIBRARY_PROJECTS:
+            continue
+        module = module.resolve(strict=True)
+        try:
+            module.relative_to(repository)
+        except ValueError as error:
+            raise ValueError(f"Iron source module is outside Iron checkout: {module}") from error
+        source_root = module / "src"
+        if source_root.is_dir() and any(source_root.rglob("*.scala")):
+            selected.append(source_root.resolve(strict=True))
+    return selected
 
 
 def fs2_library_production_roots(
