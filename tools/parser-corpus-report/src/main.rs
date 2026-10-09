@@ -1860,6 +1860,7 @@ fn root_label(root: &Path) -> String {
     if let Some(index) = components.iter().rposition(|part| {
         part.starts_with("cats-v")
             || part.starts_with("cats-effect-v")
+            || part.starts_with("fs2-v")
             || part.starts_with("kyo-v")
             || part.starts_with("shapeless-3-v")
             || part.starts_with("zio-v")
@@ -2520,6 +2521,72 @@ mod tests {
             )),
             "concurrent/src/main/scala"
         );
+    }
+
+    #[test]
+    fn fs2_root_label_does_not_include_the_local_checkout_directory() {
+        assert_eq!(
+            root_label(Path::new(
+                "/tmp/cache/fs2-v3.13.0/core/shared/src/main/scala",
+            )),
+            "core/shared/src/main/scala"
+        );
+    }
+
+    #[test]
+    fn fs2_checkout_pin_rejects_a_different_head_with_a_clear_error() {
+        let checkout = unique_temp_dir("fs2-checkout-pin").join("fs2-v3.13.0");
+        fs::create_dir_all(&checkout).expect("create temporary FS2 checkout");
+        let init = Command::new("git")
+            .args(["-C", checkout.to_str().unwrap(), "init", "-q"])
+            .status()
+            .expect("run git init");
+        assert!(init.success());
+        let commit = Command::new("git")
+            .args([
+                "-C",
+                checkout.to_str().unwrap(),
+                "-c",
+                "user.name=Corpus Test",
+                "-c",
+                "user.email=corpus-test@example.com",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "fixture",
+            ])
+            .status()
+            .expect("create temporary commit");
+        assert!(commit.success());
+        let actual = Command::new("git")
+            .args(["-C", checkout.to_str().unwrap(), "rev-parse", "HEAD"])
+            .output()
+            .expect("read temporary HEAD");
+        assert!(actual.status.success());
+        let actual = String::from_utf8(actual.stdout)
+            .expect("git revision is UTF-8")
+            .trim()
+            .to_owned();
+        let expected = "0000000000000000000000000000000000000000";
+        let cache_dir = checkout.parent().unwrap();
+        let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("source_checkout.sh");
+        let result = Command::new("bash")
+            .arg("-c")
+            .arg("source \"$1\"; cache_dir=\"$2\"; ensure_checkout fs2 https://example.invalid/fs2.git v3.13.0 \"$3\"")
+            .arg("bash")
+            .arg(helper)
+            .arg(cache_dir)
+            .arg(expected)
+            .output()
+            .expect("run FS2 checkout pin validation");
+
+        assert!(!result.status.success(), "mismatched checkout must fail");
+        let stderr = String::from_utf8(result.stderr).expect("error is UTF-8");
+        assert!(stderr.contains(&format!(
+            "fs2 checkout revision mismatch: expected {expected}, got {actual} at {}",
+            checkout.display()
+        )));
+        fs::remove_dir_all(checkout.parent().unwrap()).expect("remove temporary checkout");
     }
 
     #[test]

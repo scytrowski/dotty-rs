@@ -573,3 +573,26 @@ Recreate it with:
 tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
   --output tools/parser-corpus-report/parser-post-issue-869-zio.json
 ```
+
+## FS2 corpus
+
+The expanded corpus includes FS2 [`v3.13.0`](https://github.com/typelevel/fs2/releases/tag/v3.13.0),
+pinned to `5fd43178af3312facaa91868258b7afa90999e0f`. Its build declares
+Scala 3.3.7 as the Scala 3 cross-build version; the tracked Scala 3 source roots
+are parsed against the pinned Scala 3.9.0 parser. The runner includes shared and platform
+production roots, excludes the benchmark project, and does not discover Scala
+2-only source directories. As with other source sets, the checkout must be
+clean and exactly at the pinned revision.
+
+`parser-post-issue-885-fs2.json` measures dotty-rs revision
+`89423a957d79f16f0d8fc0ec5feb7e65712cafca` with all eight source sets. The
+corpus contains 3,767 files: 1,236 Scala 3, 548 Cats, 266 Cats Effect, 916 Kyo,
+10 Shapeless 3, 181 Chimney, 321 ZIO, and 289 FS2. All 3,767 files parse
+without diagnostics; there are no hard failures, process failures, panics,
+hangs, scanner diagnostics, or Dotty oracle failures. The previous 3,478 files
+also remain clean at this main revision. Recreate the report with:
+
+```text
+tools/parser-corpus-report/run /tmp/scala3-3.9.0 \
+  --output tools/parser-corpus-report/parser-post-issue-885-fs2.json
+```
