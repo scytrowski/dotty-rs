@@ -7,6 +7,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from source_inventory import (
     fs2_library_production_roots,
+    iron_library_production_roots,
     kyo_scala3_production_roots,
     shapeless3_compile_roots,
     tracked_scala_sources,
@@ -133,6 +134,45 @@ class TrackedScalaSourcesTests(unittest.TestCase):
     def test_fs2_rejects_source_roots_outside_checkout(self):
         with self.assertRaisesRegex(ValueError, "outside FS2 checkout"):
             fs2_library_production_roots(self.repository, [pathlib.Path("/")])
+
+    def test_iron_includes_library_modules_and_excludes_examples_docs_and_sandbox(self):
+        main = self.repository / "main/src/io/example/Main.scala"
+        cats = self.repository / "cats/src/io/example/Cats.scala"
+        main.parent.mkdir(parents=True)
+        cats.parent.mkdir(parents=True)
+        main.write_text("object Main\n", encoding="utf-8")
+        cats.write_text("object Cats\n", encoding="utf-8")
+        for project in ("examples/sample", "sandbox", "docs"):
+            source = self.repository / project / "src/io/example/Excluded.scala"
+            source.parent.mkdir(parents=True)
+            source.write_text("object Excluded\n", encoding="utf-8")
+
+        roots = iron_library_production_roots(self.repository)
+
+        self.assertEqual(roots, [
+            (self.repository / "cats/src").resolve(),
+            (self.repository / "main/src").resolve(),
+        ])
+
+    def test_iron_rejects_source_roots_outside_checkout(self):
+        with tempfile.TemporaryDirectory() as outside_dir:
+            outside = pathlib.Path(outside_dir)
+            (outside / "src").mkdir()
+            (self.repository / "linked-module").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "outside Iron checkout"):
+                iron_library_production_roots(self.repository)
+
+    def test_iron_includes_only_module_src_directories(self):
+        production = self.repository / "module/src/io/example/Production.scala"
+        test_source = self.repository / "module/test/src/io/example/Test.scala"
+        production.parent.mkdir(parents=True)
+        test_source.parent.mkdir(parents=True)
+        production.write_text("object Production\n", encoding="utf-8")
+        test_source.write_text("object Test\n", encoding="utf-8")
+
+        roots = iron_library_production_roots(self.repository)
+
+        self.assertEqual(roots, [(self.repository / "module/src").resolve()])
 
 
 if __name__ == "__main__":
