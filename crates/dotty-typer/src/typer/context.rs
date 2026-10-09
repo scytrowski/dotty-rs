@@ -123,6 +123,300 @@ impl SourceTyper<'_> {
         )
     }
 
+    /// Builds an expression context for an initialized field on an ordinary
+    /// source class. The field's recorded lexical context begins at the
+    /// primary-constructor parameter scope and chains to the class-body
+    /// context at the declaration point. `this` is owned by the class, and no
+    /// typer-local method or block scope is pushed.
+    pub fn field_initializer_context_for(
+        &self,
+        field: SymbolId,
+    ) -> Result<ExpressionContext, TyperError> {
+        if !self.store.symbols.contains(field) {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index: None,
+                issue: FieldInitializerContextIssue::SymbolMissing,
+            });
+        }
+        let field_symbol = self.store.symbols.get(field);
+        if field_symbol.kind != SymbolKind::Field {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index: None,
+                issue: FieldInitializerContextIssue::SymbolKind(field_symbol.kind),
+            });
+        }
+        if field_symbol.flags.contains(SymbolFlags::MUTABLE) {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index: None,
+                issue: FieldInitializerContextIssue::MutableField,
+            });
+        }
+        if field_symbol.flags.contains(SymbolFlags::INLINE) {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index: None,
+                issue: FieldInitializerContextIssue::InlineField,
+            });
+        }
+        let Some(definition) = self.index.definition_of(field) else {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index: None,
+                issue: FieldInitializerContextIssue::SourceDefinitionMissing,
+            });
+        };
+        let (source, tree) = match definition {
+            SourceDefinition::Canonical { source, tree } => (source, tree),
+            SourceDefinition::Derived { tree, .. } => {
+                return Err(TyperError::FieldInitializerContextInvalid {
+                    field,
+                    tree_index: Some(tree.index()),
+                    issue: FieldInitializerContextIssue::SourceDefinitionMismatch,
+                });
+            }
+        };
+        let tree_index = Some(tree.index());
+        if source != self.source {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::SourceDefinitionMismatch,
+            });
+        }
+        if self.index.symbol_at(source, tree) != Some(field) {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::SourceTreeSymbolMismatch,
+            });
+        }
+        if field_symbol.origin != SymbolOrigin::Source(self.source) {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::SourceDefinitionMismatch,
+            });
+        }
+        let Some(source_tree) = self.arena.try_get(tree) else {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::SourceTreeMissing,
+            });
+        };
+        let TreeKind::ValDef(definition) = &source_tree.kind else {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::SourceTreeKind,
+            });
+        };
+        let Some(initializer) = definition.rhs else {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::InitializerMissing,
+            });
+        };
+        if self.arena.try_get(initializer).is_none() {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::InitializerTreeMissing,
+            });
+        }
+
+        let Some(owner) = field_symbol.owner else {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::OwnerMissing,
+            });
+        };
+        if !self.store.symbols.contains(owner) {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::OwnerMissing,
+            });
+        }
+        let owner_symbol = self.store.symbols.get(owner);
+        if owner_symbol.kind != SymbolKind::Class {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::OwnerKind {
+                    owner,
+                    kind: owner_symbol.kind,
+                },
+            });
+        }
+        if owner_symbol.origin != SymbolOrigin::Source(self.source) {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::EnclosingClassMalformed { owner },
+            });
+        }
+        let class_tree = match self.index.definition_of(owner) {
+            Some(SourceDefinition::Canonical {
+                source: class_source,
+                tree,
+            }) if class_source == self.source
+                && self.index.symbol_at(class_source, tree) == Some(owner) =>
+            {
+                tree
+            }
+            _ => {
+                return Err(TyperError::FieldInitializerContextInvalid {
+                    field,
+                    tree_index,
+                    issue: FieldInitializerContextIssue::EnclosingClassMalformed { owner },
+                });
+            }
+        };
+        let class_definition = self.arena.try_get(class_tree).and_then(|node| {
+            let TreeKind::TypeDef(definition) = &node.kind else {
+                return None;
+            };
+            let TreeKind::Template(template) = &self.arena.try_get(definition.rhs)?.kind else {
+                return None;
+            };
+            Some(template)
+        });
+        let Some(class_definition) = class_definition else {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::EnclosingClassMalformed { owner },
+            });
+        };
+        if !class_definition.body.contains(&tree) {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::EnclosingClassMalformed { owner },
+            });
+        }
+        let Some(class_scope) = self.index.scope_of(owner) else {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::EnclosingClassMalformed { owner },
+            });
+        };
+        if !self.store.scopes.contains(class_scope)
+            || self.store.scopes.get(class_scope).owner != Some(owner)
+        {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::EnclosingClassMalformed { owner },
+            });
+        }
+
+        let Some(declaration_context) = self.index.declaration_context_of(field) else {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::DeclarationContextMissing,
+            });
+        };
+        let Some(declaration_source_context) = self.index.try_source_context(declaration_context)
+        else {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::SourceContextMissing {
+                    context: declaration_context,
+                },
+            });
+        };
+        if declaration_source_context.owner != owner
+            || declaration_source_context.lexical_scope != class_scope
+        {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::EnclosingClassMalformed { owner },
+            });
+        }
+        let Some(lexical) = self.index.field_initializer_context_of(field) else {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::InitializerContextMissing,
+            });
+        };
+        let Some(source_context) = self.index.try_source_context(lexical) else {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::SourceContextMissing { context: lexical },
+            });
+        };
+        let context_owner = source_context.owner;
+        let context_scope = source_context.lexical_scope;
+        let actual_scope_owner = self
+            .store
+            .scopes
+            .contains(context_scope)
+            .then(|| self.store.scopes.get(context_scope).owner)
+            .flatten();
+        if !self.store.symbols.contains(context_owner) {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::InitializerEnvironmentMalformed {
+                    context_owner,
+                    context_scope,
+                    actual_scope_owner,
+                },
+            });
+        }
+        let constructor = self.store.symbols.get(context_owner);
+        let constructor_tree = self
+            .index
+            .definition_of(context_owner)
+            .and_then(|definition| match definition {
+                SourceDefinition::Canonical {
+                    source: constructor_source,
+                    tree,
+                } if constructor_source == self.source => Some(tree),
+                _ => None,
+            });
+        let constructor_matches_class = constructor.kind == SymbolKind::Constructor
+            && constructor.owner == Some(owner)
+            && constructor_tree == Some(class_definition.constructor)
+            && self
+                .index
+                .symbol_at(self.source, class_definition.constructor)
+                == Some(context_owner)
+            && actual_scope_owner == Some(context_owner)
+            && self.index.scope_of(context_owner) == Some(context_scope);
+        let parent_matches_declaration = source_context.parent == Some(declaration_context);
+        if !constructor_matches_class || !parent_matches_declaration {
+            return Err(TyperError::FieldInitializerContextInvalid {
+                field,
+                tree_index,
+                issue: FieldInitializerContextIssue::InitializerEnvironmentMalformed {
+                    context_owner,
+                    context_scope,
+                    actual_scope_owner,
+                },
+            });
+        }
+
+        Ok(ExpressionContext {
+            lexical,
+            owner,
+            local_scopes: None,
+        })
+    }
+
     pub(super) fn expression_type_context(
         &self,
         context: ExpressionContext,
