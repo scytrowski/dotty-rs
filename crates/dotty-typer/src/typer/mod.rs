@@ -18022,7 +18022,7 @@ mod tests {
     #[test]
     fn inferred_class_fields_complete_from_supported_initializer_shapes() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class C(parameter: Int) { val literal = 42; val explicit: Int = notFound; val fromExplicit = explicit; val first = 1; val second = first; def helper(value: Int): Int = value; val fromMethod = helper(2); val fromThis = this.explicit; val fromConstructor = parameter; val fromBlock = { 3 } }",
+            "class C(parameter: Int) { val literal = 42; val explicit: Int = notFound; val fromExplicit = explicit; val first = 1; val second = first; def helper(value: Int): Int = value; val fromMethod = helper(2); val fromThis = this.explicit; val fromConstructor = parameter; val fromBlock = { val local = 3; local } }",
         );
         let int = definitions.int;
         let names = [
