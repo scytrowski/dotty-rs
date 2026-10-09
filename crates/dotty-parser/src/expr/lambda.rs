@@ -20,6 +20,12 @@ where
             )
     }
 
+    pub(super) fn starts_legacy_implicit_expression_lambda(&mut self) -> bool {
+        self.starts_legacy_implicit_block_lambda()
+            && self.cursor.lookahead(2).kind == TokenKind::Operator
+            && self.lookahead_text_is(2, "=>")
+    }
+
     /// `implicit` starts a legacy block lambda only if it is not followed by
     /// additional definition modifiers and a local definition keyword. Soft
     /// modifiers such as `inline` are lexed as identifiers, so the statement
@@ -620,6 +626,54 @@ mod tests {
             TextRange::new(0, 6).unwrap()
         );
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn parses_a_legacy_implicit_lambda_as_an_application_argument() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "f(implicit unsafe => unsafe.run())",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 1, 2),
+                token(TokenKind::Keyword(HardKeyword::Implicit), 2, 10),
+                token(TokenKind::Identifier, 11, 17),
+                Token {
+                    kind: TokenKind::Operator,
+                    span: TextRange::new(18, 20).unwrap(),
+                    value: TokenValue::None,
+                },
+                token(TokenKind::Identifier, 21, 27),
+                token(TokenKind::Punctuation(Punctuation::Dot), 27, 28),
+                token(TokenKind::Identifier, 28, 31),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 31, 32),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 32, 33),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 33, 34),
+                token(TokenKind::Eof, 34, 34),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+        let TreeKind::Apply(application) = &parser.ast().get(tree).kind else {
+            panic!("expected an application");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::Function(function)) =
+            &parser.ast().get(application.args[0]).kind
+        else {
+            panic!("expected the legacy lambda argument");
+        };
+        let TreeKind::ValDef(parameter) = &parser.ast().get(function.params[0]).kind else {
+            panic!("expected a lambda parameter");
+        };
+        assert!(
+            parameter
+                .metadata
+                .modifiers
+                .contains(&dotty_core::ast::Modifier::Implicit)
+        );
+        assert!(parser.diagnostics().is_empty());
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
