@@ -443,10 +443,13 @@ mod tests {
         parser.expr();
 
         assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("expected Punctuation(RightParen)")
+            matches!(
+                diagnostic.issue(),
+                crate::ParseIssue::ExpectedToken {
+                    expected: TokenKind::Punctuation(Punctuation::RightParen),
+                    found: TokenKind::Newline,
+                }
+            )
         }));
         assert_eq!(parser.current().kind, TokenKind::Newline);
     }

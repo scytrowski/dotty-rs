@@ -38,6 +38,8 @@ pub enum ParseIssue {
     ExpectedPattern { found: TokenKind },
     /// A token is not valid in the current parser position.
     UnexpectedToken { found: TokenKind },
+    /// The expression fragment contains tokens after its expression.
+    TrailingInput { found: TokenKind },
     /// A placeholder parameter escaped the expression that owns it.
     UnboundPlaceholderParameter,
 }
@@ -52,7 +54,32 @@ impl ParseIssue {
             Self::ExpectedType { .. } => ParseDiagnosticKind::ExpectedType,
             Self::ExpectedPattern { .. } => ParseDiagnosticKind::ExpectedPattern,
             Self::UnexpectedToken { .. } => ParseDiagnosticKind::UnexpectedToken,
+            Self::TrailingInput { .. } => ParseDiagnosticKind::UnexpectedToken,
             Self::UnboundPlaceholderParameter => ParseDiagnosticKind::UnboundPlaceholderParameter,
+        }
+    }
+
+    /// Returns a stable, text-independent identifier for corpus reporting.
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Legacy { kind, .. } => match kind {
+                ParseDiagnosticKind::ExpectedToken => "parser.expected_token",
+                ParseDiagnosticKind::UnexpectedToken => "parser.unexpected_token",
+                ParseDiagnosticKind::ExpectedExpression => "parser.expected_expression",
+                ParseDiagnosticKind::ExpectedType => "parser.expected_type",
+                ParseDiagnosticKind::ExpectedPattern => "parser.expected_pattern",
+                ParseDiagnosticKind::UnsupportedSyntax => "parser.unsupported_syntax",
+                ParseDiagnosticKind::UnboundPlaceholderParameter => {
+                    "parser.unbound_placeholder_parameter"
+                }
+            },
+            Self::ExpectedToken { .. } => "parser.expected_token",
+            Self::ExpectedExpression { .. } => "parser.expected_expression",
+            Self::ExpectedType { .. } => "parser.expected_type",
+            Self::ExpectedPattern { .. } => "parser.expected_pattern",
+            Self::UnexpectedToken { .. } => "parser.unexpected_token",
+            Self::TrailingInput { .. } => "parser.trailing_input",
+            Self::UnboundPlaceholderParameter => "parser.unbound_placeholder_parameter",
         }
     }
 }
@@ -126,6 +153,7 @@ impl ParseDiagnostic {
             | ParseIssue::ExpectedType { .. }
             | ParseIssue::ExpectedPattern { .. }
             | ParseIssue::UnexpectedToken { .. }
+            | ParseIssue::TrailingInput { .. }
             | ParseIssue::UnboundPlaceholderParameter => None,
         }
     }

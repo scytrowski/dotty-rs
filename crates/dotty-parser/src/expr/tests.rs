@@ -4835,12 +4835,12 @@ fn malformed_continuation_after_eta_expansion_keeps_tree_and_reports_its_positio
         result.diagnostics[0].kind(),
         crate::ParseDiagnosticKind::UnexpectedToken
     );
-    assert_eq!(
-        result.diagnostics[0]
-            .legacy_message()
-            .expect("legacy parser diagnostic"),
-        "expected end of expression fragment"
-    );
+    assert!(matches!(
+        result.diagnostics[0].issue(),
+        crate::ParseIssue::TrailingInput {
+            found: TokenKind::Punctuation(Punctuation::LeftParen),
+        }
+    ));
     assert_eq!(result.diagnostics[0].span(), TextRange::new(4, 5).unwrap());
     assert_eq!(
         result
