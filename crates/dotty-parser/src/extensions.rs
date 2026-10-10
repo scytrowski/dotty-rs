@@ -10,7 +10,7 @@ use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped}
 
 use crate::statements::ParsedStatement;
 use crate::templates::TemplateBody;
-use crate::{Location, ParamOwner, ParseDiagnosticKind, Parser};
+use crate::{ExtensionIssue, Location, ParamOwner, ParseIssue, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -56,17 +56,19 @@ where
                 num_lead_params,
             )
         } else {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected one receiver parameter in an extension",
-            );
+            self.report_issue(ParseIssue::Extension(
+                ExtensionIssue::ExpectedReceiverParameter {
+                    found: self.current().kind,
+                },
+            ));
             Vec::new()
         };
         if receiver.len() != 1 {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "an extension must have exactly one receiver parameter",
-            );
+            self.report_issue(ParseIssue::Extension(
+                ExtensionIssue::ReceiverMustHaveExactlyOneParameter {
+                    found_count: receiver.len(),
+                },
+            ));
         } else {
             num_lead_params += receiver.len();
             param_clauses.push(receiver);
@@ -75,10 +77,11 @@ where
         while self.current().kind == TokenKind::Punctuation(Punctuation::LeftParen) {
             let is_using = self.current_is_using_parameter_clause();
             if !is_using {
-                self.report(
-                    ParseDiagnosticKind::UnsupportedSyntax,
-                    "only `using` clauses may follow an extension receiver",
-                );
+                self.report_issue(ParseIssue::Extension(
+                    ExtensionIssue::OnlyUsingClausesMayFollowReceiver {
+                        found: self.current().kind,
+                    },
+                ));
             }
             let clause = self.parse_single_term_param_clause(
                 ParamOwner::ExtensionFollow,
@@ -109,10 +112,11 @@ where
             TokenKind::ColonFollow | TokenKind::ColonOp | TokenKind::ColonEol
         ) && self.current_text_is(":")
         {
-            self.report(
-                ParseDiagnosticKind::UnexpectedToken,
-                "no `:` is expected after an extension header",
-            );
+            self.report_issue(ParseIssue::Extension(
+                ExtensionIssue::UnexpectedColonAfterHeader {
+                    found: self.current().kind,
+                },
+            ));
             self.advance();
         }
         self.consume_newlines_before_extension_body();
@@ -148,10 +152,11 @@ where
             }
             _ if parser.starts_definition_prefix() => parser.parse_one_extension_method(),
             _ => {
-                parser.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected extension methods after the extension receiver",
-                );
+                parser.report_issue(ParseIssue::Extension(
+                    ExtensionIssue::ExpectedMethodsAfterHeader {
+                        found: parser.current().kind,
+                    },
+                ));
                 Vec::new()
             }
         });
@@ -161,10 +166,11 @@ where
                 self.ast().get(*method).kind,
                 TreeKind::DefDef(_) | TreeKind::Export(_)
             ) {
-                self.report(
-                    ParseDiagnosticKind::UnsupportedSyntax,
-                    "only methods and exports are allowed inside an extension",
-                );
+                self.report_issue(ParseIssue::Extension(
+                    ExtensionIssue::OnlyMethodsAndExportsAllowed {
+                        found: self.current().kind,
+                    },
+                ));
             }
         }
         methods
@@ -219,6 +225,7 @@ where
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
+    use crate::{ExtensionIssue, ParameterIssue, ParseIssue};
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TokenKind, TreeKind};
 
     #[test]
@@ -314,9 +321,13 @@ mod tests {
 
         assert_eq!(extension.methods.len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic.kind() == crate::ParseDiagnosticKind::UnsupportedSyntax
-        }));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Parameter(ParameterIssue::LegacyImplicitClauseNotAllowed {
+                owner: ParamOwner::ExtensionPrefix,
+            })
+        );
     }
 
     #[test]
@@ -414,7 +425,129 @@ mod tests {
         };
         assert!(extension.param_clauses.is_empty());
         assert_eq!(extension.methods.len(), 1);
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Extension(ExtensionIssue::ReceiverMustHaveExactlyOneParameter {
+                found_count: 2,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(23, 26).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_a_missing_extension_receiver_before_the_first_method() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "extension def f = x",
+            vec![
+                token(TokenKind::Identifier, 0, 9),
+                token(TokenKind::Keyword(HardKeyword::Def), 10, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Operator, 16, 17),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::Eof, 19, 19),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(extension) =
+            parser.parse_extension_definition(Location::Elsewhere)
+        else {
+            panic!("expected an extension definition");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(ref extension)) =
+            parser.ast.get(extension).kind
+        else {
+            panic!("expected ExtensionMethods");
+        };
+        assert_eq!(extension.methods.len(), 1);
+        assert_eq!(parser.diagnostics().len(), 2);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Extension(ExtensionIssue::ExpectedReceiverParameter {
+                found: TokenKind::Keyword(HardKeyword::Def),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(10, 13).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
+        assert_eq!(
+            parser.diagnostics()[1].issue(),
+            &ParseIssue::Extension(ExtensionIssue::ReceiverMustHaveExactlyOneParameter {
+                found_count: 0,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[1].span(),
+            dotty_core::TextRange::new(10, 13).unwrap()
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn rejects_non_using_clauses_after_the_extension_receiver() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "extension (x: X) (y: Y) def f = x",
+            vec![
+                token(TokenKind::Identifier, 0, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::ColonFollow, 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 17, 18),
+                token(TokenKind::Identifier, 18, 19),
+                token(TokenKind::ColonFollow, 19, 20),
+                token(TokenKind::Identifier, 21, 22),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 22, 23),
+                token(TokenKind::Keyword(HardKeyword::Def), 24, 27),
+                token(TokenKind::Identifier, 28, 29),
+                token(TokenKind::Operator, 30, 31),
+                token(TokenKind::Identifier, 32, 33),
+                token(TokenKind::Eof, 33, 33),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(extension) = parser.parse_statement(Location::Elsewhere)
+        else {
+            panic!("expected an extension definition");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(ref extension)) =
+            parser.ast.get(extension).kind
+        else {
+            panic!("expected ExtensionMethods");
+        };
+        assert_eq!(extension.methods.len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Extension(ExtensionIssue::OnlyUsingClausesMayFollowReceiver {
+                found: TokenKind::Punctuation(Punctuation::LeftParen),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(17, 18).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
@@ -443,7 +576,21 @@ mod tests {
             parser.ast.get(extension).kind,
             TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(_))
         ));
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Extension(ExtensionIssue::ExpectedMethodsAfterHeader {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(16, 16).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
@@ -567,7 +714,21 @@ mod tests {
             panic!("expected ExtensionMethods");
         };
         assert_eq!(extension.methods.len(), 1);
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Extension(ExtensionIssue::UnexpectedColonAfterHeader {
+                found: TokenKind::ColonEol,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(16, 17).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
     }
 
     #[test]
@@ -616,7 +777,21 @@ mod tests {
             parser.ast.get(extension.methods[1]).kind,
             TreeKind::DefDef(_)
         ));
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Extension(ExtensionIssue::OnlyMethodsAndExportsAllowed {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(40, 40).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 }

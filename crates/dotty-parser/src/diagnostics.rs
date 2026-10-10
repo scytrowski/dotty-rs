@@ -1846,4 +1846,126 @@ mod tests {
         );
         assert_eq!(parameter_issue.kind(), ParseDiagnosticKind::UnexpectedToken);
     }
+
+    #[test]
+    fn given_and_extension_issues_have_stable_codes_and_categories() {
+        let given_issues = [
+            (
+                GivenIssue::ExpectedResultTypeAfterTypeParameters {
+                    found: TokenKind::Eof,
+                },
+                "parser.given.expected_result_type_after_type_parameters",
+                ParseDiagnosticKind::ExpectedType,
+            ),
+            (
+                GivenIssue::ExpectedColonAfterNamedSignature {
+                    found: TokenKind::Eof,
+                },
+                "parser.given.expected_colon_after_named_signature",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+            (
+                GivenIssue::ExpectedEqualsAfterType {
+                    found: TokenKind::Eof,
+                },
+                "parser.given.expected_equals_after_type",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+            (
+                GivenIssue::ExpectedParentAfterSeparator {
+                    found: TokenKind::Eof,
+                },
+                "parser.given.expected_parent_after_separator",
+                ParseDiagnosticKind::ExpectedType,
+            ),
+            (
+                GivenIssue::ExpectedParameterAfterEmptyClause {
+                    found: TokenKind::Eof,
+                },
+                "parser.given.expected_parameter_after_empty_clause",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+            (
+                GivenIssue::ExpectedArrowInSignature {
+                    found: TokenKind::Eof,
+                },
+                "parser.given.expected_arrow_in_signature",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+        ];
+        let extension_issues = [
+            (
+                ExtensionIssue::ExpectedReceiverParameter {
+                    found: TokenKind::Eof,
+                },
+                "parser.extension.expected_receiver_parameter",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+            (
+                ExtensionIssue::ReceiverMustHaveExactlyOneParameter { found_count: 2 },
+                "parser.extension.receiver_must_have_exactly_one_parameter",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+            (
+                ExtensionIssue::OnlyUsingClausesMayFollowReceiver {
+                    found: TokenKind::Eof,
+                },
+                "parser.extension.only_using_clauses_may_follow_receiver",
+                ParseDiagnosticKind::UnsupportedSyntax,
+            ),
+            (
+                ExtensionIssue::UnexpectedColonAfterHeader {
+                    found: TokenKind::Eof,
+                },
+                "parser.extension.unexpected_colon_after_header",
+                ParseDiagnosticKind::UnexpectedToken,
+            ),
+            (
+                ExtensionIssue::ExpectedMethodsAfterHeader {
+                    found: TokenKind::Eof,
+                },
+                "parser.extension.expected_methods_after_header",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+            (
+                ExtensionIssue::OnlyMethodsAndExportsAllowed {
+                    found: TokenKind::Eof,
+                },
+                "parser.extension.only_methods_and_exports_allowed",
+                ParseDiagnosticKind::UnsupportedSyntax,
+            ),
+        ];
+        let source = SourceId::from_index(11);
+        let range = TextRange::new(5, 7).expect("valid range");
+
+        for (given, code, kind) in given_issues {
+            let issue = ParseIssue::Given(given);
+            let diagnostic = ParseDiagnostic::with_issue(
+                SourceSpan::new(source, Span::without_point(range)),
+                issue.clone(),
+            );
+            assert_eq!(issue.code(), code);
+            assert_eq!(issue.kind(), kind);
+            assert_eq!(diagnostic.issue(), &issue);
+            assert_eq!(diagnostic.source(), source);
+            assert_eq!(diagnostic.span(), range);
+            assert_eq!(diagnostic.severity(), DiagnosticSeverity::Error);
+            assert_eq!(diagnostic.legacy_message(), None);
+        }
+
+        for (extension, code, kind) in extension_issues {
+            let issue = ParseIssue::Extension(extension);
+            let diagnostic = ParseDiagnostic::with_issue(
+                SourceSpan::new(source, Span::without_point(range)),
+                issue.clone(),
+            );
+            assert_eq!(issue.code(), code);
+            assert_eq!(issue.kind(), kind);
+            assert_eq!(diagnostic.issue(), &issue);
+            assert_eq!(diagnostic.source(), source);
+            assert_eq!(diagnostic.span(), range);
+            assert_eq!(diagnostic.severity(), DiagnosticSeverity::Error);
+            assert_eq!(diagnostic.legacy_message(), None);
+        }
+    }
 }

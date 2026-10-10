@@ -2135,6 +2135,10 @@ mod tests {
             parser.diagnostics()[0].severity(),
             dotty_core::DiagnosticSeverity::Error
         );
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Punctuation(Punctuation::Colon)
+        );
     }
 
     #[test]
