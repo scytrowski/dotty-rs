@@ -84,13 +84,36 @@ The ranked list below excludes parser/namer and classpath-resolution failures, a
 | 9 | `TypedPatternRuntimeTestDeferred` | 9 / 2 |
 | 10 | `UnsupportedFunctionLiteralParameter` | 9 / 1 |
 
+### #903 hardening and refreshed local-method profile
+
+The #903 hardening reran the pinned Scala 3.9.0 audit twice with JDK feature release 21; normalized output matched byte-for-byte and is unchanged from the post-#902 profile. The #899 baseline had 14 local signature first-blocker observations across 3 files; the current profile has 0. The 8 by-name observations moved past the signature guard in #900, and the 6 parameter-modifier observations moved past it in #902. #903 adds regression coverage for generic nested by-name methods with same-name scopes, forward by-name calls, and rollback during by-name type projection and local body checking. This blocker movement is not semantic success: the two by-name origins and all six selected inline rows still stop at `ImportQualifierNotFound`; the full audit types 0 of 3,297 local methods, and 0 corpus applications reach `ByNameApplicationParameterDeferred`. `RecursiveInferredMethodResult` does not appear among current full-corpus first blockers; focused self- and mutual-recursion tests keep that behavior explicit.
+
+The table below preserves every #899 baseline row. `Signature completion` is recorded independently from the enclosing method blocker: it is `unknown` because this corpus audit does not probe signature completion in isolation. `Enclosing method typing` is `not typed` for each row; `Current first blocker` is the whole-file local-method attempt result, not evidence that its signature completed.
+
+| Method (pinned source tree) | Original feature | Current first blocker | Signature completion | Enclosing method typing | Baseline classification |
+| --- | --- | --- | --- | --- | --- |
+| `SymUtils.scala#1839 instantiateCFT` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | direct |
+| `SymUtils.scala#1874 iftParamss` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `Typer.scala#5163 cases` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | direct |
+| `Typer.scala#5232 ascription` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `Typer.scala#5296 fromRepeated` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `Typer.scala#5380 typedWildcardStarArgExpr` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `Typer.scala#5420 typedTpt` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `Typer.scala#5491 handlePattern` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `MegaPhase.scala#1125 inLocalContext` | parameter modifiers | `ImportQualifierNotFound` | unknown | not typed | direct |
+| `MegaPhase.scala#1440 transformNamed` | parameter modifiers | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `MegaPhase.scala#1224 mapValDef` | parameter modifiers | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `MegaPhase.scala#1301 mapDefDef` | parameter modifiers | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `MegaPhase.scala#2407 transformUnnamed` | parameter modifiers | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `MegaPhase.scala#2116 mapPackage` | parameter modifiers | `ImportQualifierNotFound` | unknown | not typed | inherited |
+
 ### Recommended next Typer sprint
 
-After #902, the local signature profile contains 0 first-blocker observations, down from 14 affected methods across 3 files in the #899 baseline. The 8 by-name observations moved past the signature guard in #900; the 6 parameter-modifier observations (one direct origin and five inherited siblings in `MegaPhase.scala`) moved past it in #902 by accepting the already-modeled `Inline` parameter flag on local `inline` methods. This blocker movement is not evidence that all six enclosing methods type; inspect their current first blockers and the `typed_local_defdefs` count below. #901 removes the bounded by-name application blocker in the focused local-call fixture; the two corpus methods originating from by-name signatures remain behind `ImportQualifierNotFound`. Inline expansion and dependent-result signatures remain out of scope. Recommend #903 to harden these signature paths and refresh the Typer ranking.
+Run a profiling sprint on the `LocalBlockDeclarationDeferred::val/var definition` bucket (21 observations across 8 files) before selecting an implementation slice. Join each failed declaration to its PatDef root shape, binder count, declaration type, and source file, then choose a bounded form from those measured counts. The current 21 / 8 aggregate does not identify a concrete PatDef form, so it does not yet justify implementing one. Keep general destructuring out of scope until that breakdown is available; classpath resolution remains a separate gate because the audit materialized no external members.
 
-### #899–#902 local method signature profile
+### #899–#903 local method signature profile
 
-The profile counts local methods whose first blocker is a local signature failure. `direct_origins` identifies methods carrying that signature feature; `inherited_methods` are sibling methods attributed to the same enclosing failure. The #899 baseline had 14 affected methods across 3 files; after #900 and #902, none remain at this blocker. This deterministic supplemental audit was run twice with JDK feature release 21 and the pinned Scala 3.9.0 source/artifact inputs; normalized output matched byte-for-byte. Full method typing is reported separately.
+The profile counts local methods whose first blocker is a local signature failure. `direct_origins` identifies methods carrying that signature feature; `inherited_methods` are sibling methods attributed to the same enclosing failure. The #899 baseline had 14 affected methods across 3 files; after #900 and #902, none remain at this blocker, confirmed by the #903 rerun. This deterministic supplemental audit was run twice with JDK feature release 21 and the pinned Scala 3.9.0 source/artifact inputs; normalized output matched byte-for-byte. Full method typing is reported separately.
 
 | Feature payload | Affected methods | Files | Distinct methods | Direct origins | Inherited methods | Blocker origins |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |

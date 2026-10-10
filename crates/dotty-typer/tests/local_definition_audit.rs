@@ -915,6 +915,51 @@ fn pinned_scala39_local_definition_audit() {
             "inline signature row {path}#tree={tree_index} should move past its old blocker"
         );
     }
+    let baseline_signature_methods = [
+        ("compiler/src/dotty/tools/dotc/core/SymUtils.scala", 1839),
+        ("compiler/src/dotty/tools/dotc/core/SymUtils.scala", 1874),
+        ("compiler/src/dotty/tools/dotc/typer/Typer.scala", 5163),
+        ("compiler/src/dotty/tools/dotc/typer/Typer.scala", 5232),
+        ("compiler/src/dotty/tools/dotc/typer/Typer.scala", 5296),
+        ("compiler/src/dotty/tools/dotc/typer/Typer.scala", 5380),
+        ("compiler/src/dotty/tools/dotc/typer/Typer.scala", 5420),
+        ("compiler/src/dotty/tools/dotc/typer/Typer.scala", 5491),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            1125,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            1440,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            1224,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            1301,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            2407,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            2116,
+        ),
+    ];
+    for (path, tree_index) in baseline_signature_methods {
+        let key = format!("{path}#tree={tree_index}");
+        assert_eq!(
+            audit
+                .local_method_first_blockers
+                .get(&key)
+                .map(String::as_str),
+            Some("ImportQualifierNotFound"),
+            "the #899 baseline method should retain its measured current first blocker: {key}"
+        );
+    }
     assert_eq!(audit.by_name_method_outcomes.len(), 2);
     assert_eq!(
         audit

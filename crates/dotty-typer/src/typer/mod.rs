@@ -14308,6 +14308,169 @@ mod tests {
     }
 
     #[test]
+    fn nested_generic_local_by_name_methods_keep_separate_parameter_scopes() {
+        let source_text = "class C { def outer: Int = { def force[A](value: => A): A = value; { def force[B](value: => B): B = value; 0 } } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(outer_block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let outer_method_tree = outer_block.stats[0];
+        let TreeKind::Block(inner_block) = &parsed.ast.get(outer_block.expr).kind else {
+            panic!("outer block expression should be the nested block")
+        };
+        let inner_method_tree = inner_block.stats[0];
+        let method_parameter = |method_tree| match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => (
+                definition.type_params[0],
+                definition.value_param_clauses[0][0],
+            ),
+            _ => panic!("local declaration should be a DefDef"),
+        };
+        let (outer_type_parameter_tree, outer_parameter_tree) = method_parameter(outer_method_tree);
+        let (inner_type_parameter_tree, inner_parameter_tree) = method_parameter(inner_method_tree);
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        typer.type_expression(block_tree, context).unwrap();
+
+        let outer_method = typer
+            .local_method_symbol_at(source, outer_method_tree)
+            .unwrap();
+        let inner_method = typer
+            .local_method_symbol_at(source, inner_method_tree)
+            .unwrap();
+        assert_ne!(outer_method, inner_method);
+        let outer_type_parameter = typer
+            .local_method_type_parameter_symbol_at(source, outer_type_parameter_tree)
+            .unwrap();
+        let inner_type_parameter = typer
+            .local_method_type_parameter_symbol_at(source, inner_type_parameter_tree)
+            .unwrap();
+        let outer_parameter = typer
+            .local_method_parameter_symbol_at(source, outer_parameter_tree)
+            .unwrap();
+        let inner_parameter = typer
+            .local_method_parameter_symbol_at(source, inner_parameter_tree)
+            .unwrap();
+        assert_ne!(outer_parameter, inner_parameter);
+        for (method, type_parameter, parameter) in [
+            (outer_method, outer_type_parameter, outer_parameter),
+            (inner_method, inner_type_parameter, inner_parameter),
+        ] {
+            assert_eq!(
+                typer.store().symbols.get(type_parameter).owner,
+                Some(method)
+            );
+            assert_eq!(typer.store().symbols.get(parameter).owner, Some(method));
+            let method_scope = typer.local_method_scope(method).unwrap();
+            assert_eq!(
+                typer
+                    .store()
+                    .scopes
+                    .get(method_scope)
+                    .lookup_all(&typer.store().symbols.get(parameter).name),
+                &[parameter]
+            );
+            let SymbolInfo::Complete(parameter_info) = *typer.store().symbols.info(parameter)
+            else {
+                panic!("by-name parameter should have completed info")
+            };
+            let Type::ByName { result } = typer.store().types.get(parameter_info) else {
+                panic!("parameter symbol info should retain its by-name type")
+            };
+            assert!(matches!(
+                typer.store().types.get(*result),
+                Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                } if *symbol == type_parameter
+            ));
+            let SymbolInfo::Complete(signature) = *typer.store().symbols.info(method) else {
+                panic!("nested local method should have a completed signature")
+            };
+            let Type::Poly(poly) = typer.store().types.get(signature) else {
+                panic!("generic local method should have a Poly signature")
+            };
+            let Type::Method(method_type) = typer.store().types.get(poly.result) else {
+                panic!("generic local method should have a term clause")
+            };
+            assert!(matches!(
+                typer.store().types.get(method_type.params[0].ty),
+                Type::ByName { result }
+                    if matches!(typer.store().types.get(*result), Type::ParamRef { binder, index: 0 } if *binder == signature)
+            ));
+        }
+    }
+
+    #[test]
+    fn forward_local_by_name_call_uses_the_preentered_signature() {
+        let source_text =
+            "class C { def outer: Int = { force(1); def force(value: => Int): Int = value; 0 } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let call_tree = block.stats[0];
+        let method_tree = block.stats[1];
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        let typed_block = typer.type_expression(block_tree, context).unwrap();
+
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed_block).ty)
+                .unwrap(),
+            definitions.int
+        );
+        let typed_call = typer.source_typed_index().get(source, call_tree).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_call).kind else {
+            panic!("forward call should remain an Apply")
+        };
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == method
+        ));
+        let SymbolInfo::Complete(signature) = *typer.store().symbols.info(method) else {
+            panic!("forward call should complete the later local method signature")
+        };
+        let Type::Method(method_type) = typer.store().types.get(signature) else {
+            panic!("local method should have a Method signature")
+        };
+        assert_eq!(method_type.result, definitions.int);
+        assert!(matches!(
+            typer.store().types.get(method_type.params[0].ty),
+            Type::ByName { result } if *result == definitions.int
+        ));
+    }
+
+    #[test]
     fn local_method_repeated_parameter_uses_repeated_and_varargs_signature() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def outer: Int = { def inner(xs: Int*): Int = 1; 0 } }");
@@ -15096,7 +15259,7 @@ mod tests {
     #[test]
     fn failed_local_signature_completion_rolls_back_parameters_and_types() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
-            "class C { def outer: Int = { def broken[A](value: MissingType): A = value; 0 } }",
+            "class C { def outer: Int = { def broken[A](value: => MissingType): A = value; 0 } }",
         );
         let (outer, block_tree) =
             method_definition_and_rhs(&parsed, &store, &index, source, "outer");
@@ -15994,8 +16157,9 @@ mod tests {
 
     #[test]
     fn local_method_body_mismatch_rolls_back_signature_and_typed_mappings() {
-        let (parsed, mut store, packages, definitions, index, source) =
-            parse_and_name("class C { def outer: Int = { def invalid(): Boolean = 1; 0 } }");
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def invalid(value: => Int): Boolean = 1; 0 } }",
+        );
         let (outer, block_tree) =
             method_definition_and_rhs(&parsed, &store, &index, source, "outer");
         let method_tree = match &parsed.ast.get(block_tree).kind {

@@ -677,6 +677,35 @@ calls reach application typing before or after this change. This increment
 therefore moves one focused fixture past the application blocker and no corpus
 method past its enclosing blocker.
 
+### #903 local-method hardening and audit
+
+The focused regression family now covers a generic local method with a
+by-name parameter, two nested same-name generic methods with separate
+parameter scopes and owners, and a forward call completed from a pre-entered
+by-name signature. Failure coverage includes missing-type projection inside a
+by-name formal, a late local method body mismatch after signature completion,
+by-name application argument mismatch with deterministic rollback, and the
+selected #902 inline parameter failure path. The nested fixture checks that
+each method's parameter retains `Type::ByName` over its own type-parameter
+symbol and that method signatures rebind the result to the correct `Poly`
+binder. Generic by-name application inference and by-name overload candidate
+selection remain explicitly deferred.
+
+The pinned Scala 3.9.0 audit was rerun twice with JDK 21; normalized output
+matched byte-for-byte and is unchanged from the post-#902 corpus profile. The
+14 `LocalMethodSignatureDeferred` observations from the #899 baseline remain
+at zero. `ByNameApplicationParameterDeferred` remains zero in the pinned
+corpus because neither direct by-name origin reaches application typing;
+the focused by-name call fixture also has zero such failures. Both direct
+by-name origins and all six selected inline rows still stop at
+`ImportQualifierNotFound`, and the full corpus types 0 of 3,297 local method
+definitions. These are explicit blocker outcomes, not semantic success. The
+full-corpus audit does not report `RecursiveInferredMethodResult`; focused
+self- and mutual-recursion tests still pin its deterministic error and
+rollback behavior. The
+current Typer ranking and evidence-based next-slice recommendation are in the
+[corpus audit](typer-classpath-corpus-audit-3.9.0.md#recommended-next-typer-sprint).
+
 Ordinary repeated parameters use `Type::Repeated` in parameter symbol info and
 the shared method-signature builder's `varargs` marker; references to them in
 method bodies remain deferred. A method body is typed in a method
