@@ -287,14 +287,15 @@ pub enum ExtensionIssue {
     /// An extension header is not followed by any method or export.
     ExpectedMethodsAfterHeader { found: TokenKind },
     /// An extension body contains a member other than a method or export.
-    OnlyMethodsAndExportsAllowed { found: TokenKind },
+    OnlyMethodsAndExportsAllowed,
 }
 
 impl ExtensionIssue {
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
-            Self::OnlyUsingClausesMayFollowReceiver { .. }
-            | Self::OnlyMethodsAndExportsAllowed { .. } => ParseDiagnosticKind::UnsupportedSyntax,
+            Self::OnlyUsingClausesMayFollowReceiver { .. } | Self::OnlyMethodsAndExportsAllowed => {
+                ParseDiagnosticKind::UnsupportedSyntax
+            }
             Self::UnexpectedColonAfterHeader { .. } => ParseDiagnosticKind::UnexpectedToken,
             Self::ExpectedReceiverParameter { .. }
             | Self::ReceiverMustHaveExactlyOneParameter { .. }
@@ -319,7 +320,7 @@ impl ExtensionIssue {
             Self::ExpectedMethodsAfterHeader { .. } => {
                 "parser.extension.expected_methods_after_header"
             }
-            Self::OnlyMethodsAndExportsAllowed { .. } => {
+            Self::OnlyMethodsAndExportsAllowed => {
                 "parser.extension.only_methods_and_exports_allowed"
             }
         }
@@ -1928,9 +1929,7 @@ mod tests {
                 ParseDiagnosticKind::ExpectedToken,
             ),
             (
-                ExtensionIssue::OnlyMethodsAndExportsAllowed {
-                    found: TokenKind::Eof,
-                },
+                ExtensionIssue::OnlyMethodsAndExportsAllowed,
                 "parser.extension.only_methods_and_exports_allowed",
                 ParseDiagnosticKind::UnsupportedSyntax,
             ),

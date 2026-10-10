@@ -1,7 +1,7 @@
 use dotty_core::ast::{DefDef, ModuleDef, Template, UntypedNode};
 use dotty_core::{NameInterner, SourceId, SourceText, TextRange, TreeKind};
 use dotty_lexer::ContextualScanner;
-use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
+use dotty_parser::{GivenIssue, ParseDiagnosticKind, ParseIssue, parse_compilation_unit};
 
 #[test]
 fn incomplete_named_given_type_parameters_report_error_and_preserve_next_member() {
@@ -86,10 +86,10 @@ fn missing_named_given_result_type_is_reported_before_next_member() {
         .iter()
         .find(|diagnostic| {
             diagnostic.kind() == ParseDiagnosticKind::ExpectedType
-                && diagnostic
-                    .legacy_message()
-                    .expect("legacy parser diagnostic")
-                    == "expected a given result type after type parameters"
+                && diagnostic.issue()
+                    == &ParseIssue::Given(GivenIssue::ExpectedResultTypeAfterTypeParameters {
+                        found: dotty_core::TokenKind::Newline,
+                    })
         })
         .expect("a named given without a result type should be diagnosed");
     let line_break = source.find("\n  def after").unwrap() as u32;

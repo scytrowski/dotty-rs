@@ -167,9 +167,7 @@ where
                 TreeKind::DefDef(_) | TreeKind::Export(_)
             ) {
                 self.report_issue(ParseIssue::Extension(
-                    ExtensionIssue::OnlyMethodsAndExportsAllowed {
-                        found: self.current().kind,
-                    },
+                    ExtensionIssue::OnlyMethodsAndExportsAllowed,
                 ));
             }
         }
@@ -780,9 +778,7 @@ mod tests {
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
             parser.diagnostics()[0].issue(),
-            &ParseIssue::Extension(ExtensionIssue::OnlyMethodsAndExportsAllowed {
-                found: TokenKind::Eof,
-            })
+            &ParseIssue::Extension(ExtensionIssue::OnlyMethodsAndExportsAllowed)
         );
         assert_eq!(
             parser.diagnostics()[0].span(),
@@ -793,5 +789,65 @@ mod tests {
             dotty_core::DiagnosticSeverity::Error
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn invalid_extension_member_diagnostic_does_not_depend_on_following_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "extension (x: X)\n  val y = x\n  def f = x\ndef after = 1",
+            vec![
+                token(TokenKind::Identifier, 0, 9),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 10, 11),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::ColonFollow, 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 15, 16),
+                token(TokenKind::Indent, 16, 16),
+                token(TokenKind::Keyword(HardKeyword::Val), 19, 22),
+                token(TokenKind::Identifier, 23, 24),
+                token(TokenKind::Operator, 25, 26),
+                token(TokenKind::Identifier, 27, 28),
+                token(TokenKind::Newline, 28, 31),
+                token(TokenKind::Keyword(HardKeyword::Def), 31, 34),
+                token(TokenKind::Identifier, 35, 36),
+                token(TokenKind::Operator, 37, 38),
+                token(TokenKind::Identifier, 39, 40),
+                token(TokenKind::Outdent, 40, 40),
+                token(TokenKind::Keyword(HardKeyword::Def), 41, 44),
+                token(TokenKind::Identifier, 45, 50),
+                token(TokenKind::Operator, 51, 52),
+                token(TokenKind::Identifier, 53, 54),
+                token(TokenKind::Eof, 54, 54),
+            ],
+            &mut names,
+        );
+
+        let ParsedStatement::Definition(extension) = parser.parse_statement(Location::Elsewhere)
+        else {
+            panic!("expected an extension definition");
+        };
+        let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(ref extension)) =
+            parser.ast.get(extension).kind
+        else {
+            panic!("expected ExtensionMethods");
+        };
+
+        assert_eq!(extension.methods.len(), 2);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Extension(ExtensionIssue::OnlyMethodsAndExportsAllowed)
+        );
+        assert_eq!(parser.current().kind, TokenKind::Keyword(HardKeyword::Def));
+
+        let ParsedStatement::Definition(following) = parser.parse_statement(Location::Elsewhere)
+        else {
+            panic!("expected the definition after the extension to remain parseable");
+        };
+        assert!(matches!(
+            parser.ast.get(following).kind,
+            TreeKind::DefDef(_)
+        ));
     }
 }
