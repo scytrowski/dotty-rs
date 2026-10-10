@@ -82,7 +82,7 @@ fn local_value_flags_or_defer(
     source: SourceId,
     tree: TreeId<Untyped>,
     modifiers: &[Modifier],
-    allow_contextual_value: bool,
+    allow_bounded_feature_value: bool,
 ) -> Result<SymbolFlags, TyperError> {
     let flags = local_value_symbol_flags(modifiers).map_err(|classification| {
         local_value_modifier_error(source, tree, modifiers, classification)
@@ -92,7 +92,10 @@ fn local_value_flags_or_defer(
             && flags
                 .difference(SymbolFlags::GIVEN | SymbolFlags::FINAL | SymbolFlags::LAZY)
                 .is_empty();
-    if local_value_semantics_deferred(flags) && !(allow_contextual_value && contextual_value) {
+    let lazy_value = flags == SymbolFlags::LAZY;
+    if local_value_semantics_deferred(flags)
+        && !(allow_bounded_feature_value && (contextual_value || lazy_value))
+    {
         return Err(local_value_modifier_error(
             source,
             tree,
@@ -1196,7 +1199,8 @@ impl SourceTyper<'_> {
         let contextual = !symbol_flags
             .intersection(SymbolFlags::GIVEN.union(SymbolFlags::IMPLICIT))
             .is_empty();
-        if contextual
+        let lazy_value = symbol_flags == SymbolFlags::LAZY;
+        if (contextual || lazy_value)
             && (definition.metadata.visibility.is_some()
                 || !definition.metadata.annotations.is_empty())
         {
@@ -1268,7 +1272,7 @@ impl SourceTyper<'_> {
             Some(projected?)
         };
 
-        // Ordinary explicitly typed vals shadow outer bindings during their
+        // Ordinary explicitly typed vals and lazy vals enter before their
         // initializer and use the recursion guard. Contextual locals instead
         // enter the block scope after their initializer succeeds.
         let symbol = self.store.symbols.alloc(dotty_core::Symbol {
@@ -1283,7 +1287,7 @@ impl SourceTyper<'_> {
             position,
             links: dotty_core::SymbolLinks::default(),
         });
-        let enter_before_initializer = !inferred && !contextual;
+        let enter_before_initializer = (!inferred && !contextual) || lazy_value;
         if enter_before_initializer {
             self.store.scopes.get_mut(scope).enter(name, symbol);
             self.initializing_local_symbols.insert(symbol);

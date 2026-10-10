@@ -359,7 +359,18 @@ struct LocalValueBaselineRow {
 struct LocalValueBaselineOutcome {
     observation: LocalValueBlockerObservation,
     current_first_blocker: String,
+    declaration_typed: bool,
     classification: &'static str,
+}
+
+struct LocalValueBaselineAuditContext<'typer, 'source> {
+    arena: &'typer dotty_core::AstArena<Untyped>,
+    names: &'typer dotty_core::names::NameInterner,
+    source_text: &'typer str,
+    path: &'typer str,
+    method_tree: TreeId<Untyped>,
+    typer: &'typer SourceTyper<'source>,
+    source: SourceId,
 }
 
 const LOCAL_VALUE_CONTEXTUAL_BASELINE_ROWS: &[LocalValueBaselineRow] = &[
@@ -467,6 +478,27 @@ const LOCAL_VALUE_CONTEXTUAL_BASELINE_ROWS: &[LocalValueBaselineRow] = &[
     },
 ];
 
+const LOCAL_VALUE_LAZY_BASELINE_ROWS: &[LocalValueBaselineRow] = &[
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/dotc/transform/MixinOps.scala",
+        method_tree: 355,
+        blocker_origin_tree: 439,
+        declaration_tree: 297,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/dotc/transform/MixinOps.scala",
+        method_tree: 375,
+        blocker_origin_tree: 439,
+        declaration_tree: 297,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/dotc/typer/Namer.scala",
+        method_tree: 8664,
+        blocker_origin_tree: 8719,
+        declaration_tree: 8645,
+    },
+];
+
 impl LocalValueBlockerProfile {
     fn record(&mut self, observation: LocalValueBlockerObservation) {
         self.observations.insert(observation);
@@ -481,9 +513,27 @@ impl LocalValueBlockerProfile {
     }
 }
 
-fn local_value_baseline_outcome_classification(blocker: &str) -> &'static str {
+fn local_value_baseline_outcome_classification(
+    blocker: &str,
+    declaration_typed: bool,
+) -> &'static str {
     if blocker == "typed" {
-        "declaration typed and enclosing method typed"
+        if declaration_typed {
+            "declaration typed and enclosing method typed"
+        } else {
+            "enclosing method typed but baseline declaration was not entered in the local symbol map"
+        }
+    } else if declaration_typed
+        && (blocker == "ImportQualifierNotFound"
+            || blocker == "TermNameNotFound"
+            || blocker == "TypeNameNotFound"
+            || blocker == "MemberNotFound"
+            || blocker == "MemberLookup"
+            || blocker == "SymbolResolution")
+    {
+        "declaration typed; enclosing method stopped at resolution/classpath blocker"
+    } else if declaration_typed {
+        "declaration typed; enclosing method moved to a deeper blocker"
     } else if blocker.starts_with("LocalValueModifierDeferred")
         || blocker == "LocalValueMetadataDeferred"
         || blocker.starts_with("LocalValueType")
@@ -493,6 +543,8 @@ fn local_value_baseline_outcome_classification(blocker: &str) -> &'static str {
         || blocker == "DuplicateLocalValue"
     {
         "residual local-value declaration blocker"
+    } else if blocker == "RecursiveLazyLocalValueInitializer" {
+        "intentional local lazy recursion deferral"
     } else if blocker == "UsingApplicationDeferred"
         || blocker == "ApplicationMethodKindMismatch"
         || blocker == "ApplicationCalleeNotMethod"
@@ -506,31 +558,28 @@ fn local_value_baseline_outcome_classification(blocker: &str) -> &'static str {
         || blocker == "MemberLookup"
         || blocker == "SymbolResolution"
     {
-        "resolution/classpath blocker"
+        "declaration not observed as typed; enclosing method stopped at resolution/classpath blocker"
     } else {
-        "declaration typed; enclosing method moved deeper"
+        "declaration not observed as typed; enclosing method stopped at another blocker"
     }
 }
 
 fn record_local_value_baseline_outcomes(
     audit: &mut Audit,
-    arena: &dotty_core::AstArena<Untyped>,
-    names: &dotty_core::names::NameInterner,
-    source_text: &str,
-    path: &str,
-    method_tree: TreeId<Untyped>,
+    context: LocalValueBaselineAuditContext<'_, '_>,
     current_first_blocker: &str,
 ) {
     for baseline in LOCAL_VALUE_CONTEXTUAL_BASELINE_ROWS
         .iter()
-        .filter(|row| row.path == path && row.method_tree == method_tree.index())
+        .chain(LOCAL_VALUE_LAZY_BASELINE_ROWS)
+        .filter(|row| row.path == context.path && row.method_tree == context.method_tree.index())
     {
         let observation = local_value_blocker_observation(
-            arena,
-            names,
-            source_text,
-            path,
-            method_tree,
+            context.arena,
+            context.names,
+            context.source_text,
+            context.path,
+            context.method_tree,
             baseline.declaration_tree,
             baseline.blocker_origin_tree,
         )
@@ -540,12 +589,25 @@ fn record_local_value_baseline_outcomes(
                 baseline.path, baseline.method_tree, baseline.declaration_tree
             )
         });
+        let declaration_tree = context
+            .arena
+            .iter()
+            .find_map(|(tree, _)| (tree.index() == baseline.declaration_tree).then_some(tree))
+            .expect("pinned local-value baseline declaration must remain in the AST");
+        let declaration_typed = context
+            .typer
+            .local_symbol_at(context.source, declaration_tree)
+            .is_some();
         audit
             .local_value_baseline_outcomes
             .insert(LocalValueBaselineOutcome {
                 observation,
                 current_first_blocker: current_first_blocker.to_owned(),
-                classification: local_value_baseline_outcome_classification(current_first_blocker),
+                declaration_typed,
+                classification: local_value_baseline_outcome_classification(
+                    current_first_blocker,
+                    declaration_typed,
+                ),
             });
     }
 }
@@ -1107,13 +1169,13 @@ fn pinned_scala39_local_definition_audit() {
         .failures
         .get("LocalBlockDeclarationDeferred::val/var definition")
         .map_or(0, |bucket| bucket.count);
-    assert_eq!(local_value_blocker_count, 4);
-    assert_eq!(audit.local_value_blocker_profile.observations.len(), 4);
+    assert_eq!(local_value_blocker_count, 1);
+    assert_eq!(audit.local_value_blocker_profile.observations.len(), 1);
     assert_eq!(
         audit
             .local_value_blocker_profile
             .distinct_declaration_count(),
-        3
+        1
     );
     assert_eq!(
         audit
@@ -1123,7 +1185,7 @@ fn pinned_scala39_local_definition_audit() {
             .map(|row| row.path.as_str())
             .collect::<BTreeSet<_>>()
             .len(),
-        3
+        1
     );
     let rows = &audit.local_value_blocker_profile.observations;
     assert!(rows.iter().all(|row| row.node_kind == "ValDef"));
@@ -1139,7 +1201,7 @@ fn pinned_scala39_local_definition_audit() {
     assert_eq!(count_kind("given"), 0);
     assert_eq!(count_kind("implicit val"), 0);
     assert_eq!(count_kind("inline val"), 1);
-    assert_eq!(count_kind("lazy val"), 3);
+    assert_eq!(count_kind("lazy val"), 0);
     assert_eq!(
         rows.iter()
             .filter(|row| row.type_form == "explicit")
@@ -1150,7 +1212,7 @@ fn pinned_scala39_local_definition_audit() {
         rows.iter()
             .filter(|row| row.type_form == "inferred")
             .count(),
-        4
+        1
     );
     let count_modifier = |modifier: &str| {
         rows.iter()
@@ -1159,11 +1221,11 @@ fn pinned_scala39_local_definition_audit() {
     };
     assert_eq!(count_modifier("Given"), 0);
     assert_eq!(count_modifier("Implicit"), 0);
-    assert_eq!(count_modifier("Lazy"), 3);
+    assert_eq!(count_modifier("Lazy"), 0);
     assert_eq!(count_modifier("Inline"), 1);
     assert_eq!(count_modifier("Final"), 0);
     assert_eq!(count_modifier("Var"), 0);
-    assert_eq!(audit.local_value_baseline_outcomes.len(), 17);
+    assert_eq!(audit.local_value_baseline_outcomes.len(), 20);
     assert_eq!(
         audit
             .local_value_baseline_outcomes
@@ -1180,6 +1242,19 @@ fn pinned_scala39_local_definition_audit() {
             .count(),
         12
     );
+    assert_eq!(
+        audit
+            .local_value_baseline_outcomes
+            .iter()
+            .filter(|outcome| outcome.observation.declaration_kind == "lazy val")
+            .count(),
+        3
+    );
+    assert!(audit.local_value_baseline_outcomes.iter().all(|outcome| {
+        outcome.observation.declaration_kind != "lazy val"
+            || (outcome.current_first_blocker == "ImportQualifierNotFound"
+                && !outcome.declaration_typed)
+    }));
     assert!(audit.local_value_baseline_outcomes.iter().all(|outcome| {
         outcome.current_first_blocker != "LocalBlockDeclarationDeferred::val/var definition"
     }));
@@ -4296,11 +4371,15 @@ fn audit_source_inner(
                 .insert(format!("{path}#tree={}", tree.index()), "typed".to_owned());
             record_local_value_baseline_outcomes(
                 &mut audit,
-                &parsed.ast,
-                &typer.store().names,
-                text,
-                path,
-                tree,
+                LocalValueBaselineAuditContext {
+                    arena: &parsed.ast,
+                    names: &typer.store().names,
+                    source_text: text,
+                    path,
+                    method_tree: tree,
+                    typer: &typer,
+                    source,
+                },
                 "typed",
             );
             if (path == "compiler/src/dotty/tools/dotc/core/SymUtils.scala"
@@ -4382,11 +4461,15 @@ fn audit_source_inner(
                 .insert(format!("{path}#tree={}", tree.index()), kind.bucket.clone());
             record_local_value_baseline_outcomes(
                 &mut audit,
-                &parsed.ast,
-                &typer.store().names,
-                text,
-                path,
-                tree,
+                LocalValueBaselineAuditContext {
+                    arena: &parsed.ast,
+                    names: &typer.store().names,
+                    source_text: text,
+                    path,
+                    method_tree: tree,
+                    typer: &typer,
+                    source,
+                },
                 &kind.bucket,
             );
             if kind.bucket == "LocalBlockDeclarationDeferred::val/var definition"
@@ -5819,7 +5902,7 @@ fn print_local_value_blocker_profile(profile: &LocalValueBlockerProfile) {
 }
 
 fn print_local_value_baseline_outcomes(outcomes: &BTreeSet<LocalValueBaselineOutcome>) {
-    println!("local_value_contextual_baseline_outcomes:");
+    println!("local_value_baseline_outcomes:");
     println!("  baseline_observations={}", outcomes.len());
     let mut classifications = BTreeMap::<&str, usize>::new();
     for outcome in outcomes {
@@ -5833,12 +5916,13 @@ fn print_local_value_baseline_outcomes(outcomes: &BTreeSet<LocalValueBaselineOut
     for outcome in outcomes {
         let row = &outcome.observation;
         println!(
-            "    {}:method={} declaration_tree={} kind={} modifiers=[{}] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker={} classification={}",
+            "    {}:method={} declaration_tree={} kind={} modifiers=[{}] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition declaration_typed={} current_first_blocker={} classification={}",
             row.path,
             row.enclosing_method,
             row.declaration_tree,
             row.declaration_kind,
             row.modifiers,
+            outcome.declaration_typed,
             outcome.current_first_blocker,
             outcome.classification,
         );
@@ -7967,6 +8051,9 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::InvalidInferredLocalValueType { .. } => "InvalidInferredLocalValueType",
         TyperError::LocalValueRightHandSideMissing { .. } => "LocalValueRightHandSideMissing",
         TyperError::RecursiveLocalValueInitializer { .. } => "RecursiveLocalValueInitializer",
+        TyperError::RecursiveLazyLocalValueInitializer { .. } => {
+            "RecursiveLazyLocalValueInitializer"
+        }
         TyperError::LocalValueOutsideBlock { .. } => "LocalValueOutsideBlock",
         TyperError::DuplicateLocalValue { .. } => "DuplicateLocalValue",
         TyperError::LocalValueTypeMismatch { .. } => "LocalValueTypeMismatch",
