@@ -2,7 +2,7 @@ use dotty_core::ast::{Block, If, Match, ParsedTry, Return, Throw, UntypedNode, W
 use dotty_core::{Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use super::{can_start_expr, is_else_separator};
-use crate::Parser;
+use crate::{ExpressionIssue, LayoutExpressionContext, ParseIssue, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -20,10 +20,9 @@ where
                 self.advance();
                 feedback
             } else if !parenthesized_condition {
-                self.report(
-                    crate::ParseDiagnosticKind::ExpectedToken,
-                    "expected `then` after if condition",
-                );
+                self.report_issue(ParseIssue::Expression(ExpressionIssue::ExpectedIfThen {
+                    found: self.current().kind,
+                }));
                 false
             } else {
                 false
@@ -100,10 +99,9 @@ where
                 self.advance();
                 feedback
             } else if !parenthesized_condition {
-                self.report(
-                    crate::ParseDiagnosticKind::ExpectedToken,
-                    "expected `do` after while condition",
-                );
+                self.report_issue(ParseIssue::Expression(ExpressionIssue::ExpectedWhileDo {
+                    found: self.current().kind,
+                }));
                 false
             } else {
                 false
@@ -120,10 +118,11 @@ where
         let body = if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::While)
             || self.current().kind == TokenKind::Eof
         {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedExpression,
-                "expected a body after `do`",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::MissingDoWhileBody {
+                    found: self.current().kind,
+                },
+            ));
             self.error_expr(self.current_span())
         } else {
             self.parse_control_body(body_feedback)
@@ -146,10 +145,11 @@ where
         if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::While) {
             self.advance();
         } else {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedToken,
-                "expected `while` after `do` body",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedDoWhileWhile {
+                    found: self.current().kind,
+                },
+            ));
         }
 
         let condition = if crate::expr::can_start_expr(self.current().kind)
@@ -159,10 +159,11 @@ where
             ) {
             self.expr()
         } else {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedExpression,
-                "expected a condition after `while`",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::MissingDoWhileCondition {
+                    found: self.current().kind,
+                },
+            ));
             self.error_expr(self.current_span())
         };
 
@@ -192,7 +193,7 @@ where
 
     pub(super) fn parse_throw_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         self.advance();
-        let expr = self.parse_layout_expression("expected an expression after `throw`");
+        let expr = self.parse_layout_expression(LayoutExpressionContext::ThrowBody);
         self.alloc_from(
             mark,
             TreeKind::PhaseSpecific(UntypedNode::Throw(Throw { expr })),
@@ -202,27 +203,26 @@ where
     pub(super) fn parse_try_expr(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         let body_feedback = self.observe_indented_body();
         self.advance();
-        let expr = self.parse_try_body(body_feedback, "expected an expression after `try`");
+        let expr = self.parse_try_body(body_feedback, LayoutExpressionContext::TryBody);
 
         let handler = if let Some(feedback_opened) = self.accept_catch_keyword() {
             if self.catch_starts_case_handler() {
                 Some(self.parse_catch_case_handler(feedback_opened))
             } else {
-                Some(self.parse_layout_expression("expected an expression after `catch`"))
+                Some(self.parse_layout_expression(LayoutExpressionContext::CatchBody))
             }
         } else {
             None
         };
         if handler.is_some_and(|handler| self.is_empty_block(handler)) {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedExpression,
-                "catch handler cannot be empty",
-            );
+            self.report_issue(ParseIssue::Expression(ExpressionIssue::EmptyCatchHandler {
+                found: self.current().kind,
+            }));
         }
         let finalizer = self
             .accept_layout_keyword(dotty_core::HardKeyword::Finally)
             .map(|feedback_opened| {
-                self.parse_try_body(feedback_opened, "expected an expression after `finally`")
+                self.parse_try_body(feedback_opened, LayoutExpressionContext::FinallyBody)
             });
 
         self.alloc_from(
@@ -235,7 +235,11 @@ where
         )
     }
 
-    fn parse_try_body(&mut self, feedback_opened: bool, message: &str) -> TreeId<Untyped> {
+    fn parse_try_body(
+        &mut self,
+        feedback_opened: bool,
+        context: LayoutExpressionContext,
+    ) -> TreeId<Untyped> {
         let mut lookahead = 0;
         while matches!(
             self.cursor.lookahead(lookahead).kind,
@@ -252,7 +256,7 @@ where
                 self.parse_indented_block()
             }
         } else {
-            self.parse_layout_expression(message)
+            self.parse_layout_expression(context)
         }
     }
 
@@ -280,22 +284,28 @@ where
         }
         if !can_start_expr(self.current().kind) {
             let position = self.current_span();
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedExpression,
-                "expected an expression for the control-flow branch",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedControlFlowBranch {
+                    found: self.current().kind,
+                },
+            ));
             return self.error_expr(position);
         }
         self.expr()
     }
 
-    fn parse_layout_expression(&mut self, message: &str) -> TreeId<Untyped> {
+    fn parse_layout_expression(&mut self, context: LayoutExpressionContext) -> TreeId<Untyped> {
         let indented = self.accept_layout_indent();
         let expression = if can_start_expr(self.current().kind) {
             self.expr()
         } else {
             let position = self.current_span();
-            self.report(crate::ParseDiagnosticKind::ExpectedExpression, message);
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedLayoutExpression {
+                    context,
+                    found: self.current().kind,
+                },
+            ));
             self.error_expr(position)
         };
         self.close_layout_expression(indented);
@@ -321,10 +331,11 @@ where
         if indented {
             self.consume_control_newlines();
             if !self.accept(TokenKind::Outdent) {
-                self.report(
-                    crate::ParseDiagnosticKind::ExpectedToken,
-                    "expected an outdent to close an indented expression",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ExpectedIndentedExpressionOutdent {
+                        found: self.current().kind,
+                    },
+                ));
             }
         }
     }
@@ -528,18 +539,18 @@ where
             vec![self.case_clause(true)]
         };
         if cases.is_empty() {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedPattern,
-                "expected at least one `case` clause after `catch`",
-            );
+            self.report_issue(ParseIssue::Expression(ExpressionIssue::ExpectedCatchCase {
+                found: self.current().kind,
+            }));
         }
 
         if braced {
             if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-                self.report(
-                    crate::ParseDiagnosticKind::ExpectedToken,
-                    "expected `}` to close catch cases",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ExpectedCatchCloseBrace {
+                        found: self.current().kind,
+                    },
+                ));
             }
         } else if indented {
             self.consume_control_newlines();
@@ -555,10 +566,11 @@ where
                 self.observe_outdented();
             }
             if !self.accept(TokenKind::Outdent) {
-                self.report(
-                    crate::ParseDiagnosticKind::ExpectedToken,
-                    "expected an outdent to close catch cases",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ExpectedCatchOutdent {
+                        found: self.current().kind,
+                    },
+                ));
             }
         }
 
@@ -585,10 +597,11 @@ where
             let checkpoint = self.cursor.checkpoint();
             self.advance();
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    crate::ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while consuming control-flow newlines",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ControlFlowNewlineNoProgress {
+                        found: self.current().kind,
+                    },
+                ));
                 break;
             }
         }
@@ -660,10 +673,11 @@ where
                 self.observe_outdented();
             }
             if !closed_by_delimiter && !self.accept(TokenKind::Outdent) {
-                self.report(
-                    crate::ParseDiagnosticKind::ExpectedToken,
-                    "expected an outdent to close case-lambda clauses",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ExpectedCaseLambdaOutdent {
+                        found: self.current().kind,
+                    },
+                ));
             }
             let selector = self.synthetic_unit_at(case_mark.start);
             return self.alloc_from(case_mark, TreeKind::Match(Match { selector, cases }));
@@ -704,10 +718,11 @@ where
             && !self.accept(TokenKind::Outdent)
             && !closes_at_enclosing_end_marker
         {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedToken,
-                "expected an outdent to close an indented block",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedIndentedBlockOutdent {
+                    found: self.current().kind,
+                },
+            ));
         }
         if preserve_block {
             self.alloc_from(mark, TreeKind::Block(Block { stats, expr }))
@@ -921,6 +936,7 @@ const fn is_control_lookahead_boundary(kind: TokenKind) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::compilation_unit::tests::{parser_for, token};
+    use crate::{ExpressionIssue, ParseIssue};
     use dotty_core::ast::{Block, Match, ParsedTry, Return, Throw, UntypedNode};
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TokenKind, TreeKind};
 
@@ -1723,12 +1739,20 @@ mod tests {
 
         assert!(matches!(parser.ast().get(expr).kind, TreeKind::Block(_)));
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                == "expected an outdent to close an indented block"
-        }));
+        let diagnostic = parser
+            .diagnostics()
+            .last()
+            .expect("missing outdent diagnostic");
+        assert_eq!(
+            diagnostic.issue(),
+            &ParseIssue::Expression(ExpressionIssue::ExpectedIndentedBlockOutdent {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            diagnostic.span(),
+            dotty_core::TextRange::new(19, 19).unwrap()
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use dotty_core::ast::Match;
 use dotty_core::{Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
-use crate::{Mark, Parser};
+use crate::{ExpressionIssue, Mark, ParseIssue, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -29,10 +29,11 @@ where
             self.observe_outdented();
         }
         if !self.accept(TokenKind::Outdent) {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedToken,
-                "expected an outdent to close colon case clauses",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedMatchColonOutdent {
+                    found: self.current().kind,
+                },
+            ));
         }
 
         let selector = self.synthetic_unit_at(start);
@@ -78,10 +79,11 @@ where
         let cases = if self.accept(TokenKind::Punctuation(Punctuation::LeftBrace)) {
             let cases = self.case_clauses();
             if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-                self.report(
-                    crate::ParseDiagnosticKind::ExpectedToken,
-                    "expected `}` to close match cases",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ExpectedMatchCloseBrace {
+                        found: self.current().kind,
+                    },
+                ));
             }
             cases
         } else if self.features().sub_cases
@@ -116,17 +118,19 @@ where
                     && !closed_by_delimiter
                     && !self.current_end_marker_matches_active_construct()
                 {
-                    self.report(
-                        crate::ParseDiagnosticKind::ExpectedToken,
-                        "expected an outdent to close match cases",
-                    );
+                    self.report_issue(ParseIssue::Expression(
+                        ExpressionIssue::ExpectedMatchOutdent {
+                            found: self.current().kind,
+                        },
+                    ));
                 }
                 cases
             } else {
-                self.report(
-                    crate::ParseDiagnosticKind::ExpectedToken,
-                    "expected `{` or an indented case region after `match`",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ExpectedMatchCaseRegion {
+                        found: self.current().kind,
+                    },
+                ));
                 self.case_clauses()
             }
         };
@@ -137,10 +141,9 @@ where
         );
 
         if cases.is_empty() {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedPattern,
-                "expected at least one `case` clause after `match`",
-            );
+            self.report_issue(ParseIssue::Expression(ExpressionIssue::ExpectedMatchCase {
+                found: self.current().kind,
+            }));
         }
 
         self.alloc_from(mark, TreeKind::Match(Match { selector, cases }))

@@ -2,7 +2,7 @@ use dotty_core::ast::{ForDo, ForYield, GenAlias, GenCheckMode, GenFrom, UntypedN
 use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use super::can_start_expr;
-use crate::{Location, ParseDiagnosticKind, ParseKind, Parser};
+use crate::{ExpressionIssue, Location, ParseDiagnosticKind, ParseIssue, ParseKind, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -33,10 +33,11 @@ where
         if indented {
             self.consume_for_newlines();
             if !self.accept(TokenKind::Outdent) {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected an outdent to close for enumerators",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ExpectedForEnumeratorOutdent {
+                        found: self.current().kind,
+                    },
+                ));
             }
         }
         if wrapped && self.for_body_keyword_follows_newlines() {
@@ -56,10 +57,11 @@ where
             }
             _ => {
                 if !wrapped {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedToken,
-                        "expected `yield` or `do` after for enumerators",
-                    );
+                    self.report_issue(ParseIssue::Expression(
+                        ExpressionIssue::ExpectedForBodyKeyword {
+                            found: self.current().kind,
+                        },
+                    ));
                 }
                 (None, false)
             }
@@ -92,10 +94,11 @@ where
             let checkpoint = self.cursor.checkpoint();
             if self.current().kind == TokenKind::Keyword(HardKeyword::If) {
                 if enums.is_empty() {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedPattern,
-                        "expected a generator before a for guard",
-                    );
+                    self.report_issue(ParseIssue::Expression(
+                        ExpressionIssue::ForGuardMissingGenerator {
+                            found: self.current().kind,
+                        },
+                    ));
                 }
                 if let Some(guard) = self.parse_guard() {
                     enums.push(guard);
@@ -117,10 +120,11 @@ where
             let has_suppressed_newline_separator = self.current_starts_multiline_for_enumerator();
 
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing for enumerators",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ForEnumeratorsNoProgress {
+                        found: self.current().kind,
+                    },
+                ));
                 break;
             }
             if !had_separator
@@ -136,10 +140,11 @@ where
         }
 
         if !saw_generator {
-            self.report(
-                ParseDiagnosticKind::ExpectedPattern,
-                "a for comprehension requires a generator",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ForMissingGenerator {
+                    found: self.current().kind,
+                },
+            ));
         }
         enums
     }
@@ -179,10 +184,11 @@ where
             );
         }
 
-        self.report(
-            ParseDiagnosticKind::ExpectedToken,
-            "expected `<-` or `=` after for pattern",
-        );
+        self.report_issue(ParseIssue::Expression(
+            ExpressionIssue::ExpectedForEnumeratorOperator {
+                found: self.current().kind,
+            },
+        ));
         if !self.at_for_body_keyword()
             && !matches!(
                 self.current().kind,
@@ -204,10 +210,11 @@ where
         let mark = self.mark();
         let pattern = self.parse_pattern1_for_enumerator();
         if !self.current_is_operator("<-") {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `<-` after case generator pattern",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedCaseGeneratorOperator {
+                    found: self.current().kind,
+                },
+            ));
             return self.error_pattern(self.current_span());
         }
         self.advance();
@@ -234,10 +241,11 @@ where
         let expr = if can_start_expr(self.current().kind) {
             self.parse_for_enumerator_expression()
         } else {
-            self.report(
-                ParseDiagnosticKind::ExpectedExpression,
-                "expected an expression after for enumerator operator",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedForEnumeratorExpression {
+                    found: self.current().kind,
+                },
+            ));
             self.error_expr(self.current_span())
         };
         if indented {
@@ -331,10 +339,11 @@ where
         if can_start_expr(self.current().kind) {
             self.expr()
         } else {
-            self.report(
-                ParseDiagnosticKind::ExpectedExpression,
-                "expected an expression after for body delimiter",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedForBodyExpression {
+                    found: self.current().kind,
+                },
+            ));
             self.error_expr(self.current_span())
         }
     }
@@ -1066,12 +1075,20 @@ mod tests {
 
         let _ = parser.expr();
 
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("outdent")
-        }));
+        let diagnostic = parser
+            .diagnostics()
+            .last()
+            .expect("missing outdent diagnostic");
+        assert_eq!(
+            diagnostic.issue(),
+            &ParseIssue::Expression(ExpressionIssue::ExpectedIndentedBlockOutdent {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            diagnostic.span(),
+            dotty_core::TextRange::new(31, 31).unwrap()
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 

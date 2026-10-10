@@ -40,8 +40,9 @@ pub use compilation_unit::{ParseResult, parse_compilation_unit, parse_expression
 pub use context::{Location, ParamOwner, ParseContext, ParseKind, ParserFeatures};
 pub use cursor::{Cursor, CursorCheckpoint};
 pub use diagnostics::{
-    ExpressionApplicationTarget, ExpressionIssue, ParseDiagnostic, ParseDiagnosticKind, ParseIssue,
-    TypeDefinitionIssue, TypeFunctionArrow, TypeIssue, TypeParamIssue,
+    ExpressionApplicationTarget, ExpressionIssue, LayoutExpressionContext, ParseDiagnostic,
+    ParseDiagnosticKind, ParseIssue, TypeDefinitionIssue, TypeFunctionArrow, TypeIssue,
+    TypeParamIssue,
 };
 pub use infix::{OpInfo, is_assignment_operator, is_right_associative, precedence};
 pub use names::KnownNames;

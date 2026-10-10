@@ -218,6 +218,80 @@ pub enum ExpressionIssue {
     ExpressionSuffixNoProgress { found: TokenKind },
     /// No expression can start at the current token.
     ExpectedExpressionAtCurrentToken { found: TokenKind },
+    /// An `if` condition is not followed by `then`.
+    ExpectedIfThen { found: TokenKind },
+    /// A `while` condition is not followed by `do`.
+    ExpectedWhileDo { found: TokenKind },
+    /// A legacy `do` loop has no body expression.
+    MissingDoWhileBody { found: TokenKind },
+    /// A legacy `do` loop body is not followed by `while`.
+    ExpectedDoWhileWhile { found: TokenKind },
+    /// A legacy `do ... while` loop has no condition.
+    MissingDoWhileCondition { found: TokenKind },
+    /// A catch handler has no body.
+    EmptyCatchHandler { found: TokenKind },
+    /// A control-flow construct is missing its branch/body expression.
+    ExpectedControlFlowBranch { found: TokenKind },
+    /// A layout-introduced expression is missing its body.
+    ExpectedLayoutExpression {
+        context: LayoutExpressionContext,
+        found: TokenKind,
+    },
+    /// An indented expression is not closed by an outdent.
+    ExpectedIndentedExpressionOutdent { found: TokenKind },
+    /// A catch handler is missing a `case` clause.
+    ExpectedCatchCase { found: TokenKind },
+    /// Braced catch clauses are missing their closing brace.
+    ExpectedCatchCloseBrace { found: TokenKind },
+    /// Indented catch clauses are missing their closing outdent.
+    ExpectedCatchOutdent { found: TokenKind },
+    /// Consuming control-flow newlines did not advance the token source.
+    ControlFlowNewlineNoProgress { found: TokenKind },
+    /// An indented case-lambda is missing its closing outdent.
+    ExpectedCaseLambdaOutdent { found: TokenKind },
+    /// An indented block is missing its closing outdent.
+    ExpectedIndentedBlockOutdent { found: TokenKind },
+    /// An indented for-enumerator region is missing its closing outdent.
+    ExpectedForEnumeratorOutdent { found: TokenKind },
+    /// A for-comprehension is missing `yield` or `do` after its enumerators.
+    ExpectedForBodyKeyword { found: TokenKind },
+    /// A for guard appears before any generator.
+    ForGuardMissingGenerator { found: TokenKind },
+    /// Parsing for enumerators did not advance the token source.
+    ForEnumeratorsNoProgress { found: TokenKind },
+    /// A for-comprehension contains no generator.
+    ForMissingGenerator { found: TokenKind },
+    /// A for pattern is not followed by `<-` or `=`.
+    ExpectedForEnumeratorOperator { found: TokenKind },
+    /// A case-generator pattern is not followed by `<-`.
+    ExpectedCaseGeneratorOperator { found: TokenKind },
+    /// A for enumerator operator has no right-hand expression.
+    ExpectedForEnumeratorExpression { found: TokenKind },
+    /// A for body delimiter is not followed by an expression.
+    ExpectedForBodyExpression { found: TokenKind },
+    /// An indented colon-introduced match clause is missing its outdent.
+    ExpectedMatchColonOutdent { found: TokenKind },
+    /// Braced match cases are missing their closing brace.
+    ExpectedMatchCloseBrace { found: TokenKind },
+    /// Indented match cases are missing their closing outdent.
+    ExpectedMatchOutdent { found: TokenKind },
+    /// A `match` expression is not followed by a braced or indented case region.
+    ExpectedMatchCaseRegion { found: TokenKind },
+    /// A match expression has no case clauses.
+    ExpectedMatchCase { found: TokenKind },
+}
+
+/// Layout-delimited expression positions which may need a recovery node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayoutExpressionContext {
+    /// The body introduced by `throw`.
+    ThrowBody,
+    /// The body introduced by `try`.
+    TryBody,
+    /// The body introduced by `catch`.
+    CatchBody,
+    /// The body introduced by `finally`.
+    FinallyBody,
 }
 
 /// Expression shapes which the source parser does not permit as direct call targets.
@@ -258,6 +332,36 @@ impl ExpressionIssue {
             | Self::ExpressionSuffixNoProgress { .. } => ParseDiagnosticKind::UnexpectedToken,
             Self::ExpectedExpressionAtCurrentToken { .. } => {
                 ParseDiagnosticKind::ExpectedExpression
+            }
+            Self::MissingDoWhileBody { .. }
+            | Self::MissingDoWhileCondition { .. }
+            | Self::EmptyCatchHandler { .. }
+            | Self::ExpectedControlFlowBranch { .. }
+            | Self::ExpectedLayoutExpression { .. }
+            | Self::ExpectedForEnumeratorExpression { .. }
+            | Self::ExpectedForBodyExpression { .. } => ParseDiagnosticKind::ExpectedExpression,
+            Self::ExpectedCatchCase { .. }
+            | Self::ForGuardMissingGenerator { .. }
+            | Self::ForMissingGenerator { .. }
+            | Self::ExpectedMatchCase { .. } => ParseDiagnosticKind::ExpectedPattern,
+            Self::ExpectedIfThen { .. }
+            | Self::ExpectedWhileDo { .. }
+            | Self::ExpectedDoWhileWhile { .. }
+            | Self::ExpectedIndentedExpressionOutdent { .. }
+            | Self::ExpectedCatchCloseBrace { .. }
+            | Self::ExpectedCatchOutdent { .. }
+            | Self::ExpectedCaseLambdaOutdent { .. }
+            | Self::ExpectedIndentedBlockOutdent { .. }
+            | Self::ExpectedForEnumeratorOutdent { .. }
+            | Self::ExpectedForBodyKeyword { .. }
+            | Self::ExpectedForEnumeratorOperator { .. }
+            | Self::ExpectedCaseGeneratorOperator { .. }
+            | Self::ExpectedMatchColonOutdent { .. }
+            | Self::ExpectedMatchCloseBrace { .. }
+            | Self::ExpectedMatchOutdent { .. }
+            | Self::ExpectedMatchCaseRegion { .. } => ParseDiagnosticKind::ExpectedToken,
+            Self::ControlFlowNewlineNoProgress { .. } | Self::ForEnumeratorsNoProgress { .. } => {
+                ParseDiagnosticKind::UnexpectedToken
             }
             Self::NonFinalArgumentSpread
             | Self::PostfixOperatorNoProgress { .. }
@@ -334,6 +438,62 @@ impl ExpressionIssue {
             Self::ExpectedExpressionAtCurrentToken { .. } => {
                 "parser.expression.expected_at_current_token"
             }
+            Self::ExpectedIfThen { .. } => "parser.expression.expected_if_then",
+            Self::ExpectedWhileDo { .. } => "parser.expression.expected_while_do",
+            Self::MissingDoWhileBody { .. } => "parser.expression.missing_do_while_body",
+            Self::ExpectedDoWhileWhile { .. } => "parser.expression.expected_do_while_while",
+            Self::MissingDoWhileCondition { .. } => "parser.expression.missing_do_while_condition",
+            Self::EmptyCatchHandler { .. } => "parser.expression.empty_catch_handler",
+            Self::ExpectedControlFlowBranch { .. } => {
+                "parser.expression.expected_control_flow_branch"
+            }
+            Self::ExpectedLayoutExpression { context, .. } => match context {
+                LayoutExpressionContext::ThrowBody => "parser.expression.expected_throw_body",
+                LayoutExpressionContext::TryBody => "parser.expression.expected_try_body",
+                LayoutExpressionContext::CatchBody => "parser.expression.expected_catch_body",
+                LayoutExpressionContext::FinallyBody => "parser.expression.expected_finally_body",
+            },
+            Self::ExpectedIndentedExpressionOutdent { .. } => {
+                "parser.expression.expected_layout_expression_outdent"
+            }
+            Self::ExpectedCatchCase { .. } => "parser.expression.expected_catch_case",
+            Self::ExpectedCatchCloseBrace { .. } => "parser.expression.expected_catch_close_brace",
+            Self::ExpectedCatchOutdent { .. } => "parser.expression.expected_catch_outdent",
+            Self::ControlFlowNewlineNoProgress { .. } => {
+                "parser.expression.control_newline_no_progress"
+            }
+            Self::ExpectedCaseLambdaOutdent { .. } => {
+                "parser.expression.expected_case_lambda_outdent"
+            }
+            Self::ExpectedIndentedBlockOutdent { .. } => "parser.expression.expected_block_outdent",
+            Self::ExpectedForEnumeratorOutdent { .. } => {
+                "parser.expression.expected_for_enumerator_outdent"
+            }
+            Self::ExpectedForBodyKeyword { .. } => "parser.expression.expected_for_body_keyword",
+            Self::ForGuardMissingGenerator { .. } => {
+                "parser.expression.for_guard_missing_generator"
+            }
+            Self::ForEnumeratorsNoProgress { .. } => "parser.expression.for_enumerator_no_progress",
+            Self::ForMissingGenerator { .. } => "parser.expression.for_missing_generator",
+            Self::ExpectedForEnumeratorOperator { .. } => {
+                "parser.expression.expected_for_enumerator_operator"
+            }
+            Self::ExpectedCaseGeneratorOperator { .. } => {
+                "parser.expression.expected_case_generator_operator"
+            }
+            Self::ExpectedForEnumeratorExpression { .. } => {
+                "parser.expression.expected_for_enumerator_expression"
+            }
+            Self::ExpectedForBodyExpression { .. } => {
+                "parser.expression.expected_for_body_expression"
+            }
+            Self::ExpectedMatchColonOutdent { .. } => {
+                "parser.expression.expected_match_colon_outdent"
+            }
+            Self::ExpectedMatchCloseBrace { .. } => "parser.expression.expected_match_close_brace",
+            Self::ExpectedMatchOutdent { .. } => "parser.expression.expected_match_outdent",
+            Self::ExpectedMatchCaseRegion { .. } => "parser.expression.expected_match_case_region",
+            Self::ExpectedMatchCase { .. } => "parser.expression.expected_match_case",
         }
     }
 }
