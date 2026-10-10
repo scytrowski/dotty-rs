@@ -7,7 +7,7 @@ use dotty_core::{
     TextRange, TokenKind, TokenSource, TreeId, TreeKind, Untyped,
 };
 
-use crate::{Location, ParseDiagnosticKind, ParseKind, ParseResult, Parser};
+use crate::{Location, ParseIssue, ParseKind, ParseResult, Parser, PatternIssue};
 
 /// Parses one source-level pattern fragment with the same pattern grammar used
 /// by case clauses and future generators.
@@ -42,10 +42,9 @@ where
             }
         }
         if self.current().kind != TokenKind::Eof {
-            self.report(
-                ParseDiagnosticKind::UnexpectedToken,
-                "expected end of pattern fragment",
-            );
+            self.report_issue(ParseIssue::Pattern(PatternIssue::TrailingInput {
+                found: self.current().kind,
+            }));
             self.recover_until(crate::RecoverySet::Statement);
         }
 
@@ -72,10 +71,11 @@ where
             }
             self.advance();
             let Some(operand_offset) = pattern_alternative_operand_offset(self) else {
-                self.report(
-                    ParseDiagnosticKind::ExpectedPattern,
-                    "expected a pattern after `|`",
-                );
+                self.report_issue(ParseIssue::Pattern(
+                    PatternIssue::ExpectedPatternAfterAlternative {
+                        found: self.current().kind,
+                    },
+                ));
                 alternatives.push(self.error_pattern(self.current_span()));
                 break;
             };
@@ -126,10 +126,11 @@ where
         }
 
         let TreeKind::Ident(identifier) = self.ast().get(pattern).kind else {
-            self.report(
-                ParseDiagnosticKind::UnexpectedToken,
-                "a pattern binder must start with an identifier",
-            );
+            self.report_issue(ParseIssue::Pattern(
+                PatternIssue::ExpectedIdentifierBeforeBinder {
+                    found: self.current().kind,
+                },
+            ));
             self.advance();
             return pattern;
         };
@@ -203,12 +204,16 @@ where
             );
         }
 
-        let message = if location == Location::InPatternArgs {
-            "`*` must follow a pattern variable"
+        let issue = if location == Location::InPatternArgs {
+            PatternIssue::SequencePatternRequiresVariable {
+                found: self.current().kind,
+            }
         } else {
-            "sequence patterns are only allowed in extractor arguments"
+            PatternIssue::SequencePatternOutsideExtractorArguments {
+                found: self.current().kind,
+            }
         };
-        self.report(ParseDiagnosticKind::UnsupportedSyntax, message);
+        self.report_issue(ParseIssue::Pattern(issue));
         pattern
     }
 
@@ -235,12 +240,12 @@ where
             if let Some(top) = operators.last().copied() {
                 let top_spelling = self.names.resolve(top.text()).to_owned();
                 if crate::infix::has_mixed_associativity(&top_spelling, &spelling) {
-                    self.report(
-                        ParseDiagnosticKind::UnexpectedToken,
-                        format!(
-                            "mixed left- and right-associative pattern operators `{top_spelling}` and `{spelling}`"
-                        ),
-                    );
+                    self.report_issue(ParseIssue::Pattern(
+                        PatternIssue::MixedAssociativityOperators {
+                            left: top,
+                            right: operator,
+                        },
+                    ));
                 }
             }
 
@@ -265,10 +270,9 @@ where
             operators.push(operator);
             operands.push(self.simple_pattern());
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing an infix pattern",
-                );
+                self.report_issue(ParseIssue::Pattern(PatternIssue::InfixPatternNoProgress {
+                    found: self.current().kind,
+                }));
                 break;
             }
         }
@@ -373,10 +377,11 @@ where
         loop {
             if self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
                 let Some((name, backquoted)) = self.current_selector_name() else {
-                    self.report(
-                        crate::ParseDiagnosticKind::ExpectedToken,
-                        "expected a selector after `.` in pattern",
-                    );
+                    self.report_issue(ParseIssue::Pattern(
+                        PatternIssue::ExpectedSelectorAfterDot {
+                            found: self.current().kind,
+                        },
+                    ));
                     return tree;
                 };
                 self.advance();
@@ -496,10 +501,11 @@ where
                     .cursor
                     .at(TokenKind::Punctuation(Punctuation::RightParen))
                 {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedPattern,
-                        "expected a pattern after `,`",
-                    );
+                    self.report_issue(ParseIssue::Pattern(
+                        PatternIssue::ExpectedPatternAfterComma {
+                            found: self.current().kind,
+                        },
+                    ));
                     self.advance();
                     break;
                 }
@@ -609,7 +615,9 @@ where
 
     fn unexpected_pattern(&mut self) -> TreeId<Untyped> {
         let position = self.current_span();
-        self.report(ParseDiagnosticKind::ExpectedPattern, "expected a pattern");
+        self.report_issue(ParseIssue::Pattern(PatternIssue::ExpectedPattern {
+            found: self.current().kind,
+        }));
         if self.current().kind != TokenKind::Eof
             && !self.current_is_structural_operator()
             && !matches!(
@@ -629,10 +637,9 @@ where
 
     fn unsupported_pattern(&mut self) -> TreeId<Untyped> {
         let position = self.current_span();
-        self.report(
-            ParseDiagnosticKind::UnsupportedSyntax,
-            "this pattern form is not supported yet",
-        );
+        self.report_issue(ParseIssue::Pattern(PatternIssue::UnsupportedPattern {
+            found: self.current().kind,
+        }));
         if self.current().kind != TokenKind::Eof {
             self.advance();
         }
@@ -752,6 +759,7 @@ fn symbolic_pattern_extractor_at<S: TokenSource>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ParseDiagnosticKind;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::{
         Alternative, Annotated, Apply, Bind, Ident, SplicePattern, This, Tuple, UntypedNode,
@@ -1080,12 +1088,13 @@ mod tests {
             result.diagnostics[0].kind(),
             ParseDiagnosticKind::ExpectedType
         );
-        assert_eq!(
-            result.diagnostics[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "expected an annotation type after `@`"
-        );
+        assert!(matches!(
+            result.diagnostics[0].issue(),
+            ParseIssue::Legacy {
+                kind: ParseDiagnosticKind::ExpectedType,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1333,10 +1342,14 @@ mod tests {
         assert_eq!(parser.current().kind, TokenKind::Operator);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "expected a selector after `.` in pattern"
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Pattern(PatternIssue::ExpectedSelectorAfterDot {
+                found: TokenKind::Operator,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(2, 3).expect("valid diagnostic range")
         );
     }
 
@@ -1359,10 +1372,14 @@ mod tests {
         assert_eq!(parser.current().kind, TokenKind::Operator);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "expected a selector after `.` in pattern"
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Pattern(PatternIssue::ExpectedSelectorAfterDot {
+                found: TokenKind::Operator,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(2, 5).expect("valid diagnostic range")
         );
     }
 
@@ -1692,9 +1709,12 @@ mod tests {
         ));
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(
-            result.diagnostics[0].kind(),
-            ParseDiagnosticKind::ExpectedPattern
+            result.diagnostics[0].issue(),
+            &ParseIssue::Pattern(PatternIssue::ExpectedPatternAfterAlternative {
+                found: TokenKind::Eof,
+            })
         );
+        assert_eq!(result.diagnostics[0].span(), TextRange::new(3, 3).unwrap());
     }
 
     #[test]
@@ -1763,15 +1783,21 @@ mod tests {
         let result = parser.parse_pattern_fragment();
 
         assert_eq!(result.diagnostics.len(), 1);
+        let ParseIssue::Pattern(PatternIssue::MixedAssociativityOperators { left, right }) =
+            result.diagnostics[0].issue()
+        else {
+            panic!("expected a typed mixed-associativity issue");
+        };
+        assert_eq!(names.resolve(left.text()), "+");
+        assert_eq!(names.resolve(right.text()), "+:");
         assert_eq!(
             result.diagnostics[0].kind(),
             ParseDiagnosticKind::UnexpectedToken
         );
-        assert!(
-            result.diagnostics[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("mixed")
+        assert_eq!(result.diagnostics[0].span(), TextRange::new(6, 8).unwrap());
+        assert_eq!(
+            result.diagnostics[0].issue().code(),
+            "parser.pattern.mixed_associativity"
         );
     }
 
@@ -1793,15 +1819,21 @@ mod tests {
         let result = parser.parse_pattern_fragment();
 
         assert_eq!(result.diagnostics.len(), 1);
+        let ParseIssue::Pattern(PatternIssue::MixedAssociativityOperators { left, right }) =
+            result.diagnostics[0].issue()
+        else {
+            panic!("expected a typed mixed-associativity issue");
+        };
+        assert_eq!(names.resolve(left.text()), "+:");
+        assert_eq!(names.resolve(right.text()), "+");
         assert_eq!(
             result.diagnostics[0].kind(),
             ParseDiagnosticKind::UnexpectedToken
         );
-        assert!(
-            result.diagnostics[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("mixed")
+        assert_eq!(result.diagnostics[0].span(), TextRange::new(7, 8).unwrap());
+        assert_eq!(
+            result.diagnostics[0].issue().code(),
+            "parser.pattern.mixed_associativity"
         );
     }
 
@@ -2149,9 +2181,12 @@ mod tests {
 
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(
-            result.diagnostics[0].kind(),
-            ParseDiagnosticKind::UnsupportedSyntax
+            result.diagnostics[0].issue(),
+            &ParseIssue::Pattern(PatternIssue::SequencePatternOutsideExtractorArguments {
+                found: TokenKind::Eof,
+            })
         );
+        assert_eq!(result.diagnostics[0].span(), TextRange::new(2, 2).unwrap());
     }
 
     #[test]
@@ -2172,9 +2207,12 @@ mod tests {
 
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(
-            result.diagnostics[0].kind(),
-            ParseDiagnosticKind::UnsupportedSyntax
+            result.diagnostics[0].issue(),
+            &ParseIssue::Pattern(PatternIssue::SequencePatternOutsideExtractorArguments {
+                found: TokenKind::Eof,
+            })
         );
+        assert_eq!(result.diagnostics[0].span(), TextRange::new(6, 6).unwrap());
     }
 
     #[test]
@@ -2319,8 +2357,10 @@ mod tests {
 
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(
-            result.diagnostics[0].kind(),
-            ParseDiagnosticKind::UnsupportedSyntax
+            result.diagnostics[0].issue(),
+            &ParseIssue::Pattern(PatternIssue::SequencePatternOutsideExtractorArguments {
+                found: TokenKind::Punctuation(Punctuation::RightParen),
+            })
         );
         assert_eq!(
             result.ast.get(result.root).position.unwrap().span().range(),
@@ -2369,8 +2409,10 @@ mod tests {
 
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(
-            result.diagnostics[0].kind(),
-            ParseDiagnosticKind::UnsupportedSyntax
+            result.diagnostics[0].issue(),
+            &ParseIssue::Pattern(PatternIssue::SequencePatternRequiresVariable {
+                found: TokenKind::Punctuation(Punctuation::RightParen),
+            })
         );
         assert_eq!(
             result.ast.get(result.root).position.unwrap().span().range(),
