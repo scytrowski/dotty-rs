@@ -538,6 +538,53 @@ impl LayoutIssue {
     }
 }
 
+/// Typed failures emitted while parsing template bodies and self types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemplateIssue {
+    /// A template body is missing its closing delimiter.
+    ExpectedBodyEnd {
+        expected: TokenKind,
+        found: TokenKind,
+    },
+    /// Parsing a template body did not advance the token source.
+    BodyNoProgress { found: TokenKind },
+    /// A template member is not followed by a separator.
+    ExpectedMemberSeparator { found: TokenKind },
+    /// A `this` self type is missing its colon.
+    ExpectedSelfTypeColon { found: TokenKind },
+    /// Compound self-type syntax is not supported by this parser increment.
+    CompoundSelfTypeUnsupported { found: TokenKind },
+    /// A self type is missing its `=>` separator.
+    ExpectedSelfTypeArrow { found: TokenKind },
+}
+
+impl TemplateIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::ExpectedBodyEnd { .. }
+            | Self::ExpectedSelfTypeColon { .. }
+            | Self::ExpectedSelfTypeArrow { .. } => ParseDiagnosticKind::ExpectedToken,
+            Self::BodyNoProgress { .. } | Self::ExpectedMemberSeparator { .. } => {
+                ParseDiagnosticKind::UnexpectedToken
+            }
+            Self::CompoundSelfTypeUnsupported { .. } => ParseDiagnosticKind::UnsupportedSyntax,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ExpectedBodyEnd { .. } => "parser.template.expected_body_end",
+            Self::BodyNoProgress { .. } => "parser.template.body_no_progress",
+            Self::ExpectedMemberSeparator { .. } => "parser.template.expected_member_separator",
+            Self::ExpectedSelfTypeColon { .. } => "parser.template.expected_self_type_colon",
+            Self::CompoundSelfTypeUnsupported { .. } => {
+                "parser.template.compound_self_type_unsupported"
+            }
+            Self::ExpectedSelfTypeArrow { .. } => "parser.template.expected_self_type_arrow",
+        }
+    }
+}
+
 /// Typed failures in Scala type-parameter and context-bound clauses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypeParamIssue {
@@ -1760,6 +1807,8 @@ pub enum ParseIssue {
     Statement(StatementIssue),
     /// A structured failure emitted while parsing separators and layout markers.
     Layout(LayoutIssue),
+    /// A structured failure emitted while parsing template bodies and self types.
+    Template(TemplateIssue),
 }
 
 impl ParseIssue {
@@ -1790,6 +1839,7 @@ impl ParseIssue {
             Self::Package(issue) => issue.kind(),
             Self::Statement(issue) => issue.kind(),
             Self::Layout(issue) => issue.kind(),
+            Self::Template(issue) => issue.kind(),
         }
     }
 
@@ -1830,6 +1880,7 @@ impl ParseIssue {
             Self::Package(issue) => issue.code(),
             Self::Statement(issue) => issue.code(),
             Self::Layout(issue) => issue.code(),
+            Self::Template(issue) => issue.code(),
         }
     }
 }
@@ -1921,6 +1972,7 @@ impl ParseDiagnostic {
             ParseIssue::Package(_) => None,
             ParseIssue::Statement(_) => None,
             ParseIssue::Layout(_) => None,
+            ParseIssue::Template(_) => None,
         }
     }
 }

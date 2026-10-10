@@ -44,8 +44,8 @@ pub use diagnostics::{
     ExpressionApplicationTarget, ExpressionIssue, ExtensionIssue, GivenIssue, ImportIssue,
     LayoutExpressionContext, LayoutIssue, ModifierIssue, PackageIssue, ParameterIssue,
     ParameterMutability, ParseDiagnostic, ParseDiagnosticKind, ParseIssue, PatternIssue,
-    StatementIssue, StatementSequenceContext, TypeDefinitionIssue, TypeFunctionArrow, TypeIssue,
-    TypeParamIssue, ValueDefinitionKind,
+    StatementIssue, StatementSequenceContext, TemplateIssue, TypeDefinitionIssue,
+    TypeFunctionArrow, TypeIssue, TypeParamIssue, ValueDefinitionKind,
 };
 pub use infix::{OpInfo, is_assignment_operator, is_right_associative, precedence};
 pub use names::KnownNames;
