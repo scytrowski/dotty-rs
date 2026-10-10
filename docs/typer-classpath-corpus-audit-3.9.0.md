@@ -1,12 +1,12 @@
 # Typer classpath corpus audit: Scala 3.9.0
 
-The report is generated from two byte-identical runs of the pinned Scala 3.9.0 audit. It records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success. The source corpus, parser/namer setup, Scala revision, JDK 21, and classpath remain pinned.
+The full audit and ranking below are a JDK 21 snapshot from before #900. Their raw `top_semantic_gaps` data therefore retains the pre-#900 count of 14 `LocalMethodSignatureDeferred` observations in 3 files. The later #900 supplemental section records the post-change profile using JDK 25; its 6 / 1 count is current for that profile. The full report is generated from two byte-identical runs of the pinned Scala 3.9.0 audit and records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success.
 
 Run `tools/typer-classpath-corpus-audit/run` with the environment documented in `docs/typer-v0.1-compatibility.md` to regenerate this report.
 
 ## Historical #767–#771 expression sprint snapshot
 
-At the #772 snapshot, first blockers for term prefix operators and term annotations had moved to zero. These historical measurements are retained here for context; current values and ranking come from the report below.
+At the #772 snapshot, first blockers for term prefix operators and term annotations had moved to zero. These historical measurements are retained here for context; the full JDK 21 baseline and ranking are below.
 
 | First blocker | Before #767 | At #772 snapshot |
 | --- | ---: | ---: |
@@ -67,9 +67,9 @@ The initial local-extension blocker was 25 occurrences in 5 files. The current a
 
 Receiver or ordinary-argument mismatches remain non-applicable candidates and preserve `MemberNotFound`; the audit does not relabel those as successful typing. Multiple viable same-name local extensions produce `OverloadedSelectionDeferred` in a focused regression. Primitive definitions have no modeled member scopes. If nominal lookup cannot inspect a primitive member index, local extension resolution is not attempted and the original `MemberLookup` error is retained; fallback is available only after a completed index confirms that the ordinary name has no member. External member materialization remains zero.
 
-### Current top ten Typer-owned semantic blockers
+### Pre-#900 JDK 21 top ten Typer-owned semantic blockers
 
-The ranked list below excludes parser/namer and classpath-resolution failures, and excludes the downstream `NoSuccessfulEnclosingMethodTyping` counter. Counts and representative paths are in `top_semantic_gaps` in the raw report.
+This ranking predates #900 and excludes parser/namer and classpath-resolution failures, as well as the downstream `NoSuccessfulEnclosingMethodTyping` counter. Counts and representative paths are in the matching pre-#900 `top_semantic_gaps` raw snapshot below. The current #900 supplemental local-signature profile above is 6 / 1.
 
 | Rank | First blocker | Count / files |
 | ---: | --- | ---: |
@@ -313,6 +313,10 @@ The raw profile below lists the current first blocker for each of the 22 pinned 
 ## Previous type projection snapshot
 
 The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.
+
+## Full JDK 21 raw audit snapshot (before #900)
+
+The raw report below was generated before #900 and is retained as a baseline snapshot. Its `top_semantic_gaps` section reports `LocalMethodSignatureDeferred: 14` in 3 files; the post-#900 supplemental profile above reports 6 in 1 file. Other raw counts also belong to this baseline run.
 
 ```text
 scala_revision=777528f19a58e794c9954a42f433373472ec57f8

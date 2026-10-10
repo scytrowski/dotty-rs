@@ -497,6 +497,8 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '\nThe raw profile below lists the current first blocker for each of the 22 pinned method trees. After #883, the former `LocalValueTypeMismatch` blocker moved to `ImportQualifierNotFound`; these observations show where typing stops and do not assert that the methods completed typing.\n\n'
     printf '## Previous type projection snapshot\n\n'
     printf 'The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.\n\n'
+    printf '## Full raw audit output (JDK feature release %s)\n\n' "$jdk_release"
+    printf 'The raw audit below corresponds to the pinned source state processed by this run. Its aggregate counts and rankings should be read together with the source-state and JDK provenance in this report.\n\n'
     printf '```text\n'
     cat "$tmp_dir/first.report"
     printf '```\n'
