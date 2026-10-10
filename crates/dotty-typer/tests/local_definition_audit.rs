@@ -2467,7 +2467,12 @@ fn local_value_blocker_profiler_classifies_declaration_shapes_and_deduplicates()
     let mutable = observation("mutable");
     assert_eq!(mutable.declaration_kind, "var");
     assert_eq!(mutable.modifiers, "Var");
-    assert_eq!(observation("context").declaration_kind, "given");
+    let context = observation("context");
+    assert_eq!(context.declaration_kind, "given");
+    assert_eq!(
+        context.dispatch_path,
+        "type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition)"
+    );
     assert_eq!(observation("legacy").declaration_kind, "implicit val");
     assert_eq!(observation("delayed").declaration_kind, "lazy val");
     assert_eq!(observation("constant").declaration_kind, "inline val");
@@ -5139,7 +5144,7 @@ fn local_value_blocker_observation(
         |tree| source_type_form(arena, tree),
     );
     let dispatch_path = match node_kind.as_str() {
-        "ValDef" => "type_block_stat_expansion: ValDef modifier guard".to_owned(),
+        "ValDef" => "type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition)".to_owned(),
         "PatDef" => "type_block_stat_expansion -> type_local_patdef".to_owned(),
         _ => "type_block_stat_expansion: generic declaration fallback".to_owned(),
     };
