@@ -88,9 +88,28 @@ The ranked list below excludes parser/namer and classpath-resolution failures, a
 
 The #903 hardening reran the pinned Scala 3.9.0 audit twice with JDK feature release 21; normalized output matched byte-for-byte and is unchanged from the post-#902 profile. The #899 baseline had 14 local signature first-blocker observations across 3 files; the current profile has 0. The 8 by-name observations moved past the signature guard in #900, and the 6 parameter-modifier observations moved past it in #902. #903 adds regression coverage for generic nested by-name methods with same-name scopes, forward by-name calls, and rollback during by-name type projection and local body checking. This blocker movement is not semantic success: the two by-name origins and all six selected inline rows still stop at `ImportQualifierNotFound`; the full audit types 0 of 3,297 local methods, and 0 corpus applications reach `ByNameApplicationParameterDeferred`. `RecursiveInferredMethodResult` does not appear among current full-corpus first blockers; focused self- and mutual-recursion tests keep that behavior explicit.
 
+The table below preserves every #899 baseline row. `Signature completion` is recorded independently from the enclosing method blocker: it is `unknown` because this corpus audit does not probe signature completion in isolation. `Enclosing method typing` is `not typed` for each row; `Current first blocker` is the whole-file local-method attempt result, not evidence that its signature completed.
+
+| Method (pinned source tree) | Original feature | Current first blocker | Signature completion | Enclosing method typing | Baseline classification |
+| --- | --- | --- | --- | --- | --- |
+| `SymUtils.scala#1839 instantiateCFT` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | direct |
+| `SymUtils.scala#1874 iftParamss` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `Typer.scala#5163 cases` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | direct |
+| `Typer.scala#5232 ascription` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `Typer.scala#5296 fromRepeated` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `Typer.scala#5380 typedWildcardStarArgExpr` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `Typer.scala#5420 typedTpt` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `Typer.scala#5491 handlePattern` | by-name parameters | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `MegaPhase.scala#1125 inLocalContext` | parameter modifiers | `ImportQualifierNotFound` | unknown | not typed | direct |
+| `MegaPhase.scala#1440 transformNamed` | parameter modifiers | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `MegaPhase.scala#1224 mapValDef` | parameter modifiers | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `MegaPhase.scala#1301 mapDefDef` | parameter modifiers | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `MegaPhase.scala#2407 transformUnnamed` | parameter modifiers | `ImportQualifierNotFound` | unknown | not typed | inherited |
+| `MegaPhase.scala#2116 mapPackage` | parameter modifiers | `ImportQualifierNotFound` | unknown | not typed | inherited |
+
 ### Recommended next Typer sprint
 
-Choose a bounded `LocalBlockDeclarationDeferred::val/var definition` slice (21 observations across 8 files), grouped by exact PatDef root and binder shape. It can reuse transactional PatDef lowering, local binders, and assignment support, offering likely reachability beyond the 13 `FunctionWithMods` rows in 2 files while avoiding the anonymous-class identity and class-info work behind the top-ranked 32 observations in 15 files. Keep general destructuring out of scope. This recommendation uses blocker count, shared infrastructure, implementation risk, and expected reachability together; classpath resolution remains a separate gate because the audit materialized no external members.
+Run a profiling sprint on the `LocalBlockDeclarationDeferred::val/var definition` bucket (21 observations across 8 files) before selecting an implementation slice. Join each failed declaration to its PatDef root shape, binder count, declaration type, and source file, then choose a bounded form from those measured counts. The current 21 / 8 aggregate does not identify a concrete PatDef form, so it does not yet justify implementing one. Keep general destructuring out of scope until that breakdown is available; classpath resolution remains a separate gate because the audit materialized no external members.
 
 ### #899–#903 local method signature profile
 
