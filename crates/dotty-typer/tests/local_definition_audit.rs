@@ -3721,25 +3721,24 @@ fn audit_source_inner(
             audit
                 .local_method_first_blockers
                 .insert(format!("{path}#tree={}", tree.index()), "typed".to_owned());
-            if path == "compiler/src/dotty/tools/dotc/core/SymUtils.scala"
-                || path == "compiler/src/dotty/tools/dotc/typer/Typer.scala"
+            if (path == "compiler/src/dotty/tools/dotc/core/SymUtils.scala"
+                || path == "compiler/src/dotty/tools/dotc/typer/Typer.scala")
+                && let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind
             {
-                if let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind {
-                    let name = typer
-                        .store()
-                        .names
-                        .resolve(definition.name.as_name().text());
-                    if matches!(
-                        (path, name),
-                        (
-                            "compiler/src/dotty/tools/dotc/core/SymUtils.scala",
-                            "instantiateCFT"
-                        ) | ("compiler/src/dotty/tools/dotc/typer/Typer.scala", "cases")
-                    ) {
-                        audit
-                            .by_name_method_outcomes
-                            .insert(format!("{path}::{name}"), "typed".to_owned());
-                    }
+                let name = typer
+                    .store()
+                    .names
+                    .resolve(definition.name.as_name().text());
+                if matches!(
+                    (path, name),
+                    (
+                        "compiler/src/dotty/tools/dotc/core/SymUtils.scala",
+                        "instantiateCFT"
+                    ) | ("compiler/src/dotty/tools/dotc/typer/Typer.scala", "cases")
+                ) {
+                    audit
+                        .by_name_method_outcomes
+                        .insert(format!("{path}::{name}"), "typed".to_owned());
                 }
             }
         } else {
@@ -3789,25 +3788,24 @@ fn audit_source_inner(
             audit
                 .local_method_first_blockers
                 .insert(format!("{path}#tree={}", tree.index()), kind.bucket.clone());
-            if path == "compiler/src/dotty/tools/dotc/core/SymUtils.scala"
-                || path == "compiler/src/dotty/tools/dotc/typer/Typer.scala"
+            if (path == "compiler/src/dotty/tools/dotc/core/SymUtils.scala"
+                || path == "compiler/src/dotty/tools/dotc/typer/Typer.scala")
+                && let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind
             {
-                if let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind {
-                    let name = typer
-                        .store()
-                        .names
-                        .resolve(definition.name.as_name().text());
-                    if matches!(
-                        (path, name),
-                        (
-                            "compiler/src/dotty/tools/dotc/core/SymUtils.scala",
-                            "instantiateCFT"
-                        ) | ("compiler/src/dotty/tools/dotc/typer/Typer.scala", "cases")
-                    ) {
-                        audit
-                            .by_name_method_outcomes
-                            .insert(format!("{path}::{name}"), kind.bucket.clone());
-                    }
+                let name = typer
+                    .store()
+                    .names
+                    .resolve(definition.name.as_name().text());
+                if matches!(
+                    (path, name),
+                    (
+                        "compiler/src/dotty/tools/dotc/core/SymUtils.scala",
+                        "instantiateCFT"
+                    ) | ("compiler/src/dotty/tools/dotc/typer/Typer.scala", "cases")
+                ) {
+                    audit
+                        .by_name_method_outcomes
+                        .insert(format!("{path}::{name}"), kind.bucket.clone());
                 }
             }
             if kind.bucket == "LocalMethodSignatureDeferred" {
