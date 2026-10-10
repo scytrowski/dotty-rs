@@ -110,6 +110,56 @@ impl TypeParamIssue {
     }
 }
 
+/// Typed failures in Scala type definitions and their right-hand sides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeDefinitionIssue {
+    /// A `type` definition has no valid name.
+    ExpectedName { found: TokenKind },
+    /// A type alias is missing the type after `=`.
+    ExpectedAliasType { found: TokenKind },
+    /// A match type alias cannot have a lower bound.
+    LowerBoundNotAllowedOnMatchTypeAlias { found: TokenKind },
+    /// Only match type aliases can combine a bound with an alias.
+    BoundedAliasMustBeMatchType { found: TokenKind },
+    /// An opaque type definition without bounds is missing `=`.
+    ExpectedEqualsAfterOpaqueDefinition { found: TokenKind },
+    /// An opaque type bound is missing its required `=`.
+    ExpectedEqualsAfterOpaqueBound { found: TokenKind },
+}
+
+impl TypeDefinitionIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::ExpectedName { .. } | Self::ExpectedAliasType { .. } => {
+                ParseDiagnosticKind::ExpectedType
+            }
+            Self::LowerBoundNotAllowedOnMatchTypeAlias { .. }
+            | Self::BoundedAliasMustBeMatchType { .. } => ParseDiagnosticKind::UnexpectedToken,
+            Self::ExpectedEqualsAfterOpaqueDefinition { .. }
+            | Self::ExpectedEqualsAfterOpaqueBound { .. } => ParseDiagnosticKind::ExpectedToken,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ExpectedName { .. } => "parser.type_definition.expected_name",
+            Self::ExpectedAliasType { .. } => "parser.type_definition.expected_alias_type",
+            Self::LowerBoundNotAllowedOnMatchTypeAlias { .. } => {
+                "parser.type_definition.match_alias_lower_bound"
+            }
+            Self::BoundedAliasMustBeMatchType { .. } => {
+                "parser.type_definition.bounded_alias_must_be_match_type"
+            }
+            Self::ExpectedEqualsAfterOpaqueDefinition { .. } => {
+                "parser.type_definition.expected_equals_after_opaque_definition"
+            }
+            Self::ExpectedEqualsAfterOpaqueBound { .. } => {
+                "parser.type_definition.expected_equals_after_opaque_bound"
+            }
+        }
+    }
+}
+
 /// Typed reasons emitted by the type-grammar portion owned by issue #910.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypeIssue {
@@ -484,6 +534,8 @@ pub enum ParseIssue {
     Type(TypeIssue),
     /// A structured failure emitted while parsing a type parameter clause.
     TypeParameter(TypeParamIssue),
+    /// A structured failure emitted while parsing a type definition.
+    TypeDefinition(TypeDefinitionIssue),
 }
 
 impl ParseIssue {
@@ -500,6 +552,7 @@ impl ParseIssue {
             Self::UnboundPlaceholderParameter => ParseDiagnosticKind::UnboundPlaceholderParameter,
             Self::Type(issue) => issue.kind(),
             Self::TypeParameter(issue) => issue.kind(),
+            Self::TypeDefinition(issue) => issue.kind(),
         }
     }
 
@@ -526,6 +579,7 @@ impl ParseIssue {
             Self::UnboundPlaceholderParameter => "parser.unbound_placeholder_parameter",
             Self::Type(issue) => issue.code(),
             Self::TypeParameter(issue) => issue.code(),
+            Self::TypeDefinition(issue) => issue.code(),
         }
     }
 }
@@ -603,6 +657,7 @@ impl ParseDiagnostic {
             | ParseIssue::UnboundPlaceholderParameter => None,
             ParseIssue::Type(_) => None,
             ParseIssue::TypeParameter(_) => None,
+            ParseIssue::TypeDefinition(_) => None,
         }
     }
 }
