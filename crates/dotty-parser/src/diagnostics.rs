@@ -384,7 +384,7 @@ impl ImportIssue {
             }
             Self::ExpectedSelectorSeparator { .. } => "parser.import.expected_selector_separator",
             Self::NamedSelectorAfterWildcardOrGiven => {
-                "parser.import.named_selector_after_wildcard"
+                "parser.import.named_selector_after_wildcard_or_given"
             }
             Self::ExpectedSelector { .. } => "parser.import.expected_selector",
             Self::ExpectedRightBraceAfterSelectors { .. } => {

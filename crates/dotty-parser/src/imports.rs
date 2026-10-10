@@ -1313,6 +1313,50 @@ mod tests {
             parser.diagnostics()[0].issue(),
             &ParseIssue::Import(ImportIssue::NamedSelectorAfterWildcardOrGiven)
         );
+        assert_eq!(
+            parser.diagnostics()[0].issue().code(),
+            "parser.import.named_selector_after_wildcard_or_given"
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(15, 18).unwrap()
+        );
+    }
+
+    #[test]
+    fn diagnoses_a_named_selector_after_a_given_selector_with_a_shared_code() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.{given, bar}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Keyword(HardKeyword::Given), 12, 17),
+                token(TokenKind::Punctuation(Punctuation::Comma), 17, 18),
+                token(TokenKind::Identifier, 19, 22),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 22, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        parser.parse_import_clause(Location::Elsewhere);
+
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Import(ImportIssue::NamedSelectorAfterWildcardOrGiven)
+        );
+        assert_eq!(
+            parser.diagnostics()[0].issue().code(),
+            "parser.import.named_selector_after_wildcard_or_given"
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(19, 22).unwrap()
+        );
     }
 
     #[test]
