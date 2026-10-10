@@ -368,10 +368,10 @@ where
             .any(|modifier| matches!(modifier, Modifier::Given | Modifier::Implicit))
             && let Some(position) = self.ast.get(tpt).position
         {
-            let clause = if metadata.modifiers.contains(&Modifier::Given) {
-                ContextualParameterClause::Given
-            } else {
+            let clause = if metadata.modifiers.contains(&Modifier::Implicit) {
                 ContextualParameterClause::Implicit
+            } else {
+                ContextualParameterClause::Given
             };
             self.report_issue_at(
                 SourceSpan::new(self.source_id, position.span()),
@@ -997,6 +997,59 @@ mod tests {
             dotty_core::DiagnosticSeverity::Error
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_explicit_implicit_context_when_the_owner_is_a_given() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(implicit xs: A*)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Implicit), 1, 9),
+                token(TokenKind::Identifier, 10, 12),
+                token(TokenKind::ColonFollow, 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Operator, 15, 16),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 16, 17),
+                token(TokenKind::Eof, 17, 17),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_single_term_param_clause(ParamOwner::Given, true, false, 0);
+
+        assert_eq!(parser.diagnostics().len(), 2);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Parameter(ParameterIssue::LegacyImplicitClauseNotAllowed {
+                owner: ParamOwner::Given,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(1, 9).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
+        assert_eq!(
+            parser.diagnostics()[1].issue(),
+            &ParseIssue::Parameter(
+                ParameterIssue::RepeatedParameterNotAllowedInContextualClause {
+                    clause: ContextualParameterClause::Implicit,
+                }
+            )
+        );
+        assert_eq!(
+            parser.diagnostics()[1].span(),
+            dotty_core::TextRange::new(14, 16).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[1].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
     }
 
     #[test]
