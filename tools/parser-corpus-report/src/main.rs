@@ -15,7 +15,7 @@ use dotty_core::{
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
-use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
+use dotty_parser::parse_compilation_unit;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_TIMEOUT_MS: u64 = 10_000;
@@ -160,7 +160,7 @@ impl SourceSetReport {
         for diagnostic in &outcome.diagnostics {
             *self
                 .diagnostic_histogram
-                .entry(diagnostic.kind.clone())
+                .entry(diagnostic.code.clone())
                 .or_default() += 1;
         }
         let failure = outcome
@@ -319,11 +319,10 @@ enum Status {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct DiagnosticSummary {
-    kind: String,
+    code: String,
+    unsupported_syntax: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
+    detail: Option<String>,
 }
 
 fn main() {
@@ -825,9 +824,9 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration, namer: bool) -> 
             source_set: None,
             status: Status::Hang,
             diagnostics: vec![DiagnosticSummary {
-                kind: "Hang".to_owned(),
-                code: None,
-                message: Some(format!("parser exceeded {} ms", timeout.as_millis())),
+                code: "tool.hang".to_owned(),
+                unsupported_syntax: false,
+                detail: Some(format!("parser exceeded {} ms", timeout.as_millis())),
             }],
             scanner_diagnostics: 0,
             namer: None,
@@ -847,9 +846,9 @@ fn process_failure(path: String, kind: &str, message: impl Into<String>) -> File
         source_set: None,
         status: Status::ProcessFailure,
         diagnostics: vec![DiagnosticSummary {
-            kind: kind.to_owned(),
-            code: None,
-            message: Some(message.into()),
+            code: tool_diagnostic_code(kind),
+            unsupported_syntax: false,
+            detail: Some(message.into()),
         }],
         scanner_diagnostics: 0,
         namer: None,
@@ -899,9 +898,9 @@ fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
                 Err(_) => WorkerResult {
                     status: Status::Panic,
                     diagnostics: vec![DiagnosticSummary {
-                        kind: "Panic".to_owned(),
-                        code: None,
-                        message: Some("parser worker panicked".to_owned()),
+                        code: "tool.panic".to_owned(),
+                        unsupported_syntax: false,
+                        detail: Some("parser worker panicked".to_owned()),
                     }],
                     scanner_diagnostics: 0,
                     namer: None,
@@ -916,9 +915,9 @@ fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
         Err(error) => WorkerResult {
             status: Status::ScannerFailure,
             diagnostics: vec![DiagnosticSummary {
-                kind: "IoError".to_owned(),
-                code: None,
-                message: Some(error.to_string()),
+                code: "tool.io_error".to_owned(),
+                unsupported_syntax: false,
+                detail: Some(error.to_string()),
             }],
             scanner_diagnostics: 0,
             namer: None,
@@ -998,9 +997,9 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
             return ParsedSource {
                 status: Status::ScannerFailure,
                 diagnostics: vec![DiagnosticSummary {
-                    kind: "ScannerError".to_owned(),
-                    code: None,
-                    message: Some(error.to_string()),
+                    code: "tool.scanner_error".to_owned(),
+                    unsupported_syntax: false,
+                    detail: Some(error.to_string()),
                 }],
                 scanner_diagnostics: 0,
                 namer: None,
@@ -1035,9 +1034,9 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
             return ParsedSource {
                 status: Status::ScannerFailure,
                 diagnostics: vec![DiagnosticSummary {
-                    kind: "SourceTextError".to_owned(),
-                    code: None,
-                    message: Some(error.to_string()),
+                    code: "tool.source_text_error".to_owned(),
+                    unsupported_syntax: false,
+                    detail: Some(error.to_string()),
                 }],
                 scanner_diagnostics,
                 namer: None,
@@ -1060,9 +1059,9 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
         .diagnostics
         .iter()
         .map(|diagnostic| DiagnosticSummary {
-            kind: diagnostic_kind_name(diagnostic.kind()).to_owned(),
-            code: Some(diagnostic.issue().code().to_owned()),
-            message: None,
+            code: diagnostic.issue().code().to_owned(),
+            unsupported_syntax: diagnostic.issue().is_unsupported_syntax(),
+            detail: None,
         })
         .collect::<Vec<_>>();
     let capture_checking_enabled = Some(result.effective_features.capture_checking);
@@ -1549,11 +1548,8 @@ fn collect_deferred_features(
     );
 
     for diagnostic in diagnostics {
-        if diagnostic.kind == "UnsupportedSyntax" {
-            let bucket = diagnostic.message.as_deref().map_or_else(
-                || "parser_blocked: UnsupportedSyntax".to_owned(),
-                |message| format!("parser_blocked: {}", normalize_message(message)),
-            );
+        if diagnostic.unsupported_syntax {
+            let bucket = format!("parser_blocked: {}", diagnostic.code);
             record(&mut features, &bucket, 1, |_| false);
         }
     }
@@ -1922,7 +1918,7 @@ fn root_label(root: &Path) -> String {
 
 fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Report {
     let mut report = Report {
-        schema_version: 7,
+        schema_version: 8,
         corpus_roots: metadata.roots.iter().map(|root| root_label(root)).collect(),
         source_version: metadata.source_version,
         source_revision: metadata.source_revision,
@@ -2022,7 +2018,7 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
         for diagnostic in &outcome.diagnostics {
             *cohort
                 .diagnostic_histogram
-                .entry(diagnostic.kind.clone())
+                .entry(diagnostic.code.clone())
                 .or_default() += 1;
         }
         if let Some(diagnostic) = outcome.diagnostics.first() {
@@ -2214,7 +2210,7 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
         for diagnostic in &outcome.diagnostics {
             *report
                 .diagnostic_histogram
-                .entry(diagnostic.kind.clone())
+                .entry(diagnostic.code.clone())
                 .or_default() += 1;
         }
         if let Some(diagnostic) = outcome.diagnostics.first() {
@@ -2263,39 +2259,24 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
 }
 
 fn first_failure_bucket(diagnostic: &DiagnosticSummary) -> String {
-    if diagnostic.kind == "UnsupportedSyntax" {
-        diagnostic.message.as_deref().map_or_else(
-            || "UnsupportedSyntax".to_owned(),
-            |message| format!("UnsupportedSyntax: {}", normalize_message(message)),
-        )
-    } else {
-        diagnostic.kind.to_string()
-    }
+    diagnostic.code.clone()
 }
 
 fn is_namer_audit_metric_feature(name: &str) -> bool {
     name.starts_with("enum_") || name.starts_with("export_")
 }
 
-fn normalize_message(message: &str) -> String {
-    message
-        .split_whitespace()
-        .map(|word| word.trim_matches(|character: char| matches!(character, '`' | '\'' | '"')))
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
-}
-
-fn diagnostic_kind_name(kind: ParseDiagnosticKind) -> &'static str {
-    match kind {
-        ParseDiagnosticKind::ExpectedToken => "ExpectedToken",
-        ParseDiagnosticKind::UnexpectedToken => "UnexpectedToken",
-        ParseDiagnosticKind::ExpectedExpression => "ExpectedExpression",
-        ParseDiagnosticKind::ExpectedType => "ExpectedType",
-        ParseDiagnosticKind::ExpectedPattern => "ExpectedPattern",
-        ParseDiagnosticKind::UnsupportedSyntax => "UnsupportedSyntax",
-        ParseDiagnosticKind::UnboundPlaceholderParameter => "UnboundPlaceholderParameter",
+fn tool_diagnostic_code(kind: &str) -> String {
+    let mut code = String::from("tool.");
+    for character in kind.chars() {
+        if character.is_ascii_uppercase() {
+            code.push('_');
+            code.push(character.to_ascii_lowercase());
+        } else {
+            code.push(character);
+        }
     }
+    code
 }
 
 fn write_report(path: &Path, report: &Report) -> io::Result<()> {
@@ -2851,9 +2832,9 @@ mod tests {
                 source_set: Some("cats".to_owned()),
                 status: Status::RecoverableDiagnostics,
                 diagnostics: vec![DiagnosticSummary {
-                    kind: "ExpectedType".to_owned(),
-                    code: None,
-                    message: Some("expected a type".to_owned()),
+                    code: "parser.expected_type".to_owned(),
+                    unsupported_syntax: false,
+                    detail: None,
                 }],
                 scanner_diagnostics: 0,
                 namer: None,
@@ -2868,9 +2849,9 @@ mod tests {
                 source_set: Some("cats".to_owned()),
                 status: Status::Panic,
                 diagnostics: vec![DiagnosticSummary {
-                    kind: "Panic".to_owned(),
-                    code: None,
-                    message: Some("parser worker panicked".to_owned()),
+                    code: "tool.panic".to_owned(),
+                    unsupported_syntax: false,
+                    detail: Some("parser worker panicked".to_owned()),
                 }],
                 scanner_diagnostics: 0,
                 namer: None,
@@ -2906,8 +2887,8 @@ mod tests {
         assert_eq!(set.files_parsed_with_recoverable_diagnostics, 1);
         assert_eq!(set.hard_parser_failures, 1);
         assert_eq!(set.diagnostics, 2);
-        assert_eq!(set.diagnostic_histogram["ExpectedType"], 1);
-        assert_eq!(set.diagnostic_histogram["Panic"], 1);
+        assert_eq!(set.diagnostic_histogram["parser.expected_type"], 1);
+        assert_eq!(set.diagnostic_histogram["tool.panic"], 1);
     }
 
     #[test]
@@ -3386,9 +3367,9 @@ mod tests {
                 source_set: None,
                 status: Status::RecoverableDiagnostics,
                 diagnostics: vec![DiagnosticSummary {
-                    kind: "ExpectedType".to_owned(),
-                    code: None,
-                    message: Some("expected a type".to_owned()),
+                    code: "parser.expected_type".to_owned(),
+                    unsupported_syntax: false,
+                    detail: None,
                 }],
                 scanner_diagnostics: 0,
                 namer: None,
@@ -3430,7 +3411,7 @@ mod tests {
         assert_eq!(report.capture_checking_cohorts["disabled"].recoverable, 1);
         assert_eq!(report.capture_checking_cohorts["disabled"].clean, 1);
         assert_eq!(
-            report.capture_checking_cohorts["disabled"].diagnostic_histogram["ExpectedType"],
+            report.capture_checking_cohorts["disabled"].diagnostic_histogram["parser.expected_type"],
             1
         );
         assert_eq!(
@@ -3459,34 +3440,38 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_diagnostic_bucket_is_normalized() {
+    fn unsupported_diagnostic_bucket_uses_a_stable_issue_code() {
         let diagnostic = DiagnosticSummary {
-            kind: "UnsupportedSyntax".to_owned(),
-            code: Some("parser.unsupported_syntax".to_owned()),
-            message: Some("unsupported `class`  syntax".to_owned()),
+            code: "parser.statement.unsupported_syntax_start".to_owned(),
+            unsupported_syntax: true,
+            detail: None,
         };
         assert_eq!(
             first_failure_bucket(&diagnostic),
-            "UnsupportedSyntax: unsupported class syntax"
+            "parser.statement.unsupported_syntax_start"
         );
-        let json = serde_json::to_value(diagnostic).expect("serialize legacy diagnostic");
-        assert_eq!(json["message"], "unsupported `class`  syntax");
-        assert_eq!(json["code"], "parser.unsupported_syntax");
+        let json = serde_json::to_value(diagnostic).expect("serialize typed diagnostic summary");
+        assert_eq!(json["code"], "parser.statement.unsupported_syntax_start");
+        assert_eq!(json["unsupported_syntax"], true);
+        assert!(json.get("detail").is_none());
     }
 
     #[test]
-    fn typed_unsupported_diagnostic_uses_its_category_without_fake_message() {
+    fn parser_diagnostic_summary_does_not_serialize_rendered_text() {
         let diagnostic = DiagnosticSummary {
-            kind: "UnsupportedSyntax".to_owned(),
-            code: Some("parser.unsupported_syntax".to_owned()),
-            message: None,
+            code: "parser.type.expected_type".to_owned(),
+            unsupported_syntax: false,
+            detail: None,
         };
 
-        assert_eq!(first_failure_bucket(&diagnostic), "UnsupportedSyntax");
+        assert_eq!(
+            first_failure_bucket(&diagnostic),
+            "parser.type.expected_type"
+        );
         let json = serde_json::to_value(diagnostic).expect("serialize diagnostic summary");
-        assert_eq!(json["kind"], "UnsupportedSyntax");
-        assert_eq!(json["code"], "parser.unsupported_syntax");
-        assert!(json.get("message").is_none());
+        assert_eq!(json["code"], "parser.type.expected_type");
+        assert_eq!(json["unsupported_syntax"], false);
+        assert!(json.get("detail").is_none());
     }
 
     #[test]
@@ -3510,9 +3495,9 @@ mod tests {
             source_set: None,
             status: Status::Panic,
             diagnostics: vec![DiagnosticSummary {
-                kind: "Panic".to_owned(),
-                code: None,
-                message: Some("parser worker panicked".to_owned()),
+                code: "tool.panic".to_owned(),
+                unsupported_syntax: false,
+                detail: Some("parser worker panicked".to_owned()),
             }],
             scanner_diagnostics: 0,
             namer: None,
@@ -3546,6 +3531,7 @@ mod tests {
         );
 
         assert_eq!(report.corpus_roots, vec!["library/src"]);
+        assert_eq!(report.schema_version, 8);
         assert_eq!(report.source_version.as_deref(), Some("3.9.0"));
         assert_eq!(report.source_revision.as_deref(), Some("revision"));
         assert_eq!(report.parser_revision.as_deref(), Some("parser revision"));

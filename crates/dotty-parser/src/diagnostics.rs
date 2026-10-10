@@ -1861,6 +1861,11 @@ impl ParseIssue {
             Self::Template(issue) => issue.code(),
         }
     }
+
+    /// Whether this issue represents syntax that the parser intentionally does not support.
+    pub fn is_unsupported_syntax(&self) -> bool {
+        self.kind() == ParseDiagnosticKind::UnsupportedSyntax
+    }
 }
 
 /// A parser diagnostic that retains the shared diagnostic payload and source identity.
