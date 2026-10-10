@@ -177,6 +177,58 @@ pub enum ExpressionIssue {
     MixedAssociativityOperators { left: Name, right: Name },
     /// A prefix operator is not followed by its operand on the same line.
     PrefixOperandMustShareLine { found: TokenKind },
+    /// `inline` is not followed by an inline `if` or `match` form.
+    ExpectedInlineIfOrMatch { found: TokenKind },
+    /// An assignment operator has no right-hand expression.
+    MissingAssignmentRhs { found: TokenKind },
+    /// An assignment left-hand tree is not assignable.
+    UnassignableAssignmentTarget { found: TokenKind },
+    /// The legacy `_*` splice is not the final application argument.
+    LegacyWildcardSpliceNotFinal { found: TokenKind },
+    /// A quoted expression is missing its closing brace.
+    ExpectedQuotedExpressionCloseBrace { found: TokenKind },
+    /// A quoted type is missing its closing bracket.
+    ExpectedQuotedTypeCloseBracket { found: TokenKind },
+    /// A quote marker is not followed by a quoted expression or type.
+    ExpectedQuoteBodyStart { found: TokenKind },
+    /// Consecutive quoted type definitions are missing a separator.
+    ExpectedQuotedTypeDefinitionSeparator { found: TokenKind },
+    /// A pattern splice is missing its closing brace.
+    ExpectedPatternSpliceCloseBrace { found: TokenKind },
+    /// An expression splice is missing its closing brace.
+    ExpectedExpressionSpliceCloseBrace { found: TokenKind },
+    /// A braced case-lambda is missing its closing brace.
+    ExpectedCaseLambdaCloseBrace { found: TokenKind },
+    /// A brace block is missing its closing brace.
+    ExpectedBlockCloseBrace { found: TokenKind },
+    /// A `super[...]` qualifier is missing a type name.
+    ExpectedSuperTypeQualifier { found: TokenKind },
+    /// A `super` expression is missing a selector.
+    ExpectedSelectorAfterSuper { found: TokenKind },
+    /// A `super.` expression is missing its selector.
+    ExpectedSelectorAfterSuperDot { found: TokenKind },
+    /// A selection dot is not followed by a selector.
+    ExpectedSelectorAfterDot { found: TokenKind },
+    /// A suffix attempts to call an expression that is not callable in this syntax.
+    InvalidApplicationTarget {
+        target: ExpressionApplicationTarget,
+        found: TokenKind,
+    },
+    /// Parsing a simple-expression suffix did not advance the token source.
+    ExpressionSuffixNoProgress { found: TokenKind },
+    /// No expression can start at the current token.
+    ExpectedExpressionAtCurrentToken { found: TokenKind },
+}
+
+/// Expression shapes which the source parser does not permit as direct call targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpressionApplicationTarget {
+    /// A block expression, which must be parenthesized before direct application.
+    Block,
+    /// A case-lambda expression, which must be parenthesized before application.
+    CaseLambda,
+    /// An already completed constructor application.
+    ConstructorApplication,
 }
 
 impl ExpressionIssue {
@@ -185,6 +237,28 @@ impl ExpressionIssue {
             Self::MissingUsingArgument { .. }
             | Self::MissingArgument { .. }
             | Self::PrefixOperandMustShareLine { .. } => ParseDiagnosticKind::ExpectedExpression,
+            Self::ExpectedInlineIfOrMatch { .. } | Self::MissingAssignmentRhs { .. } => {
+                ParseDiagnosticKind::ExpectedExpression
+            }
+            Self::ExpectedSuperTypeQualifier { .. } => ParseDiagnosticKind::ExpectedType,
+            Self::ExpectedQuotedExpressionCloseBrace { .. }
+            | Self::ExpectedQuotedTypeCloseBracket { .. }
+            | Self::ExpectedQuoteBodyStart { .. }
+            | Self::ExpectedPatternSpliceCloseBrace { .. }
+            | Self::ExpectedExpressionSpliceCloseBrace { .. }
+            | Self::ExpectedCaseLambdaCloseBrace { .. }
+            | Self::ExpectedBlockCloseBrace { .. }
+            | Self::ExpectedSelectorAfterSuper { .. }
+            | Self::ExpectedSelectorAfterSuperDot { .. }
+            | Self::ExpectedSelectorAfterDot { .. } => ParseDiagnosticKind::ExpectedToken,
+            Self::ExpectedQuotedTypeDefinitionSeparator { .. }
+            | Self::UnassignableAssignmentTarget { .. }
+            | Self::LegacyWildcardSpliceNotFinal { .. }
+            | Self::InvalidApplicationTarget { .. }
+            | Self::ExpressionSuffixNoProgress { .. } => ParseDiagnosticKind::UnexpectedToken,
+            Self::ExpectedExpressionAtCurrentToken { .. } => {
+                ParseDiagnosticKind::ExpectedExpression
+            }
             Self::NonFinalArgumentSpread
             | Self::PostfixOperatorNoProgress { .. }
             | Self::InfixExpressionNoProgress { .. }
@@ -205,6 +279,61 @@ impl ExpressionIssue {
                 "parser.expression.mixed_operator_associativity"
             }
             Self::PrefixOperandMustShareLine { .. } => "parser.expression.prefix_operand_newline",
+            Self::ExpectedInlineIfOrMatch { .. } => "parser.expression.expected_inline_if_or_match",
+            Self::MissingAssignmentRhs { .. } => "parser.expression.missing_assignment_rhs",
+            Self::UnassignableAssignmentTarget { .. } => {
+                "parser.expression.unassignable_assignment_target"
+            }
+            Self::LegacyWildcardSpliceNotFinal { .. } => {
+                "parser.expression.legacy_wildcard_splice_not_final"
+            }
+            Self::ExpectedQuotedExpressionCloseBrace { .. } => {
+                "parser.expression.expected_quoted_expression_close_brace"
+            }
+            Self::ExpectedQuotedTypeCloseBracket { .. } => {
+                "parser.expression.expected_quoted_type_close_bracket"
+            }
+            Self::ExpectedQuoteBodyStart { .. } => "parser.expression.expected_quote_body_start",
+            Self::ExpectedQuotedTypeDefinitionSeparator { .. } => {
+                "parser.expression.expected_quoted_type_definition_separator"
+            }
+            Self::ExpectedPatternSpliceCloseBrace { .. } => {
+                "parser.expression.expected_pattern_splice_close_brace"
+            }
+            Self::ExpectedExpressionSpliceCloseBrace { .. } => {
+                "parser.expression.expected_expression_splice_close_brace"
+            }
+            Self::ExpectedCaseLambdaCloseBrace { .. } => {
+                "parser.expression.expected_case_lambda_close_brace"
+            }
+            Self::ExpectedBlockCloseBrace { .. } => "parser.expression.expected_block_close_brace",
+            Self::ExpectedSuperTypeQualifier { .. } => {
+                "parser.expression.expected_super_type_qualifier"
+            }
+            Self::ExpectedSelectorAfterSuper { .. } => {
+                "parser.expression.expected_selector_after_super"
+            }
+            Self::ExpectedSelectorAfterSuperDot { .. } => {
+                "parser.expression.expected_selector_after_super_dot"
+            }
+            Self::ExpectedSelectorAfterDot { .. } => {
+                "parser.expression.expected_selector_after_dot"
+            }
+            Self::InvalidApplicationTarget { target, .. } => match target {
+                ExpressionApplicationTarget::Block => {
+                    "parser.expression.invalid_application_target.block"
+                }
+                ExpressionApplicationTarget::CaseLambda => {
+                    "parser.expression.invalid_application_target.case_lambda"
+                }
+                ExpressionApplicationTarget::ConstructorApplication => {
+                    "parser.expression.invalid_application_target.constructor_application"
+                }
+            },
+            Self::ExpressionSuffixNoProgress { .. } => "parser.expression.suffix_no_progress",
+            Self::ExpectedExpressionAtCurrentToken { .. } => {
+                "parser.expression.expected_at_current_token"
+            }
         }
     }
 }

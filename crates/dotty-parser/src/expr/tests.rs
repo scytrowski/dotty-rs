@@ -1,6 +1,8 @@
 use super::*;
 use crate::compilation_unit::tests::{parser_for, token};
-use crate::{ParseDiagnosticKind, ParseIssue, TypeIssue};
+use crate::{
+    ExpressionApplicationTarget, ExpressionIssue, ParseDiagnosticKind, ParseIssue, TypeIssue,
+};
 use dotty_core::ast::{
     Annotated, Apply, ApplyKind, Block, CaseDef, Literal, Match, New, NumberKind, Parens, Select,
     Super, This, Tuple, UntypedNode,
@@ -641,10 +643,15 @@ fn a_bare_case_lambda_does_not_take_an_application_suffix() {
         TokenKind::Punctuation(Punctuation::LeftParen)
     );
     assert_eq!(
-        parser.diagnostics()[0]
-            .legacy_message()
-            .expect("legacy parser diagnostic"),
-        "a case-lambda cannot be applied directly"
+        parser.diagnostics()[0].issue(),
+        &ParseIssue::Expression(ExpressionIssue::InvalidApplicationTarget {
+            target: ExpressionApplicationTarget::CaseLambda,
+            found: TokenKind::Punctuation(Punctuation::LeftParen),
+        })
+    );
+    assert_eq!(
+        parser.diagnostics()[0].span(),
+        TextRange::new(15, 16).unwrap()
     );
 }
 
@@ -1342,10 +1349,15 @@ fn does_not_apply_a_completed_anonymous_new_template() {
     );
     assert_eq!(parser.diagnostics().len(), 1);
     assert_eq!(
-        parser.diagnostics()[0]
-            .legacy_message()
-            .expect("legacy parser diagnostic"),
-        "a constructor application cannot be applied again"
+        parser.diagnostics()[0].issue(),
+        &ParseIssue::Expression(ExpressionIssue::InvalidApplicationTarget {
+            target: ExpressionApplicationTarget::ConstructorApplication,
+            found: TokenKind::Punctuation(Punctuation::LeftParen),
+        })
+    );
+    assert_eq!(
+        parser.diagnostics()[0].span(),
+        TextRange::new(10, 11).unwrap()
     );
 }
 
@@ -5449,10 +5461,14 @@ fn leaves_reserved_equals_unconsumed_after_a_selection_dot() {
     assert_eq!(parser.current().kind, TokenKind::Operator);
     assert_eq!(parser.diagnostics().len(), 1);
     assert_eq!(
-        parser.diagnostics()[0]
-            .legacy_message()
-            .expect("legacy parser diagnostic"),
-        "expected a selector after `.`"
+        parser.diagnostics()[0].issue(),
+        &ParseIssue::Expression(ExpressionIssue::ExpectedSelectorAfterDot {
+            found: TokenKind::Operator,
+        })
+    );
+    assert_eq!(
+        parser.diagnostics()[0].span(),
+        TextRange::new(2, 3).unwrap()
     );
 }
 
@@ -5475,10 +5491,14 @@ fn leaves_reserved_hash_unconsumed_after_a_selection_dot() {
     assert_eq!(parser.current().kind, TokenKind::Operator);
     assert_eq!(parser.diagnostics().len(), 1);
     assert_eq!(
-        parser.diagnostics()[0]
-            .legacy_message()
-            .expect("legacy parser diagnostic"),
-        "expected a selector after `.`"
+        parser.diagnostics()[0].issue(),
+        &ParseIssue::Expression(ExpressionIssue::ExpectedSelectorAfterDot {
+            found: TokenKind::Operator,
+        })
+    );
+    assert_eq!(
+        parser.diagnostics()[0].span(),
+        TextRange::new(2, 3).unwrap()
     );
 }
 
@@ -5501,10 +5521,14 @@ fn leaves_reserved_context_function_arrow_unconsumed_after_a_selection_dot() {
     assert_eq!(parser.current().kind, TokenKind::Operator);
     assert_eq!(parser.diagnostics().len(), 1);
     assert_eq!(
-        parser.diagnostics()[0]
-            .legacy_message()
-            .expect("legacy parser diagnostic"),
-        "expected a selector after `.`"
+        parser.diagnostics()[0].issue(),
+        &ParseIssue::Expression(ExpressionIssue::ExpectedSelectorAfterDot {
+            found: TokenKind::Operator,
+        })
+    );
+    assert_eq!(
+        parser.diagnostics()[0].span(),
+        TextRange::new(2, 5).unwrap()
     );
 }
 

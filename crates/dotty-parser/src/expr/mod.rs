@@ -3,7 +3,7 @@ use dotty_core::{
     Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped,
 };
 
-use crate::{Location, ParseKind, Parser};
+use crate::{ExpressionIssue, Location, ParseIssue, ParseKind, Parser};
 
 mod arguments;
 mod control_flow;
@@ -203,10 +203,11 @@ where
             );
         }
 
-        self.report(
-            crate::ParseDiagnosticKind::ExpectedExpression,
-            "expected `if` or a `match` expression after `inline`",
-        );
+        self.report_issue(ParseIssue::Expression(
+            ExpressionIssue::ExpectedInlineIfOrMatch {
+                found: self.current().kind,
+            },
+        ));
         parsed
     }
 
@@ -234,10 +235,11 @@ where
                     .get(assignment_end as usize..self.current().span.start() as usize)
                     .is_some_and(|gap| gap.chars().any(dotty_core::is_line_break_char));
             let rhs = if let Some(start) = missing_rhs_start {
-                self.report(
-                    crate::ParseDiagnosticKind::ExpectedExpression,
-                    "expected an expression after `=`",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::MissingAssignmentRhs {
+                        found: self.current().kind,
+                    },
+                ));
                 self.error_expr(self.zero_width_span(start))
             } else if self.current().kind == TokenKind::Indent {
                 if let Some(indent_offset) = feedback_indent {
@@ -249,10 +251,11 @@ where
                 self.expr()
             };
             if !is_assignable_lhs(&self.ast.get(lhs).kind) {
-                self.report(
-                    crate::ParseDiagnosticKind::UnexpectedToken,
-                    "left-hand side is not assignable",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::UnassignableAssignmentTarget {
+                        found: self.current().kind,
+                    },
+                ));
                 self.last_advance_consumed_statement_separator |= consumed_statement_separator;
                 return lhs;
             }
@@ -390,10 +393,11 @@ where
             self.advance(); // `*`
 
             if !valid_argument_splice {
-                self.report(
-                    crate::ParseDiagnosticKind::UnexpectedToken,
-                    "legacy `_*` is only allowed as a final application argument",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::LegacyWildcardSpliceNotFinal {
+                        found: self.current().kind,
+                    },
+                ));
             }
 
             let wildcard_star = TypeName::new(self.names.intern("_*"));
