@@ -772,10 +772,12 @@ declaration also remain unsupported; the Typer keeps the existing
 declaration-order scope and reports `TermNameNotFound`.
 
 Contextual search, contextual argument insertion, implicit conversions, and
-summon remain unsupported. `lazy val` and `inline val` declarations remain
-deferred. Unsupported modifiers, duplicate modifiers, and unsupported or
-inconsistent modifier sets return `LocalValueModifierDeferred` with the source
-tree and complete modifier set.
+summon remain unsupported. `inline val` declarations and lazy pattern
+definitions remain deferred. Recursive lazy initializers and forward
+references to later lazy declarations remain unsupported as described above.
+Unsupported modifiers, duplicate modifiers, and unsupported or inconsistent
+modifier sets return `LocalValueModifierDeferred` with the source tree and
+complete modifier set.
 
 ### Local-definition source audit v1 (historical)
 
