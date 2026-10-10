@@ -1,7 +1,7 @@
 use dotty_core::ast::{Block, CaseDef};
 use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
-use crate::{CaseIssue, Location, ParseIssue, ParseKind, Parser, RecoverySet};
+use crate::{CaseIssue, ExpressionIssue, Location, ParseIssue, ParseKind, Parser, RecoverySet};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -170,9 +170,11 @@ where
         self.advance();
         if !crate::expr::can_start_prefix_expr(self.current().kind) {
             let position = self.current_span();
-            self.report_issue(ParseIssue::Case(CaseIssue::ExpectedGuardExpression {
-                found: self.current().kind,
-            }));
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedExpressionAtCurrentToken {
+                    found: self.current().kind,
+                },
+            ));
             return Some(self.error_expr(position));
         }
         Some(self.with_location(Location::InGuard, |parser| parser.postfix_expr()))
@@ -981,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_a_missing_guard_expression_as_a_typed_case_issue() {
+    fn reports_a_missing_guard_expression_without_misclassifying_the_case_arrow() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
             "case x if",
@@ -999,7 +1001,7 @@ mod tests {
         assert_eq!(parser.diagnostics().len(), 2);
         assert_eq!(
             parser.diagnostics()[0].issue(),
-            &ParseIssue::Case(CaseIssue::ExpectedGuardExpression {
+            &ParseIssue::Expression(ExpressionIssue::ExpectedExpressionAtCurrentToken {
                 found: TokenKind::Eof,
             })
         );

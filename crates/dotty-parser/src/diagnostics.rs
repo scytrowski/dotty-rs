@@ -984,8 +984,6 @@ pub enum CaseIssue {
     ExpectedCaseArrow { found: TokenKind },
     /// Parsing a case list did not advance the token source.
     CaseListNoProgress { found: TokenKind },
-    /// A case guard is not followed by an expression.
-    ExpectedGuardExpression { found: TokenKind },
     /// An indented case body is not closed by an outdent.
     ExpectedCaseBodyOutdent { found: TokenKind },
 }
@@ -997,7 +995,6 @@ impl CaseIssue {
             | Self::ExpectedCaseArrow { .. }
             | Self::ExpectedCaseBodyOutdent { .. } => ParseDiagnosticKind::ExpectedToken,
             Self::CaseListNoProgress { .. } => ParseDiagnosticKind::UnexpectedToken,
-            Self::ExpectedGuardExpression { .. } => ParseDiagnosticKind::ExpectedExpression,
         }
     }
 
@@ -1006,7 +1003,6 @@ impl CaseIssue {
             Self::ExpectedCaseKeyword { .. } => "parser.case.expected_keyword",
             Self::ExpectedCaseArrow { .. } => "parser.case.expected_arrow",
             Self::CaseListNoProgress { .. } => "parser.case.no_progress",
-            Self::ExpectedGuardExpression { .. } => "parser.case.expected_guard_expression",
             Self::ExpectedCaseBodyOutdent { .. } => "parser.case.expected_body_outdent",
         }
     }
