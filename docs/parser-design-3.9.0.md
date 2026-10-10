@@ -185,7 +185,16 @@ remain distinct without accepting same-line members that lack a separator.
 
 ## Diagnostics and recovery
 
-Parser diagnostics use the small categories `ExpectedToken`,
+Parser diagnostics retain a stable category and source range. Common parser
+expectation/recovery failures use typed `ParseIssue` payloads (for example,
+`ExpectedToken { expected, found }`) and expose stable text-independent codes
+to corpus tooling. Unmigrated sites remain `Legacy` payloads with their
+existing category and optional message; typed issues are not converted into
+synthetic text. The report JSON schema version 7 adds an optional `code` to
+each parser diagnostic summary; legacy categories/messages and parser outcome
+counts remain unchanged.
+
+The supported diagnostic categories are `ExpectedToken`,
 `UnexpectedToken`, `ExpectedExpression`, `ExpectedType`, `ExpectedPattern`,
 `UnsupportedSyntax`, and `UnboundPlaceholderParameter`, with a source ID and
 source span. `UnboundPlaceholderParameter` is reported when an expression

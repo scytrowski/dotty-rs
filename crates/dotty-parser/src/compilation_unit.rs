@@ -2,7 +2,7 @@ use dotty_core::ast::{Block, Ident, PackageDef};
 use dotty_core::{AstArena, SourceId, SourceText, TokenSource, TreeId, TreeKind, Untyped};
 
 use crate::statements::StatementSequenceBoundary;
-use crate::{Location, ParseDiagnostic, ParseDiagnosticKind, ParseKind, Parser};
+use crate::{Location, ParseDiagnostic, ParseIssue, ParseKind, Parser};
 
 /// Result of parsing one source compilation unit.
 #[derive(Debug)]
@@ -70,10 +70,9 @@ where
             }
         }
         if self.current().kind != dotty_core::TokenKind::Eof {
-            self.report(
-                ParseDiagnosticKind::UnexpectedToken,
-                "expected end of expression fragment",
-            );
+            self.report_issue(ParseIssue::TrailingInput {
+                found: self.current().kind,
+            });
             self.recover_until(crate::RecoverySet::Statement);
         }
 
@@ -311,6 +310,14 @@ pub(crate) mod tests {
             ParseDiagnosticKind::UnboundPlaceholderParameter
         );
         assert_eq!(result.diagnostics[0].span(), TextRange::new(0, 0).unwrap());
+        assert_eq!(
+            result.diagnostics[0].issue(),
+            &ParseIssue::UnboundPlaceholderParameter
+        );
+        assert_eq!(
+            result.diagnostics[0].issue().code(),
+            "parser.unbound_placeholder_parameter"
+        );
     }
 
     #[test]
@@ -582,6 +589,17 @@ pub(crate) mod tests {
         assert_eq!(
             result.diagnostics[0].kind(),
             ParseDiagnosticKind::UnexpectedToken
+        );
+        assert_eq!(result.diagnostics[0].span(), TextRange::new(1, 2).unwrap());
+        assert!(matches!(
+            result.diagnostics[0].issue(),
+            ParseIssue::TrailingInput {
+                found: TokenKind::Punctuation(Punctuation::Semicolon),
+            }
+        ));
+        assert_eq!(
+            result.diagnostics[0].issue().code(),
+            "parser.trailing_input"
         );
     }
 }

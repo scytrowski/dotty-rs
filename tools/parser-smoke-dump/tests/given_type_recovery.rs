@@ -20,10 +20,15 @@ fn incomplete_named_given_type_parameters_report_error_and_preserve_next_member(
         .iter()
         .find(|diagnostic| {
             diagnostic.kind() == ParseDiagnosticKind::ExpectedToken
-                && diagnostic
-                    .legacy_message()
-                    .expect("legacy parser diagnostic")
-                    == "expected Punctuation(RightBracket), found Newline"
+                && matches!(
+                    diagnostic.issue(),
+                    dotty_parser::ParseIssue::ExpectedToken {
+                        expected: dotty_core::TokenKind::Punctuation(
+                            dotty_core::Punctuation::RightBracket
+                        ),
+                        found: dotty_core::TokenKind::Newline,
+                    }
+                )
         })
         .unwrap_or_else(|| {
             panic!(

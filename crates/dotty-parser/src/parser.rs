@@ -534,10 +534,10 @@ where
             return true;
         }
 
-        self.report(
-            ParseDiagnosticKind::ExpectedToken,
-            format!("expected {kind:?}, found {:?}", self.current().kind),
-        );
+        self.report_issue(ParseIssue::ExpectedToken {
+            expected: kind,
+            found: self.current().kind,
+        });
         false
     }
 
@@ -591,11 +591,7 @@ where
                 .get(parameter)
                 .position
                 .unwrap_or_else(|| self.current_span());
-            self.report_at(
-                ParseDiagnosticKind::UnboundPlaceholderParameter,
-                span,
-                "unbound placeholder parameter",
-            );
+            self.report_issue_at(span, ParseIssue::UnboundPlaceholderParameter);
         }
         self.placeholder_params.clear();
     }
@@ -1345,6 +1341,39 @@ mod tests {
             parser.diagnostics()[0].severity(),
             dotty_core::DiagnosticSeverity::Error
         );
+        assert!(matches!(
+            parser.diagnostics()[0].issue(),
+            ParseIssue::ExpectedToken {
+                expected: TokenKind::Eof,
+                found: TokenKind::Identifier,
+            }
+        ));
+        assert_eq!(parser.diagnostics()[0].legacy_message(), None);
+    }
+
+    #[test]
+    fn expect_at_eof_keeps_the_zero_width_eof_span_in_typed_payload() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_with_tokens(
+            "x",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Eof, 1, 1),
+            ],
+            &mut names,
+        );
+        parser.advance();
+
+        assert!(!parser.expect(TokenKind::Identifier));
+        let diagnostic = &parser.diagnostics()[0];
+        assert_eq!(diagnostic.span(), TextRange::new(1, 1).unwrap());
+        assert!(matches!(
+            diagnostic.issue(),
+            ParseIssue::ExpectedToken {
+                expected: TokenKind::Identifier,
+                found: TokenKind::Eof,
+            }
+        ));
     }
 
     #[test]
@@ -1371,6 +1400,7 @@ mod tests {
         assert_eq!(diagnostic.source(), SourceId::from_index(1));
         assert_eq!(diagnostic.span(), TextRange::new(0, 1).unwrap());
         assert_eq!(diagnostic.legacy_message(), None);
+        assert_eq!(diagnostic.issue().code(), "parser.expected_token");
         assert!(matches!(
             diagnostic.issue(),
             ParseIssue::ExpectedToken {

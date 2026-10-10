@@ -430,10 +430,13 @@ mod tests {
         let _ = parser.expr();
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("RightBracket")
+            matches!(
+                diagnostic.issue(),
+                crate::ParseIssue::ExpectedToken {
+                    expected: TokenKind::Punctuation(Punctuation::RightBracket),
+                    found: TokenKind::Operator,
+                }
+            )
         }));
     }
 }
