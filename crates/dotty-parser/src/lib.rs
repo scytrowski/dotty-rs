@@ -39,7 +39,9 @@ mod types;
 pub use compilation_unit::{ParseResult, parse_compilation_unit, parse_expression_fragment};
 pub use context::{Location, ParamOwner, ParseContext, ParseKind, ParserFeatures};
 pub use cursor::{Cursor, CursorCheckpoint};
-pub use diagnostics::{ParseDiagnostic, ParseDiagnosticKind, ParseIssue};
+pub use diagnostics::{
+    ParseDiagnostic, ParseDiagnosticKind, ParseIssue, TypeFunctionArrow, TypeIssue,
+};
 pub use infix::{OpInfo, is_assignment_operator, is_right_associative, precedence};
 pub use names::KnownNames;
 pub use parser::Parser;

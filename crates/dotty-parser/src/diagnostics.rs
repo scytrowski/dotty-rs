@@ -12,6 +12,194 @@ pub enum ParseDiagnosticKind {
     UnboundPlaceholderParameter,
 }
 
+/// Typed reasons emitted by the type-grammar portion owned by issue #910.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeIssue {
+    /// A type-argument clause contains no type arguments.
+    EmptyTypeArgumentList,
+    /// A comma in a type-argument clause is followed by its closing bracket.
+    MissingTypeArgumentAfterComma { found: TokenKind },
+    /// The source token used as a repeated-parameter marker is invalid.
+    InvalidRepeatedParameterMarker { found: TokenKind },
+    /// A repeated parameter is followed by another parameter.
+    RepeatedParameterMustBeLast { found: TokenKind },
+    /// A context function type has an empty parameter list.
+    EmptyContextFunctionParameterList,
+    /// A wildcard type appears where the grammar does not permit it.
+    WildcardTypeNotAllowed,
+    /// A match type is missing its braced or indented case region.
+    ExpectedMatchTypeCaseRegion { found: TokenKind },
+    /// An indented match-type case region did not close with an outdent.
+    ExpectedMatchTypeOutdent { found: TokenKind },
+    /// A braced match-type case region did not close with `}`.
+    ExpectedMatchTypeRightBrace { found: TokenKind },
+    /// A match type contains no case clauses.
+    MissingMatchTypeCase,
+    /// Parsing a match-type case did not advance the token source.
+    MatchTypeCaseNoProgress { found: TokenKind },
+    /// A match-type case pattern is not followed by `=>`.
+    ExpectedMatchTypeCaseArrow { found: TokenKind },
+    /// An indented match-type result did not close with an outdent.
+    ExpectedMatchTypeResultOutdent { found: TokenKind },
+    /// The wildcard in a match-type case is not a valid type name.
+    InvalidMatchTypeWildcard { found: TokenKind },
+    /// A type lambda has no type parameters.
+    EmptyTypeLambdaParameterList,
+    /// Polymorphic function type parameters are not followed by `=>`.
+    ExpectedPolymorphicFunctionTypeArrow { found: TokenKind },
+    /// A polymorphic function type lacks parameters or a function-type body.
+    InvalidPolymorphicFunctionTypeShape {
+        has_type_parameters: bool,
+        has_function_body: bool,
+    },
+    /// A function-type parameter list has a comma without a following parameter.
+    MissingFunctionTypeParameterAfterComma { named: bool, found: TokenKind },
+    /// A function-type parameter is not followed by a comma or closing parenthesis.
+    ExpectedFunctionTypeParameterSeparator { named: bool, found: TokenKind },
+    /// An unnamed erased function type must start with an erased parameter.
+    ExpectedLeadingErasedFunctionTypeParameter { found: TokenKind },
+    /// An erased parameter occurs after the permitted leading unnamed parameter.
+    OnlyLeadingUnnamedFunctionTypeParameterMayBeErased { found: TokenKind },
+    /// A named function-type parameter list is missing its closing parenthesis.
+    ExpectedNamedFunctionTypeCloseParen { found: TokenKind },
+    /// A named function-type parameter is missing its identifier.
+    ExpectedNamedFunctionTypeParameter { found: TokenKind },
+    /// A named function-type parameter identifier is not followed by `:`.
+    ExpectedNamedFunctionTypeParameterColon { found: TokenKind },
+    /// A parsed function-type parameter list is not followed by its required arrow.
+    ExpectedFunctionTypeArrow {
+        arrow: TypeFunctionArrow,
+        found: TokenKind,
+    },
+}
+
+/// Function-arrow shape expected by a parsed function-type parameter clause.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeFunctionArrow {
+    /// The ordinary `=>` function arrow.
+    Ordinary,
+    /// The context `?=>` function arrow.
+    Context,
+    /// The pure `->` function arrow.
+    Pure,
+    /// The pure context `?->` function arrow.
+    PureContext,
+}
+
+impl TypeIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::EmptyTypeArgumentList
+            | Self::MissingTypeArgumentAfterComma { .. }
+            | Self::InvalidRepeatedParameterMarker { .. }
+            | Self::EmptyContextFunctionParameterList
+            | Self::WildcardTypeNotAllowed
+            | Self::MissingMatchTypeCase
+            | Self::InvalidMatchTypeWildcard { .. }
+            | Self::EmptyTypeLambdaParameterList
+            | Self::ExpectedLeadingErasedFunctionTypeParameter { .. } => {
+                ParseDiagnosticKind::ExpectedType
+            }
+            Self::MissingFunctionTypeParameterAfterComma { named: false, .. }
+            | Self::OnlyLeadingUnnamedFunctionTypeParameterMayBeErased { .. } => {
+                ParseDiagnosticKind::ExpectedType
+            }
+            Self::RepeatedParameterMustBeLast { .. }
+            | Self::MatchTypeCaseNoProgress { .. }
+            | Self::InvalidPolymorphicFunctionTypeShape { .. } => {
+                ParseDiagnosticKind::UnexpectedToken
+            }
+            Self::ExpectedMatchTypeCaseRegion { .. }
+            | Self::ExpectedMatchTypeOutdent { .. }
+            | Self::ExpectedMatchTypeRightBrace { .. }
+            | Self::ExpectedMatchTypeCaseArrow { .. }
+            | Self::ExpectedMatchTypeResultOutdent { .. }
+            | Self::ExpectedPolymorphicFunctionTypeArrow { .. }
+            | Self::ExpectedFunctionTypeParameterSeparator { .. }
+            | Self::MissingFunctionTypeParameterAfterComma { named: true, .. }
+            | Self::ExpectedNamedFunctionTypeCloseParen { .. }
+            | Self::ExpectedNamedFunctionTypeParameter { .. }
+            | Self::ExpectedNamedFunctionTypeParameterColon { .. }
+            | Self::ExpectedFunctionTypeArrow { .. } => ParseDiagnosticKind::ExpectedToken,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::EmptyTypeArgumentList => "parser.type.empty_type_argument_list",
+            Self::MissingTypeArgumentAfterComma { .. } => {
+                "parser.type.missing_type_argument_after_comma"
+            }
+            Self::InvalidRepeatedParameterMarker { .. } => {
+                "parser.type.invalid_repeated_parameter_marker"
+            }
+            Self::RepeatedParameterMustBeLast { .. } => {
+                "parser.type.repeated_parameter_must_be_last"
+            }
+            Self::EmptyContextFunctionParameterList => {
+                "parser.type.empty_context_function_parameter_list"
+            }
+            Self::WildcardTypeNotAllowed => "parser.type.wildcard_type_not_allowed",
+            Self::ExpectedMatchTypeCaseRegion { .. } => {
+                "parser.type.expected_match_type_case_region"
+            }
+            Self::ExpectedMatchTypeOutdent { .. } => "parser.type.expected_match_type_outdent",
+            Self::ExpectedMatchTypeRightBrace { .. } => {
+                "parser.type.expected_match_type_right_brace"
+            }
+            Self::MissingMatchTypeCase => "parser.type.missing_match_type_case",
+            Self::MatchTypeCaseNoProgress { .. } => "parser.type.match_type_case_no_progress",
+            Self::ExpectedMatchTypeCaseArrow { .. } => "parser.type.expected_match_type_case_arrow",
+            Self::ExpectedMatchTypeResultOutdent { .. } => {
+                "parser.type.expected_match_type_result_outdent"
+            }
+            Self::InvalidMatchTypeWildcard { .. } => "parser.type.invalid_match_type_wildcard",
+            Self::EmptyTypeLambdaParameterList => "parser.type.empty_type_lambda_parameters",
+            Self::ExpectedPolymorphicFunctionTypeArrow { .. } => {
+                "parser.type.expected_polymorphic_function_arrow"
+            }
+            Self::InvalidPolymorphicFunctionTypeShape { .. } => {
+                "parser.type.invalid_polymorphic_function_shape"
+            }
+            Self::MissingFunctionTypeParameterAfterComma { named: true, .. } => {
+                "parser.type.missing_named_function_parameter_after_comma"
+            }
+            Self::MissingFunctionTypeParameterAfterComma { named: false, .. } => {
+                "parser.type.missing_function_parameter_after_comma"
+            }
+            Self::ExpectedFunctionTypeParameterSeparator { named: true, .. } => {
+                "parser.type.expected_named_function_parameter_separator"
+            }
+            Self::ExpectedFunctionTypeParameterSeparator { named: false, .. } => {
+                "parser.type.expected_function_parameter_separator"
+            }
+            Self::ExpectedLeadingErasedFunctionTypeParameter { .. } => {
+                "parser.type.expected_leading_erased_function_parameter"
+            }
+            Self::OnlyLeadingUnnamedFunctionTypeParameterMayBeErased { .. } => {
+                "parser.type.only_leading_function_parameter_may_be_erased"
+            }
+            Self::ExpectedNamedFunctionTypeCloseParen { .. } => {
+                "parser.type.expected_named_function_parameter_close_paren"
+            }
+            Self::ExpectedNamedFunctionTypeParameter { .. } => {
+                "parser.type.expected_named_function_parameter"
+            }
+            Self::ExpectedNamedFunctionTypeParameterColon { .. } => {
+                "parser.type.expected_named_function_parameter_colon"
+            }
+            Self::ExpectedFunctionTypeArrow { arrow, .. } => match arrow {
+                TypeFunctionArrow::Ordinary => "parser.type.expected_function_arrow",
+                TypeFunctionArrow::Context => "parser.type.expected_context_function_arrow",
+                TypeFunctionArrow::Pure => "parser.type.expected_pure_function_arrow",
+                TypeFunctionArrow::PureContext => {
+                    "parser.type.expected_pure_context_function_arrow"
+                }
+            },
+        }
+    }
+}
+
 /// Structured parser issue data.
 ///
 /// `Legacy` temporarily retains messages from parser call sites that have not
@@ -42,6 +230,8 @@ pub enum ParseIssue {
     TrailingInput { found: TokenKind },
     /// A placeholder parameter escaped the expression that owns it.
     UnboundPlaceholderParameter,
+    /// A structured failure emitted by the Scala type grammar.
+    Type(TypeIssue),
 }
 
 impl ParseIssue {
@@ -56,6 +246,7 @@ impl ParseIssue {
             Self::UnexpectedToken { .. } => ParseDiagnosticKind::UnexpectedToken,
             Self::TrailingInput { .. } => ParseDiagnosticKind::UnexpectedToken,
             Self::UnboundPlaceholderParameter => ParseDiagnosticKind::UnboundPlaceholderParameter,
+            Self::Type(issue) => issue.kind(),
         }
     }
 
@@ -80,6 +271,7 @@ impl ParseIssue {
             Self::UnexpectedToken { .. } => "parser.unexpected_token",
             Self::TrailingInput { .. } => "parser.trailing_input",
             Self::UnboundPlaceholderParameter => "parser.unbound_placeholder_parameter",
+            Self::Type(issue) => issue.code(),
         }
     }
 }
@@ -155,6 +347,7 @@ impl ParseDiagnostic {
             | ParseIssue::UnexpectedToken { .. }
             | ParseIssue::TrailingInput { .. }
             | ParseIssue::UnboundPlaceholderParameter => None,
+            ParseIssue::Type(_) => None,
         }
     }
 }
