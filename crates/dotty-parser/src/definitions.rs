@@ -13,7 +13,7 @@ use dotty_core::{
 
 use crate::modifiers::DefinitionPrefix;
 use crate::statements::ParsedStatement;
-use crate::{Location, ParseDiagnosticKind, Parser};
+use crate::{DeclarationIssue, Location, ParseIssue, Parser, ValueDefinitionKind};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -133,10 +133,11 @@ where
         } else if has_explicit_return_type && is_definition_boundary(self.current().kind) {
             None
         } else {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `:` or `=` after a method definition",
-            );
+            self.report_issue(ParseIssue::Declaration(
+                DeclarationIssue::ExpectedMethodSeparator {
+                    found: self.current().kind,
+                },
+            ));
             None
         };
 
@@ -238,10 +239,9 @@ where
                 if secondary_constructor_allowed {
                     TermName::new(self.names.intern("<init>"))
                 } else {
-                    self.report(
-                        ParseDiagnosticKind::UnexpectedToken,
-                        "secondary constructors are only allowed in a class template",
-                    );
+                    self.report_issue(ParseIssue::Declaration(
+                        DeclarationIssue::SecondaryConstructorOutsideTemplate,
+                    ));
                     self.missing_method_name()
                 }
             }
@@ -256,10 +256,11 @@ where
                 Err(_) => self.missing_method_name(),
             },
             _ => {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected a method name after `def`",
-                );
+                self.report_issue(ParseIssue::Declaration(
+                    DeclarationIssue::ExpectedMethodName {
+                        found: self.current().kind,
+                    },
+                ));
                 self.missing_method_name()
             }
         }
@@ -282,10 +283,12 @@ where
             | TokenKind::Operator
             | TokenKind::ColonOp => {
                 if self.current().kind == TokenKind::Operator && self.current_text_is("=") {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedToken,
-                        "expected a value name after `val` or `var`",
-                    );
+                    self.report_issue(ParseIssue::Declaration(
+                        DeclarationIssue::ExpectedValueName {
+                            declaration: value_definition_kind(is_var),
+                            found: self.current().kind,
+                        },
+                    ));
                     return self.malformed_definition();
                 }
                 match self.intern_current_term_name() {
@@ -297,10 +300,12 @@ where
                 }
             }
             _ => {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected an identifier after `val` or `var`",
-                );
+                self.report_issue(ParseIssue::Declaration(
+                    DeclarationIssue::ExpectedValueName {
+                        declaration: value_definition_kind(is_var),
+                        found: self.current().kind,
+                    },
+                ));
                 return self.malformed_definition();
             }
         };
@@ -329,15 +334,17 @@ where
             }
         } else {
             if has_explicit_type && !is_definition_boundary(self.current().kind) {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `=` after a value definition",
-                );
+                self.report_issue(ParseIssue::Declaration(
+                    DeclarationIssue::ExpectedValueEquals {
+                        found: self.current().kind,
+                    },
+                ));
             } else if !has_explicit_type {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `:` or `=` after a value definition name",
-                );
+                self.report_issue(ParseIssue::Declaration(
+                    DeclarationIssue::ExpectedValueTypeOrEquals {
+                        found: self.current().kind,
+                    },
+                ));
             }
             None
         };
@@ -403,10 +410,12 @@ where
         mut metadata: Modifiers,
     ) -> ParsedStatement {
         if is_definition_boundary(self.current().kind) {
-            self.report(
-                ParseDiagnosticKind::ExpectedPattern,
-                "expected a pattern after `val` or `var`",
-            );
+            self.report_issue(ParseIssue::Declaration(
+                DeclarationIssue::ExpectedPatternAfterValueKeyword {
+                    declaration: value_definition_kind(is_var),
+                    found: self.current().kind,
+                },
+            ));
             return self.malformed_definition();
         }
 
@@ -419,17 +428,19 @@ where
 
         if self.accept(TokenKind::Punctuation(dotty_core::Punctuation::Comma)) {
             if !first_is_identifier {
-                self.report(
-                    ParseDiagnosticKind::ExpectedPattern,
-                    "only simple identifiers may be comma-separated in a value definition",
-                );
+                self.report_issue(ParseIssue::Declaration(
+                    DeclarationIssue::CommaSeparatedValuePatternsMustBeIdentifiers {
+                        found: self.current().kind,
+                    },
+                ));
             } else {
                 loop {
                     if !is_comma_definition_identifier(self) {
-                        self.report(
-                            ParseDiagnosticKind::ExpectedPattern,
-                            "expected an identifier after `,` in a value definition",
-                        );
+                        self.report_issue(ParseIssue::Declaration(
+                            DeclarationIssue::ExpectedIdentifierAfterValuePatternComma {
+                                found: self.current().kind,
+                            },
+                        ));
                         break;
                     }
                     patterns.push(self.with_parse_kind(crate::ParseKind::Pattern, |parser| {
@@ -464,10 +475,11 @@ where
         {
             None
         } else {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `=` after a pattern definition",
-            );
+            self.report_issue(ParseIssue::Declaration(
+                DeclarationIssue::ExpectedEqualsAfterPatternDefinition {
+                    found: self.current().kind,
+                },
+            ));
             Some(self.error_expr(self.current_span()))
         };
 
@@ -599,6 +611,14 @@ pub(crate) fn is_definition_boundary(kind: TokenKind) -> bool {
     )
 }
 
+fn value_definition_kind(is_var: bool) -> ValueDefinitionKind {
+    if is_var {
+        ValueDefinitionKind::Var
+    } else {
+        ValueDefinitionKind::Val
+    }
+}
+
 fn synthetic_type_tree<S: dotty_core::TokenSource>(
     parser: &mut Parser<'_, '_, S>,
     start: u32,
@@ -616,6 +636,7 @@ fn synthetic_type_tree<S: dotty_core::TokenSource>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ParseDiagnosticKind;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::UntypedNode;
     use dotty_core::{
@@ -1184,8 +1205,18 @@ mod tests {
         let _ = parser.parse_value_definition(Location::Elsewhere);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::ExpectedToken
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Declaration(DeclarationIssue::ExpectedValueTypeOrEquals {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(5, 5).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
         );
     }
 
@@ -1257,6 +1288,34 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_missing_method_separator_structurally() {
+        let mut names = NameInterner::new();
+        let result = parser_for(
+            "def f",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Def), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                token(TokenKind::Eof, 5, 5),
+            ],
+            &mut names,
+        )
+        .compilation_unit();
+
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].issue(),
+            &ParseIssue::Declaration(DeclarationIssue::ExpectedMethodSeparator {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(result.diagnostics[0].span(), TextRange::new(5, 5).unwrap());
+        assert_eq!(
+            result.diagnostics[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
+    }
+
+    #[test]
     fn leaves_a_declaration_newline_unconsumed_without_a_following_colon() {
         let mut names = NameInterner::new();
         let result = parser_for(
@@ -1293,10 +1352,10 @@ mod tests {
             ParseDiagnosticKind::ExpectedToken
         );
         assert_eq!(
-            result.diagnostics[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "expected `:` or `=` after a value definition name"
+            result.diagnostics[0].issue(),
+            &ParseIssue::Declaration(DeclarationIssue::ExpectedValueTypeOrEquals {
+                found: TokenKind::Newline,
+            })
         );
         assert_eq!(result.diagnostics[0].span(), TextRange::new(5, 6).unwrap());
         assert_eq!(
@@ -2472,14 +2531,21 @@ mod tests {
         assert_eq!(names.resolve(second.name.as_name().text()), "g");
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(
-            result.diagnostics[0].kind(),
-            ParseDiagnosticKind::UnsupportedSyntax
+            result.diagnostics[0].issue(),
+            &ParseIssue::Parameter(
+                crate::ParameterIssue::HardModifierNotAllowedOnNamedUsingParameter {
+                    owner: crate::ParamOwner::Def,
+                    found: TokenKind::Keyword(HardKeyword::Private),
+                }
+            )
         );
         assert_eq!(
-            result.diagnostics[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "hard modifiers are not allowed on a named `using` parameter for this owner"
+            result.diagnostics[0].span(),
+            TextRange::new(12, 19).unwrap()
+        );
+        assert_eq!(
+            result.diagnostics[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
         );
     }
 
@@ -2775,8 +2841,10 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::Error(_))
         ));
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::ExpectedToken
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Declaration(DeclarationIssue::ExpectedEqualsAfterPatternDefinition {
+                found: TokenKind::Eof,
+            })
         );
     }
 
@@ -2885,8 +2953,10 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::Error(_))
         ));
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::ExpectedToken
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Declaration(DeclarationIssue::ExpectedEqualsAfterPatternDefinition {
+                found: TokenKind::Eof,
+            })
         );
     }
 
@@ -2925,11 +2995,22 @@ mod tests {
 
         let _ = parser.parse_value_definition(Location::Elsewhere);
 
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedPattern)
+        assert_eq!(parser.diagnostics().len(), 2);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Declaration(DeclarationIssue::ExpectedIdentifierAfterValuePatternComma {
+                found: TokenKind::Punctuation(Punctuation::LeftParen),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(7, 8).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[1].issue(),
+            &ParseIssue::Declaration(DeclarationIssue::ExpectedEqualsAfterPatternDefinition {
+                found: TokenKind::Punctuation(Punctuation::LeftParen),
+            })
         );
     }
 
@@ -2963,11 +3044,59 @@ mod tests {
 
         let _ = parser.parse_value_definition(Location::Elsewhere);
 
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedPattern)
+        assert_eq!(parser.diagnostics().len(), 2);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Declaration(DeclarationIssue::ExpectedIdentifierAfterValuePatternComma {
+                found: TokenKind::Identifier,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(7, 11).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[1].issue(),
+            &ParseIssue::Declaration(DeclarationIssue::ExpectedEqualsAfterPatternDefinition {
+                found: TokenKind::Identifier,
+            })
+        );
+    }
+
+    #[test]
+    fn diagnoses_a_comma_after_a_non_identifier_value_pattern_structurally() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "val (x, y), z = pair",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Val), 0, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 4, 5),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Punctuation(Punctuation::Comma), 6, 7),
+                token(TokenKind::Identifier, 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Punctuation(Punctuation::Comma), 10, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Operator, 14, 15),
+                token(TokenKind::Identifier, 16, 20),
+                token(TokenKind::Eof, 20, 20),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_value_definition(Location::Elsewhere);
+
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Declaration(
+                DeclarationIssue::CommaSeparatedValuePatternsMustBeIdentifiers {
+                    found: TokenKind::Identifier,
+                }
+            )
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(12, 13).unwrap()
         );
     }
 
@@ -3037,7 +3166,15 @@ mod tests {
             result.ast.get(block.expr).kind,
             TreeKind::Ident(_)
         ));
-        assert!(!result.diagnostics.is_empty());
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].issue(),
+            &ParseIssue::Declaration(DeclarationIssue::ExpectedPatternAfterValueKeyword {
+                declaration: ValueDefinitionKind::Val,
+                found: TokenKind::Newline,
+            })
+        );
+        assert_eq!(result.diagnostics[0].span(), TextRange::new(3, 4).unwrap());
     }
 
     #[test]

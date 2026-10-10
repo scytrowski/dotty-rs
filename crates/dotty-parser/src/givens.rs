@@ -941,13 +941,23 @@ mod tests {
             TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::PostfixOp(_))
         ));
         assert!(parameter.metadata.modifiers.contains(&Modifier::Given));
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
-                && diagnostic
-                    .legacy_message()
-                    .expect("legacy parser diagnostic")
-                    .contains("not allowed in `given` or `implicit`")
-        }));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &crate::ParseIssue::Parameter(
+                crate::ParameterIssue::RepeatedParameterNotAllowedInContextualClause {
+                    clause: crate::ContextualParameterClause::Given,
+                }
+            )
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(14, 16).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
