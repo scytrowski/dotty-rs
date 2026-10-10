@@ -627,29 +627,31 @@ cycles fail deterministically and roll back completion state; an explicit
 result type can break a mixed recursive cycle, as confirmed against the pinned
 Scala 3.9.0 compiler by
 [`explicit-breaks-inference-cycle.scala`](../crates/dotty-typer/tests/fixtures/local-method-results/explicit-breaks-inference-cycle.scala).
-Parameter-dependent result
-types, erased and by-name parameters, higher-kinded and aliased type-parameter
-bounds, and unsupported parameter modifiers remain explicitly deferred.
-The #899 source-corpus profile splits the 14 `LocalMethodSignatureDeferred`
-first-blocker observations into 3 direct signature failures and 11 sibling
-methods that inherit an enclosing method's first blocker. The direct payloads
-are 2 by-name parameter origins (8 affected local methods across 2 files) and
-1 parameter-modifier origin (6 affected methods in 1 file). The latter is a
-local `inline` parameter. `source_method_flags` already preserves `Inline` on
-the parameter symbol and the shared method-signature builder represents its
-type and clause, so local inline-parameter signature completion is a bounded
-candidate for a follow-up. This would cover signature construction only;
-inline expansion and argument evaluation are separate behavior. A focused
-application fixture reports `ByNameApplicationParameterDeferred` for a
-by-name method call. For the two direct corpus origins (`instantiateCFT` and
-`cases`), the current signature guard runs before their RHS or enclosing body
-is typed, so downstream status is unobserved; the report lists their likely
-application sites as hypotheses only. One origin has an explicit result and
-the other an inferred result, but neither result form has been validated in
-combination with by-name parameters.
-Parameter-dependent results have no corpus first-blocker observations and
-remain covered by a focused unsupported-case fixture. These are profile
-findings only; the #899 work does not change typer semantics.
+Local by-name parameters in explicit local method signatures now use the
+shared method-signature builder, which projects them as `Type::ByName` and
+preserves the same parameter symbol in the method scope and body. Mixed
+ordinary/by-name clauses and an existing inferred-result path are covered by
+focused tests. When inference would produce the by-name parameter's own type,
+the existing `InvalidInferredMethodResult` validation still rejects it;
+inference semantics are unchanged. Parameter-dependent result types, erased
+parameters, higher-kinded and aliased type-parameter bounds, and unsupported
+parameter modifiers remain explicitly deferred. Applying a by-name method
+parameter remains separately deferred as
+`ByNameApplicationParameterDeferred`.
+
+The #899 profile recorded 14 `LocalMethodSignatureDeferred` first-blocker
+observations: 8 by-name observations (2 direct origins and 6 inherited
+siblings) and 6 parameter-modifier observations. After #900, the supplemental
+Scala 3.9.0 corpus audit (run twice with JDK feature release 25) records 6
+signature observations, all from the `parameter modifiers` group in
+`MegaPhase.scala`. The direct by-name origins, `instantiateCFT` and `cases`,
+now have `ImportQualifierNotFound` as their first blocker. Their applications
+remain behind the enclosing blocker, so the audit does not observe
+`ByNameApplicationParameterDeferred` at those sites; the focused application
+fixture still confirms that boundary. No local methods became fully typed in
+the corpus audit. Parameter-dependent results remain covered by a focused
+unsupported-case fixture. These profile results are blocker movements, not
+semantic success.
 Ordinary repeated parameters use `Type::Repeated` in parameter symbol info and
 the shared method-signature builder's `varargs` marker; references to them in
 method bodies remain deferred. A method body is typed in a method

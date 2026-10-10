@@ -262,6 +262,7 @@ struct Audit {
     patdef_profile: PatDefProfile,
     missing_declared_type_profile: MissingDeclaredTypeProfile,
     local_method_first_blockers: BTreeMap<String, String>,
+    by_name_method_outcomes: BTreeMap<String, String>,
     local_method_signature_profile: LocalMethodSignatureProfile,
     singleton_reference_profile: SingletonReferenceProfile,
     singleton_source_inventory: SingletonSourceInventory,
@@ -300,6 +301,7 @@ impl Default for Audit {
             patdef_profile: PatDefProfile::default(),
             missing_declared_type_profile: MissingDeclaredTypeProfile::default(),
             local_method_first_blockers: BTreeMap::new(),
+            by_name_method_outcomes: BTreeMap::new(),
             local_method_signature_profile: LocalMethodSignatureProfile::default(),
             singleton_reference_profile: SingletonReferenceProfile::default(),
             singleton_source_inventory: SingletonSourceInventory::default(),
@@ -506,6 +508,8 @@ impl Audit {
             .merge(other.missing_declared_type_profile);
         self.local_method_first_blockers
             .extend(other.local_method_first_blockers);
+        self.by_name_method_outcomes
+            .extend(other.by_name_method_outcomes);
         self.local_method_signature_profile
             .merge(other.local_method_signature_profile);
         self.singleton_reference_profile
@@ -859,17 +863,15 @@ fn pinned_scala39_local_definition_audit() {
         audit.local_method_signature_profile.total, local_method_signature_failure_count,
         "every LocalMethodSignatureDeferred first blocker must retain its exact payload and source shape"
     );
-    assert_eq!(local_method_signature_failure_count, 14);
-    assert_eq!(audit.local_method_signature_profile.features.len(), 2);
-    let by_name_parameters = audit
-        .local_method_signature_profile
-        .features
-        .get("by-name parameters")
-        .expect("the pinned local-method profile should classify by-name parameters");
-    assert_eq!(by_name_parameters.count, 8);
-    assert_eq!(by_name_parameters.files.len(), 2);
-    assert_eq!(by_name_parameters.direct_methods.len(), 2);
-    assert_eq!(by_name_parameters.inherited_methods.len(), 6);
+    assert_eq!(local_method_signature_failure_count, 6);
+    assert_eq!(audit.local_method_signature_profile.features.len(), 1);
+    assert!(
+        !audit
+            .local_method_signature_profile
+            .features
+            .contains_key("by-name parameters"),
+        "the by-name signature blocker should be resolved by the local-method signature increment"
+    );
     let parameter_modifiers = audit
         .local_method_signature_profile
         .features
@@ -885,7 +887,22 @@ fn pinned_scala39_local_definition_audit() {
         .values()
         .flat_map(|bucket| bucket.files.iter())
         .collect::<BTreeSet<_>>();
-    assert_eq!(local_method_signature_files.len(), 3);
+    assert_eq!(local_method_signature_files.len(), 1);
+    assert_eq!(audit.by_name_method_outcomes.len(), 2);
+    assert_eq!(
+        audit
+            .by_name_method_outcomes
+            .get("compiler/src/dotty/tools/dotc/core/SymUtils.scala::instantiateCFT")
+            .map(String::as_str),
+        Some("ImportQualifierNotFound")
+    );
+    assert_eq!(
+        audit
+            .by_name_method_outcomes
+            .get("compiler/src/dotty/tools/dotc/typer/Typer.scala::cases")
+            .map(String::as_str),
+        Some("ImportQualifierNotFound")
+    );
     let singleton_projection_outcomes =
         singleton_projection_baseline_outcomes(&audit.local_method_first_blockers);
     let singleton_no_longer_first_blocked = singleton_projection_outcomes
@@ -1131,6 +1148,10 @@ fn pinned_scala39_local_definition_audit() {
     print_pinned_immutable_field_method_outcomes(&audit.local_method_first_blockers);
     print_pinned_mutable_field_method_outcomes(&audit.local_method_first_blockers);
     print_local_method_signature_profile(&audit.local_method_signature_profile);
+    println!("by_name_method_outcomes:");
+    for (method, outcome) in &audit.by_name_method_outcomes {
+        println!("  {method}={outcome}");
+    }
     print_singleton_reference_profile(&audit.singleton_reference_profile);
     print_singleton_source_inventory(&audit.singleton_source_inventory);
     print_singleton_projection_baseline(&singleton_projection_outcomes);
@@ -3700,6 +3721,27 @@ fn audit_source_inner(
             audit
                 .local_method_first_blockers
                 .insert(format!("{path}#tree={}", tree.index()), "typed".to_owned());
+            if path == "compiler/src/dotty/tools/dotc/core/SymUtils.scala"
+                || path == "compiler/src/dotty/tools/dotc/typer/Typer.scala"
+            {
+                if let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind {
+                    let name = typer
+                        .store()
+                        .names
+                        .resolve(definition.name.as_name().text());
+                    if matches!(
+                        (path, name),
+                        (
+                            "compiler/src/dotty/tools/dotc/core/SymUtils.scala",
+                            "instantiateCFT"
+                        ) | ("compiler/src/dotty/tools/dotc/typer/Typer.scala", "cases")
+                    ) {
+                        audit
+                            .by_name_method_outcomes
+                            .insert(format!("{path}::{name}"), "typed".to_owned());
+                    }
+                }
+            }
         } else {
             let (kind, missing_type_tree, singleton_reference_tree, local_method_signature) =
                 root_failures
@@ -3747,6 +3789,27 @@ fn audit_source_inner(
             audit
                 .local_method_first_blockers
                 .insert(format!("{path}#tree={}", tree.index()), kind.bucket.clone());
+            if path == "compiler/src/dotty/tools/dotc/core/SymUtils.scala"
+                || path == "compiler/src/dotty/tools/dotc/typer/Typer.scala"
+            {
+                if let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind {
+                    let name = typer
+                        .store()
+                        .names
+                        .resolve(definition.name.as_name().text());
+                    if matches!(
+                        (path, name),
+                        (
+                            "compiler/src/dotty/tools/dotc/core/SymUtils.scala",
+                            "instantiateCFT"
+                        ) | ("compiler/src/dotty/tools/dotc/typer/Typer.scala", "cases")
+                    ) {
+                        audit
+                            .by_name_method_outcomes
+                            .insert(format!("{path}::{name}"), kind.bucket.clone());
+                    }
+                }
+            }
             if kind.bucket == "LocalMethodSignatureDeferred" {
                 let (origin_tree_index, feature) = local_method_signature.unwrap_or_else(|| {
                     panic!(
