@@ -1,3 +1,4 @@
+use dotty_core::ast::Modifier;
 use dotty_core::{
     Diagnostic, DiagnosticSeverity, Name, SourceId, SourceSpan, TextRange, TokenKind,
 };
@@ -156,6 +157,172 @@ impl TypeDefinitionIssue {
             Self::ExpectedEqualsAfterOpaqueBound { .. } => {
                 "parser.type_definition.expected_equals_after_opaque_bound"
             }
+        }
+    }
+}
+
+/// Typed failures emitted while parsing class-like definitions and templates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClassDefinitionIssue {
+    /// An enum case with type parameters is missing its constructor parameter clause.
+    ExpectedEnumCaseConstructorParameters { found: TokenKind },
+    /// An enum-case parent list contains a non-identifier after a comma.
+    ExpectedEnumCaseParentAfterComma { found: TokenKind },
+    /// A source enum case is followed by a disallowed template body.
+    EnumCaseTemplateBodyNotAllowed { found: TokenKind },
+    /// A modifier is not allowed on an enum case.
+    ModifierNotAllowedOnEnumCase { modifier: Modifier },
+    /// An enum case is missing its name.
+    ExpectedEnumCaseName { found: TokenKind },
+    /// The parser encountered an enum-case form outside its supported syntax.
+    UnsupportedEnumCaseSyntax { found: TokenKind },
+    /// A modifier is not allowed on an enum definition.
+    ModifierNotAllowedOnEnum { modifier: Modifier },
+    /// An enum header is not followed by its required body.
+    ExpectedEnumBody { found: TokenKind },
+    /// A type application appears in a `derives` clause.
+    TypeApplicationNotAllowedInDerives { found: TokenKind },
+    /// An infix type appears in a `derives` clause.
+    InfixTypeNotAllowedInDerives { found: TokenKind },
+    /// A `uses` clause is not followed by a capture reference.
+    ExpectedCaptureReference { found: TokenKind },
+    /// A capture-reference selection is not followed by a name.
+    ExpectedCaptureReferenceNameAfterDot { found: TokenKind },
+    /// A `with` clause is not followed by a template body.
+    ExpectedTemplateBodyAfterWith { found: TokenKind },
+    /// A colon-introduced template body is not indented.
+    ExpectedIndentedTemplateBodyAfterColon { found: TokenKind },
+    /// An extends clause mixes comma and `with` parent separators.
+    MixedExtendsSeparators { found: TokenKind },
+    /// An extends-clause separator is not followed by a parent type.
+    ExpectedParentAfterExtendsSeparator { found: TokenKind },
+    /// A class or trait definition is missing its type name.
+    ExpectedClassOrTraitName { found: TokenKind },
+    /// An object definition is missing its name.
+    ExpectedObjectName { found: TokenKind },
+}
+
+impl ClassDefinitionIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::ExpectedEnumCaseParentAfterComma { .. } | Self::ExpectedEnumCaseName { .. } => {
+                ParseDiagnosticKind::ExpectedPattern
+            }
+            Self::EnumCaseTemplateBodyNotAllowed { .. } | Self::MixedExtendsSeparators { .. } => {
+                ParseDiagnosticKind::UnexpectedToken
+            }
+            Self::ModifierNotAllowedOnEnumCase { .. }
+            | Self::UnsupportedEnumCaseSyntax { .. }
+            | Self::ModifierNotAllowedOnEnum { .. }
+            | Self::TypeApplicationNotAllowedInDerives { .. }
+            | Self::InfixTypeNotAllowedInDerives { .. } => ParseDiagnosticKind::UnsupportedSyntax,
+            Self::ExpectedParentAfterExtendsSeparator { .. }
+            | Self::ExpectedClassOrTraitName { .. } => ParseDiagnosticKind::ExpectedType,
+            Self::ExpectedEnumCaseConstructorParameters { .. }
+            | Self::ExpectedEnumBody { .. }
+            | Self::ExpectedCaptureReference { .. }
+            | Self::ExpectedCaptureReferenceNameAfterDot { .. }
+            | Self::ExpectedTemplateBodyAfterWith { .. }
+            | Self::ExpectedIndentedTemplateBodyAfterColon { .. }
+            | Self::ExpectedObjectName { .. } => ParseDiagnosticKind::ExpectedToken,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ExpectedEnumCaseConstructorParameters { .. } => {
+                "parser.class_definition.expected_enum_case_parameters"
+            }
+            Self::ExpectedEnumCaseParentAfterComma { .. } => {
+                "parser.class_definition.expected_enum_case_parent_after_comma"
+            }
+            Self::EnumCaseTemplateBodyNotAllowed { .. } => {
+                "parser.class_definition.enum_case_template_body_not_allowed"
+            }
+            Self::ModifierNotAllowedOnEnumCase { .. } => {
+                "parser.class_definition.modifier_not_allowed_on_enum_case"
+            }
+            Self::ExpectedEnumCaseName { .. } => "parser.class_definition.expected_enum_case_name",
+            Self::UnsupportedEnumCaseSyntax { .. } => {
+                "parser.class_definition.unsupported_enum_case_syntax"
+            }
+            Self::ModifierNotAllowedOnEnum { .. } => {
+                "parser.class_definition.modifier_not_allowed_on_enum"
+            }
+            Self::ExpectedEnumBody { .. } => "parser.class_definition.expected_enum_body",
+            Self::TypeApplicationNotAllowedInDerives { .. } => {
+                "parser.class_definition.type_application_in_derives"
+            }
+            Self::InfixTypeNotAllowedInDerives { .. } => {
+                "parser.class_definition.infix_type_in_derives"
+            }
+            Self::ExpectedCaptureReference { .. } => {
+                "parser.class_definition.expected_capture_reference"
+            }
+            Self::ExpectedCaptureReferenceNameAfterDot { .. } => {
+                "parser.class_definition.expected_capture_name_after_dot"
+            }
+            Self::ExpectedTemplateBodyAfterWith { .. } => {
+                "parser.class_definition.expected_template_body_after_with"
+            }
+            Self::ExpectedIndentedTemplateBodyAfterColon { .. } => {
+                "parser.class_definition.expected_indented_template_body_after_colon"
+            }
+            Self::MixedExtendsSeparators { .. } => {
+                "parser.class_definition.mixed_extends_separators"
+            }
+            Self::ExpectedParentAfterExtendsSeparator { .. } => {
+                "parser.class_definition.expected_parent_after_extends_separator"
+            }
+            Self::ExpectedClassOrTraitName { .. } => {
+                "parser.class_definition.expected_class_or_trait_name"
+            }
+            Self::ExpectedObjectName { .. } => "parser.class_definition.expected_object_name",
+        }
+    }
+}
+
+/// Typed failures emitted while parsing declaration modifiers and annotations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModifierIssue {
+    /// An annotation appears after a definition modifier or visibility clause.
+    AnnotationAfterModifier { found: TokenKind },
+    /// A deferred contextual modifier is recognized but not supported here.
+    UnsupportedContextualModifier { name: Name },
+    /// A definition prefix repeats a modifier.
+    DuplicateModifier { modifier: Modifier },
+    /// A definition prefix repeats its visibility clause.
+    DuplicateVisibility { found: TokenKind },
+    /// A visibility qualifier is not a valid name or `this`.
+    ExpectedVisibilityQualifier { found: TokenKind },
+    /// An annotation marker is not followed by a type.
+    ExpectedAnnotationType { found: TokenKind },
+}
+
+impl ModifierIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::AnnotationAfterModifier { .. }
+            | Self::DuplicateModifier { .. }
+            | Self::DuplicateVisibility { .. } => ParseDiagnosticKind::UnexpectedToken,
+            Self::UnsupportedContextualModifier { .. } => ParseDiagnosticKind::UnsupportedSyntax,
+            Self::ExpectedVisibilityQualifier { .. } => ParseDiagnosticKind::ExpectedToken,
+            Self::ExpectedAnnotationType { .. } => ParseDiagnosticKind::ExpectedType,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::AnnotationAfterModifier { .. } => "parser.modifier.annotation_after_modifier",
+            Self::UnsupportedContextualModifier { .. } => {
+                "parser.modifier.unsupported_contextual_modifier"
+            }
+            Self::DuplicateModifier { .. } => "parser.modifier.duplicate_modifier",
+            Self::DuplicateVisibility { .. } => "parser.modifier.duplicate_visibility",
+            Self::ExpectedVisibilityQualifier { .. } => {
+                "parser.modifier.expected_visibility_qualifier"
+            }
+            Self::ExpectedAnnotationType { .. } => "parser.modifier.expected_annotation_type",
         }
     }
 }
@@ -1042,6 +1209,10 @@ pub enum ParseIssue {
     UnboundPlaceholderParameter,
     /// A structured failure emitted by the Scala type grammar.
     Type(TypeIssue),
+    /// A structured failure emitted while parsing class-like definitions.
+    ClassDefinition(ClassDefinitionIssue),
+    /// A structured failure emitted while parsing modifiers and annotations.
+    Modifier(ModifierIssue),
     /// A structured failure emitted while parsing a type parameter clause.
     TypeParameter(TypeParamIssue),
     /// A structured failure emitted while parsing a type definition.
@@ -1067,6 +1238,8 @@ impl ParseIssue {
             Self::TrailingInput { .. } => ParseDiagnosticKind::UnexpectedToken,
             Self::UnboundPlaceholderParameter => ParseDiagnosticKind::UnboundPlaceholderParameter,
             Self::Type(issue) => issue.kind(),
+            Self::ClassDefinition(issue) => issue.kind(),
+            Self::Modifier(issue) => issue.kind(),
             Self::TypeParameter(issue) => issue.kind(),
             Self::TypeDefinition(issue) => issue.kind(),
             Self::Expression(issue) => issue.kind(),
@@ -1097,6 +1270,8 @@ impl ParseIssue {
             Self::TrailingInput { .. } => "parser.trailing_input",
             Self::UnboundPlaceholderParameter => "parser.unbound_placeholder_parameter",
             Self::Type(issue) => issue.code(),
+            Self::ClassDefinition(issue) => issue.code(),
+            Self::Modifier(issue) => issue.code(),
             Self::TypeParameter(issue) => issue.code(),
             Self::TypeDefinition(issue) => issue.code(),
             Self::Expression(issue) => issue.code(),
@@ -1178,6 +1353,8 @@ impl ParseDiagnostic {
             | ParseIssue::TrailingInput { .. }
             | ParseIssue::UnboundPlaceholderParameter => None,
             ParseIssue::Type(_) => None,
+            ParseIssue::ClassDefinition(_) => None,
+            ParseIssue::Modifier(_) => None,
             ParseIssue::TypeParameter(_) => None,
             ParseIssue::TypeDefinition(_) => None,
             ParseIssue::Expression(_) => None,
@@ -1297,5 +1474,24 @@ mod tests {
         assert_eq!(case_diagnostic.span(), range);
         assert_eq!(case_diagnostic.severity(), DiagnosticSeverity::Error);
         assert_eq!(case_diagnostic.legacy_message(), None);
+    }
+
+    #[test]
+    fn class_definition_and_modifier_issues_have_stable_codes_and_categories() {
+        let class_issue =
+            ParseIssue::ClassDefinition(ClassDefinitionIssue::ExpectedClassOrTraitName {
+                found: TokenKind::Eof,
+            });
+        let modifier_issue = ParseIssue::Modifier(ModifierIssue::DuplicateModifier {
+            modifier: Modifier::Final,
+        });
+
+        assert_eq!(
+            class_issue.code(),
+            "parser.class_definition.expected_class_or_trait_name"
+        );
+        assert_eq!(class_issue.kind(), ParseDiagnosticKind::ExpectedType);
+        assert_eq!(modifier_issue.code(), "parser.modifier.duplicate_modifier");
+        assert_eq!(modifier_issue.kind(), ParseDiagnosticKind::UnexpectedToken);
     }
 }
