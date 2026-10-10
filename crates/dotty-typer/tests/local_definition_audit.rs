@@ -320,12 +320,14 @@ struct LocalValueBlockerObservation {
     path: String,
     enclosing_method: String,
     enclosing_method_tree: u32,
+    blocker_origin_method: String,
     declaration_tree: u32,
     line: usize,
     span: String,
     node_kind: String,
     declaration_name: String,
     declaration_kind: String,
+    dispatch_path: String,
     modifiers: String,
     visibility: String,
     annotations: bool,
@@ -916,6 +918,12 @@ fn pinned_scala39_local_definition_audit() {
     assert_eq!(
         audit
             .local_value_blocker_profile
+            .distinct_declaration_count(),
+        14
+    );
+    assert_eq!(
+        audit
+            .local_value_blocker_profile
             .observations
             .iter()
             .map(|row| row.path.as_str())
@@ -923,6 +931,44 @@ fn pinned_scala39_local_definition_audit() {
             .len(),
         8
     );
+    let rows = &audit.local_value_blocker_profile.observations;
+    assert!(rows.iter().all(|row| row.node_kind == "ValDef"));
+    assert!(rows.iter().all(|row| row.rhs_present));
+    assert!(rows.iter().all(|row| !row.annotations));
+    assert!(rows.iter().all(|row| row.visibility == "default"));
+    assert!(rows.iter().all(|row| row.attribution == "inherited"));
+    let count_kind = |kind: &str| {
+        rows.iter()
+            .filter(|row| row.declaration_kind == kind)
+            .count()
+    };
+    assert_eq!(count_kind("given"), 5);
+    assert_eq!(count_kind("implicit val"), 12);
+    assert_eq!(count_kind("inline val"), 1);
+    assert_eq!(count_kind("lazy val"), 3);
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.type_form == "explicit")
+            .count(),
+        7
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.type_form == "inferred")
+            .count(),
+        14
+    );
+    let count_modifier = |modifier: &str| {
+        rows.iter()
+            .filter(|row| row.modifiers.split(',').any(|value| value == modifier))
+            .count()
+    };
+    assert_eq!(count_modifier("Given"), 5);
+    assert_eq!(count_modifier("Implicit"), 12);
+    assert_eq!(count_modifier("Lazy"), 8);
+    assert_eq!(count_modifier("Inline"), 1);
+    assert_eq!(count_modifier("Final"), 5);
+    assert_eq!(count_modifier("Var"), 0);
     assert_eq!(
         audit.local_method_signature_profile.total, local_method_signature_failure_count,
         "every LocalMethodSignatureDeferred first blocker must retain its exact payload and source shape"
@@ -2416,7 +2462,7 @@ fn local_value_blocker_profiler_classifies_declaration_shapes_and_deduplicates()
     assert_eq!(plain.type_form, "inferred");
     assert!(plain.rhs_present);
     assert_eq!(plain.visibility, "default");
-    assert_eq!(plain.annotations, false);
+    assert!(!plain.annotations);
 
     let mutable = observation("mutable");
     assert_eq!(mutable.declaration_kind, "var");
@@ -2440,8 +2486,8 @@ fn local_value_blocker_profiler_classifies_declaration_shapes_and_deduplicates()
     inherited.enclosing_method = "Audit.scala#tree=sibling:sibling".to_owned();
     inherited.attribution = "inherited".to_owned();
     let mut first = LocalValueBlockerProfile::default();
+    first.record(inherited.clone());
     first.record(plain.clone());
-    first.record(inherited);
     let mut second = LocalValueBlockerProfile::default();
     second.record(plain.clone());
     let mut inherited_again = plain;
@@ -5083,6 +5129,11 @@ fn local_value_blocker_observation(
         || "unavailable".to_owned(),
         |tree| source_type_form(arena, tree),
     );
+    let dispatch_path = match node_kind.as_str() {
+        "ValDef" => "type_block_stat_expansion: ValDef modifier guard".to_owned(),
+        "PatDef" => "type_block_stat_expansion -> type_local_patdef".to_owned(),
+        _ => "type_block_stat_expansion: generic declaration fallback".to_owned(),
+    };
     let range = span.map_or_else(
         || "unknown".to_owned(),
         |range| format!("{}..{}", range.start(), range.end()),
@@ -5094,6 +5145,17 @@ fn local_value_blocker_observation(
             _ => None,
         })
         .unwrap_or("<unknown>");
+    let blocker_origin_method = arena
+        .iter()
+        .find_map(|(tree, node)| {
+            (tree.index() == blocker_method_tree_index).then(|| match &node.kind {
+                TreeKind::DefDef(definition) => {
+                    names.resolve(definition.name.as_name().text()).to_owned()
+                }
+                _ => "<unknown>".to_owned(),
+            })
+        })
+        .unwrap_or_else(|| "<unknown>".to_owned());
 
     Some(LocalValueBlockerObservation {
         path: path.to_owned(),
@@ -5103,12 +5165,16 @@ fn local_value_blocker_observation(
             method_name
         ),
         enclosing_method_tree: enclosing_method_tree.index(),
+        blocker_origin_method: format!(
+            "{path}#tree={blocker_method_tree_index}:{blocker_origin_method}"
+        ),
         declaration_tree: declaration_tree_index,
         line,
         span: range,
         node_kind,
         declaration_name,
         declaration_kind,
+        dispatch_path,
         modifiers,
         visibility,
         annotations,
@@ -5421,18 +5487,68 @@ fn print_local_value_blocker_profile(profile: &LocalValueBlockerProfile) {
         "  distinct_declarations={}",
         profile.distinct_declaration_count()
     );
+    print_local_value_groups(&profile.observations, "node_kind", |row| {
+        row.node_kind.clone()
+    });
+    print_local_value_groups(&profile.observations, "declaration_kind", |row| {
+        row.declaration_kind.clone()
+    });
+    print_local_value_groups(&profile.observations, "modifier_set", |row| {
+        row.modifiers.clone()
+    });
+    print_local_value_modifier_presence(&profile.observations);
+    print_local_value_groups(&profile.observations, "inferred_vs_explicit", |row| {
+        row.type_form.clone()
+    });
+    print_local_value_groups(&profile.observations, "direct_vs_inherited", |row| {
+        row.attribution.clone()
+    });
+    print_local_value_groups(&profile.observations, "direct_valdef_groups", |row| {
+        format!(
+            "kind={} modifiers=[{}] type={} name={} annotations={} visibility={}",
+            row.declaration_kind,
+            row.modifiers,
+            row.type_form,
+            if row.declaration_kind == "given" {
+                if row.declaration_name == "<anonymous>" {
+                    "anonymous given"
+                } else {
+                    "named given"
+                }
+            } else {
+                "ordinary named local"
+            },
+            row.annotations,
+            row.visibility
+        )
+    });
+    print_local_value_groups(&profile.observations, "patdef_groups", |row| {
+        format!(
+            "root={} source_patterns={} binders={} kind={} type={} modifiers=[{}]",
+            row.pattern_roots,
+            row.source_pattern_count
+                .map_or_else(|| "n/a".to_owned(), |count| count.to_string()),
+            row.binder_count
+                .map_or_else(|| "n/a".to_owned(), |count| count.to_string()),
+            row.declaration_kind,
+            row.type_form,
+            row.modifiers
+        )
+    });
     println!("  observations:");
     for row in &profile.observations {
         println!(
-            "    {}:method={} declaration_tree={} line={} span={} node={} name={} kind={} modifiers=[{}] visibility={} annotations={} type={} rhs={} pattern_roots=[{}] source_patterns={} binders={} attribution={}",
+            "    {}:method={} blocker_origin={} declaration_tree={} line={} span={} node={} name={} kind={} dispatch={} modifiers=[{}] visibility={} annotations={} type={} rhs={} pattern_roots=[{}] source_patterns={} binders={} attribution={}",
             row.path,
             row.enclosing_method,
+            row.blocker_origin_method,
             row.declaration_tree,
             row.line,
             row.span,
             row.node_kind,
             row.declaration_name,
             row.declaration_kind,
+            row.dispatch_path,
             row.modifiers,
             row.visibility,
             row.annotations,
@@ -5444,6 +5560,65 @@ fn print_local_value_blocker_profile(profile: &LocalValueBlockerProfile) {
             row.binder_count
                 .map_or_else(|| "n/a".to_owned(), |count| count.to_string()),
             row.attribution,
+        );
+    }
+}
+
+fn print_local_value_modifier_presence(rows: &BTreeSet<LocalValueBlockerObservation>) {
+    println!("  modifier_presence:");
+    for modifier in ["Var", "Given", "Implicit", "Lazy", "Inline", "Final"] {
+        let matching = rows
+            .iter()
+            .filter(|row| row.modifiers.split(',').any(|value| value == modifier))
+            .collect::<Vec<_>>();
+        let declarations = matching
+            .iter()
+            .map(|row| (row.path.as_str(), row.declaration_tree))
+            .collect::<BTreeSet<_>>();
+        let files = matching
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<BTreeSet<_>>();
+        println!(
+            "    {modifier}={} distinct_declarations={} files={}",
+            matching.len(),
+            declarations.len(),
+            files.len()
+        );
+    }
+    let unmodified = rows.iter().filter(|row| row.modifiers.is_empty()).count();
+    println!("    (no modifiers)={unmodified}");
+}
+
+fn print_local_value_groups(
+    rows: &BTreeSet<LocalValueBlockerObservation>,
+    label: &str,
+    key: impl Fn(&LocalValueBlockerObservation) -> String,
+) {
+    let mut groups = BTreeMap::<String, (usize, BTreeSet<(String, u32)>, BTreeSet<String>)>::new();
+    for row in rows {
+        if label == "direct_valdef_groups" && row.node_kind != "ValDef" {
+            continue;
+        }
+        if label == "patdef_groups" && row.node_kind != "PatDef" {
+            continue;
+        }
+        let group = groups.entry(key(row)).or_default();
+        group.0 += 1;
+        group.1.insert((row.path.clone(), row.declaration_tree));
+        group.2.insert(row.path.clone());
+    }
+    println!("  {label}:");
+    if groups.is_empty() {
+        println!("    (none)");
+        return;
+    }
+    for (name, (occurrences, declarations, files)) in groups {
+        println!(
+            "    {name}: occurrences={occurrences} distinct_declarations={} files={} [{}]",
+            declarations.len(),
+            files.len(),
+            files.into_iter().collect::<Vec<_>>().join(", ")
         );
     }
 }

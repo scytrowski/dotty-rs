@@ -848,6 +848,14 @@ unsupported tuple, infix, extractor, or typed-pattern behavior keeps its
 downstream specific error. The complete lowering and identity contract is
 pinned in [`typer-patdef-lowering-3.9.0.md`](typer-patdef-lowering-3.9.0.md).
 
+This `local_patdefs` inventory is distinct from the exact
+`LocalBlockDeclarationDeferred::val/var definition` first-blocker cohort.
+Issue #929 profiles that cohort by the declaration tree reported by the
+block-typing error. The pinned Scala 3.9.0 audit finds 21 observations across
+8 files, representing 14 distinct declarations; all are modified `ValDef` AST
+nodes, with no `PatDef` rows. Repeated sibling-method observations
+are kept separate from distinct declarations in the generated corpus report.
+
 The #581 baseline resolved 1,965 packages from the classpath, reused 5,025
 source packages, and materialized no external classes or members (3,884
 unresolved member requests and 91 resolver errors). The #610 rerun resolves
