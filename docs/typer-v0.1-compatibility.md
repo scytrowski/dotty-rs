@@ -746,16 +746,38 @@ scope only after their initializer and type checks succeed; their initializer
 does not see the new local as already initialized. Anonymous givens remain
 deferred when their AST has no authoritative local term name. The preserved
 `LAZY` flag on named givens does not enable general lazy-value typing or runtime
-lowering. Local contextual values with source annotations or explicit
+lowering. Local contextual and lazy values with source annotations or explicit
 visibility modifiers return `LocalValueMetadataDeferred` before symbol
 allocation, because the bounded typed local-value node does not yet preserve
 those metadata fields.
 
+#932 also types direct local `lazy val` declarations with inferred or explicit
+types through the common local-value path. The symbol carries exactly `LAZY`
+(not `MUTABLE`), and ordinary explicit reads after the declaration resolve to
+that symbol. Type inference, explicit expected-type checking, and nested-block
+shadowing use the ordinary local-value rules. Source Typer emits no lazy
+initialization state or runtime-lowering trees. Other modifier combinations,
+including lazy pattern definitions, remain deferred.
+
+The checked-in fixtures under
+`crates/dotty-typer/tests/fixtures/local-lazy-values/` were compiled with the
+pinned Scala 3.9.0 compiler. Inferred direct and mutual lazy cycles report E045
+(`Recursive lazy value … needs type`); explicitly typed direct self-reference
+compiles with an infinite-loop warning. Explicitly typed forward reference to a
+later lazy value compiles. This Typer increment conservatively returns
+`RecursiveLazyLocalValueInitializer` for direct self-reference in either type
+form because it does not model Scala's cycle inference or warning analysis.
+Forward references from an earlier local initializer to a later lazy
+declaration also remain unsupported; the Typer keeps the existing
+declaration-order scope and reports `TermNameNotFound`.
+
 Contextual search, contextual argument insertion, implicit conversions, and
-summon remain unsupported. `lazy val` and `inline val` declarations remain
-deferred. Unsupported modifiers, duplicate modifiers, and unsupported or
-inconsistent modifier sets return `LocalValueModifierDeferred` with the source
-tree and complete modifier set.
+summon remain unsupported. `inline val` declarations and lazy pattern
+definitions remain deferred. Recursive lazy initializers and forward
+references to later lazy declarations remain unsupported as described above.
+Unsupported modifiers, duplicate modifiers, and unsupported or inconsistent
+modifier sets return `LocalValueModifierDeferred` with the source tree and
+complete modifier set.
 
 ### Local-definition source audit v1 (historical)
 

@@ -659,6 +659,12 @@ mod tests {
 
     const LOCAL_EXTENSION_CALL_SOURCE: &str =
         include_str!("../../tests/fixtures/local-extension-calls/LocalExtensionCalls.scala");
+    const LOCAL_LAZY_RECURSION_ORACLE_FIXTURE: &str =
+        include_str!("../../tests/fixtures/local-lazy-values/Recursive.scala");
+    const LOCAL_LAZY_EXPLICIT_SELF_ORACLE_FIXTURE: &str =
+        include_str!("../../tests/fixtures/local-lazy-values/ExplicitSelf.scala");
+    const LOCAL_LAZY_FORWARD_ORACLE_FIXTURE: &str =
+        include_str!("../../tests/fixtures/local-lazy-values/Forward.scala");
 
     struct ScriptedResolver {
         member: Option<SymbolId>,
@@ -16920,6 +16926,242 @@ mod tests {
     }
 
     #[test]
+    fn local_lazy_values_keep_flags_types_and_explicit_reference_identity() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def inferred: Int = { lazy val inferredValue = 1; inferredValue }; def explicit: Int = { lazy val explicitValue: Int = 2; explicitValue } }",
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for (method_name, expected_name) in
+            [("inferred", "inferredValue"), ("explicit", "explicitValue")]
+        {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, method_name);
+            let TreeKind::Block(source_block) = &parsed.ast.get(rhs).kind else {
+                panic!("{method_name} should have a block body")
+            };
+            let local_tree = source_block.stats[0];
+            let context = typer.expression_context_for(method).unwrap();
+            let typed_block = typer
+                .type_expression(rhs, context)
+                .unwrap_or_else(|error| panic!("{method_name}: {error:?}"));
+            let local = typer.local_symbol_at(source, local_tree).unwrap();
+            let local_symbol = typer.store().symbols.get(local);
+            assert_eq!(local_symbol.flags, SymbolFlags::LAZY);
+            assert_eq!(local_symbol.info, SymbolInfo::Complete(definitions.int));
+            assert_eq!(
+                typer.store().names.resolve(local_symbol.name.text()),
+                expected_name
+            );
+            let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_block).kind else {
+                panic!("{method_name} should remain a typed block")
+            };
+            assert_eq!(typed_block.stats.len(), 1);
+            assert!(matches!(
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(typed_block.expr).ty),
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } if *symbol == local
+            ));
+            assert_eq!(
+                typer.local_symbol_at(source, local_tree),
+                Some(local),
+                "typing a lazy val must publish one stable local identity"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_local_lazy_values_shadow_without_leaking() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def use: Int = { lazy val value = 1; { lazy val value = 2; value }; value } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Block(source_outer) = &parsed.ast.get(rhs).kind else {
+            unreachable!();
+        };
+        let outer_tree = source_outer.stats[0];
+        let TreeKind::Block(source_inner) = &parsed.ast.get(source_outer.stats[1]).kind else {
+            unreachable!();
+        };
+        let inner_tree = source_inner.stats[0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        let outer = typer.local_symbol_at(source, outer_tree).unwrap();
+        let inner = typer.local_symbol_at(source, inner_tree).unwrap();
+        assert_ne!(outer, inner);
+        let TreeKind::Block(typed_outer) = &typer.typed_ast().get(typed).kind else {
+            unreachable!();
+        };
+        let TreeKind::Block(typed_inner) = &typer.typed_ast().get(typed_outer.stats[1]).kind else {
+            unreachable!();
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_inner.expr).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == inner
+        ));
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_outer.expr).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == outer
+        ));
+    }
+
+    #[test]
+    fn recursive_local_lazy_values_use_a_focused_deferral_and_retry_cleanly() {
+        for (source_text, method_name) in [
+            (LOCAL_LAZY_RECURSION_ORACLE_FIXTURE, "inferredSelf"),
+            (LOCAL_LAZY_EXPLICIT_SELF_ORACLE_FIXTURE, "explicitSelf"),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, method_name);
+            let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+                unreachable!();
+            };
+            let local_tree = block.stats[0];
+            let TreeKind::ValDef(definition) = &parsed.ast.get(local_tree).kind else {
+                unreachable!();
+            };
+            let recursive_reference = definition.rhs.unwrap();
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+            let checkpoint = typer.store().checkpoint();
+
+            for _ in 0..2 {
+                let result = typer.type_expression(rhs, context);
+                assert!(
+                    result.as_ref().is_err_and(|error| matches!(
+                        error,
+                        TyperError::RecursiveLazyLocalValueInitializer {
+                            source: actual_source,
+                            tree_index,
+                            ..
+                        } if *actual_source == source
+                            && *tree_index == recursive_reference.index()
+                    )),
+                    "{result:?}"
+                );
+                assert_eq!(typer.store().checkpoint(), checkpoint);
+                assert!(typer.local_symbol_at(source, local_tree).is_none());
+                assert!(typer.source_typed_index().is_empty());
+                assert!(typer.typed_ast().iter().next().is_none());
+                assert!(typer.initializing_local_symbols.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn local_lazy_values_reject_bad_rhs_types_and_modifier_combinations() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def mismatch: Boolean = { lazy val value: Boolean = 1; value }; def invalid: Int = { lazy var value = 1; value } }",
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let (mismatch_method, mismatch_rhs) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "mismatch");
+        let mismatch_context = typer.expression_context_for(mismatch_method).unwrap();
+        assert!(matches!(
+            typer.type_expression(mismatch_rhs, mismatch_context),
+            Err(TyperError::LocalValueTypeMismatch { expected, .. })
+                if expected == definitions.boolean
+        ));
+
+        let (invalid_method, invalid_rhs) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "invalid");
+        let TreeKind::Block(invalid_block) = &parsed.ast.get(invalid_rhs).kind else {
+            unreachable!();
+        };
+        let invalid_local = invalid_block.stats[0];
+        let invalid_context = typer.expression_context_for(invalid_method).unwrap();
+        assert!(matches!(
+            typer.type_expression(invalid_rhs, invalid_context),
+            Err(TyperError::LocalValueModifierDeferred {
+                tree_index,
+                classification: "inconsistent source modifier set",
+                modifiers,
+                ..
+            }) if tree_index == invalid_local.index()
+                && modifiers == [Modifier::Lazy, Modifier::Var]
+        ));
+        assert!(typer.local_symbol_at(source, invalid_local).is_none());
+    }
+
+    #[test]
+    fn forward_local_lazy_references_remain_outside_the_bounded_scope() {
+        for (source_text, method_name) in [
+            (LOCAL_LAZY_RECURSION_ORACLE_FIXTURE, "inferredMutual"),
+            (LOCAL_LAZY_FORWARD_ORACLE_FIXTURE, "explicitForward"),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, method_name);
+            let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+                unreachable!();
+            };
+            let first = block.stats[0];
+            let context = typer.expression_context_for(method).unwrap();
+
+            assert!(matches!(
+                typer.type_expression(rhs, context),
+                Err(TyperError::TermNameNotFound { .. })
+            ));
+            assert!(typer.local_symbol_at(source, first).is_none());
+            assert!(typer.typed_ast().iter().next().is_none());
+        }
+    }
+
+    #[test]
     fn anonymous_local_given_without_a_term_identity_remains_deferred() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def use: Int = { given Int = 1; 0 } }");
@@ -16951,7 +17193,7 @@ mod tests {
     }
 
     #[test]
-    fn local_contextual_metadata_is_rejected_without_losing_source_information() {
+    fn local_contextual_and_lazy_metadata_is_rejected_without_losing_source_information() {
         for (source_text, expected_visibility, expected_annotations) in [
             (
                 "class C { def use: Int = { @unchecked implicit val local: Int = 1; local } }",
@@ -16962,6 +17204,11 @@ mod tests {
                 "class C { def use: Int = { private implicit val local: Int = 1; local } }",
                 Some(VisibilitySyntax::Private { qualifier: None }),
                 0,
+            ),
+            (
+                "class C { def use: Int = { @unchecked lazy val local: Int = 1; local } }",
+                None,
+                1,
             ),
         ] {
             let (parsed, mut store, packages, definitions, index, source) =

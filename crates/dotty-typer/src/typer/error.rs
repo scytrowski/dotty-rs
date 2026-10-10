@@ -1694,6 +1694,13 @@ pub enum TyperError {
         tree_index: u32,
         symbol: SymbolId,
     },
+    /// A recursive local lazy value requires inference/initialization
+    /// semantics beyond the bounded declaration typer.
+    RecursiveLazyLocalValueInitializer {
+        source: SourceId,
+        tree_index: u32,
+        symbol: SymbolId,
+    },
     /// Local value declarations are only supported as statements in a block.
     LocalValueOutsideBlock {
         source: SourceId,

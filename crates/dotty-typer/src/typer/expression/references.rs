@@ -196,6 +196,19 @@ impl SourceTyper<'_> {
         }
         if !matches!(kind, SymbolKind::Object | SymbolKind::Package) {
             if self.initializing_local_symbols.contains(&symbol) {
+                if self
+                    .store
+                    .symbols
+                    .get(symbol)
+                    .flags
+                    .contains(SymbolFlags::LAZY)
+                {
+                    return Err(TyperError::RecursiveLazyLocalValueInitializer {
+                        source: self.source,
+                        tree_index,
+                        symbol,
+                    });
+                }
                 return Err(TyperError::RecursiveLocalValueInitializer {
                     source: self.source,
                     tree_index,
