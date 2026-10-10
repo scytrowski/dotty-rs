@@ -6,6 +6,8 @@
 
 use std::ops::{BitAnd, BitOr};
 
+use crate::ast::Modifier;
+
 /// A set of orthogonal boolean properties a [`super::Symbol`] can have.
 ///
 /// `kind` ([`super::SymbolKind`]) gives a symbol's stable category; flags
@@ -77,6 +79,44 @@ impl SymbolFlags {
     }
 }
 
+/// Returns the one-to-one symbol flag represented by a source modifier.
+///
+/// This covers modifiers whose semantic symbol representation is identical
+/// across source declaration kinds. Definition-kind markers such as `Enum`
+/// and `EnumCase` are intentionally left to the owning frontend because they
+/// map to combinations of flags.
+pub const fn source_modifier_flag(modifier: Modifier) -> SymbolFlags {
+    match modifier {
+        Modifier::Abstract => SymbolFlags::ABSTRACT,
+        Modifier::Final => SymbolFlags::FINAL,
+        Modifier::Sealed => SymbolFlags::SEALED,
+        Modifier::Case => SymbolFlags::CASE,
+        Modifier::Implicit => SymbolFlags::IMPLICIT,
+        Modifier::Given => SymbolFlags::GIVEN,
+        Modifier::Lazy => SymbolFlags::LAZY,
+        Modifier::Var => SymbolFlags::MUTABLE,
+        Modifier::Override => SymbolFlags::OVERRIDE,
+        Modifier::Inline => SymbolFlags::INLINE,
+        Modifier::Transparent => SymbolFlags::TRANSPARENT,
+        Modifier::Opaque => SymbolFlags::OPAQUE,
+        Modifier::Extension => SymbolFlags::EXTENSION,
+        Modifier::Erased => SymbolFlags::ERASED,
+        Modifier::Trait
+        | Modifier::Enum
+        | Modifier::EnumCase
+        | Modifier::PackageObject
+        | Modifier::ParamAccessor
+        | Modifier::Param
+        | Modifier::PrivateLocal
+        | Modifier::Update
+        | Modifier::Impure
+        | Modifier::Open
+        | Modifier::Infix
+        | Modifier::Tracked
+        | Modifier::Into => SymbolFlags::EMPTY,
+    }
+}
+
 impl BitOr for SymbolFlags {
     type Output = Self;
 
@@ -96,6 +136,54 @@ impl BitAnd for SymbolFlags {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_modifier_flags_cover_one_to_one_symbol_properties() {
+        let cases = [
+            (Modifier::Abstract, SymbolFlags::ABSTRACT),
+            (Modifier::Final, SymbolFlags::FINAL),
+            (Modifier::Sealed, SymbolFlags::SEALED),
+            (Modifier::Case, SymbolFlags::CASE),
+            (Modifier::Implicit, SymbolFlags::IMPLICIT),
+            (Modifier::Given, SymbolFlags::GIVEN),
+            (Modifier::Lazy, SymbolFlags::LAZY),
+            (Modifier::Var, SymbolFlags::MUTABLE),
+            (Modifier::Override, SymbolFlags::OVERRIDE),
+            (Modifier::Inline, SymbolFlags::INLINE),
+            (Modifier::Transparent, SymbolFlags::TRANSPARENT),
+            (Modifier::Opaque, SymbolFlags::OPAQUE),
+            (Modifier::Extension, SymbolFlags::EXTENSION),
+            (Modifier::Erased, SymbolFlags::ERASED),
+        ];
+
+        for (modifier, expected) in cases {
+            assert_eq!(source_modifier_flag(modifier), expected, "{modifier:?}");
+        }
+    }
+
+    #[test]
+    fn source_only_markers_do_not_invent_symbol_flags() {
+        let markers = [
+            Modifier::Trait,
+            Modifier::PackageObject,
+            Modifier::ParamAccessor,
+            Modifier::PrivateLocal,
+            Modifier::Update,
+            Modifier::Impure,
+            Modifier::Open,
+            Modifier::Infix,
+            Modifier::Tracked,
+            Modifier::Into,
+        ];
+
+        for modifier in markers {
+            assert_eq!(
+                source_modifier_flag(modifier),
+                SymbolFlags::EMPTY,
+                "{modifier:?}"
+            );
+        }
+    }
 
     #[test]
     fn empty_flags_contain_nothing_but_themselves() {

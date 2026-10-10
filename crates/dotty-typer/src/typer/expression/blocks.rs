@@ -7,6 +7,96 @@ use dotty_core::types::*;
 use dotty_core::*;
 use std::collections::HashMap;
 
+const LOCAL_VALUE_SEMANTICS_DEFERRED: SymbolFlags = SymbolFlags::GIVEN
+    .union(SymbolFlags::IMPLICIT)
+    .union(SymbolFlags::LAZY)
+    .union(SymbolFlags::INLINE);
+
+pub(in crate::typer) fn local_value_symbol_flags(
+    modifiers: &[Modifier],
+) -> Result<SymbolFlags, &'static str> {
+    let mut flags = SymbolFlags::EMPTY;
+    for (index, modifier) in modifiers.iter().copied().enumerate() {
+        if modifiers[..index].contains(&modifier) {
+            return Err("duplicate source modifier");
+        }
+        match modifier {
+            Modifier::Var
+            | Modifier::Final
+            | Modifier::Given
+            | Modifier::Implicit
+            | Modifier::Lazy
+            | Modifier::Inline => flags = flags | source_modifier_flag(modifier),
+            _ => return Err("unsupported source modifier"),
+        }
+    }
+
+    let supported_sets = [
+        SymbolFlags::EMPTY,
+        SymbolFlags::MUTABLE,
+        SymbolFlags::FINAL,
+        SymbolFlags::LAZY,
+        SymbolFlags::INLINE,
+        SymbolFlags::GIVEN,
+        SymbolFlags::GIVEN | SymbolFlags::FINAL,
+        SymbolFlags::GIVEN | SymbolFlags::LAZY,
+        SymbolFlags::GIVEN | SymbolFlags::FINAL | SymbolFlags::LAZY,
+        SymbolFlags::IMPLICIT,
+    ];
+    if !supported_sets.contains(&flags) {
+        return Err(
+            if flags.contains(SymbolFlags::MUTABLE)
+                || (flags.contains(SymbolFlags::GIVEN) && flags.contains(SymbolFlags::IMPLICIT))
+                || (flags.contains(SymbolFlags::INLINE)
+                    && flags.difference(SymbolFlags::INLINE | SymbolFlags::FINAL)
+                        != SymbolFlags::EMPTY)
+            {
+                "inconsistent source modifier set"
+            } else {
+                "unsupported source modifier set"
+            },
+        );
+    }
+    Ok(flags)
+}
+
+pub(in crate::typer) fn local_value_semantics_deferred(flags: SymbolFlags) -> bool {
+    !(flags & LOCAL_VALUE_SEMANTICS_DEFERRED).is_empty()
+}
+
+fn local_value_modifier_error(
+    source: SourceId,
+    tree: TreeId<Untyped>,
+    modifiers: &[Modifier],
+    classification: &'static str,
+) -> TyperError {
+    TyperError::LocalValueModifierDeferred {
+        source,
+        tree_index: tree.index(),
+        modifiers: modifiers.to_vec(),
+        classification,
+    }
+}
+
+fn local_value_flags_or_defer(
+    source: SourceId,
+    tree: TreeId<Untyped>,
+    modifiers: &[Modifier],
+) -> Result<SymbolFlags, TyperError> {
+    let flags = local_value_symbol_flags(modifiers).map_err(|classification| {
+        local_value_modifier_error(source, tree, modifiers, classification)
+    })?;
+    if local_value_semantics_deferred(flags) {
+        return Err(local_value_modifier_error(
+            source,
+            tree,
+            modifiers,
+            "declaration semantics deferred",
+        ));
+    }
+    Ok(flags)
+}
+
 /// The single typed identity for a source block statement and the ordered
 /// typed statements emitted into the enclosing block.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -345,6 +435,9 @@ impl SourceTyper<'_> {
             TyperError::LocalPatDefDeferred { kind, .. } => {
                 format!("LocalPatDefDeferred::{kind}")
             }
+            TyperError::LocalValueModifierDeferred { classification, .. } => {
+                format!("LocalValueModifierDeferred::{classification}")
+            }
             TyperError::PatDefAggregateArityDeferred {
                 arity,
                 max_supported,
@@ -367,8 +460,6 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TypedStatExpansion, TyperError> {
-        use dotty_core::ast::Modifier;
-
         if let Some(expansion) = self.patdef_expansion_at(self.source, tree).cloned() {
             let binders = self.patdef_binders(&definition.patterns);
             if binders.is_empty() {
@@ -435,17 +526,8 @@ impl SourceTyper<'_> {
             });
         }
         let modifiers = &definition.modifiers.modifiers;
-        if modifiers.contains(&Modifier::Lazy) {
-            return Err(TyperError::LocalPatDefDeferred {
-                source: self.source,
-                tree_index: tree.index(),
-                kind: "lazy",
-            });
-        }
-        let is_mutable = modifiers.contains(&Modifier::Var);
-        if modifiers.iter().any(|modifier| *modifier != Modifier::Var)
-            || definition.modifiers.visibility.is_some()
-            || !definition.modifiers.annotations.is_empty()
+        let symbol_flags = local_value_flags_or_defer(self.source, tree, modifiers)?;
+        if definition.modifiers.visibility.is_some() || !definition.modifiers.annotations.is_empty()
         {
             return Err(TyperError::LocalPatDefDeferred {
                 source: self.source,
@@ -706,11 +788,7 @@ impl SourceTyper<'_> {
                     name: *binder_name,
                     owner: Some(context.owner),
                     kind: SymbolKind::Local,
-                    flags: if is_mutable {
-                        SymbolFlags::MUTABLE
-                    } else {
-                        SymbolFlags::EMPTY
-                    },
+                    flags: symbol_flags,
                     visibility: dotty_core::Visibility::Public,
                     info: SymbolInfo::Complete(binder_type),
                     origin: SymbolOrigin::Source(self.source),
@@ -807,11 +885,7 @@ impl SourceTyper<'_> {
             name: binder_name,
             owner: Some(context.owner),
             kind: SymbolKind::Local,
-            flags: if is_mutable {
-                SymbolFlags::MUTABLE
-            } else {
-                SymbolFlags::EMPTY
-            },
+            flags: symbol_flags,
             visibility: dotty_core::Visibility::Public,
             info: SymbolInfo::Complete(binder_type),
             origin: SymbolOrigin::Source(self.source),
@@ -1111,6 +1185,8 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
+        let symbol_flags =
+            local_value_flags_or_defer(self.source, tree, &definition.metadata.modifiers)?;
         let Some(local_stack) = context.local_scopes else {
             return Err(TyperError::ExpressionLocalScopeStackMissing {
                 stack: ExpressionScopeId::new(
@@ -1169,15 +1245,7 @@ impl SourceTyper<'_> {
             name,
             owner: Some(context.owner),
             kind: SymbolKind::Local,
-            flags: if definition
-                .metadata
-                .modifiers
-                .contains(&dotty_core::ast::Modifier::Var)
-            {
-                SymbolFlags::MUTABLE
-            } else {
-                SymbolFlags::EMPTY
-            },
+            flags: symbol_flags,
             visibility: dotty_core::Visibility::Public,
             info: SymbolInfo::Missing,
             origin: SymbolOrigin::Source(self.source),
@@ -1844,19 +1912,7 @@ impl SourceTyper<'_> {
                 )?;
                 return Ok(TypedStatExpansion::one(typed));
             }
-            if let TreeKind::ValDef(definition) = &source_stat.kind {
-                if definition
-                    .metadata
-                    .modifiers
-                    .iter()
-                    .any(|modifier| *modifier != dotty_core::ast::Modifier::Var)
-                {
-                    return Err(TyperError::LocalBlockDeclarationDeferred {
-                        source: self.source,
-                        tree_index: stat.index(),
-                        kind,
-                    });
-                }
+            if let TreeKind::ValDef(_) = &source_stat.kind {
                 let typed =
                     self.type_value_expression_inner(stat, context, info_journal, new_mappings)?;
                 return Ok(TypedStatExpansion::one(typed));

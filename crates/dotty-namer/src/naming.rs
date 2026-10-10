@@ -2450,25 +2450,11 @@ impl Namer<'_> {
             .iter()
             .fold(SymbolFlags::EMPTY, |flags, modifier| {
                 let flag = match modifier {
-                    Modifier::Abstract => SymbolFlags::ABSTRACT,
-                    Modifier::Final => SymbolFlags::FINAL,
-                    Modifier::Sealed => SymbolFlags::SEALED,
-                    Modifier::Case => SymbolFlags::CASE,
-                    Modifier::Implicit => SymbolFlags::IMPLICIT,
-                    Modifier::Given => SymbolFlags::GIVEN,
-                    Modifier::Lazy => SymbolFlags::LAZY,
-                    Modifier::Var => SymbolFlags::MUTABLE,
-                    Modifier::Override => SymbolFlags::OVERRIDE,
-                    Modifier::Inline => SymbolFlags::INLINE,
-                    Modifier::Transparent => SymbolFlags::TRANSPARENT,
-                    Modifier::Opaque => SymbolFlags::OPAQUE,
-                    Modifier::Extension => SymbolFlags::EXTENSION,
-                    Modifier::Erased => SymbolFlags::ERASED,
                     Modifier::Enum => {
                         SymbolFlags::ENUM | SymbolFlags::ABSTRACT | SymbolFlags::SEALED
                     }
                     Modifier::EnumCase => SymbolFlags::ENUM | SymbolFlags::CASE,
-                    _ => SymbolFlags::EMPTY,
+                    modifier => dotty_core::source_modifier_flag(*modifier),
                 };
                 flags | flag
             })

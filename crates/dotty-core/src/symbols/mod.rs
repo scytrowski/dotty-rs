@@ -10,7 +10,7 @@ mod table;
 mod visibility;
 
 pub use completion::SymbolInfo;
-pub use flags::SymbolFlags;
+pub use flags::{SymbolFlags, source_modifier_flag};
 pub use kind::SymbolKind;
 pub use origin::{OriginTable, SymbolOrigin};
 pub use scope::{Scope, ScopeArena};
