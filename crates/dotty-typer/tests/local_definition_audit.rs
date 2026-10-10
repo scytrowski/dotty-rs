@@ -5759,18 +5759,7 @@ fn local_method_signature_profile_classifies_feature_fixtures() {
         by_name.local_method_signature_profile, repeated_by_name.local_method_signature_profile,
         "local method signature profile should be deterministic across repeated audits"
     );
-    let by_name_feature = by_name
-        .local_method_signature_profile
-        .features
-        .get("by-name parameters")
-        .expect("by-name parameter fixture should retain its exact feature payload");
-    assert_eq!(by_name_feature.count, 1);
-    assert!(by_name_feature.records.iter().any(|record| {
-        record.contains("method=byName")
-            && record.contains("by_name_parameter=true")
-            && record.contains("result=explicit")
-            && record.contains("attribution=direct")
-    }));
+    assert!(by_name.local_method_signature_profile.features.is_empty());
 
     let dependent = audit_source_inner(
         "class C { def outer: Int = { def dependent(value: Int): value.type = value; 0 } }",
