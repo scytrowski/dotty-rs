@@ -432,6 +432,112 @@ impl PackageIssue {
     }
 }
 
+/// Statement-sequence context relevant to layout and separator diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatementSequenceContext {
+    CompilationUnit,
+    Block,
+}
+
+/// Typed failures emitted while parsing statement-level syntax.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatementIssue {
+    /// Modifiers or annotations are not followed by a definition.
+    ExpectedDefinitionAfterModifiers { found: TokenKind },
+    /// A compilation unit begins with an expression rather than a definition.
+    TopLevelExpressionUnsupported { found: TokenKind },
+    /// The current syntax form has not been implemented by this parser.
+    UnsupportedSyntaxStart { found: TokenKind },
+    /// An enum case syntax form is not supported in this context.
+    UnsupportedEnumCase,
+}
+
+impl StatementIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::ExpectedDefinitionAfterModifiers { .. } => ParseDiagnosticKind::ExpectedToken,
+            Self::TopLevelExpressionUnsupported { .. }
+            | Self::UnsupportedSyntaxStart { .. }
+            | Self::UnsupportedEnumCase => ParseDiagnosticKind::UnsupportedSyntax,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ExpectedDefinitionAfterModifiers { .. } => {
+                "parser.statement.expected_definition_after_modifiers"
+            }
+            Self::TopLevelExpressionUnsupported { .. } => {
+                "parser.statement.top_level_expression_unsupported"
+            }
+            Self::UnsupportedSyntaxStart { .. } => "parser.statement.unsupported_syntax_start",
+            Self::UnsupportedEnumCase => "parser.statement.unsupported_enum_case",
+        }
+    }
+}
+
+/// Typed failures for statement separators, parser progress, and Scala `end` markers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayoutIssue {
+    /// A statement sequence parser failed to advance.
+    StatementSequenceNoProgress {
+        context: StatementSequenceContext,
+        found: TokenKind,
+    },
+    /// A statement is not followed by a separator in its sequence.
+    ExpectedStatementSeparator {
+        context: StatementSequenceContext,
+        found: TokenKind,
+    },
+    /// A top-level sequence parser failed to advance.
+    TopLevelSequenceNoProgress { found: TokenKind },
+    /// A top-level statement is not followed by a separator.
+    ExpectedTopLevelSeparator { found: TokenKind },
+    /// An `end` marker is not followed by a target name.
+    ExpectedEndMarkerName { found: TokenKind },
+    /// An `end` marker duplicates a marker already consumed by its owner.
+    DuplicateEndMarker,
+    /// An `end` marker names an enclosing construct other than the active owner.
+    MisalignedEndMarker,
+}
+
+impl LayoutIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::StatementSequenceNoProgress { .. }
+            | Self::ExpectedStatementSeparator { .. }
+            | Self::TopLevelSequenceNoProgress { .. }
+            | Self::ExpectedTopLevelSeparator { .. }
+            | Self::DuplicateEndMarker
+            | Self::MisalignedEndMarker => ParseDiagnosticKind::UnexpectedToken,
+            Self::ExpectedEndMarkerName { .. } => ParseDiagnosticKind::ExpectedToken,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::StatementSequenceNoProgress { .. } => {
+                "parser.layout.statement_sequence_no_progress"
+            }
+            Self::ExpectedStatementSeparator {
+                context: StatementSequenceContext::CompilationUnit,
+                ..
+            } => "parser.layout.expected_compilation_unit_separator",
+            Self::ExpectedStatementSeparator {
+                context: StatementSequenceContext::Block,
+                ..
+            } => "parser.layout.expected_block_separator",
+            Self::TopLevelSequenceNoProgress { .. } => {
+                "parser.layout.top_level_sequence_no_progress"
+            }
+            Self::ExpectedTopLevelSeparator { .. } => "parser.layout.expected_top_level_separator",
+            Self::ExpectedEndMarkerName { .. } => "parser.layout.expected_end_marker_name",
+            Self::DuplicateEndMarker => "parser.layout.duplicate_end_marker",
+            Self::MisalignedEndMarker => "parser.layout.misaligned_end_marker",
+        }
+    }
+}
+
 /// Typed failures in Scala type-parameter and context-bound clauses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypeParamIssue {
@@ -1650,6 +1756,10 @@ pub enum ParseIssue {
     Import(ImportIssue),
     /// A structured failure emitted while parsing a package clause or body.
     Package(PackageIssue),
+    /// A structured failure emitted while parsing a statement.
+    Statement(StatementIssue),
+    /// A structured failure emitted while parsing separators and layout markers.
+    Layout(LayoutIssue),
 }
 
 impl ParseIssue {
@@ -1678,6 +1788,8 @@ impl ParseIssue {
             Self::Case(issue) => issue.kind(),
             Self::Import(issue) => issue.kind(),
             Self::Package(issue) => issue.kind(),
+            Self::Statement(issue) => issue.kind(),
+            Self::Layout(issue) => issue.kind(),
         }
     }
 
@@ -1716,6 +1828,8 @@ impl ParseIssue {
             Self::Case(issue) => issue.code(),
             Self::Import(issue) => issue.code(),
             Self::Package(issue) => issue.code(),
+            Self::Statement(issue) => issue.code(),
+            Self::Layout(issue) => issue.code(),
         }
     }
 }
@@ -1805,6 +1919,8 @@ impl ParseDiagnostic {
             ParseIssue::Case(_) => None,
             ParseIssue::Import(_) => None,
             ParseIssue::Package(_) => None,
+            ParseIssue::Statement(_) => None,
+            ParseIssue::Layout(_) => None,
         }
     }
 }

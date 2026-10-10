@@ -4,7 +4,10 @@ use dotty_core::{
 };
 
 use crate::modifiers::DefinitionPrefix;
-use crate::{Location, ParseDiagnosticKind, Parser, RecoverySet};
+use crate::{
+    LayoutIssue, Location, ParseIssue, Parser, RecoverySet, StatementIssue,
+    StatementSequenceContext,
+};
 
 /// A parser-only classification used while building statement sequences.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -199,10 +202,11 @@ where
                 self.parse_given_definition_with_prefix(location, prefix)
             }
             _ => {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected a definition after its annotations and modifiers",
-                );
+                self.report_issue(ParseIssue::Statement(
+                    StatementIssue::ExpectedDefinitionAfterModifiers {
+                        found: self.current().kind,
+                    },
+                ));
                 ParsedStatement::Expression(self.parse_unsupported_syntax())
             }
         }
@@ -272,23 +276,17 @@ where
             statements.push(self.parse_statement(location));
 
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    match boundary {
-                        StatementSequenceBoundary::CompilationUnit => {
-                            "parser made no progress while parsing a compilation unit"
-                        }
-                        StatementSequenceBoundary::Block(_) => {
-                            "parser made no progress while parsing a block"
-                        }
-                        StatementSequenceBoundary::FeedbackRegionBlock { .. } => {
-                            "parser made no progress while parsing a block"
-                        }
-                        StatementSequenceBoundary::LayoutRegionBlock { .. } => {
-                            "parser made no progress while parsing a block"
-                        }
+                let context = if boundary == StatementSequenceBoundary::CompilationUnit {
+                    StatementSequenceContext::CompilationUnit
+                } else {
+                    StatementSequenceContext::Block
+                };
+                self.report_issue(ParseIssue::Layout(
+                    LayoutIssue::StatementSequenceNoProgress {
+                        context,
+                        found: self.current().kind,
                     },
-                );
+                ));
                 let recovery_checkpoint = self.cursor.checkpoint();
                 self.advance();
                 if !self.cursor.progressed_since(recovery_checkpoint) {
@@ -315,23 +313,17 @@ where
             } else if self.last_advance_consumed_statement_separator {
                 self.last_advance_consumed_statement_separator = false;
             } else if !self.sequence_ended(boundary) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    match boundary {
-                        StatementSequenceBoundary::CompilationUnit => {
-                            "expected a statement separator"
-                        }
-                        StatementSequenceBoundary::Block(_) => {
-                            "expected a block statement separator"
-                        }
-                        StatementSequenceBoundary::FeedbackRegionBlock { .. } => {
-                            "expected a block statement separator"
-                        }
-                        StatementSequenceBoundary::LayoutRegionBlock { .. } => {
-                            "expected a block statement separator"
-                        }
+                let context = if boundary == StatementSequenceBoundary::CompilationUnit {
+                    StatementSequenceContext::CompilationUnit
+                } else {
+                    StatementSequenceContext::Block
+                };
+                self.report_issue(ParseIssue::Layout(
+                    LayoutIssue::ExpectedStatementSeparator {
+                        context,
+                        found: self.current().kind,
                     },
-                );
+                ));
                 self.recover_until(RecoverySet::Statement);
                 self.consume_sequence_separators(boundary);
             }
@@ -440,10 +432,11 @@ where
             }
 
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing a top-level statement",
-                );
+                self.report_issue(ParseIssue::Layout(
+                    LayoutIssue::TopLevelSequenceNoProgress {
+                        found: self.current().kind,
+                    },
+                ));
                 let recovery_checkpoint = self.cursor.checkpoint();
                 self.advance();
                 if !self.cursor.progressed_since(recovery_checkpoint) {
@@ -460,10 +453,9 @@ where
                 self.last_advance_consumed_statement_separator = false;
             } else if !self.sequence_ended(boundary) && self.current().kind != TokenKind::EndMarker
             {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "expected a top-level statement separator",
-                );
+                self.report_issue(ParseIssue::Layout(LayoutIssue::ExpectedTopLevelSeparator {
+                    found: self.current().kind,
+                }));
                 self.recover_until(RecoverySet::Statement);
                 self.consume_sequence_separators(boundary);
             }
@@ -489,10 +481,11 @@ where
         }
 
         let position = self.current_span();
-        self.report(
-            ParseDiagnosticKind::UnsupportedSyntax,
-            "top-level expressions are not supported in a compilation unit",
-        );
+        self.report_issue(ParseIssue::Statement(
+            StatementIssue::TopLevelExpressionUnsupported {
+                found: self.current().kind,
+            },
+        ));
         let checkpoint = self.cursor.checkpoint();
         self.with_location(location, |parser| {
             let _ = parser.expr();
@@ -651,10 +644,9 @@ where
                 )
         );
         if !target_is_name {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected a name after `end`",
-            );
+            self.report_issue(ParseIssue::Layout(LayoutIssue::ExpectedEndMarkerName {
+                found: self.current().kind,
+            }));
             return self.cursor.progressed_since(checkpoint);
         }
 
@@ -677,17 +669,15 @@ where
             self.end_marker_owner(tree, target_kind, &target_text, marker.start(), true)
                 .is_some()
         }) {
-            self.report_at(
-                ParseDiagnosticKind::UnexpectedToken,
+            self.report_issue_at(
                 SourceSpan::new(self.source_id, Span::without_point(marker)),
-                "duplicate end marker",
+                ParseIssue::Layout(LayoutIssue::DuplicateEndMarker),
             );
         } else {
             let range = TextRange::new(marker.start(), target_end).expect("marker span is ordered");
-            self.report_at(
-                ParseDiagnosticKind::UnexpectedToken,
+            self.report_issue_at(
                 SourceSpan::new(self.source_id, Span::without_point(range)),
-                "misaligned end marker",
+                ParseIssue::Layout(LayoutIssue::MisalignedEndMarker),
             );
         }
         self.advance();
@@ -1033,13 +1023,11 @@ where
 
     fn parse_unsupported_syntax(&mut self) -> TreeId<Untyped> {
         let position = self.current_span();
-        self.report(
-            ParseDiagnosticKind::UnsupportedSyntax,
-            format!(
-                "syntax beginning with {:?} is not supported by this parser milestone",
-                self.current().kind
-            ),
-        );
+        self.report_issue(ParseIssue::Statement(
+            StatementIssue::UnsupportedSyntaxStart {
+                found: self.current().kind,
+            },
+        ));
         self.advance();
         self.recover_until(RecoverySet::Statement);
         self.error_expr(position)
@@ -1047,10 +1035,7 @@ where
 
     fn parse_unsupported_enum_case(&mut self) -> ParsedStatement {
         let position = self.current_span();
-        self.report(
-            ParseDiagnosticKind::UnsupportedSyntax,
-            "enum cases are not supported by this parser milestone",
-        );
+        self.report_issue(ParseIssue::Statement(StatementIssue::UnsupportedEnumCase));
         self.advance();
         self.recover_until(RecoverySet::Statement);
         ParsedStatement::Expression(self.error_expr(position))
@@ -1145,6 +1130,7 @@ const fn token_starts_definition(kind: TokenKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ParseDiagnosticKind;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::{
         Ident, Modifiers, ModuleDef, Template, TypeDef, UntypedNode, UntypedTemplateMetadata,
@@ -1360,13 +1346,20 @@ mod tests {
             parser.parse_statement_sequence(StatementSequenceBoundary::Block(TokenKind::Outdent))
         });
 
-        assert!(parser.diagnostics.iter().any(|diagnostic| {
-            diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
-                && diagnostic
-                    .legacy_message()
-                    .expect("legacy parser diagnostic")
-                    == "expected a block statement separator"
-        }));
+        let diagnostic = parser.diagnostics.last().expect("separator diagnostic");
+        assert_eq!(diagnostic.kind(), ParseDiagnosticKind::UnexpectedToken);
+        assert_eq!(
+            diagnostic.issue().code(),
+            "parser.layout.expected_block_separator"
+        );
+        assert_eq!(
+            diagnostic.issue(),
+            &ParseIssue::Layout(LayoutIssue::ExpectedStatementSeparator {
+                context: StatementSequenceContext::Block,
+                found: TokenKind::Keyword(HardKeyword::If),
+            })
+        );
+        assert_eq!(diagnostic.span(), TextRange::new(6, 8).unwrap());
     }
 
     #[test]
@@ -1444,11 +1437,14 @@ mod tests {
         assert!(parser.consume_end_marker(Some(module)));
         assert_eq!(parser.diagnostics.len(), 1);
         assert_eq!(
-            parser.diagnostics[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "misaligned end marker"
+            parser.diagnostics[0].issue(),
+            &ParseIssue::Layout(LayoutIssue::MisalignedEndMarker)
         );
+        assert_eq!(
+            parser.diagnostics[0].issue().code(),
+            "parser.layout.misaligned_end_marker"
+        );
+        assert_eq!(parser.diagnostics[0].span(), TextRange::new(2, 11).unwrap());
         for tree in [module, outer_template, inner_type] {
             assert_eq!(
                 parser.ast.get(tree).position.unwrap().span().range(),
@@ -1469,11 +1465,14 @@ mod tests {
         assert!(parser.consume_end_marker(Some(module)));
         assert_eq!(parser.diagnostics.len(), 1);
         assert_eq!(
-            parser.diagnostics[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "duplicate end marker"
+            parser.diagnostics[0].issue(),
+            &ParseIssue::Layout(LayoutIssue::DuplicateEndMarker)
         );
+        assert_eq!(
+            parser.diagnostics[0].issue().code(),
+            "parser.layout.duplicate_end_marker"
+        );
+        assert_eq!(parser.diagnostics[0].span(), TextRange::new(2, 5).unwrap());
         for tree in [module, outer_template, inner_type] {
             assert_eq!(
                 parser.ast.get(tree).position.unwrap().span().range(),
@@ -1570,8 +1569,12 @@ mod tests {
         assert_eq!(stats.len(), 1);
         assert_eq!(parser.diagnostics.len(), 1);
         assert_eq!(
-            parser.diagnostics[0].kind(),
-            ParseDiagnosticKind::UnexpectedToken
+            parser.diagnostics[0].issue(),
+            &ParseIssue::Layout(LayoutIssue::MisalignedEndMarker)
+        );
+        assert_eq!(
+            parser.diagnostics[0].span(),
+            TextRange::new(12, 21).unwrap()
         );
         let TreeKind::Ident(result) = parser.ast.get(result).kind else {
             panic!("expected the statement after the marker");
@@ -1607,11 +1610,10 @@ mod tests {
         );
         assert_eq!(parser.diagnostics.len(), 1);
         assert_eq!(
-            parser.diagnostics[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "misaligned end marker"
+            parser.diagnostics[0].issue(),
+            &ParseIssue::Layout(LayoutIssue::MisalignedEndMarker)
         );
+        assert_eq!(parser.diagnostics[0].span(), TextRange::new(8, 17).unwrap());
         let TreeKind::Ident(result) = parser.ast.get(result).kind else {
             panic!("expected the statement after the misaligned marker");
         };
@@ -1647,10 +1649,12 @@ mod tests {
         assert_eq!(stats.len(), 1);
         assert_eq!(parser.diagnostics.len(), 1);
         assert_eq!(
-            parser.diagnostics[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "duplicate end marker"
+            parser.diagnostics[0].issue(),
+            &ParseIssue::Layout(LayoutIssue::DuplicateEndMarker)
+        );
+        assert_eq!(
+            parser.diagnostics[0].span(),
+            TextRange::new(19, 22).unwrap()
         );
         let TreeKind::Ident(result) = parser.ast.get(result).kind else {
             panic!("expected the statement after the duplicate marker");

@@ -42,9 +42,10 @@ pub use cursor::{Cursor, CursorCheckpoint};
 pub use diagnostics::{
     CaseIssue, ClassDefinitionIssue, ContextualParameterClause, DeclarationIssue,
     ExpressionApplicationTarget, ExpressionIssue, ExtensionIssue, GivenIssue, ImportIssue,
-    LayoutExpressionContext, ModifierIssue, PackageIssue, ParameterIssue, ParameterMutability,
-    ParseDiagnostic, ParseDiagnosticKind, ParseIssue, PatternIssue, TypeDefinitionIssue,
-    TypeFunctionArrow, TypeIssue, TypeParamIssue, ValueDefinitionKind,
+    LayoutExpressionContext, LayoutIssue, ModifierIssue, PackageIssue, ParameterIssue,
+    ParameterMutability, ParseDiagnostic, ParseDiagnosticKind, ParseIssue, PatternIssue,
+    StatementIssue, StatementSequenceContext, TypeDefinitionIssue, TypeFunctionArrow, TypeIssue,
+    TypeParamIssue, ValueDefinitionKind,
 };
 pub use infix::{OpInfo, is_assignment_operator, is_right_associative, precedence};
 pub use names::KnownNames;
