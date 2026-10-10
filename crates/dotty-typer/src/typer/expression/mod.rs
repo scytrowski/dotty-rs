@@ -344,7 +344,13 @@ impl SourceTyper<'_> {
                     return Err(TyperError::TermReferenceCannotBeWidened { symbol, kind });
                 }
                 if prefix == self.definitions.no_prefix {
-                    self.completed_expression_symbol_info(symbol, info_journal)
+                    let info = self.completed_expression_symbol_info(symbol, info_journal)?;
+                    if kind == SymbolKind::Parameter
+                        && let Some(Type::ByName { result }) = self.store.types.try_get(info)
+                    {
+                        return Ok(*result);
+                    }
+                    Ok(info)
                 } else {
                     let receiver =
                         self.widen_expression_type_journaled(prefix, info_journal, depth + 1)?;

@@ -1,12 +1,12 @@
 # Typer classpath corpus audit: Scala 3.9.0
 
-The report is generated from two byte-identical runs of the pinned Scala 3.9.0 audit. It records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success. The source corpus, parser/namer setup, Scala revision, JDK 21, and classpath remain pinned.
+The full audit and ranking below are a JDK 21 snapshot from before #900. Their raw `top_semantic_gaps` data therefore retains the pre-#900 count of 14 `LocalMethodSignatureDeferred` observations in 3 files. The later #900 supplemental section records the post-change profile using JDK 25; its 6 / 1 count is current for that profile. The full report is generated from two byte-identical runs of the pinned Scala 3.9.0 audit and records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success.
 
 Run `tools/typer-classpath-corpus-audit/run` with the environment documented in `docs/typer-v0.1-compatibility.md` to regenerate this report.
 
 ## Historical #767–#771 expression sprint snapshot
 
-At the #772 snapshot, first blockers for term prefix operators and term annotations had moved to zero. These historical measurements are retained here for context; current values and ranking come from the report below.
+At the #772 snapshot, first blockers for term prefix operators and term annotations had moved to zero. These historical measurements are retained here for context; the full JDK 21 baseline and ranking are below.
 
 | First blocker | Before #767 | At #772 snapshot |
 | --- | ---: | ---: |
@@ -67,9 +67,9 @@ The initial local-extension blocker was 25 occurrences in 5 files. The current a
 
 Receiver or ordinary-argument mismatches remain non-applicable candidates and preserve `MemberNotFound`; the audit does not relabel those as successful typing. Multiple viable same-name local extensions produce `OverloadedSelectionDeferred` in a focused regression. Primitive definitions have no modeled member scopes. If nominal lookup cannot inspect a primitive member index, local extension resolution is not attempted and the original `MemberLookup` error is retained; fallback is available only after a completed index confirms that the ordinary name has no member. External member materialization remains zero.
 
-### Current top ten Typer-owned semantic blockers
+### Pre-#900 JDK 21 top ten Typer-owned semantic blockers
 
-The ranked list below excludes parser/namer and classpath-resolution failures, and excludes the downstream `NoSuccessfulEnclosingMethodTyping` counter. Counts and representative paths are in `top_semantic_gaps` in the raw report.
+This ranking predates #900 and excludes parser/namer and classpath-resolution failures, as well as the downstream `NoSuccessfulEnclosingMethodTyping` counter. Counts and representative paths are in the matching pre-#900 `top_semantic_gaps` raw snapshot below. The current #900 supplemental local-signature profile above is 6 / 1.
 
 | Rank | First blocker | Count / files |
 | ---: | --- | ---: |
@@ -84,11 +84,11 @@ The ranked list below excludes parser/namer and classpath-resolution failures, a
 | 9 | `MissingDeclaredType` | 10 / 3 |
 | 10 | `LocalBlockDeclarationDeferred::module definition` | 9 / 2 |
 
-### Recommended next Typer sprint
+### Recommended next Typer sprint after #900
 
-The 14 `LocalMethodSignatureDeferred` observations split into 3 direct signature failures and 11 sibling local methods that inherit the first blocker from an enclosing failed body. The direct payloads are `by-name parameters` (2 origins; 8 affected methods across 2 files) and `parameter modifiers` (1 origin; 6 affected methods in 1 file). Recommend a narrow follow-up for local `inline` parameter signatures: the direct modifier origin is one method in `MegaPhase.scala`, and the shared signature builder already preserves `Inline` on parameter symbols. Keep inline expansion and argument evaluation out of scope. By-name signatures have higher measured reach, but the corpus audit stops at their local signature guards; per-method downstream status is unobserved, as detailed below. Dependent-result signatures have no corpus first-blocker observations and remain covered only by focused fixtures. The other high-ranked buckets still need separate prerequisites: anonymous classes (32 / 15) need stable identity and ownership, while local values/variables (21 / 8) need a PatDef shape breakdown.
+Before #900, the 14 `LocalMethodSignatureDeferred` observations split into 3 direct signature failures and 11 inherited sibling methods. The #900 audit shows that all 8 by-name signature observations now reach deeper first blockers; `instantiateCFT` and `cases` both reach `ImportQualifierNotFound`, while no corpus by-name application site is typed. A bounded next slice is the separate by-name application boundary (`ByNameApplicationParameterDeferred`); keep evaluation/thunk semantics out of scope until its behavior is specified. The remaining local signature group is parameter modifiers (6 affected methods in one file), with one direct `inline` parameter origin in `MegaPhase.scala`; `source_method_flags` already preserves `Inline`, so that signature-only slice remains bounded. Dependent-result signatures have no corpus first-blocker observations and remain covered only by focused fixtures. The other high-ranked buckets still need separate prerequisites: anonymous classes (32 / 15) need stable identity and ownership, while local values/variables (21 / 8) need a PatDef shape breakdown.
 
-### #899 local method signature profile
+### #899 baseline local method signature profile (before #900)
 
 The profile counts local methods whose first blocker is a local signature failure. `direct_origins` identifies methods carrying that signature feature; `inherited_methods` are sibling methods attributed to the same enclosing failure. Thus 14 affected methods do not mean 14 independently unsupported signatures. The audit was run twice with JDK feature release 25 and the pinned Scala 3.9.0 source/artifact inputs; normalized output matched byte-for-byte. The profile is diagnostic only and does not type additional methods.
 
@@ -116,14 +116,16 @@ compiler/src/dotty/tools/dotc/transform/MegaPhase.scala:line=292 span=13347..202
 compiler/src/dotty/tools/dotc/transform/MegaPhase.scala:line=394 span=17855..18077 tree=2116 method=mapPackage feature="parameter modifiers" type_parameter_clauses=0 value_parameter_clauses=1 clause_kinds=[contextual] parameter_modifiers=[Given] by_name_parameter=false result_depends_on_parameter=false extension=false result=inferred blocker_origin=compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1125:inLocalContext attribution=inherited
 ```
 
-### By-name downstream blocker inspection
+### #900 by-name signature follow-up
 
-For both direct by-name origins, `complete_local_method_signature_inner` reports the signature guard before the local method RHS or enclosing body is typed. The full corpus audit therefore cannot observe whether these exact application sites produce `ByNameApplicationParameterDeferred` after signature completion. Source inspection identifies likely sites, but the downstream result is a hypothesis, not a measured outcome. `instantiateCFT` has an explicit result and `cases` an inferred result; these source shapes do not establish that either complete signature/body would type after removing the by-name guard. The separate `ByNameCall.scala` fixture confirms that an application to a by-name method can produce this error; it does not establish the outcome for these corpus methods.
+The pinned Scala 3.9.0 audit was rerun twice after #900 with JDK feature release 25 and the same source/artifact inputs. Normalized output matched byte-for-byte. The local signature profile dropped from 14 observations in 3 files to 6 in 1 file: all 8 by-name observations (2 direct origins and 6 inherited sibling methods) no longer stop at `LocalMethodSignatureDeferred`. The six remaining observations are the `parameter modifiers` group in `MegaPhase.scala`.
 
-| Corpus method | Result shape | Source application sites | Current measured blocker | Downstream application outcome |
-| --- | --- | --- | --- | --- |
-| `SymUtils.scala::instantiateCFT` | Explicit | Recursive call in its RHS (line 469); initial call from `returnProto` (line 479). | `LocalMethodSignatureDeferred::by-name parameters` before either application is typed. | Unobserved for both sites; `ByNameApplicationParameterDeferred` is a hypothesis if signature completion advances. |
-| `Typer.scala::cases` | Inferred | Calls from the enclosing `typedTyped` body at lines 1354 and 1378; the local method RHS itself has no call to `cases`. | `LocalMethodSignatureDeferred::by-name parameters` before the enclosing body is typed. | Unobserved for both sites; `ByNameApplicationParameterDeferred` is a hypothesis if signature completion advances. |
+| Corpus method | Result shape | First blocker after #900 | Application sites reached by audit |
+| --- | --- | --- | --- |
+| `SymUtils.scala::instantiateCFT` | Explicit | `ImportQualifierNotFound` | No; recursive RHS call (line 469) and `returnProto` call (line 479) remain behind the enclosing blocker. |
+| `Typer.scala::cases` | Inferred | `ImportQualifierNotFound` | No; calls from `typedTyped` (lines 1354 and 1378) remain behind the enclosing blocker. |
+
+These two methods do not produce a corpus `ByNameApplicationParameterDeferred` observation because their enclosing blocker prevents those applications from being typed. The focused `ByNameCall.scala` fixture continues to verify that separate application boundary. The audit is diagnostic only: no additional local methods typed, and the first-blocker movement is not semantic success.
 
 ### Historical #825 next-sprint candidates (pre-#856)
 
@@ -133,7 +135,7 @@ For both direct by-name origins, `complete_local_method_signature_inner` reports
 | `AnonymousClassInstantiationDeferred` (32 / 15) | Support one anonymous `new` with one concrete parent in `typer/expression/new.rs`. | Reuse ordinary `New` typing and parent projection; define stable anonymous symbol ownership and class info. | Closure capture, refinement synthesis, and general anonymous-class members. |
 | `UnsupportedSingletonReference` (historical 22 / 1) | #880 profiled the baseline; #881–#883 now project, relate, and preserve supported literal constants. | Reuse `Type::Constant`, literal expression typing, bounded relations, expected adaptation, and stable-prefix validation. | Arbitrary paths, unstable prefixes, and path-dependent relation redesign. |
 | `LocalBlockDeclarationDeferred::val/var definition` (21 / 8) | Split remaining cases by PatDef root/binder shape in `typer/expression/blocks.rs`. | Reuse transactional PatDef lowering, local binders, and assignment support. | General destructuring and reopening supported PatDef forms. |
-| `LocalMethodSignatureDeferred` (14 / 3; current profile) | Profiled as 3 direct errors plus 11 inherited observations: `parameter modifiers` has 1 direct origin / 6 affected methods; `by-name parameters` has 2 / 8. A bounded next slice is local `inline` parameter signature completion in `typer/completion/local_methods.rs`. | Reuse `source_method_flags` and the shared method-signature builder; parameter symbols already retain `Inline`. | Inline expansion and argument evaluation; by-name signature and application typing; dependent results; general erased parameter support or new method inference. |
+| `LocalMethodSignatureDeferred` (6 / 1; after #900) | The 8 by-name observations from #899 no longer stop at the signature guard; 6 parameter-modifier observations remain in `MegaPhase.scala`. | Reuse `source_method_flags` and the shared method-signature builder; parameter symbols already retain `Inline`. | Inline expansion and argument evaluation; by-name application typing; dependent results; general erased parameter support or new method inference. |
 
 ## Historical #825 MissingDeclaredType producer profile (pre-#856)
 
@@ -311,6 +313,10 @@ The raw profile below lists the current first blocker for each of the 22 pinned 
 ## Previous type projection snapshot
 
 The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.
+
+## Full JDK 21 raw audit snapshot (before #900)
+
+The raw report below was generated before #900 and is retained as a baseline snapshot. Its `top_semantic_gaps` section reports `LocalMethodSignatureDeferred: 14` in 3 files; the post-#900 supplemental profile above reports 6 in 1 file. Other raw counts also belong to this baseline run.
 
 ```text
 scala_revision=777528f19a58e794c9954a42f433373472ec57f8
