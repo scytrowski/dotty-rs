@@ -17,6 +17,206 @@ pub enum ParseDiagnosticKind {
     UnboundPlaceholderParameter,
 }
 
+/// Kind of simple source-level value declaration being parsed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueDefinitionKind {
+    Val,
+    Var,
+}
+
+/// Mutability keyword used by a class parameter accessor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParameterMutability {
+    Val,
+    Var,
+}
+
+/// Typed failures emitted while parsing `val`, `var`, and `def` declarations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeclarationIssue {
+    /// A method header is missing its return-type colon or body equals.
+    ExpectedMethodSeparator { found: TokenKind },
+    /// A secondary constructor appeared outside a class template.
+    SecondaryConstructorOutsideTemplate,
+    /// A method declaration has no valid name.
+    ExpectedMethodName { found: TokenKind },
+    /// A value declaration has no valid name.
+    ExpectedValueName {
+        declaration: ValueDefinitionKind,
+        found: TokenKind,
+    },
+    /// A typed value declaration is missing its initializer equals.
+    ExpectedValueEquals { found: TokenKind },
+    /// A value declaration has neither a type ascription nor an initializer.
+    ExpectedValueTypeOrEquals { found: TokenKind },
+    /// A pattern definition has no pattern after its `val` or `var` keyword.
+    ExpectedPatternAfterValueKeyword {
+        declaration: ValueDefinitionKind,
+        found: TokenKind,
+    },
+    /// A comma-separated value definition contains a non-identifier pattern.
+    CommaSeparatedValuePatternsMustBeIdentifiers { found: TokenKind },
+    /// A comma in a value definition is not followed by an identifier.
+    ExpectedIdentifierAfterValuePatternComma { found: TokenKind },
+    /// A pattern definition is missing its initializer equals.
+    ExpectedEqualsAfterPatternDefinition { found: TokenKind },
+}
+
+impl DeclarationIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::ExpectedMethodSeparator { .. }
+            | Self::ExpectedMethodName { .. }
+            | Self::ExpectedValueName { .. }
+            | Self::ExpectedValueEquals { .. }
+            | Self::ExpectedValueTypeOrEquals { .. }
+            | Self::ExpectedEqualsAfterPatternDefinition { .. } => {
+                ParseDiagnosticKind::ExpectedToken
+            }
+            Self::SecondaryConstructorOutsideTemplate => ParseDiagnosticKind::UnexpectedToken,
+            Self::ExpectedPatternAfterValueKeyword { .. }
+            | Self::CommaSeparatedValuePatternsMustBeIdentifiers { .. }
+            | Self::ExpectedIdentifierAfterValuePatternComma { .. } => {
+                ParseDiagnosticKind::ExpectedPattern
+            }
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ExpectedMethodSeparator { .. } => "parser.declaration.expected_method_separator",
+            Self::SecondaryConstructorOutsideTemplate => {
+                "parser.declaration.secondary_constructor_outside_template"
+            }
+            Self::ExpectedMethodName { .. } => "parser.declaration.expected_method_name",
+            Self::ExpectedValueName { .. } => "parser.declaration.expected_value_name",
+            Self::ExpectedValueEquals { .. } => "parser.declaration.expected_value_equals",
+            Self::ExpectedValueTypeOrEquals { .. } => {
+                "parser.declaration.expected_value_type_or_equals"
+            }
+            Self::ExpectedPatternAfterValueKeyword { .. } => {
+                "parser.declaration.expected_pattern_after_value_keyword"
+            }
+            Self::CommaSeparatedValuePatternsMustBeIdentifiers { .. } => {
+                "parser.declaration.comma_patterns_must_be_identifiers"
+            }
+            Self::ExpectedIdentifierAfterValuePatternComma { .. } => {
+                "parser.declaration.expected_identifier_after_pattern_comma"
+            }
+            Self::ExpectedEqualsAfterPatternDefinition { .. } => {
+                "parser.declaration.expected_equals_after_pattern"
+            }
+        }
+    }
+}
+
+/// Typed failures emitted while parsing term parameter clauses and parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParameterIssue {
+    /// A legacy `implicit` clause is not valid for this parameter owner.
+    LegacyImplicitClauseNotAllowed { owner: ParamOwner },
+    /// An `implicit` clause contains no parameter.
+    EmptyImplicitClause { found: TokenKind },
+    /// A named `using` clause contains no parameter.
+    EmptyUsingClause { found: TokenKind },
+    /// A class enum-case parameter clause ended before its parameter.
+    ExpectedParameterBeforeClauseEnd { found: TokenKind },
+    /// Parsing a term parameter did not advance the token source.
+    TermParameterNoProgress { found: TokenKind },
+    /// A comma is not followed by another term parameter.
+    ExpectedParameterAfterComma { found: TokenKind },
+    /// A hard modifier is not allowed on a named `using` parameter here.
+    HardModifierNotAllowedOnNamedUsingParameter { owner: ParamOwner, found: TokenKind },
+    /// An explicit `val`/`var` parameter accessor appeared outside a constructor.
+    AccessorOnlyAllowedOnClassConstructor { accessor: ParameterMutability },
+    /// A class parameter modifier requiring an accessor is missing `val` or `var`.
+    ExpectedClassParameterAccessor { found: TokenKind },
+    /// A `val`/`var` constructor parameter cannot use a by-name type.
+    ByNameClassParameterNotAllowed { accessor: ParameterMutability },
+    /// Repeated parameters are not allowed in legacy contextual clauses.
+    RepeatedParameterNotAllowedInContextualClause { modifier: Modifier },
+    /// An anonymous or named `using` clause has no parameter type.
+    ExpectedUsingParameterType { found: TokenKind },
+    /// Parsing an anonymous `using` parameter type did not advance the source.
+    AnonymousUsingParameterTypeNoProgress { found: TokenKind },
+    /// A comma in an anonymous `using` clause has no following type.
+    ExpectedUsingParameterTypeAfterComma { found: TokenKind },
+    /// A parameter has no valid name.
+    ExpectedParameterName { found: TokenKind },
+    /// A named parameter is missing its type ascription.
+    ExpectedParameterColonAndType { found: TokenKind },
+}
+
+impl ParameterIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::LegacyImplicitClauseNotAllowed { .. }
+            | Self::HardModifierNotAllowedOnNamedUsingParameter { .. }
+            | Self::AccessorOnlyAllowedOnClassConstructor { .. } => {
+                ParseDiagnosticKind::UnsupportedSyntax
+            }
+            Self::TermParameterNoProgress { .. }
+            | Self::AnonymousUsingParameterTypeNoProgress { .. }
+            | Self::ByNameClassParameterNotAllowed { .. }
+            | Self::RepeatedParameterNotAllowedInContextualClause { .. } => {
+                ParseDiagnosticKind::UnexpectedToken
+            }
+            Self::ExpectedParameterColonAndType { .. } => ParseDiagnosticKind::ExpectedType,
+            Self::EmptyImplicitClause { .. }
+            | Self::EmptyUsingClause { .. }
+            | Self::ExpectedParameterBeforeClauseEnd { .. }
+            | Self::ExpectedParameterAfterComma { .. }
+            | Self::ExpectedClassParameterAccessor { .. }
+            | Self::ExpectedUsingParameterType { .. }
+            | Self::ExpectedUsingParameterTypeAfterComma { .. }
+            | Self::ExpectedParameterName { .. } => ParseDiagnosticKind::ExpectedToken,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::LegacyImplicitClauseNotAllowed { .. } => {
+                "parser.parameter.implicit_clause_not_allowed_for_owner"
+            }
+            Self::EmptyImplicitClause { .. } => "parser.parameter.empty_implicit_clause",
+            Self::EmptyUsingClause { .. } => "parser.parameter.empty_using_clause",
+            Self::ExpectedParameterBeforeClauseEnd { .. } => {
+                "parser.parameter.expected_parameter_before_clause_end"
+            }
+            Self::TermParameterNoProgress { .. } => "parser.parameter.no_progress",
+            Self::ExpectedParameterAfterComma { .. } => "parser.parameter.expected_after_comma",
+            Self::HardModifierNotAllowedOnNamedUsingParameter { .. } => {
+                "parser.parameter.hard_modifier_on_named_using_parameter"
+            }
+            Self::AccessorOnlyAllowedOnClassConstructor { .. } => {
+                "parser.parameter.accessor_only_on_constructor"
+            }
+            Self::ExpectedClassParameterAccessor { .. } => {
+                "parser.parameter.expected_class_accessor"
+            }
+            Self::ByNameClassParameterNotAllowed { .. } => {
+                "parser.parameter.by_name_class_parameter"
+            }
+            Self::RepeatedParameterNotAllowedInContextualClause { .. } => {
+                "parser.parameter.repeated_in_contextual_clause"
+            }
+            Self::ExpectedUsingParameterType { .. } => {
+                "parser.parameter.expected_using_parameter_type"
+            }
+            Self::AnonymousUsingParameterTypeNoProgress { .. } => {
+                "parser.parameter.anonymous_using_type_no_progress"
+            }
+            Self::ExpectedUsingParameterTypeAfterComma { .. } => {
+                "parser.parameter.expected_using_type_after_comma"
+            }
+            Self::ExpectedParameterName { .. } => "parser.parameter.expected_name",
+            Self::ExpectedParameterColonAndType { .. } => {
+                "parser.parameter.expected_colon_and_type"
+            }
+        }
+    }
+}
+
 /// Typed failures in Scala type-parameter and context-bound clauses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypeParamIssue {
@@ -1211,6 +1411,10 @@ pub enum ParseIssue {
     Type(TypeIssue),
     /// A structured failure emitted while parsing class-like definitions.
     ClassDefinition(ClassDefinitionIssue),
+    /// A structured failure emitted while parsing value/method declarations.
+    Declaration(DeclarationIssue),
+    /// A structured failure emitted while parsing term parameter clauses.
+    Parameter(ParameterIssue),
     /// A structured failure emitted while parsing modifiers and annotations.
     Modifier(ModifierIssue),
     /// A structured failure emitted while parsing a type parameter clause.
@@ -1239,6 +1443,8 @@ impl ParseIssue {
             Self::UnboundPlaceholderParameter => ParseDiagnosticKind::UnboundPlaceholderParameter,
             Self::Type(issue) => issue.kind(),
             Self::ClassDefinition(issue) => issue.kind(),
+            Self::Declaration(issue) => issue.kind(),
+            Self::Parameter(issue) => issue.kind(),
             Self::Modifier(issue) => issue.kind(),
             Self::TypeParameter(issue) => issue.kind(),
             Self::TypeDefinition(issue) => issue.kind(),
@@ -1271,6 +1477,8 @@ impl ParseIssue {
             Self::UnboundPlaceholderParameter => "parser.unbound_placeholder_parameter",
             Self::Type(issue) => issue.code(),
             Self::ClassDefinition(issue) => issue.code(),
+            Self::Declaration(issue) => issue.code(),
+            Self::Parameter(issue) => issue.code(),
             Self::Modifier(issue) => issue.code(),
             Self::TypeParameter(issue) => issue.code(),
             Self::TypeDefinition(issue) => issue.code(),
@@ -1354,6 +1562,8 @@ impl ParseDiagnostic {
             | ParseIssue::UnboundPlaceholderParameter => None,
             ParseIssue::Type(_) => None,
             ParseIssue::ClassDefinition(_) => None,
+            ParseIssue::Declaration(_) => None,
+            ParseIssue::Parameter(_) => None,
             ParseIssue::Modifier(_) => None,
             ParseIssue::TypeParameter(_) => None,
             ParseIssue::TypeDefinition(_) => None,
@@ -1493,5 +1703,28 @@ mod tests {
         assert_eq!(class_issue.kind(), ParseDiagnosticKind::ExpectedType);
         assert_eq!(modifier_issue.code(), "parser.modifier.duplicate_modifier");
         assert_eq!(modifier_issue.kind(), ParseDiagnosticKind::UnexpectedToken);
+    }
+
+    #[test]
+    fn declaration_and_parameter_issues_have_stable_codes_and_categories() {
+        let declaration_issue = ParseIssue::Declaration(DeclarationIssue::ExpectedValueName {
+            declaration: ValueDefinitionKind::Var,
+            found: TokenKind::Eof,
+        });
+        let parameter_issue =
+            ParseIssue::Parameter(ParameterIssue::ByNameClassParameterNotAllowed {
+                accessor: ParameterMutability::Var,
+            });
+
+        assert_eq!(
+            declaration_issue.code(),
+            "parser.declaration.expected_value_name"
+        );
+        assert_eq!(declaration_issue.kind(), ParseDiagnosticKind::ExpectedToken);
+        assert_eq!(
+            parameter_issue.code(),
+            "parser.parameter.by_name_class_parameter"
+        );
+        assert_eq!(parameter_issue.kind(), ParseDiagnosticKind::UnexpectedToken);
     }
 }
