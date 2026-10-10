@@ -735,13 +735,27 @@ Local value symbol flags use the shared `dotty-core::source_modifier_flag`
 mapping, with a bounded Typer policy for the source forms measured by #929.
 `var` preserves `MUTABLE`, and `final val` preserves `FINAL`; the supported
 PatDef path applies those flags to each exposed final binder while generated
-aggregate temporaries retain only `SYNTHETIC`. `given`, `implicit val`, `lazy
-val`, and `inline val` have represented symbol flags but remain deferred before
-symbol creation because their lookup, initialization, or expansion semantics
-belong to later increments. Unsupported modifiers, duplicate modifiers, and
-unsupported or inconsistent modifier sets return `LocalValueModifierDeferred`
-with the source tree and complete modifier set. This plumbing does not enable
-contextual search, lazy initialization, or inline expansion.
+aggregate temporaries retain only `SYNTHETIC`.
+
+#931 types direct block-local `implicit val` declarations and named local
+`given` declarations through the common local-value path. They preserve
+`IMPLICIT` or `GIVEN` and any source/Namer modifiers (named givens in the
+measured source carry `FINAL | LAZY`). Explicit references after the
+declaration use ordinary local-scope lookup. Contextual declarations enter the
+scope only after their initializer and type checks succeed; their initializer
+does not see the new local as already initialized. Anonymous givens remain
+deferred when their AST has no authoritative local term name. The preserved
+`LAZY` flag on named givens does not enable general lazy-value typing or runtime
+lowering. Local contextual values with source annotations or explicit
+visibility modifiers return `LocalValueMetadataDeferred` before symbol
+allocation, because the bounded typed local-value node does not yet preserve
+those metadata fields.
+
+Contextual search, contextual argument insertion, implicit conversions, and
+summon remain unsupported. `lazy val` and `inline val` declarations remain
+deferred. Unsupported modifiers, duplicate modifiers, and unsupported or
+inconsistent modifier sets return `LocalValueModifierDeferred` with the source
+tree and complete modifier set.
 
 ### Local-definition source audit v1 (historical)
 

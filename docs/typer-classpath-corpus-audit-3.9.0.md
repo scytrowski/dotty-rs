@@ -74,15 +74,15 @@ The ranked list below excludes parser/namer and classpath-resolution failures, a
 | Rank | First blocker | Count / files |
 | ---: | --- | ---: |
 | 1 | `AnonymousClassInstantiationDeferred` | 32 / 15 |
-| 2 | `LocalBlockDeclarationDeferred::val/var definition` | 21 / 8 |
-| 3 | `UnsupportedTypeTree::FunctionWithMods` | 13 / 2 |
-| 4 | `LocalBlockDeclarationDeferred::type definition` | 11 / 4 |
-| 5 | `SymbolSourceKindMismatch` | 11 / 3 |
-| 6 | `UnsupportedExpression::ParsedTry` | 11 / 6 |
-| 7 | `MissingDeclaredType` | 10 / 3 |
-| 8 | `LocalBlockDeclarationDeferred::module definition` | 9 / 2 |
-| 9 | `TypedPatternRuntimeTestDeferred` | 9 / 2 |
-| 10 | `UnsupportedFunctionLiteralParameter` | 9 / 1 |
+| 2 | `UnsupportedTypeTree::FunctionWithMods` | 13 / 2 |
+| 3 | `LocalBlockDeclarationDeferred::type definition` | 11 / 4 |
+| 4 | `SymbolSourceKindMismatch` | 11 / 3 |
+| 5 | `UnsupportedExpression::ParsedTry` | 11 / 6 |
+| 6 | `MissingDeclaredType` | 10 / 3 |
+| 7 | `LocalBlockDeclarationDeferred::module definition` | 9 / 2 |
+| 8 | `TypedPatternRuntimeTestDeferred` | 9 / 2 |
+| 9 | `UnsupportedFunctionLiteralParameter` | 9 / 1 |
+| 10 | `StringLiteralTypingDeferred` | 8 / 5 |
 
 ### #903 hardening and refreshed local-method profile
 
@@ -107,9 +107,9 @@ The table below preserves every #899 baseline row. `Signature completion` is rec
 | `MegaPhase.scala#2407 transformUnnamed` | parameter modifiers | `ImportQualifierNotFound` | unknown | not typed | inherited |
 | `MegaPhase.scala#2116 mapPackage` | parameter modifiers | `ImportQualifierNotFound` | unknown | not typed | inherited |
 
-### #929 local value blocker profile, #930 update, and retained recommendation
+### #929 local value baseline and #930–#931 implementation status
 
-The pinned audit attributes all 21 first-blocker observations across 8 files to 14 distinct `ValDef` declarations; none are `PatDef`. Five declarations produce repeated sibling-method observations, accounting for 7 observations beyond the first observation for each declaration; all 21 rows are inherited observations from the enclosing method attempt. The exact method/declaration pairs, source spans, full source modifiers, type form, RHS, visibility, annotations, and attribution are listed in `local_value_blocker_profile` in the raw audit below. Following #930, each `ValDef` row passes through `type_block_stat_expansion`, `type_value_expression_inner`, and `type_local_value`, where the bounded modifier policy returns `LocalValueModifierDeferred::declaration semantics deferred` before allocating a local symbol. To keep the longitudinal audit profile comparable, the audit maps this error to the legacy `LocalBlockDeclarationDeferred::val/var definition` bucket; the bucket name therefore does not describe the current dispatch path. Plain `val` and `var` are not in this bucket because their modifiers are supported. #930 also preserves `FINAL` and `MUTABLE` on typed local values. The measured `Given`, `Implicit`, `Lazy`, and `Inline` modifier semantics remain deferred; their local lookup, initialization, or expansion behavior is not implemented by this bounded plumbing change.
+The pinned #929 baseline attributes 21 first-blocker observations across 8 files to 14 distinct `ValDef` declarations; none are `PatDef`. Five declarations produce repeated sibling-method observations, accounting for 7 observations beyond the first observation for each declaration; all 21 rows are inherited observations from the enclosing method attempt. The exact method/declaration pairs, source spans, full source modifiers, type form, RHS, visibility, annotations, and attribution remain in `local_value_blocker_profile` below. Following #930, ordinary local values preserve `FINAL`/`MUTABLE` flags and contextual modifiers are validated. #931 now types direct named `implicit val` and named `given` declarations, preserves their mapped flags, and inserts them into lexical scope after a successful initializer. Ordinary explicit references resolve through that scope; contextual search and argument insertion remain unsupported. Anonymous givens have no local term identity and report `LocalValueModifierDeferred::anonymous given has no local term identity`. The original 17 contextual baseline rows are individually retained in `local_value_contextual_baseline_outcomes`; 4 currently stop at that anonymous-given boundary and 13 enclosing methods stop earlier at resolution/classpath blockers. The legacy 21-row blocker profile is preserved as the historical #929 baseline, while its current local-declaration bucket now contains only the remaining lazy/inline rows.
 
 | Observed source family | Observations | Distinct declarations | Files | Type tree shape | Remaining semantic work |
 | --- | ---: | ---: | ---: | --- | --- |
@@ -119,15 +119,15 @@ The pinned audit attributes all 21 first-blocker observations across 8 files to 
 | `inline val` | 1 | 1 | 1 | 1 inferred | Compile-time evaluation and expansion semantics |
 | PatDef / plain val / plain var | 0 | 0 | 0 | — | No occurrence in this first-blocker bucket |
 
-The ranked candidates and preferred/fallback slices below preserve the recommendation made from the #929 baseline measurements. #930 subsequently added bounded source modifier mapping and validation and preserves `FINAL` and `MUTABLE` on typed local values. The feature semantics remain deferred: measured `Given`, `Implicit`, `Lazy`, and `Inline` values are validated and classified, then rejected before local symbol allocation; local lookup, initialization, and expansion behavior still needs separate contracts and regression coverage. The ranking remains useful as the recorded rationale for selecting the next implementation slice, not as a claim that #930 implemented those feature semantics.
+The candidate ranking below is retained as historical planning context from #929. The first named contextual-value slice is now implemented by #931; the remaining local-value families still require their own bounded semantic contracts.
 
-Ranked follow-up candidates use distinct declaration counts for implementation reach and report observation counts separately. Prefer a narrowly scoped named explicit-type `implicit val` slice (2 observations from 1 declaration in `JSCodeGen.scala`): it reaches the existing explicit type-projection and local-value machinery while containing the source shape. The issue must also specify correct local implicit visibility; #930 now maps and validates the `IMPLICIT` flag, while local implicit lookup still needs its own focused contract and tests. If that coupling makes the first slice unsafe, use the measured `lazy val` family (3 observations / 2 declarations / 2 files) as the fallback after its initialization boundary is specified. Lazy vals rank ahead of givens despite lower reach because their implementation does not also require contextual lookup; both still need an explicit initialization contract.
+The #929 ranking preferred an explicitly typed named `implicit val`, followed by inferred named forms, with `lazy val` as the fallback and local `given` deferred until contextual lookup boundaries were established. #931 completed named implicit/given declaration typing and lexical explicit-reference lookup without implementing contextual search. Lazy initialization and inline evaluation/expansion remain separate work.
 
 | Rank | Candidate family | Reach | Existing reuse | Missing work and risk | Recommended slice |
 | ---: | --- | --- | --- | --- | --- |
-| 1 | Named `implicit val` | 12 observations / 7 declarations / 2 files | `type_local_value`, explicit type projection, inferred widening, local scope insertion, initializer recursion guard, typed-tree mapping | `IMPLICIT` flag mapping and validation are implemented; define local implicit lookup | Explicitly typed named `implicit val` (2 observations / 1 declaration / 1 file), then inferred named forms |
-| 2 | `lazy val` | 3 / 2 / 2 | Inferred local-value typing, local scope, recursion guard, typed-tree mapping | `LAZY` flag mapping and validation are implemented; establish lazy initializer and self-reference semantics | Fallback bounded to inferred direct `ValDef` rows |
-| 3 | Given `ValDef` | 5 / 4 / 3 | Explicit type projection and local-value typing | `GIVEN` flag mapping and validation are implemented; separate named from anonymous given and specify contextual lookup plus initialization | Defer until implicit lookup boundary is established |
+| 1 | Named `implicit val` (completed in #931) | 12 observations / 7 declarations / 2 files | `type_local_value`, explicit type projection, inferred widening, lexical scope insertion, typed-tree mapping | Contextual implicit search and insertion remain unsupported | Complete for declaration typing and explicit lexical references |
+| 2 | `lazy val` | 3 / 2 / 2 | Inferred local-value typing, local scope, recursion guard, typed-tree mapping | `LAZY` flag mapping is available; lazy initialization and self-reference semantics remain deferred | Separate bounded issue |
+| 3 | Given `ValDef` (named declaration typing completed in #931) | 5 / 4 / 3 | Named given uses local-value typing and lexical scope; source flags are preserved | Anonymous givens have no local term identity; contextual given search/insertion and lazy initialization remain unsupported | Named declaration typing is complete; preserve explicit deferral for anonymous forms |
 | 4 | `inline val` | 1 / 1 / 1 | Inferred local-value typing | `INLINE` flag mapping is available; compile-time evaluation/expansion is not present | Defer |
 
 ### #899–#903 local method signature profile
@@ -375,9 +375,9 @@ audit_v1_comparison:
   local_declarations=22713 (delta=-505)
   local_methods=3297 (delta=-481)
   typed_local_methods=0 (delta=+0)
-  ImportQualifierNotFound=2876 (delta=+830)
+  ImportQualifierNotFound=2889 (delta=+843)
   UnsupportedExpression_total=25 (delta=-547)
-  LocalBlockDeclarationDeferred=41 (delta=-231)
+  LocalBlockDeclarationDeferred=24 (delta=-248)
   NoSuccessfulEnclosingMethodTyping=34 (delta=-449)
 audit_581_feature_comparison:
   UnsupportedExpression::Parens=0 (baseline=146, delta=-146)
@@ -576,64 +576,61 @@ local_patdefs:
     not_attempted::var::binders=3+::root=Ident::tpt=synthetic inferred TypeTree=2 files=2 [library/src/scala/collection/immutable/Map.scala, library/src/scala/collection/immutable/RedBlackTree.scala]
   representative_files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala]
 local_value_blocker_profile:
-  occurrences=21
-  distinct_declarations=14
+  occurrences=4
+  distinct_declarations=3
   node_kind:
-    ValDef: occurrences=21 distinct_declarations=14 files=8 [compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/core/NameOps.scala, compiler/src/dotty/tools/dotc/transform/MixinOps.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala]
+    ValDef: occurrences=4 distinct_declarations=3 files=3 [compiler/src/dotty/tools/dotc/core/NameOps.scala, compiler/src/dotty/tools/dotc/transform/MixinOps.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala]
   declaration_kind:
-    given: occurrences=5 distinct_declarations=4 files=3 [compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala]
-    implicit val: occurrences=12 distinct_declarations=7 files=2 [compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala]
     inline val: occurrences=1 distinct_declarations=1 files=1 [compiler/src/dotty/tools/dotc/core/NameOps.scala]
     lazy val: occurrences=3 distinct_declarations=2 files=2 [compiler/src/dotty/tools/dotc/transform/MixinOps.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala]
   modifier_set:
-    Given,Final,Lazy: occurrences=5 distinct_declarations=4 files=3 [compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala]
-    Implicit: occurrences=12 distinct_declarations=7 files=2 [compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala]
     Inline: occurrences=1 distinct_declarations=1 files=1 [compiler/src/dotty/tools/dotc/core/NameOps.scala]
     Lazy: occurrences=3 distinct_declarations=2 files=2 [compiler/src/dotty/tools/dotc/transform/MixinOps.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala]
   modifier_presence:
     Var=0 distinct_declarations=0 files=0
-    Given=5 distinct_declarations=4 files=3
-    Implicit=12 distinct_declarations=7 files=2
-    Lazy=8 distinct_declarations=6 files=5
+    Given=0 distinct_declarations=0 files=0
+    Implicit=0 distinct_declarations=0 files=0
+    Lazy=3 distinct_declarations=2 files=2
     Inline=1 distinct_declarations=1 files=1
-    Final=5 distinct_declarations=4 files=3
+    Final=0 distinct_declarations=0 files=0
     (no modifiers)=0
   inferred_vs_explicit:
-    explicit: occurrences=7 distinct_declarations=5 files=4 [compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala]
-    inferred: occurrences=14 distinct_declarations=9 files=5 [compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/core/NameOps.scala, compiler/src/dotty/tools/dotc/transform/MixinOps.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala]
+    inferred: occurrences=4 distinct_declarations=3 files=3 [compiler/src/dotty/tools/dotc/core/NameOps.scala, compiler/src/dotty/tools/dotc/transform/MixinOps.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala]
   direct_vs_inherited:
-    inherited: occurrences=21 distinct_declarations=14 files=8 [compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/core/NameOps.scala, compiler/src/dotty/tools/dotc/transform/MixinOps.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala]
+    inherited: occurrences=4 distinct_declarations=3 files=3 [compiler/src/dotty/tools/dotc/core/NameOps.scala, compiler/src/dotty/tools/dotc/transform/MixinOps.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala]
   direct_valdef_groups:
-    kind=given modifiers=[Given,Final,Lazy] type=explicit name=anonymous given annotations=false visibility=default: occurrences=4 distinct_declarations=3 files=2 [compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala]
-    kind=given modifiers=[Given,Final,Lazy] type=explicit name=named given annotations=false visibility=default: occurrences=1 distinct_declarations=1 files=1 [compiler/src/dotty/tools/dotc/ast/Trees.scala]
-    kind=implicit val modifiers=[Implicit] type=explicit name=ordinary named local annotations=false visibility=default: occurrences=2 distinct_declarations=1 files=1 [compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala]
-    kind=implicit val modifiers=[Implicit] type=inferred name=ordinary named local annotations=false visibility=default: occurrences=10 distinct_declarations=6 files=2 [compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala]
     kind=inline val modifiers=[Inline] type=inferred name=ordinary named local annotations=false visibility=default: occurrences=1 distinct_declarations=1 files=1 [compiler/src/dotty/tools/dotc/core/NameOps.scala]
     kind=lazy val modifiers=[Lazy] type=inferred name=ordinary named local annotations=false visibility=default: occurrences=3 distinct_declarations=2 files=2 [compiler/src/dotty/tools/dotc/transform/MixinOps.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala]
   patdef_groups:
     (none)
   observations:
-    compiler/src/dotty/tools/backend/ScalaPrimitives.scala:method=compiler/src/dotty/tools/backend/ScalaPrimitives.scala#tree=167:elementType blocker_origin=compiler/src/dotty/tools/backend/ScalaPrimitives.scala#tree=331:getPrimitive declaration_tree=95 line=53 span=1996..2016 node=ValDef name=<anonymous> kind=given dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Given,Final,Lazy] visibility=default annotations=false type=explicit rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/ScalaPrimitives.scala:method=compiler/src/dotty/tools/backend/ScalaPrimitives.scala#tree=367:addPrimitive blocker_origin=compiler/src/dotty/tools/backend/ScalaPrimitives.scala#tree=1640:init declaration_tree=338 line=122 span=4196..4216 node=ValDef name=<anonymous> kind=given dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Given,Final,Lazy] visibility=default annotations=false type=explicit rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/ScalaPrimitives.scala:method=compiler/src/dotty/tools/backend/ScalaPrimitives.scala#tree=440:addPrimitives blocker_origin=compiler/src/dotty/tools/backend/ScalaPrimitives.scala#tree=1640:init declaration_tree=338 line=122 span=4196..4216 node=ValDef name=<anonymous> kind=given dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Given,Final,Lazy] visibility=default annotations=false type=explicit rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala:method=compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala#tree=236:addRewrite blocker_origin=compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala#tree=453:rewriteClosureApplyInvocations declaration_tree=195 line=92 span=3457..3515 node=ValDef name=<anonymous> kind=given dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Given,Final,Lazy] visibility=default annotations=false type=explicit rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10367:isStringMethodFromObject blocker_origin=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10456:genNormalApply declaration_tree=10316 line=3135 span=115480..115508 node=ValDef name=pos kind=implicit val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Implicit] visibility=default annotations=false type=inferred rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11524:abortMatch blocker_origin=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11809:genMatch declaration_tree=11493 line=3478 span=129391..129419 node=ValDef name=pos kind=implicit val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Implicit] visibility=default annotations=false type=inferred rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11629:invalidCase blocker_origin=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11809:genMatch declaration_tree=11493 line=3478 span=129391..129419 node=ValDef name=pos kind=implicit val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Implicit] visibility=default annotations=false type=inferred rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11651:genMatchableLiteral blocker_origin=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11809:genMatch declaration_tree=11493 line=3478 span=129391..129419 node=ValDef name=pos kind=implicit val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Implicit] visibility=default annotations=false type=inferred rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11745:isInt blocker_origin=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11809:genMatch declaration_tree=11493 line=3478 span=129391..129419 node=ValDef name=pos kind=implicit val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Implicit] visibility=default annotations=false type=inferred rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=4923:isIgnorableDefaultParam blocker_origin=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=5172:genMethodWithCurrentLocalNameScope declaration_tree=4843 line=1559 span=57438..57464 node=ValDef name=pos kind=implicit val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Implicit] visibility=default annotations=false type=inferred rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=4975:jsParams blocker_origin=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=5172:genMethodWithCurrentLocalNameScope declaration_tree=4843 line=1559 span=57438..57464 node=ValDef name=pos kind=implicit val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Implicit] visibility=default annotations=false type=inferred rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=5228:genBody blocker_origin=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=5328:genMethodDef declaration_tree=5197 line=1703 span=63505..63533 node=ValDef name=pos kind=implicit val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Implicit] visibility=default annotations=false type=inferred rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=6279:genRhs blocker_origin=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=6447:genStatOrExpr declaration_tree=5662 line=1840 span=68301..68350 node=ValDef name=pos kind=implicit val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Implicit] visibility=default annotations=false type=explicit rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=6327:ctorAssignment blocker_origin=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=6447:genStatOrExpr declaration_tree=5662 line=1840 span=68301..68350 node=ValDef name=pos kind=implicit val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Implicit] visibility=default annotations=false type=explicit rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=6966:isJSDefaultParam blocker_origin=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=7061:genApply declaration_tree=6904 line=2207 span=80818..80846 node=ValDef name=pos kind=implicit val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Implicit] visibility=default annotations=false type=inferred rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala#tree=2075:hasDefaultParam blocker_origin=compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala#tree=2169:genOverloadDispatchSameArgcRec declaration_tree=1862 line=520 span=18463..18495 node=ValDef name=pos kind=implicit val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Implicit] visibility=default annotations=false type=inferred rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
-    compiler/src/dotty/tools/dotc/ast/Trees.scala:method=compiler/src/dotty/tools/dotc/ast/Trees.scala#tree=10108:typeParamCount blocker_origin=compiler/src/dotty/tools/dotc/ast/Trees.scala#tree=10270:applyOverloaded declaration_tree=10035 line=1904 span=88589..88654 node=ValDef name=ctx kind=given dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Given,Final,Lazy] visibility=default annotations=false type=explicit rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
     compiler/src/dotty/tools/dotc/core/NameOps.scala:method=compiler/src/dotty/tools/dotc/core/NameOps.scala#tree=895:collectDigits blocker_origin=compiler/src/dotty/tools/dotc/core/NameOps.scala#tree=903:funArity declaration_tree=851 line=220 span=8112..8149 node=ValDef name=MaxSafeInt kind=inline val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Inline] visibility=default annotations=false type=inferred rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
     compiler/src/dotty/tools/dotc/transform/MixinOps.scala:method=compiler/src/dotty/tools/dotc/transform/MixinOps.scala#tree=355:generateJUnitForwarder blocker_origin=compiler/src/dotty/tools/dotc/transform/MixinOps.scala#tree=439:needsMixinForwarder declaration_tree=297 line=75 span=3153..3325 node=ValDef name=competingMethods kind=lazy val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Lazy] visibility=default annotations=false type=inferred rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
     compiler/src/dotty/tools/dotc/transform/MixinOps.scala:method=compiler/src/dotty/tools/dotc/transform/MixinOps.scala#tree=375:generateSerializationForwarder blocker_origin=compiler/src/dotty/tools/dotc/transform/MixinOps.scala#tree=439:needsMixinForwarder declaration_tree=297 line=75 span=3153..3325 node=ValDef name=competingMethods kind=lazy val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Lazy] visibility=default annotations=false type=inferred rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
     compiler/src/dotty/tools/dotc/typer/Namer.scala:method=compiler/src/dotty/tools/dotc/typer/Namer.scala#tree=8664:infoDontForceAnnots blocker_origin=compiler/src/dotty/tools/dotc/typer/Namer.scala#tree=8719:needsTracked declaration_tree=8645 line=2117 span=97417..97477 node=ValDef name=accessorSyms kind=lazy val dispatch=type_block_stat_expansion -> type_value_expression_inner -> type_local_value: LocalValueModifierDeferred (audit bucket mapped to LocalBlockDeclarationDeferred::val/var definition) modifiers=[Lazy] visibility=default annotations=false type=inferred rhs=true pattern_roots=[] source_patterns=n/a binders=n/a attribution=inherited
+local_value_contextual_baseline_outcomes:
+  baseline_observations=17
+  classifications:
+    residual local-value declaration blocker=4
+    resolution/classpath blocker=13
+  rows:
+    compiler/src/dotty/tools/backend/ScalaPrimitives.scala:method=compiler/src/dotty/tools/backend/ScalaPrimitives.scala#tree=167:elementType declaration_tree=95 kind=given modifiers=[Given,Final,Lazy] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=LocalValueModifierDeferred::anonymous given has no local term identity classification=residual local-value declaration blocker
+    compiler/src/dotty/tools/backend/ScalaPrimitives.scala:method=compiler/src/dotty/tools/backend/ScalaPrimitives.scala#tree=367:addPrimitive declaration_tree=338 kind=given modifiers=[Given,Final,Lazy] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=LocalValueModifierDeferred::anonymous given has no local term identity classification=residual local-value declaration blocker
+    compiler/src/dotty/tools/backend/ScalaPrimitives.scala:method=compiler/src/dotty/tools/backend/ScalaPrimitives.scala#tree=440:addPrimitives declaration_tree=338 kind=given modifiers=[Given,Final,Lazy] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=LocalValueModifierDeferred::anonymous given has no local term identity classification=residual local-value declaration blocker
+    compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala:method=compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala#tree=236:addRewrite declaration_tree=195 kind=given modifiers=[Given,Final,Lazy] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=LocalValueModifierDeferred::anonymous given has no local term identity classification=residual local-value declaration blocker
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10367:isStringMethodFromObject declaration_tree=10316 kind=implicit val modifiers=[Implicit] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=ImportQualifierNotFound classification=resolution/classpath blocker
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11524:abortMatch declaration_tree=11493 kind=implicit val modifiers=[Implicit] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=ImportQualifierNotFound classification=resolution/classpath blocker
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11629:invalidCase declaration_tree=11493 kind=implicit val modifiers=[Implicit] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=ImportQualifierNotFound classification=resolution/classpath blocker
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11651:genMatchableLiteral declaration_tree=11493 kind=implicit val modifiers=[Implicit] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=ImportQualifierNotFound classification=resolution/classpath blocker
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11745:isInt declaration_tree=11493 kind=implicit val modifiers=[Implicit] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=ImportQualifierNotFound classification=resolution/classpath blocker
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=4923:isIgnorableDefaultParam declaration_tree=4843 kind=implicit val modifiers=[Implicit] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=ImportQualifierNotFound classification=resolution/classpath blocker
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=4975:jsParams declaration_tree=4843 kind=implicit val modifiers=[Implicit] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=ImportQualifierNotFound classification=resolution/classpath blocker
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=5228:genBody declaration_tree=5197 kind=implicit val modifiers=[Implicit] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=ImportQualifierNotFound classification=resolution/classpath blocker
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=6279:genRhs declaration_tree=5662 kind=implicit val modifiers=[Implicit] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=ImportQualifierNotFound classification=resolution/classpath blocker
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=6327:ctorAssignment declaration_tree=5662 kind=implicit val modifiers=[Implicit] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=ImportQualifierNotFound classification=resolution/classpath blocker
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=6966:isJSDefaultParam declaration_tree=6904 kind=implicit val modifiers=[Implicit] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=ImportQualifierNotFound classification=resolution/classpath blocker
+    compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala:method=compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala#tree=2075:hasDefaultParam declaration_tree=1862 kind=implicit val modifiers=[Implicit] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=ImportQualifierNotFound classification=resolution/classpath blocker
+    compiler/src/dotty/tools/dotc/ast/Trees.scala:method=compiler/src/dotty/tools/dotc/ast/Trees.scala#tree=10108:typeParamCount declaration_tree=10035 kind=given modifiers=[Given,Final,Lazy] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker=ImportQualifierNotFound classification=resolution/classpath blocker
 unsupported_expression_total=25
 expression_sprint_first_blockers:
   UnsupportedExpression::PrefixOp=0 files=0
@@ -655,24 +652,23 @@ unsupported_type_tree_failures:
   UnsupportedTypeTree::FunctionWithMods: count=13, files=2 [library/src/scala/collection/StringParsers.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala]
   UnsupportedTypeTree::Annotated: count=5, files=3 [library/src/scala/collection/Iterator.scala, library/src/scala/collection/immutable/ArraySeq.scala, library/src/scala/collection/immutable/LazyListIterable.scala]
   UnsupportedTypeTree::Tuple: count=2, files=1 [compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala]
-local_block_declaration_deferred=41
+local_block_declaration_deferred=24
 no_successful_enclosing_method_typing=34
-import_qualifier_not_found=2876
+import_qualifier_not_found=2889
 external_name_or_member_resolution_failures=202
 failure_families:
-  resolution/classpath environment=3079
+  resolution/classpath environment=3092
   other=141
-  local declaration deferral=46
+  local declaration deferral=33
   unsupported expression syntax/semantics=25
   type relation/inference/completion=6
 local_defdef_failures:
-  ImportQualifierNotFound [resolution/classpath environment]: 2876 (273 files) [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
+  ImportQualifierNotFound [resolution/classpath environment]: 2889 (273 files) [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
   TypeNameNotFound [resolution/classpath environment]: 80 (30 files) [compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/dotc/core/tasty/CommentPickler.scala, compiler/src/dotty/tools/dotc/core/tasty/TreeBuffer.scala, compiler/src/dotty/tools/dotc/coverage/Serializer.scala, compiler/src/dotty/tools/dotc/util/Chars.scala]
   MemberLookup [resolution/classpath environment]: 61 (28 files) [compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/SymDenotations.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/core/classfile/ClassfileParser.scala]
   SymbolResolution [resolution/classpath environment]: 40 (17 files) [compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/core/Decorators.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala]
   NoSuccessfulEnclosingMethodTyping [other]: 34 (15 files) [compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/classpath/DirectoryClassPath.scala, compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala]
   AnonymousClassInstantiationDeferred [other]: 32 (15 files) [compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala]
-  LocalBlockDeclarationDeferred::val/var definition [local declaration deferral]: 21 (8 files) [compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala]
   TermNameNotFound [resolution/classpath environment]: 20 (12 files) [compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/backend/jvm/opt/MethodMax.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala, compiler/src/dotty/tools/dotc/util/ClasspathFromClassloader.scala, compiler/src/dotty/tools/dotc/util/WeakHashSet.scala]
   UnsupportedTypeTree::FunctionWithMods [other]: 13 (2 files) [library/src/scala/collection/StringParsers.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala]
   LocalBlockDeclarationDeferred::type definition [local declaration deferral]: 11 (4 files) [compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/typer/Checking.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala]
@@ -686,6 +682,8 @@ local_defdef_failures:
   UnsupportedExpression::ForDo [unsupported expression syntax/semantics]: 5 (2 files) [compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/transform/LambdaLift.scala]
   UnsupportedExpression::InterpolatedString [unsupported expression syntax/semantics]: 5 (4 files) [compiler/src/dotty/tools/dotc/core/ConstraintHandling.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/report.scala, compiler/src/dotty/tools/dotc/util/SimpleIdentityMap.scala]
   UnsupportedTypeTree::Annotated [other]: 5 (3 files) [library/src/scala/collection/Iterator.scala, library/src/scala/collection/immutable/ArraySeq.scala, library/src/scala/collection/immutable/LazyListIterable.scala]
+  LocalBlockDeclarationDeferred::val/var definition [local declaration deferral]: 4 (3 files) [compiler/src/dotty/tools/dotc/core/NameOps.scala, compiler/src/dotty/tools/dotc/transform/MixinOps.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala]
+  LocalValueModifierDeferred::anonymous given has no local term identity [local declaration deferral]: 4 (2 files) [compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala]
   MatchSelectorTypeCannotBeAdapted [other]: 4 (2 files) [compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/config/Settings.scala]
   UnstableSelectionPrefix [type relation/inference/completion]: 4 (3 files) [compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/core/Contexts.scala, compiler/src/dotty/tools/dotc/core/Types.scala]
   LocalExtensionGroupShapeDeferred [local declaration deferral]: 3 (1 files) [compiler/src/dotty/tools/dotc/typer/Applications.scala]
@@ -746,18 +744,17 @@ missing_declared_type_records:
   compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala: failed_local_method_tree=4009 tree=175 error_tree_kind=TypeTree declaration_tree=177 declaration_tree_kind=ValDef declaration=value symbol_kind=Field owner_kind=ModuleClass context_owner_kind=ModuleClass shape=synthetic inferred TypeTree rhs=true modifiers=[Inline] semantic_mutable=false entry=complete_symbol_inner -> type_of_tpt_inner_journaled span=Some(SourceSpan { source: SourceId(0), span: Span { range: TextRange { start: 2358, end: 2358 }, point: None } })
 top_semantic_gaps:
   1. AnonymousClassInstantiationDeferred: count=32, files=15, category=other, examples=compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala
-  2. LocalBlockDeclarationDeferred::val/var definition: count=21, files=8, category=local declaration support, examples=compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala
-  3. UnsupportedTypeTree::FunctionWithMods: count=13, files=2, category=other, examples=library/src/scala/collection/StringParsers.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala
-  4. LocalBlockDeclarationDeferred::type definition: count=11, files=4, category=local declaration support, examples=compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/typer/Checking.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala
-  5. SymbolSourceKindMismatch: count=11, files=3, category=other, examples=compiler/src/dotty/tools/dotc/parsing/Tokens.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala, library/src/scala/collection/immutable/Vector.scala
-  6. UnsupportedExpression::ParsedTry: count=11, files=6, category=expression typing, examples=compiler/src/dotty/tools/dotc/ast/Positioned.scala, compiler/src/dotty/tools/dotc/core/TypeComparer.scala, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala, compiler/src/dotty/tools/dotc/transform/Erasure.scala, compiler/src/dotty/tools/dotc/transform/ExplicitOuter.scala
-  7. MissingDeclaredType: count=10, files=3, category=other, examples=compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala
-  8. LocalBlockDeclarationDeferred::module definition: count=9, files=2, category=local declaration support, examples=compiler/src/dotty/tools/dotc/ast/DesugarEnums.scala, compiler/src/dotty/tools/dotc/typer/Implicits.scala
-  9. TypedPatternRuntimeTestDeferred: count=9, files=2, category=pattern typing, examples=compiler/src/dotty/tools/dotc/core/Types.scala, library/src/scala/collection/immutable/HashMap.scala
-  10. UnsupportedFunctionLiteralParameter: count=9, files=1, category=other, examples=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala
+  2. UnsupportedTypeTree::FunctionWithMods: count=13, files=2, category=other, examples=library/src/scala/collection/StringParsers.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala
+  3. LocalBlockDeclarationDeferred::type definition: count=11, files=4, category=local declaration support, examples=compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/typer/Checking.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala
+  4. SymbolSourceKindMismatch: count=11, files=3, category=other, examples=compiler/src/dotty/tools/dotc/parsing/Tokens.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala, library/src/scala/collection/immutable/Vector.scala
+  5. UnsupportedExpression::ParsedTry: count=11, files=6, category=expression typing, examples=compiler/src/dotty/tools/dotc/ast/Positioned.scala, compiler/src/dotty/tools/dotc/core/TypeComparer.scala, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala, compiler/src/dotty/tools/dotc/transform/Erasure.scala, compiler/src/dotty/tools/dotc/transform/ExplicitOuter.scala
+  6. MissingDeclaredType: count=10, files=3, category=other, examples=compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala
+  7. LocalBlockDeclarationDeferred::module definition: count=9, files=2, category=local declaration support, examples=compiler/src/dotty/tools/dotc/ast/DesugarEnums.scala, compiler/src/dotty/tools/dotc/typer/Implicits.scala
+  8. TypedPatternRuntimeTestDeferred: count=9, files=2, category=pattern typing, examples=compiler/src/dotty/tools/dotc/core/Types.scala, library/src/scala/collection/immutable/HashMap.scala
+  9. UnsupportedFunctionLiteralParameter: count=9, files=1, category=other, examples=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala
+  10. StringLiteralTypingDeferred: count=8, files=5, category=other, examples=compiler/src/dotty/tools/dotc/core/NameOps.scala, compiler/src/dotty/tools/dotc/core/TypeErrors.scala, compiler/src/dotty/tools/dotc/core/tasty/TastyPrinter.scala, compiler/src/dotty/tools/dotc/reporting/messages.scala, library/src/scala/util/Random.scala
 top_gap_implementation_scope_notes:
   AnonymousClassInstantiationDeferred (32 occurrences, 15 files): first_slice=support one anonymous new with one concrete parent and explicit member ownership; owner=dotty-typer/src/typer/expression/new.rs; prerequisites=ordinary New typing, parent projection, and stable anonymous class identity; non_goals=closure capture, refinement synthesis, and general anonymous-class members
-  LocalBlockDeclarationDeferred::val/var definition (21 occurrences, 8 files): first_slice=split remaining local definitions by PatDef root and binder shape before adding one form; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=transactional PatDef lowering, local binders, and assignment support; non_goals=general destructuring or reopening already supported PatDef forms
   UnsupportedTypeTree::FunctionWithMods (13 occurrences, 2 files): first_slice=inspect the remaining modifier-bearing function types and keep erased/capture-specific forms deferred; owner=dotty-typer/src/typer/type_projection.rs; prerequisites=plain contextual `Given` forms now use the canonical ContextFunction identity and existing Applied types; non_goals=capture checking, erased-function semantics, and arbitrary modifiers
   LocalBlockDeclarationDeferred::type definition (11 occurrences, 4 files): first_slice=enter one local declaration kind transactionally in block typing; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=source symbol and scope metadata from dotty-core; non_goals=local classes, imports, or type definitions beyond the selected kind
   SymbolSourceKindMismatch (11 occurrences, 3 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
@@ -766,6 +763,7 @@ top_gap_implementation_scope_notes:
   LocalBlockDeclarationDeferred::module definition (9 occurrences, 2 files): first_slice=enter one local declaration kind transactionally in block typing; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=source symbol and scope metadata from dotty-core; non_goals=local classes, imports, or type definitions beyond the selected kind
   TypedPatternRuntimeTestDeferred (9 occurrences, 2 files): first_slice=type one pattern form against an already known expected type; owner=dotty-typer/src/typer/patterns; prerequisites=the expected type and existing pattern AST shape; non_goals=exhaustivity analysis and match-result inference
   UnsupportedFunctionLiteralParameter (9 occurrences, 1 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
+  StringLiteralTypingDeferred (8 occurrences, 5 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
 highest_ranked_semantic_gap: AnonymousClassInstantiationDeferred (32 occurrences in 15 files); count ranks the audit only and does not select a sprint increment; keep classpath materialization as a separate gate because the pinned audit resolved no external members
 match_readiness:
   first_blocker_methods=279
@@ -928,31 +926,31 @@ match_corpus_profile:
   infix_pattern_forms=781
   extractor_representative_files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala]
 resolver_metrics:
-  resolver_package_requests=22962
-  external_package_requests=14150
-  external_package_successes=3531
-  external_package_unresolved=10619
+  resolver_package_requests=23161
+  external_package_requests=14263
+  external_package_successes=3614
+  external_package_unresolved=10649
   external_package_errors=0
-  source_package_reuse=8812
-  resolver_member_requests=7502
-  external_member_requests=7502
+  source_package_reuse=8898
+  resolver_member_requests=7571
+  external_member_requests=7571
   external_member_successes=0
   external_class_symbol_successes=0
   external_non_class_member_successes=0
   source_member_reuse=0
-  external_member_unresolved=7159
+  external_member_unresolved=7228
   external_member_errors=342
   distinct_packages=25
   distinct_classes=0
   distinct_members=0
   classloader_success_gate=BLOCKED: external members not materialized
 resolver_581_comparison:
-  external_package_successes=3531 (baseline=1965, delta=+1566)
-  external_package_unresolved=10619 (baseline=5816, delta=+4803)
+  external_package_successes=3614 (baseline=1965, delta=+1649)
+  external_package_unresolved=10649 (baseline=5816, delta=+4833)
   external_package_errors=0 (baseline=0, delta=+0)
   external_class_materializations=0 (baseline=0, delta=+0)
   external_non_class_member_successes=0 (baseline=0, delta=+0)
-  external_member_unresolved=7159 (baseline=3884, delta=+3275)
+  external_member_unresolved=7228 (baseline=3884, delta=+3344)
   external_member_errors=342 (baseline=91, delta=+251)
   distinct_packages=25 (baseline=23, delta=+2)
   member_error_kinds:
@@ -1009,9 +1007,9 @@ resolver_581_comparison:
     Malformed { reason: "invalid .tasty file for scala/collection/mutable/Queue: a supertype reference could not be resolved to a name" }=1
     Malformed { reason: "invalid .tasty file for scala/collection/mutable/StringBuilder: a supertype reference could not be resolved to a name" }=7
   most_requested_unresolved_member_names:
-    tpd=731
-    scala=640
-    Contexts=519
+    tpd=757
+    scala=641
+    Contexts=547
     Int=399
     core=274
     CollectionConverters=270
@@ -1019,10 +1017,10 @@ resolver_581_comparison:
     Array=212
     Type=151
     Boolean=108
-    Symbol=105
+    Symbol=106
     Trees=98
+    Tree=93
     Predef=91
-    Tree=91
     String=88
     dotty=87
     Context=76

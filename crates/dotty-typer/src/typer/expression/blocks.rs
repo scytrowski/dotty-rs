@@ -82,11 +82,17 @@ fn local_value_flags_or_defer(
     source: SourceId,
     tree: TreeId<Untyped>,
     modifiers: &[Modifier],
+    allow_contextual_value: bool,
 ) -> Result<SymbolFlags, TyperError> {
     let flags = local_value_symbol_flags(modifiers).map_err(|classification| {
         local_value_modifier_error(source, tree, modifiers, classification)
     })?;
-    if local_value_semantics_deferred(flags) {
+    let contextual_value = flags.contains(SymbolFlags::IMPLICIT) && flags == SymbolFlags::IMPLICIT
+        || flags.contains(SymbolFlags::GIVEN)
+            && flags
+                .difference(SymbolFlags::GIVEN | SymbolFlags::FINAL | SymbolFlags::LAZY)
+                .is_empty();
+    if local_value_semantics_deferred(flags) && !(allow_contextual_value && contextual_value) {
         return Err(local_value_modifier_error(
             source,
             tree,
@@ -526,7 +532,7 @@ impl SourceTyper<'_> {
             });
         }
         let modifiers = &definition.modifiers.modifiers;
-        let symbol_flags = local_value_flags_or_defer(self.source, tree, modifiers)?;
+        let symbol_flags = local_value_flags_or_defer(self.source, tree, modifiers, false)?;
         if definition.modifiers.visibility.is_some() || !definition.modifiers.annotations.is_empty()
         {
             return Err(TyperError::LocalPatDefDeferred {
@@ -1186,7 +1192,21 @@ impl SourceTyper<'_> {
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
         let symbol_flags =
-            local_value_flags_or_defer(self.source, tree, &definition.metadata.modifiers)?;
+            local_value_flags_or_defer(self.source, tree, &definition.metadata.modifiers, true)?;
+        let contextual = !symbol_flags
+            .intersection(SymbolFlags::GIVEN.union(SymbolFlags::IMPLICIT))
+            .is_empty();
+        if contextual
+            && (definition.metadata.visibility.is_some()
+                || !definition.metadata.annotations.is_empty())
+        {
+            return Err(TyperError::LocalValueMetadataDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                visibility: definition.metadata.visibility,
+                annotation_count: definition.metadata.annotations.len(),
+            });
+        }
         let Some(local_stack) = context.local_scopes else {
             return Err(TyperError::ExpressionLocalScopeStackMissing {
                 stack: ExpressionScopeId::new(
@@ -1207,6 +1227,16 @@ impl SourceTyper<'_> {
         }
         let scope = frame.scope;
         let name = *definition.name.as_name();
+        if symbol_flags.contains(SymbolFlags::GIVEN)
+            && self.store.names.resolve(name.text()).is_empty()
+        {
+            return Err(local_value_modifier_error(
+                self.source,
+                tree,
+                &definition.metadata.modifiers,
+                "anonymous given has no local term identity",
+            ));
+        }
         if !self.store.scopes.get(scope).lookup_all(&name).is_empty() {
             return Err(TyperError::DuplicateLocalValue {
                 source: self.source,
@@ -1238,9 +1268,9 @@ impl SourceTyper<'_> {
             Some(projected?)
         };
 
-        // Scala 3 gives a local definition scope over the entire statement
-        // sequence, including its own initializer. Enter the binding now so it
-        // shadows outer names, and diagnose a reference to it while initializing.
+        // Ordinary explicitly typed vals shadow outer bindings during their
+        // initializer and use the recursion guard. Contextual locals instead
+        // enter the block scope after their initializer succeeds.
         let symbol = self.store.symbols.alloc(dotty_core::Symbol {
             name,
             owner: Some(context.owner),
@@ -1253,13 +1283,14 @@ impl SourceTyper<'_> {
             position,
             links: dotty_core::SymbolLinks::default(),
         });
-        if !inferred {
+        let enter_before_initializer = !inferred && !contextual;
+        if enter_before_initializer {
             self.store.scopes.get_mut(scope).enter(name, symbol);
             self.initializing_local_symbols.insert(symbol);
         }
         let typed_rhs_result =
             self.type_value_expression_inner(rhs, context, info_journal, new_mappings);
-        if !inferred {
+        if enter_before_initializer {
             self.initializing_local_symbols.remove(&symbol);
         }
         let typed_rhs = typed_rhs_result?;
@@ -1299,7 +1330,9 @@ impl SourceTyper<'_> {
         self.store
             .symbols
             .set_info(symbol, SymbolInfo::Complete(declared_type));
-        if inferred {
+        // Contextual declarations become lexically visible only after the
+        // initializer and type checks have succeeded, like inferred values.
+        if !enter_before_initializer {
             self.store.scopes.get_mut(scope).enter(name, symbol);
         }
         self.local_symbols.insert((self.source, tree), symbol);
