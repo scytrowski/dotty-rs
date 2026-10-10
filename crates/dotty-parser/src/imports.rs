@@ -1360,6 +1360,60 @@ mod tests {
     }
 
     #[test]
+    fn malformed_selector_list_reports_its_span_and_preserves_the_next_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.{bar baz}\ndef next = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Identifier, 16, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 19, 20),
+                token(TokenKind::Newline, 20, 21),
+                token(TokenKind::Keyword(HardKeyword::Def), 21, 24),
+                token(TokenKind::Identifier, 25, 29),
+                token(TokenKind::Operator, 30, 31),
+                token(TokenKind::IntegerLiteral, 32, 33),
+                token(TokenKind::Eof, 33, 33),
+            ],
+            &mut names,
+        );
+
+        let trees = parser.parse_top_level_sequence(
+            StatementSequenceBoundary::CompilationUnit,
+            Location::Elsewhere,
+        );
+
+        assert_eq!(trees.len(), 2);
+        assert!(matches!(
+            parser.ast().get(trees[0]).kind,
+            TreeKind::Import(_)
+        ));
+        let TreeKind::DefDef(definition) = &parser.ast().get(trees[1]).kind else {
+            panic!("the definition after the malformed import must be parsed");
+        };
+        assert_eq!(
+            parser.names.resolve(definition.name.as_name().text()),
+            "next"
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Import(ImportIssue::ExpectedSelectorSeparator {
+                found: TokenKind::Identifier,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(16, 19).unwrap()
+        );
+    }
+
+    #[test]
     fn parses_multiple_import_expressions_in_source_order() {
         let mut names = NameInterner::new();
         let mut parser = parser_for(
