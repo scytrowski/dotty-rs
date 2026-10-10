@@ -316,16 +316,6 @@ impl SourceTyper<'_> {
                     parameter_index,
                 });
             }
-            if matches!(
-                self.store.types.try_get(parameter.ty),
-                Some(Type::ByName { .. })
-            ) {
-                return Err(TyperError::ByNameApplicationParameterDeferred {
-                    source: self.source,
-                    tree_index,
-                    parameter_index,
-                });
-            }
         }
         if self.type_contains_param_ref(method.result, callable)? {
             return Err(TyperError::DependentMethodApplicationDeferred {
@@ -339,6 +329,10 @@ impl SourceTyper<'_> {
         for (argument_index, (argument_tree, parameter)) in
             argument_trees.iter().zip(&method.params).enumerate()
         {
+            let expected_type = match self.store.types.try_get(parameter.ty) {
+                Some(Type::ByName { result }) => *result,
+                _ => parameter.ty,
+            };
             let (argument, actual) = if let Some(typed_arguments) = &typed_arguments {
                 let typed_argument = typed_arguments[argument_index];
                 debug_assert_eq!(
@@ -347,7 +341,7 @@ impl SourceTyper<'_> {
                 );
                 let actual = self.adapt_expression_type_to_expected(
                     typed_argument.own_type,
-                    parameter.ty,
+                    expected_type,
                     info_journal,
                 )?;
                 (typed_argument.typed, actual)
@@ -361,12 +355,12 @@ impl SourceTyper<'_> {
                 let argument_type = self.typed_arena.get(argument).ty;
                 let actual = self.adapt_expression_type_to_expected(
                     argument_type,
-                    parameter.ty,
+                    expected_type,
                     info_journal,
                 )?;
                 (argument, actual)
             };
-            match self.conforms(actual, parameter.ty) {
+            match self.conforms(actual, expected_type) {
                 Ok(true) => {}
                 Ok(false)
                     if is_constructor_application
@@ -382,7 +376,7 @@ impl SourceTyper<'_> {
                         tree_index,
                         argument_index,
                         actual,
-                        expected: parameter.ty,
+                        expected: expected_type,
                     });
                 }
                 Err(error) => {
@@ -391,7 +385,7 @@ impl SourceTyper<'_> {
                         tree_index,
                         argument_index,
                         actual,
-                        expected: parameter.ty,
+                        expected: expected_type,
                         error: Box::new(error),
                     });
                 }
