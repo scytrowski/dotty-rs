@@ -900,7 +900,8 @@ mod tests {
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
                 && diagnostic
-                    .message()
+                    .legacy_message()
+                    .expect("legacy parser diagnostic")
                     .contains("not allowed in `given` or `implicit`")
         }));
         assert_eq!(parser.current().kind, TokenKind::Eof);
@@ -937,7 +938,8 @@ mod tests {
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
                 && diagnostic
-                    .message()
+                    .legacy_message()
+                    .expect("legacy parser diagnostic")
                     .contains("not allowed in `given` or `implicit`")
         }));
         assert_eq!(parser.current().kind, TokenKind::Eof);
@@ -1000,7 +1002,10 @@ mod tests {
         assert_eq!(clauses[0].len(), 2);
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
-                && diagnostic.message().contains("must come last")
+                && diagnostic
+                    .legacy_message()
+                    .expect("legacy parser diagnostic")
+                    .contains("must come last")
         }));
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
@@ -1570,7 +1575,12 @@ mod tests {
             parser.diagnostics()[0].kind(),
             ParseDiagnosticKind::ExpectedToken
         );
-        assert_eq!(parser.diagnostics()[0].message(), "`val` or `var` expected");
+        assert_eq!(
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
+            "`val` or `var` expected"
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
@@ -1860,7 +1870,9 @@ mod tests {
             ParseDiagnosticKind::UnexpectedToken
         );
         assert_eq!(
-            parser.diagnostics()[0].message(),
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "`val` parameters may not be call-by-name"
         );
         assert_eq!(
@@ -1897,7 +1909,9 @@ mod tests {
             ParseDiagnosticKind::UnexpectedToken
         );
         assert_eq!(
-            parser.diagnostics()[0].message(),
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "`var` parameters may not be call-by-name"
         );
         assert_eq!(
@@ -1929,7 +1943,9 @@ mod tests {
         assert_eq!(clauses[0].len(), 1);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].message(),
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "`val` parameters may not be call-by-name"
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
@@ -2105,7 +2121,12 @@ mod tests {
             parser.diagnostics()[0].kind(),
             ParseDiagnosticKind::ExpectedToken
         );
-        assert_eq!(parser.diagnostics()[0].message(), "`val` or `var` expected");
+        assert_eq!(
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
+            "`val` or `var` expected"
+        );
     }
 
     #[test]

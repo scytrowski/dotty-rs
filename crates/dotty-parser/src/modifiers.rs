@@ -601,12 +601,12 @@ mod tests {
             Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
         ));
         assert_eq!(parser.current().kind, TokenKind::Operator);
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.message() == "expected a visibility qualifier")
-        );
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .legacy_message()
+                .expect("legacy parser diagnostic")
+                == "expected a visibility qualifier"
+        }));
     }
 
     #[test]

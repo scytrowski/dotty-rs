@@ -902,11 +902,12 @@ mod tests {
 
         parser.parse_template_body(TemplateBody::Braced);
 
-        assert!(
-            parser.diagnostics().iter().any(|diagnostic| {
-                diagnostic.message() == "expected a template member separator"
-            })
-        );
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .legacy_message()
+                .expect("legacy parser diagnostic")
+                == "expected a template member separator"
+        }));
     }
 
     #[test]

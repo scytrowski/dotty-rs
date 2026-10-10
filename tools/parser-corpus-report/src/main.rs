@@ -320,7 +320,8 @@ enum Status {
 #[derive(Debug, Serialize, Deserialize)]
 struct DiagnosticSummary {
     kind: String,
-    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 fn main() {
@@ -823,7 +824,7 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration, namer: bool) -> 
             status: Status::Hang,
             diagnostics: vec![DiagnosticSummary {
                 kind: "Hang".to_owned(),
-                message: format!("parser exceeded {} ms", timeout.as_millis()),
+                message: Some(format!("parser exceeded {} ms", timeout.as_millis())),
             }],
             scanner_diagnostics: 0,
             namer: None,
@@ -844,7 +845,7 @@ fn process_failure(path: String, kind: &str, message: impl Into<String>) -> File
         status: Status::ProcessFailure,
         diagnostics: vec![DiagnosticSummary {
             kind: kind.to_owned(),
-            message: message.into(),
+            message: Some(message.into()),
         }],
         scanner_diagnostics: 0,
         namer: None,
@@ -895,7 +896,7 @@ fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
                     status: Status::Panic,
                     diagnostics: vec![DiagnosticSummary {
                         kind: "Panic".to_owned(),
-                        message: "parser worker panicked".to_owned(),
+                        message: Some("parser worker panicked".to_owned()),
                     }],
                     scanner_diagnostics: 0,
                     namer: None,
@@ -911,7 +912,7 @@ fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
             status: Status::ScannerFailure,
             diagnostics: vec![DiagnosticSummary {
                 kind: "IoError".to_owned(),
-                message: error.to_string(),
+                message: Some(error.to_string()),
             }],
             scanner_diagnostics: 0,
             namer: None,
@@ -992,7 +993,7 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
                 status: Status::ScannerFailure,
                 diagnostics: vec![DiagnosticSummary {
                     kind: "ScannerError".to_owned(),
-                    message: error.to_string(),
+                    message: Some(error.to_string()),
                 }],
                 scanner_diagnostics: 0,
                 namer: None,
@@ -1028,7 +1029,7 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
                 status: Status::ScannerFailure,
                 diagnostics: vec![DiagnosticSummary {
                     kind: "SourceTextError".to_owned(),
-                    message: error.to_string(),
+                    message: Some(error.to_string()),
                 }],
                 scanner_diagnostics,
                 namer: None,
@@ -1052,7 +1053,7 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
         .iter()
         .map(|diagnostic| DiagnosticSummary {
             kind: diagnostic_kind_name(diagnostic.kind()).to_owned(),
-            message: diagnostic.message().to_owned(),
+            message: diagnostic.legacy_message().map(str::to_owned),
         })
         .collect::<Vec<_>>();
     let capture_checking_enabled = Some(result.effective_features.capture_checking);
@@ -1540,7 +1541,10 @@ fn collect_deferred_features(
 
     for diagnostic in diagnostics {
         if diagnostic.kind == "UnsupportedSyntax" {
-            let bucket = format!("parser_blocked: {}", normalize_message(&diagnostic.message));
+            let bucket = diagnostic.message.as_deref().map_or_else(
+                || "parser_blocked: UnsupportedSyntax".to_owned(),
+                |message| format!("parser_blocked: {}", normalize_message(message)),
+            );
             record(&mut features, &bucket, 1, |_| false);
         }
     }
@@ -2251,9 +2255,9 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
 
 fn first_failure_bucket(diagnostic: &DiagnosticSummary) -> String {
     if diagnostic.kind == "UnsupportedSyntax" {
-        format!(
-            "UnsupportedSyntax: {}",
-            normalize_message(&diagnostic.message)
+        diagnostic.message.as_deref().map_or_else(
+            || "UnsupportedSyntax".to_owned(),
+            |message| format!("UnsupportedSyntax: {}", normalize_message(message)),
         )
     } else {
         diagnostic.kind.to_string()
@@ -2839,7 +2843,7 @@ mod tests {
                 status: Status::RecoverableDiagnostics,
                 diagnostics: vec![DiagnosticSummary {
                     kind: "ExpectedType".to_owned(),
-                    message: "expected a type".to_owned(),
+                    message: Some("expected a type".to_owned()),
                 }],
                 scanner_diagnostics: 0,
                 namer: None,
@@ -2855,7 +2859,7 @@ mod tests {
                 status: Status::Panic,
                 diagnostics: vec![DiagnosticSummary {
                     kind: "Panic".to_owned(),
-                    message: "parser worker panicked".to_owned(),
+                    message: Some("parser worker panicked".to_owned()),
                 }],
                 scanner_diagnostics: 0,
                 namer: None,
@@ -3372,7 +3376,7 @@ mod tests {
                 status: Status::RecoverableDiagnostics,
                 diagnostics: vec![DiagnosticSummary {
                     kind: "ExpectedType".to_owned(),
-                    message: "expected a type".to_owned(),
+                    message: Some("expected a type".to_owned()),
                 }],
                 scanner_diagnostics: 0,
                 namer: None,
@@ -3444,11 +3448,29 @@ mod tests {
 
     #[test]
     fn unsupported_diagnostic_bucket_is_normalized() {
-        let bucket = first_failure_bucket(&DiagnosticSummary {
+        let diagnostic = DiagnosticSummary {
             kind: "UnsupportedSyntax".to_owned(),
-            message: "unsupported `class`  syntax".to_owned(),
-        });
-        assert_eq!(bucket, "UnsupportedSyntax: unsupported class syntax");
+            message: Some("unsupported `class`  syntax".to_owned()),
+        };
+        assert_eq!(
+            first_failure_bucket(&diagnostic),
+            "UnsupportedSyntax: unsupported class syntax"
+        );
+        let json = serde_json::to_value(diagnostic).expect("serialize legacy diagnostic");
+        assert_eq!(json["message"], "unsupported `class`  syntax");
+    }
+
+    #[test]
+    fn typed_unsupported_diagnostic_uses_its_category_without_fake_message() {
+        let diagnostic = DiagnosticSummary {
+            kind: "UnsupportedSyntax".to_owned(),
+            message: None,
+        };
+
+        assert_eq!(first_failure_bucket(&diagnostic), "UnsupportedSyntax");
+        let json = serde_json::to_value(diagnostic).expect("serialize diagnostic summary");
+        assert_eq!(json["kind"], "UnsupportedSyntax");
+        assert!(json.get("message").is_none());
     }
 
     #[test]
@@ -3473,7 +3495,7 @@ mod tests {
             status: Status::Panic,
             diagnostics: vec![DiagnosticSummary {
                 kind: "Panic".to_owned(),
-                message: "parser worker panicked".to_owned(),
+                message: Some("parser worker panicked".to_owned()),
             }],
             scanner_diagnostics: 0,
             namer: None,

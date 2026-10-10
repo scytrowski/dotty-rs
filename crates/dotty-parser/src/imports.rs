@@ -651,7 +651,9 @@ mod tests {
         assert!(parser.features().capture_checking);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].message(),
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "this language import is only allowed at the toplevel"
         );
     }

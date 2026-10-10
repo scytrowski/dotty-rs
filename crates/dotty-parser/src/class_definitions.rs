@@ -1811,7 +1811,12 @@ mod tests {
             parser.diagnostics()[0].kind(),
             ParseDiagnosticKind::ExpectedToken
         );
-        assert!(parser.diagnostics()[0].message().contains("enum body"));
+        assert!(
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic")
+                .contains("enum body")
+        );
     }
 
     #[test]
@@ -2228,7 +2233,12 @@ mod tests {
                 .count(),
             1
         );
-        assert!(parser.diagnostics()[0].message().contains("enum cases"));
+        assert!(
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic")
+                .contains("enum cases")
+        );
     }
 
     #[test]
@@ -2329,7 +2339,8 @@ mod tests {
         );
         assert!(
             parser.diagnostics()[0]
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("not allowed on an enum case")
         );
     }
@@ -2379,7 +2390,8 @@ mod tests {
         assert_eq!(parser.diagnostics().len(), 1);
         assert!(
             parser.diagnostics()[0]
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("not allowed on an enum case")
         );
     }
@@ -2584,7 +2596,8 @@ mod tests {
         assert_eq!(parser.diagnostics().len(), 1);
         assert!(
             parser.diagnostics()[0]
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("not allowed on an enum case")
         );
     }
@@ -2645,7 +2658,8 @@ mod tests {
         assert_eq!(parser.diagnostics().len(), 1);
         assert!(
             parser.diagnostics()[0]
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("not allowed on an enum case")
         );
     }
@@ -2695,7 +2709,8 @@ mod tests {
         assert_eq!(parser.diagnostics().len(), 1);
         assert!(
             parser.diagnostics()[0]
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("not allowed on an enum case")
         );
     }
@@ -2921,7 +2936,8 @@ mod tests {
         assert_eq!(parser.diagnostics().len(), 1);
         assert!(
             parser.diagnostics()[0]
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("unsupported enum case syntax")
         );
     }
@@ -3657,7 +3673,8 @@ mod tests {
         assert_eq!(parser.diagnostics()[0].span().start(), 16);
         assert!(
             parser.diagnostics()[0]
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("cannot have a template body")
         );
     }
@@ -3716,7 +3733,8 @@ mod tests {
         assert_eq!(parser.diagnostics()[0].span().start(), 19);
         assert!(
             parser.diagnostics()[0]
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("cannot have a template body")
         );
     }
@@ -3774,7 +3792,8 @@ mod tests {
         assert_eq!(parser.diagnostics().len(), 1);
         assert!(
             parser.diagnostics()[0]
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("cannot have a template body")
         );
     }
@@ -3827,7 +3846,8 @@ mod tests {
         assert_eq!(parser.diagnostics().len(), 1);
         assert!(
             parser.diagnostics()[0]
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("cannot have a template body")
         );
     }
@@ -3885,7 +3905,8 @@ mod tests {
         assert_eq!(parser.diagnostics().len(), 1);
         assert!(
             parser.diagnostics()[0]
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("cannot have a template body")
         );
     }
@@ -4098,7 +4119,10 @@ mod tests {
             parser
                 .diagnostics()
                 .iter()
-                .filter(|diagnostic| diagnostic.message().contains("unsupported enum case"))
+                .filter(|diagnostic| diagnostic
+                    .legacy_message()
+                    .expect("legacy parser diagnostic")
+                    .contains("unsupported enum case"))
                 .count(),
             2
         );
@@ -4152,7 +4176,8 @@ mod tests {
         assert_eq!(parser.diagnostics().len(), 1);
         assert!(
             parser.diagnostics()[0]
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("unsupported enum case syntax")
         );
     }
@@ -4206,7 +4231,10 @@ mod tests {
             parser
                 .diagnostics()
                 .iter()
-                .filter(|diagnostic| diagnostic.message().contains("unsupported enum case"))
+                .filter(|diagnostic| diagnostic
+                    .legacy_message()
+                    .expect("legacy parser diagnostic")
+                    .contains("unsupported enum case"))
                 .count(),
             2
         );

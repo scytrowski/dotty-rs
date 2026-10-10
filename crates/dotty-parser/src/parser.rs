@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use crate::ParserFeatures;
 use crate::{
     Cursor, KnownNames, Location, Mark, ParamOwner, ParseContext, ParseDiagnostic,
-    ParseDiagnosticKind, ParseKind, RecoverySet,
+    ParseDiagnosticKind, ParseIssue, ParseKind, RecoverySet,
 };
 
 /// Stateful input and allocation context for the handwritten parser.
@@ -542,6 +542,9 @@ where
     }
 
     /// Adds a parser diagnostic at the current token.
+    ///
+    /// This is the transitional legacy-message bridge. New code should use
+    /// [`Self::report_issue`] so diagnostic data remains structured.
     pub fn report(&mut self, kind: ParseDiagnosticKind, message: impl Into<String>) {
         let span = self.current_span();
         self.report_at(kind, span, message);
@@ -556,6 +559,18 @@ where
     ) {
         self.diagnostics
             .push(ParseDiagnostic::error(kind, span, message));
+    }
+
+    /// Adds a structured parser diagnostic at the current token.
+    pub fn report_issue(&mut self, issue: ParseIssue) {
+        let span = self.current_span();
+        self.report_issue_at(span, issue);
+    }
+
+    /// Adds a structured parser diagnostic at an explicitly selected span.
+    pub(crate) fn report_issue_at(&mut self, span: SourceSpan, issue: ParseIssue) {
+        self.diagnostics
+            .push(ParseDiagnostic::with_issue(span, issue));
     }
 
     /// Checks and clears placeholders that escaped a complete expression
@@ -1339,6 +1354,30 @@ mod tests {
 
         assert!(parser.expect(TokenKind::Identifier));
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn report_issue_adds_structured_payload_without_legacy_text() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for("x", TextRange::new(0, 1).unwrap(), &mut names);
+
+        parser.report_issue(ParseIssue::ExpectedToken {
+            expected: TokenKind::Eof,
+            found: TokenKind::Identifier,
+        });
+
+        let diagnostic = &parser.diagnostics()[0];
+        assert_eq!(diagnostic.kind(), ParseDiagnosticKind::ExpectedToken);
+        assert_eq!(diagnostic.source(), SourceId::from_index(1));
+        assert_eq!(diagnostic.span(), TextRange::new(0, 1).unwrap());
+        assert_eq!(diagnostic.legacy_message(), None);
+        assert!(matches!(
+            diagnostic.issue(),
+            ParseIssue::ExpectedToken {
+                expected: TokenKind::Eof,
+                found: TokenKind::Identifier
+            }
+        ));
     }
 
     #[test]

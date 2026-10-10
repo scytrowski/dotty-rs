@@ -641,7 +641,9 @@ fn a_bare_case_lambda_does_not_take_an_application_suffix() {
         TokenKind::Punctuation(Punctuation::LeftParen)
     );
     assert_eq!(
-        parser.diagnostics()[0].message(),
+        parser.diagnostics()[0]
+            .legacy_message()
+            .expect("legacy parser diagnostic"),
         "a case-lambda cannot be applied directly"
     );
 }
@@ -1340,7 +1342,9 @@ fn does_not_apply_a_completed_anonymous_new_template() {
     );
     assert_eq!(parser.diagnostics().len(), 1);
     assert_eq!(
-        parser.diagnostics()[0].message(),
+        parser.diagnostics()[0]
+            .legacy_message()
+            .expect("legacy parser diagnostic"),
         "a constructor application cannot be applied again"
     );
 }
@@ -2953,7 +2957,8 @@ fn recovers_from_a_colon_lambda_argument_without_a_body() {
     assert!(matches!(parser.ast().get(tree).kind, TreeKind::Apply(_)));
     assert!(parser.diagnostics().iter().any(|diagnostic| {
         diagnostic
-            .message()
+            .legacy_message()
+            .expect("legacy parser diagnostic")
             .contains("expected an expression after lambda arrow")
     }));
     assert_eq!(parser.current().kind, TokenKind::Eof);
@@ -3120,7 +3125,8 @@ fn malformed_parenthesized_new_ascription_recovers_without_suffix_stall() {
     assert!(!parser.diagnostics().is_empty());
     assert!(parser.diagnostics().iter().all(|diagnostic| {
         !diagnostic
-            .message()
+            .legacy_message()
+            .expect("legacy parser diagnostic")
             .contains("no progress while parsing an expression suffix")
     }));
     assert_eq!(parser.current().kind, TokenKind::Eof);
@@ -4830,7 +4836,9 @@ fn malformed_continuation_after_eta_expansion_keeps_tree_and_reports_its_positio
         crate::ParseDiagnosticKind::UnexpectedToken
     );
     assert_eq!(
-        result.diagnostics[0].message(),
+        result.diagnostics[0]
+            .legacy_message()
+            .expect("legacy parser diagnostic"),
         "expected end of expression fragment"
     );
     assert_eq!(result.diagnostics[0].span(), TextRange::new(4, 5).unwrap());
@@ -5437,7 +5445,9 @@ fn leaves_reserved_equals_unconsumed_after_a_selection_dot() {
     assert_eq!(parser.current().kind, TokenKind::Operator);
     assert_eq!(parser.diagnostics().len(), 1);
     assert_eq!(
-        parser.diagnostics()[0].message(),
+        parser.diagnostics()[0]
+            .legacy_message()
+            .expect("legacy parser diagnostic"),
         "expected a selector after `.`"
     );
 }
@@ -5461,7 +5471,9 @@ fn leaves_reserved_hash_unconsumed_after_a_selection_dot() {
     assert_eq!(parser.current().kind, TokenKind::Operator);
     assert_eq!(parser.diagnostics().len(), 1);
     assert_eq!(
-        parser.diagnostics()[0].message(),
+        parser.diagnostics()[0]
+            .legacy_message()
+            .expect("legacy parser diagnostic"),
         "expected a selector after `.`"
     );
 }
@@ -5485,7 +5497,9 @@ fn leaves_reserved_context_function_arrow_unconsumed_after_a_selection_dot() {
     assert_eq!(parser.current().kind, TokenKind::Operator);
     assert_eq!(parser.diagnostics().len(), 1);
     assert_eq!(
-        parser.diagnostics()[0].message(),
+        parser.diagnostics()[0]
+            .legacy_message()
+            .expect("legacy parser diagnostic"),
         "expected a selector after `.`"
     );
 }

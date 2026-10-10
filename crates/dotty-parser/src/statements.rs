@@ -1362,7 +1362,10 @@ mod tests {
 
         assert!(parser.diagnostics.iter().any(|diagnostic| {
             diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
-                && diagnostic.message() == "expected a block statement separator"
+                && diagnostic
+                    .legacy_message()
+                    .expect("legacy parser diagnostic")
+                    == "expected a block statement separator"
         }));
     }
 
@@ -1440,7 +1443,12 @@ mod tests {
 
         assert!(parser.consume_end_marker(Some(module)));
         assert_eq!(parser.diagnostics.len(), 1);
-        assert_eq!(parser.diagnostics[0].message(), "misaligned end marker");
+        assert_eq!(
+            parser.diagnostics[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
+            "misaligned end marker"
+        );
         for tree in [module, outer_template, inner_type] {
             assert_eq!(
                 parser.ast.get(tree).position.unwrap().span().range(),
@@ -1460,7 +1468,12 @@ mod tests {
 
         assert!(parser.consume_end_marker(Some(module)));
         assert_eq!(parser.diagnostics.len(), 1);
-        assert_eq!(parser.diagnostics[0].message(), "duplicate end marker");
+        assert_eq!(
+            parser.diagnostics[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
+            "duplicate end marker"
+        );
         for tree in [module, outer_template, inner_type] {
             assert_eq!(
                 parser.ast.get(tree).position.unwrap().span().range(),
@@ -1593,7 +1606,12 @@ mod tests {
             TextRange::new(0, 7).unwrap()
         );
         assert_eq!(parser.diagnostics.len(), 1);
-        assert_eq!(parser.diagnostics[0].message(), "misaligned end marker");
+        assert_eq!(
+            parser.diagnostics[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
+            "misaligned end marker"
+        );
         let TreeKind::Ident(result) = parser.ast.get(result).kind else {
             panic!("expected the statement after the misaligned marker");
         };
@@ -1628,7 +1646,12 @@ mod tests {
 
         assert_eq!(stats.len(), 1);
         assert_eq!(parser.diagnostics.len(), 1);
-        assert_eq!(parser.diagnostics[0].message(), "duplicate end marker");
+        assert_eq!(
+            parser.diagnostics[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
+            "duplicate end marker"
+        );
         let TreeKind::Ident(result) = parser.ast.get(result).kind else {
             panic!("expected the statement after the duplicate marker");
         };

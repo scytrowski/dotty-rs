@@ -944,7 +944,8 @@ mod tests {
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
                 && diagnostic
-                    .message()
+                    .legacy_message()
+                    .expect("legacy parser diagnostic")
                     .contains("not allowed in `given` or `implicit`")
         }));
         assert_eq!(parser.current().kind, TokenKind::Eof);
@@ -1046,7 +1047,12 @@ mod tests {
         };
         assert!(definition.rhs.is_some());
         assert_eq!(parser.diagnostics().len(), 1);
-        assert!(parser.diagnostics()[0].message().contains("expected `=`"));
+        assert!(
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic")
+                .contains("expected `=`")
+        );
     }
 
     #[test]
@@ -1846,7 +1852,9 @@ mod tests {
 
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].message(),
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "expected a template body after `with`"
         );
         assert_eq!(parser.current().kind, TokenKind::Newline);
@@ -2010,7 +2018,8 @@ mod tests {
         assert!(!parser.diagnostics().is_empty());
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("expected `=` after a given type")
         }));
         assert_eq!(parser.current().kind, TokenKind::Eof);

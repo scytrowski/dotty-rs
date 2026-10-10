@@ -20,7 +20,10 @@ fn incomplete_named_given_type_parameters_report_error_and_preserve_next_member(
         .iter()
         .find(|diagnostic| {
             diagnostic.kind() == ParseDiagnosticKind::ExpectedToken
-                && diagnostic.message() == "expected Punctuation(RightBracket), found Newline"
+                && diagnostic
+                    .legacy_message()
+                    .expect("legacy parser diagnostic")
+                    == "expected Punctuation(RightBracket), found Newline"
         })
         .unwrap_or_else(|| {
             panic!(
@@ -78,7 +81,10 @@ fn missing_named_given_result_type_is_reported_before_next_member() {
         .iter()
         .find(|diagnostic| {
             diagnostic.kind() == ParseDiagnosticKind::ExpectedType
-                && diagnostic.message() == "expected a given result type after type parameters"
+                && diagnostic
+                    .legacy_message()
+                    .expect("legacy parser diagnostic")
+                    == "expected a given result type after type parameters"
         })
         .expect("a named given without a result type should be diagnosed");
     let line_break = source.find("\n  def after").unwrap() as u32;

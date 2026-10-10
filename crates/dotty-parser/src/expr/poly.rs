@@ -313,7 +313,8 @@ mod tests {
         ));
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("value-parameter function body")
         }));
     }
@@ -428,11 +429,11 @@ mod tests {
 
         let _ = parser.expr();
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.message().contains("RightBracket") })
-        );
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .legacy_message()
+                .expect("legacy parser diagnostic")
+                .contains("RightBracket")
+        }));
     }
 }

@@ -444,7 +444,8 @@ mod tests {
 
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("expected Punctuation(RightParen)")
         }));
         assert_eq!(parser.current().kind, TokenKind::Newline);
@@ -538,7 +539,8 @@ mod tests {
         ));
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("must come last in a parameter list")
         }));
         assert_eq!(parser.current().kind, TokenKind::Eof);
