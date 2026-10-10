@@ -9,7 +9,7 @@ use dotty_core::{SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeN
 
 use crate::modifiers::DefinitionPrefix;
 use crate::statements::ParsedStatement;
-use crate::{Location, ParseDiagnosticKind, ParseKind, Parser};
+use crate::{Location, ParseIssue, ParseKind, Parser, TypeDefinitionIssue};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -146,10 +146,11 @@ where
                 }
             }
             _ => {
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "expected a type name after `type`",
-                );
+                self.report_issue(ParseIssue::TypeDefinition(
+                    TypeDefinitionIssue::ExpectedName {
+                        found: self.current().kind,
+                    },
+                ));
                 self.missing_type_definition_name()
             }
         }
@@ -184,10 +185,11 @@ where
             }
             if self.at_type_definition_rhs_boundary() {
                 let position = self.current_span();
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "expected a type after `=`",
-                );
+                self.report_issue(ParseIssue::TypeDefinition(
+                    TypeDefinitionIssue::ExpectedAliasType {
+                        found: self.current().kind,
+                    },
+                ));
                 let error = self.error_type(position);
                 if owns_layout && self.current().kind == TokenKind::Outdent {
                     self.advance();
@@ -211,18 +213,20 @@ where
                             self.extend_match_type_span(rhs, bound_id);
                         }
                     } else {
-                        self.report(
-                            ParseDiagnosticKind::UnexpectedToken,
-                            "a match type alias cannot have a lower type bound",
-                        );
+                        self.report_issue(ParseIssue::TypeDefinition(
+                            TypeDefinitionIssue::LowerBoundNotAllowedOnMatchTypeAlias {
+                                found: self.current().kind,
+                            },
+                        ));
                     }
                 } else if opaque {
                     return self.alloc_opaque_type_bounds(low, high, rhs);
                 } else {
-                    self.report(
-                        ParseDiagnosticKind::UnexpectedToken,
-                        "only a match type alias can combine a type bound with `=`",
-                    );
+                    self.report_issue(ParseIssue::TypeDefinition(
+                        TypeDefinitionIssue::BoundedAliasMustBeMatchType {
+                            found: self.current().kind,
+                        },
+                    ));
                 }
             }
             return rhs;
@@ -230,10 +234,11 @@ where
 
         if low.is_none() && high.is_none() {
             if opaque {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `=` after an opaque type definition",
-                );
+                self.report_issue(ParseIssue::TypeDefinition(
+                    TypeDefinitionIssue::ExpectedEqualsAfterOpaqueDefinition {
+                        found: self.current().kind,
+                    },
+                ));
             }
             // Dotty represents an abstract declaration's empty bounds at the
             // start of the type definition, rather than after its name.
@@ -251,10 +256,11 @@ where
             }),
         );
         if opaque {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `=` after an opaque type bound",
-            );
+            self.report_issue(ParseIssue::TypeDefinition(
+                TypeDefinitionIssue::ExpectedEqualsAfterOpaqueBound {
+                    found: self.current().kind,
+                },
+            ));
         }
         bounds
     }
@@ -359,6 +365,7 @@ where
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
+    use crate::{ParseDiagnosticKind, ParseIssue};
     use dotty_core::ast::{LambdaTypeTree, Modifier, TypeBoundsTree, TypeDef};
     use dotty_core::{HardKeyword, NameInterner, TextRange};
 
@@ -474,11 +481,16 @@ mod tests {
         };
 
         assert_eq!(parser.names.resolve(name.as_name().text()), "$missing_type");
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedType })
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeDefinition(TypeDefinitionIssue::ExpectedName {
+                found: TokenKind::Operator,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(5, 6).unwrap()
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
@@ -507,11 +519,16 @@ mod tests {
         };
 
         assert_eq!(parser.names.resolve(name.as_name().text()), "$missing_type");
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedType })
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeDefinition(TypeDefinitionIssue::ExpectedName {
+                found: TokenKind::Operator,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(5, 6).unwrap()
         );
         assert_eq!(parser.current().span, TextRange::new(5, 6).unwrap());
     }
@@ -540,11 +557,16 @@ mod tests {
         };
 
         assert_eq!(parser.names.resolve(name.as_name().text()), "$missing_type");
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::ExpectedType })
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeDefinition(TypeDefinitionIssue::ExpectedName {
+                found: TokenKind::Operator,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(5, 7).unwrap()
         );
         assert_eq!(parser.current().span, TextRange::new(5, 7).unwrap());
     }
@@ -695,7 +717,21 @@ mod tests {
         let ParsedStatement::Definition(_) = parser.parse_statement(Location::Elsewhere) else {
             panic!("expected the malformed opaque definition");
         };
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeDefinition(TypeDefinitionIssue::ExpectedEqualsAfterOpaqueBound {
+                found: TokenKind::Newline,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(27, 28).unwrap()
+        );
         assert_eq!(parser.current().kind, TokenKind::Newline);
 
         parser.advance();
@@ -982,11 +1018,91 @@ mod tests {
             panic!("expected MatchTypeTree");
         };
         assert!(bound.is_none());
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken })
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeDefinition(
+                TypeDefinitionIssue::LowerBoundNotAllowedOnMatchTypeAlias {
+                    found: TokenKind::Eof,
+                }
+            )
+        );
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(46, 46).unwrap()
+        );
+    }
+
+    #[test]
+    fn reports_a_bounded_non_match_alias_structurally() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "type A >: L = B",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Type), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Operator, 7, 9),
+                token(TokenKind::Identifier, 10, 11),
+                token(TokenKind::Operator, 12, 13),
+                token(TokenKind::Identifier, 14, 15),
+                token(TokenKind::Eof, 15, 15),
+            ],
+            &mut names,
+        );
+
+        parser.parse_statement(Location::Elsewhere);
+
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeDefinition(TypeDefinitionIssue::BoundedAliasMustBeMatchType {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(15, 15).unwrap()
+        );
+    }
+
+    #[test]
+    fn reports_an_opaque_definition_missing_equals_structurally() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "opaque type A",
+            vec![
+                token(TokenKind::Identifier, 0, 6),
+                token(TokenKind::Keyword(HardKeyword::Type), 7, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        parser.parse_statement(Location::Elsewhere);
+
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeDefinition(TypeDefinitionIssue::ExpectedEqualsAfterOpaqueDefinition {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(13, 13).unwrap()
         );
     }
 
@@ -1130,11 +1246,16 @@ mod tests {
             panic!("expected a definition statement");
         };
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeDefinition(TypeDefinitionIssue::ExpectedName {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(4, 4).unwrap()
         );
     }
 
@@ -1157,11 +1278,20 @@ mod tests {
             panic!("expected a definition statement");
         };
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeDefinition(TypeDefinitionIssue::ExpectedAliasType {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(8, 8).unwrap()
         );
     }
 
@@ -1194,12 +1324,14 @@ mod tests {
             result.ast.get(block.expr).kind,
             TreeKind::Ident(_)
         ));
-        assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedType)
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].issue(),
+            &ParseIssue::TypeDefinition(TypeDefinitionIssue::ExpectedAliasType {
+                found: TokenKind::Newline,
+            })
         );
+        assert_eq!(result.diagnostics[0].span(), TextRange::new(8, 9).unwrap());
     }
 
     #[test]

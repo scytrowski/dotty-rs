@@ -7,7 +7,7 @@ use dotty_core::{
     Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeName, Untyped,
 };
 
-use crate::{ParamOwner, ParseDiagnosticKind, ParseKind, Parser};
+use crate::{ParamOwner, ParseIssue, ParseKind, Parser, TypeParamIssue};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -43,10 +43,11 @@ where
                 continue;
             };
 
-            self.report_at(
-                ParseDiagnosticKind::UnsupportedSyntax,
+            self.report_issue_at(
                 context_bounds_span.unwrap_or_else(|| self.current_span()),
-                "context bounds are not allowed for a polymorphic function type parameter",
+                ParseIssue::TypeParameter(
+                    TypeParamIssue::ContextBoundsNotAllowedForPolyFunctionParameter,
+                ),
             );
 
             if let TreeKind::TypeDef(definition) = &mut self.ast.get_mut(param).kind {
@@ -83,10 +84,11 @@ where
         let mut params = Vec::new();
 
         if self.current().kind == TokenKind::Punctuation(Punctuation::RightBracket) {
-            self.report(
-                ParseDiagnosticKind::ExpectedType,
-                "expected a type parameter between `[` and `]`",
-            );
+            self.report_issue(ParseIssue::TypeParameter(
+                TypeParamIssue::EmptyParameterClause {
+                    found: self.current().kind,
+                },
+            ));
         }
 
         while self.current().kind != TokenKind::Eof
@@ -104,29 +106,32 @@ where
                 ))
         {
             if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "expected a type parameter after `,`",
-                );
+                self.report_issue(ParseIssue::TypeParameter(
+                    TypeParamIssue::ExpectedParameterAfterComma {
+                        found: self.current().kind,
+                    },
+                ));
                 continue;
             }
 
             let checkpoint = self.cursor.checkpoint();
             params.push(self.type_param());
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing a type parameter",
-                );
+                self.report_issue(ParseIssue::TypeParameter(
+                    TypeParamIssue::ParameterNoProgress {
+                        found: self.current().kind,
+                    },
+                ));
                 break;
             }
 
             if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 if self.current().kind == TokenKind::Punctuation(Punctuation::RightBracket) {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedType,
-                        "expected a type parameter after `,`",
-                    );
+                    self.report_issue(ParseIssue::TypeParameter(
+                        TypeParamIssue::ExpectedParameterAfterComma {
+                            found: self.current().kind,
+                        },
+                    ));
                 }
                 continue;
             }
@@ -139,17 +144,19 @@ where
             }
 
             if self.type_param_recovery_definition_boundary() {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `,` or `]` after a type parameter",
-                );
+                self.report_issue(ParseIssue::TypeParameter(
+                    TypeParamIssue::ExpectedParameterSeparator {
+                        found: self.current().kind,
+                    },
+                ));
                 break;
             }
 
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `,` or `]` after a type parameter",
-            );
+            self.report_issue(ParseIssue::TypeParameter(
+                TypeParamIssue::ExpectedParameterSeparator {
+                    found: self.current().kind,
+                },
+            ));
             self.recover_type_param_clause();
             if self.current_is_arrow() || self.current_is_type_lambda_arrow() {
                 break;
@@ -215,10 +222,9 @@ where
 
         let name = self.parse_type_param_name();
         if variance.is_some() && self.context.param_owner == Some(ParamOwner::Type) {
-            self.report(
-                ParseDiagnosticKind::UnsupportedSyntax,
-                "variance is not allowed for a polymorphic function type parameter",
-            );
+            self.report_issue(ParseIssue::TypeParameter(
+                TypeParamIssue::VarianceNotAllowedForPolyFunctionParameter,
+            ));
         }
 
         let nested_params = if self
@@ -302,10 +308,11 @@ where
             )
         } else {
             if has_context_bounds {
-                self.report(
-                    ParseDiagnosticKind::UnsupportedSyntax,
-                    "context bounds are not allowed for this type-parameter owner",
-                );
+                self.report_issue(ParseIssue::TypeParameter(
+                    TypeParamIssue::ContextBoundsNotAllowedForOwner {
+                        owner: self.context.param_owner,
+                    },
+                ));
             }
             bounds
         };
@@ -366,10 +373,11 @@ where
                 }
             }
             _ => {
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "expected a type parameter name",
-                );
+                self.report_issue(ParseIssue::TypeParameter(
+                    TypeParamIssue::ExpectedParameterName {
+                        found: self.current().kind,
+                    },
+                ));
                 self.missing_type_param_name()
             }
         }
@@ -428,27 +436,30 @@ where
         while self.accept_context_bound_colon() {
             if self.accept(TokenKind::Punctuation(Punctuation::LeftBrace)) {
                 if self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedType,
-                        "expected a context-bound type between `{` and `}`",
-                    );
+                    self.report_issue(ParseIssue::TypeParameter(
+                        TypeParamIssue::EmptyBracedContextBoundList {
+                            found: self.current().kind,
+                        },
+                    ));
                 } else {
                     loop {
                         if self.current().kind == TokenKind::Punctuation(Punctuation::Comma) {
-                            self.report(
-                                ParseDiagnosticKind::ExpectedType,
-                                "expected a context-bound type",
-                            );
+                            self.report_issue(ParseIssue::TypeParameter(
+                                TypeParamIssue::ExpectedContextBoundAtListStart {
+                                    found: self.current().kind,
+                                },
+                            ));
                             self.advance();
                             continue;
                         }
                         let checkpoint = self.cursor.checkpoint();
                         context_bounds.push(self.parse_context_bound_type(parameter));
                         if !self.cursor.progressed_since(checkpoint) {
-                            self.report(
-                                ParseDiagnosticKind::UnexpectedToken,
-                                "parser made no progress while parsing a context bound",
-                            );
+                            self.report_issue(ParseIssue::TypeParameter(
+                                TypeParamIssue::ContextBoundNoProgress {
+                                    found: self.current().kind,
+                                },
+                            ));
                             self.recover_context_bound_list();
                         }
                         if self.current().kind != TokenKind::Punctuation(Punctuation::Comma) {
@@ -456,10 +467,11 @@ where
                         }
                         self.advance();
                         if self.current().kind == TokenKind::Punctuation(Punctuation::RightBrace) {
-                            self.report(
-                                ParseDiagnosticKind::ExpectedType,
-                                "expected a context-bound type after `,`",
-                            );
+                            self.report_issue(ParseIssue::TypeParameter(
+                                TypeParamIssue::ExpectedContextBoundAfterComma {
+                                    found: self.current().kind,
+                                },
+                            ));
                             break;
                         }
                     }
@@ -488,10 +500,11 @@ where
     fn parse_context_bound_type(&mut self, parameter: TypeName) -> TreeId<Untyped> {
         let mark = self.mark();
         let bound = if self.context_bound_type_is_missing() {
-            self.report(
-                ParseDiagnosticKind::ExpectedType,
-                "expected a context-bound type",
-            );
+            self.report_issue(ParseIssue::TypeParameter(
+                TypeParamIssue::ExpectedContextBoundType {
+                    found: self.current().kind,
+                },
+            ));
             self.error_type(self.span_from(mark))
         } else {
             self.with_parse_kind(ParseKind::Type, |parser| {
@@ -521,10 +534,11 @@ where
                 name
             }
             _ => {
-                self.report(
-                    ParseDiagnosticKind::ExpectedExpression,
-                    "expected a context-bound alias after `as`",
-                );
+                self.report_issue(ParseIssue::TypeParameter(
+                    TypeParamIssue::ExpectedContextBoundAlias {
+                        found: self.current().kind,
+                    },
+                ));
                 None
             }
         }
@@ -622,6 +636,7 @@ pub(crate) fn is_recovery_definition_keyword(kind: TokenKind) -> bool {
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
+    use crate::{ParseDiagnosticKind, ParseIssue};
     use dotty_core::ast::{
         ContextBoundTypeTree, ContextBounds, TypeBoundsTree, TypeDef, UntypedNode,
     };
@@ -818,8 +833,122 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(parsed_names, ["A", "B"]);
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeParameter(TypeParamIssue::ExpectedContextBoundAtListStart {
+                found: TokenKind::Punctuation(Punctuation::Comma),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(5, 6).unwrap()
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_an_empty_braced_context_bound_list_structurally() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A: {}]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 4, 5),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 5, 6),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        parser.parse_type_param_clause(ParamOwner::Def);
+
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeParameter(TypeParamIssue::EmptyBracedContextBoundList {
+                found: TokenKind::Punctuation(Punctuation::RightBracket),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(6, 7).unwrap()
+        );
+    }
+
+    #[test]
+    fn reports_a_missing_context_bound_alias_structurally() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A: Show as]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Identifier, 4, 8),
+                token(TokenKind::Identifier, 9, 11),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        parser.parse_type_param_clause(ParamOwner::Def);
+
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeParameter(TypeParamIssue::ExpectedContextBoundAlias {
+                found: TokenKind::Punctuation(Punctuation::RightBracket),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedExpression
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(11, 12).unwrap()
+        );
+    }
+
+    #[test]
+    fn reports_context_bounds_stripped_from_a_polyfunction_structurally() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "[A: Show]",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 0, 1),
+                token(TokenKind::Identifier, 1, 2),
+                token(TokenKind::ColonFollow, 2, 3),
+                token(TokenKind::Identifier, 4, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+        let params = parser.parse_type_param_clause(ParamOwner::Type);
+
+        parser.strip_type_lambda_context_bounds(&params);
+
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeParameter(
+                TypeParamIssue::ContextBoundsNotAllowedForPolyFunctionParameter,
+            )
+        );
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(4, 8).unwrap()
+        );
     }
 
     #[test]
@@ -845,11 +974,20 @@ mod tests {
             TreeKind::TypeDef(TypeDef { rhs, .. })
                 if matches!(parser.ast().get(rhs).kind, TreeKind::TypeBoundsTree(_))
         ));
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax })
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeParameter(TypeParamIssue::ContextBoundsNotAllowedForOwner {
+                owner: Some(ParamOwner::Hk),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(8, 9).unwrap()
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
@@ -964,6 +1102,16 @@ mod tests {
         let _ = parser.parse_type_param_clause(ParamOwner::Type);
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeParameter(TypeParamIssue::ExpectedParameterAfterComma {
+                found: TokenKind::Punctuation(Punctuation::RightBracket),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(3, 4).unwrap()
+        );
     }
 
     #[test]
@@ -1110,10 +1258,10 @@ mod tests {
         let diagnostic = &parser.diagnostics()[0];
         assert_eq!(diagnostic.kind(), ParseDiagnosticKind::ExpectedType);
         assert_eq!(
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "expected a type parameter name"
+            diagnostic.issue(),
+            &ParseIssue::TypeParameter(TypeParamIssue::ExpectedParameterName {
+                found: TokenKind::Operator,
+            })
         );
         assert_eq!(diagnostic.span(), TextRange::new(1, 2).unwrap());
     }
@@ -1312,7 +1460,17 @@ mod tests {
         let params = parser.parse_type_param_clause(ParamOwner::Type);
         assert_eq!(params.len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeParameter(TypeParamIssue::ExpectedParameterAfterComma {
+                found: TokenKind::Identifier,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(2, 3).unwrap()
+        );
     }
 
     #[test]
@@ -1520,12 +1678,21 @@ mod tests {
 
         assert_eq!(params.len(), 1);
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("expected `,` or `]` after a type parameter")
-        }));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeParameter(TypeParamIssue::ExpectedParameterSeparator {
+                found: TokenKind::Identifier,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedToken
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(3, 4).unwrap()
+        );
     }
 
     #[test]
@@ -1543,11 +1710,20 @@ mod tests {
 
         let params = parser.parse_type_param_clause(ParamOwner::Type);
         assert!(params.is_empty());
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("expected a type parameter")
-        }));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::TypeParameter(TypeParamIssue::EmptyParameterClause {
+                found: TokenKind::Punctuation(Punctuation::RightBracket),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(1, 2).unwrap()
+        );
     }
 }
