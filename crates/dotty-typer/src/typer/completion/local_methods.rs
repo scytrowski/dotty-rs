@@ -168,7 +168,7 @@ impl SourceTyper<'_> {
                 if parameter.metadata.modifiers.iter().any(|modifier| {
                     !matches!(
                         modifier,
-                        Modifier::Param | Modifier::Given | Modifier::Implicit
+                        Modifier::Param | Modifier::Given | Modifier::Implicit | Modifier::Inline
                     )
                 }) {
                     return Err(deferred("parameter modifiers"));

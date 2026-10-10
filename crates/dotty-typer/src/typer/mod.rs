@@ -14631,7 +14631,7 @@ mod tests {
     fn local_unsupported_parameter_modifiers_remain_deferred() {
         for (unsupported_modifier, expected_feature) in [
             (Modifier::Erased, "erased parameters"),
-            (Modifier::Inline, "parameter modifiers"),
+            (Modifier::Final, "parameter modifiers"),
         ] {
             let (mut parsed, mut store, packages, definitions, index, source) = parse_and_name(
                 "class C { def outer: Int = { def local(value: Int): Int = value; 0 } }",
@@ -14676,6 +14676,148 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    #[test]
+    fn local_inline_parameter_uses_shared_method_signature_and_preserves_identity() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def local(inline value: Int): Int = value; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let method_tree = match &parsed.ast.get(block_tree).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("outer body should be a block"),
+        };
+        let parameter_tree = match &parsed.ast.get(method_tree).kind {
+            TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+            _ => panic!("local declaration should be a DefDef"),
+        };
+        let TreeKind::ValDef(parameter) = &parsed.ast.get(parameter_tree).kind else {
+            panic!("parameter should be a ValDef")
+        };
+        assert!(parameter.metadata.modifiers.contains(&Modifier::Inline));
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+
+        let signature = typer.complete_symbol(method).unwrap();
+
+        let Type::Method(method_type) = typer.store().types.get(signature) else {
+            panic!("inline local method should use the shared Method signature")
+        };
+        assert_eq!(method_type.params.len(), 1);
+        assert_eq!(method_type.params[0].ty, definitions.int);
+        assert_eq!(method_type.result, definitions.int);
+        let parameter_symbol = typer
+            .local_method_parameter_symbol_at(source, parameter_tree)
+            .expect("inline parameter should have a canonical local symbol");
+        assert_eq!(
+            typer.store().symbols.get(parameter_symbol).owner,
+            Some(method)
+        );
+        assert!(
+            typer
+                .store()
+                .symbols
+                .get(parameter_symbol)
+                .flags
+                .contains(SymbolFlags::INLINE)
+        );
+        assert_eq!(
+            typer.local_method_parameter_symbol_at(source, parameter_tree),
+            Some(parameter_symbol)
+        );
+        assert!(matches!(
+            typer.store().symbols.get(parameter_symbol).info,
+            SymbolInfo::Complete(ty) if ty == definitions.int
+        ));
+    }
+
+    #[test]
+    fn local_inline_signature_failure_rolls_back_before_deterministic_retry() {
+        let (mut parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def outer: Int = { def local(inline first: Int, second: Int): Int = first; 0 } }",
+        );
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let method_tree = match &parsed.ast.get(block_tree).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("outer body should be a block"),
+        };
+        let (first_parameter_tree, second_parameter_tree) = match &parsed.ast.get(method_tree).kind
+        {
+            TreeKind::DefDef(definition) => (
+                definition.value_param_clauses[0][0],
+                definition.value_param_clauses[0][1],
+            ),
+            _ => panic!("local declaration should be a DefDef"),
+        };
+        let TreeKind::ValDef(second_parameter) =
+            &mut parsed.ast.get_mut(second_parameter_tree).kind
+        else {
+            panic!("second parameter should be a ValDef")
+        };
+        second_parameter.metadata.modifiers.push(Modifier::Erased);
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        preindex_block_for_test(&mut typer, block_tree, context);
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+
+        assert!(matches!(
+            typer.complete_symbol(method),
+            Err(TyperError::LocalMethodSignatureDeferred {
+                feature: "erased parameters",
+                ..
+            })
+        ));
+        assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+        assert!(
+            typer
+                .local_method_parameter_symbol_at(source, first_parameter_tree)
+                .is_none()
+        );
+        assert!(
+            typer
+                .local_method_parameter_symbol_at(source, second_parameter_tree)
+                .is_none()
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(method),
+            Err(TyperError::LocalMethodSignatureDeferred {
+                feature: "erased parameters",
+                ..
+            })
+        ));
+        assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
+        assert!(
+            typer
+                .local_method_parameter_symbol_at(source, first_parameter_tree)
+                .is_none()
+        );
+        assert!(
+            typer
+                .local_method_parameter_symbol_at(source, second_parameter_tree)
+                .is_none()
+        );
     }
 
     #[test]
