@@ -1,7 +1,7 @@
 use dotty_core::ast::{Apply, DefDef, ModuleDef, New, Template, UntypedNode};
 use dotty_core::{NameInterner, SourceId, SourceText, TextRange, TreeKind};
 use dotty_lexer::ContextualScanner;
-use dotty_parser::{ExpressionIssue, ParseIssue, parse_compilation_unit};
+use dotty_parser::{ExpressionIssue, ParseIssue, TemplateIssue, parse_compilation_unit};
 
 #[test]
 fn missing_argument_after_indented_new_template_does_not_swallow_later_argument() {
@@ -36,6 +36,14 @@ fn missing_argument_after_indented_new_template_does_not_swallow_later_argument(
     assert_eq!(
         missing_rhs.span(),
         TextRange::new(closing_paren, closing_paren + 1).unwrap()
+    );
+    assert!(
+        result.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic.issue(),
+            ParseIssue::Template(TemplateIssue::ExpectedMemberSeparator { .. })
+        )),
+        "unexpected template-member separator diagnostic: {:?}",
+        result.diagnostics
     );
     let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
         panic!("expected package root");
