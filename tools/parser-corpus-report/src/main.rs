@@ -2268,9 +2268,11 @@ fn is_namer_audit_metric_feature(name: &str) -> bool {
 
 fn tool_diagnostic_code(kind: &str) -> String {
     let mut code = String::from("tool.");
-    for character in kind.chars() {
+    for (index, character) in kind.chars().enumerate() {
         if character.is_ascii_uppercase() {
-            code.push('_');
+            if index > 0 {
+                code.push('_');
+            }
             code.push(character.to_ascii_lowercase());
         } else {
             code.push(character);
@@ -3486,6 +3488,8 @@ mod tests {
         assert_eq!(report.hard_parser_failures, 1);
         assert_eq!(report.process_failures, 1);
         assert_eq!(report.panics, 0);
+        assert_eq!(report.diagnostic_histogram["tool.worker_protocol"], 1);
+        assert_eq!(tool_diagnostic_code("ProcessError"), "tool.process_error");
     }
 
     #[test]
