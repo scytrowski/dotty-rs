@@ -14413,6 +14413,64 @@ mod tests {
     }
 
     #[test]
+    fn forward_local_by_name_call_uses_the_preentered_signature() {
+        let source_text =
+            "class C { def outer: Int = { force(1); def force(value: => Int): Int = value; 0 } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (outer, block_tree) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(block) = &parsed.ast.get(block_tree).kind else {
+            panic!("outer body should be a block")
+        };
+        let call_tree = block.stats[0];
+        let method_tree = block.stats[1];
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+        let typed_block = typer.type_expression(block_tree, context).unwrap();
+
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed_block).ty)
+                .unwrap(),
+            definitions.int
+        );
+        let typed_call = typer.source_typed_index().get(source, call_tree).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_call).kind else {
+            panic!("forward call should remain an Apply")
+        };
+        let method = typer.local_method_symbol_at(source, method_tree).unwrap();
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == method
+        ));
+        let SymbolInfo::Complete(signature) = *typer.store().symbols.info(method) else {
+            panic!("forward call should complete the later local method signature")
+        };
+        let Type::Method(method_type) = typer.store().types.get(signature) else {
+            panic!("local method should have a Method signature")
+        };
+        assert_eq!(method_type.result, definitions.int);
+        assert!(matches!(
+            typer.store().types.get(method_type.params[0].ty),
+            Type::ByName { result } if *result == definitions.int
+        ));
+    }
+
+    #[test]
     fn local_method_repeated_parameter_uses_repeated_and_varargs_signature() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def outer: Int = { def inner(xs: Int*): Int = 1; 0 } }");
