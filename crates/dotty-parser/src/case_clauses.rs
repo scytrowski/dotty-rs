@@ -1,7 +1,7 @@
 use dotty_core::ast::{Block, CaseDef};
 use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
-use crate::{Location, ParseDiagnosticKind, ParseKind, Parser, RecoverySet};
+use crate::{CaseIssue, ExpressionIssue, Location, ParseIssue, ParseKind, Parser, RecoverySet};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -19,7 +19,9 @@ where
     ) -> TreeId<Untyped> {
         let mark = self.mark();
         if !self.accept(TokenKind::Keyword(HardKeyword::Case)) {
-            self.report(ParseDiagnosticKind::ExpectedToken, "expected `case`");
+            self.report_issue(ParseIssue::Case(CaseIssue::ExpectedCaseKeyword {
+                found: self.current().kind,
+            }));
         }
 
         let pattern = self.with_parse_kind(ParseKind::Pattern, |parser| {
@@ -32,10 +34,9 @@ where
 
         if !self.current_is_arrow() {
             self.observe_case_clause_ended();
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `=>` after case pattern",
-            );
+            self.report_issue(ParseIssue::Case(CaseIssue::ExpectedCaseArrow {
+                found: self.current().kind,
+            }));
             self.recover_until(RecoverySet::Case);
             let body = self.error_expr(self.current_span());
             return self.alloc_from(
@@ -152,10 +153,9 @@ where
             cases.push(self.case_clause_in_region(false, region_indent_offset));
             self.consume_case_separators();
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing case clauses",
-                );
+                self.report_issue(ParseIssue::Case(CaseIssue::CaseListNoProgress {
+                    found: self.current().kind,
+                }));
                 break;
             }
         }
@@ -170,10 +170,11 @@ where
         self.advance();
         if !crate::expr::can_start_prefix_expr(self.current().kind) {
             let position = self.current_span();
-            self.report(
-                ParseDiagnosticKind::ExpectedExpression,
-                "expected an expression after guard `if`",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedGuardExpression {
+                    found: self.current().kind,
+                },
+            ));
             return Some(self.error_expr(position));
         }
         Some(self.with_location(Location::InGuard, |parser| parser.postfix_expr()))
@@ -337,10 +338,9 @@ where
                 && !closed_by_delimiter
                 && !self.current_end_marker_matches_active_construct()
             {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected an outdent to close a case body",
-                );
+                self.report_issue(ParseIssue::Case(CaseIssue::ExpectedCaseBodyOutdent {
+                    found: self.current().kind,
+                }));
             }
             let block_mark = result
                 .0
@@ -390,6 +390,7 @@ where
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
+    use crate::{CaseIssue, ExpressionIssue, ParseDiagnosticKind};
     use dotty_core::ast::{CaseDef, Ident, UntypedNode};
     use dotty_core::{NameInterner, ScannerEvent, SourceId, SourceText, TextRange, Token};
     use std::cell::RefCell;
@@ -910,12 +911,111 @@ mod tests {
         let cases = parser.case_clauses();
 
         assert_eq!(cases.len(), 2);
-        assert!(
+        let diagnostic = parser
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedExpression)
+            .expect("the malformed guard should be diagnosed");
+        assert_eq!(
+            diagnostic.issue(),
+            &ParseIssue::Expression(ExpressionIssue::ExpectedExpressionAtCurrentToken {
+                found: TokenKind::Operator,
+            })
+        );
+        assert_eq!(
+            diagnostic.span(),
+            TextRange::new(12, 14).expect("valid diagnostic range")
+        );
+        assert_eq!(diagnostic.source(), SourceId::from_index(1));
+        assert_eq!(diagnostic.severity(), dotty_core::DiagnosticSeverity::Error);
+    }
+
+    #[test]
+    fn reports_each_missing_arrow_in_multiple_malformed_case_clauses() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case x\ncase y",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Newline, 6, 7),
+                token(TokenKind::Keyword(HardKeyword::Case), 7, 11),
+                token(TokenKind::Identifier, 12, 13),
+                token(TokenKind::Eof, 13, 13),
+            ],
+            &mut names,
+        );
+
+        let cases = parser.case_clauses();
+
+        assert_eq!(cases.len(), 2);
+        assert_eq!(parser.diagnostics().len(), 2);
+        assert_eq!(
             parser
                 .diagnostics()
                 .iter()
-                .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedExpression)
+                .map(|diagnostic| diagnostic.issue())
+                .collect::<Vec<_>>(),
+            vec![
+                &ParseIssue::Case(CaseIssue::ExpectedCaseArrow {
+                    found: TokenKind::Newline,
+                }),
+                &ParseIssue::Case(CaseIssue::ExpectedCaseArrow {
+                    found: TokenKind::Eof,
+                }),
+            ]
         );
+        assert_eq!(
+            parser
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| diagnostic.span())
+                .collect::<Vec<_>>(),
+            vec![
+                TextRange::new(6, 7).expect("valid first diagnostic range"),
+                TextRange::new(13, 13).expect("valid second diagnostic range"),
+            ]
+        );
+        assert!(parser.diagnostics().iter().all(|diagnostic| {
+            diagnostic.source() == SourceId::from_index(1)
+                && diagnostic.severity() == dotty_core::DiagnosticSeverity::Error
+        }));
+    }
+
+    #[test]
+    fn reports_a_missing_guard_expression_without_misclassifying_the_case_arrow() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "case x if",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                token(TokenKind::Identifier, 5, 6),
+                token(TokenKind::Keyword(HardKeyword::If), 7, 9),
+                token(TokenKind::Eof, 9, 9),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.case_clause(false);
+
+        assert_eq!(parser.diagnostics().len(), 2);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Expression(ExpressionIssue::ExpectedGuardExpression {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[1].issue(),
+            &ParseIssue::Case(CaseIssue::ExpectedCaseArrow {
+                found: TokenKind::Eof,
+            })
+        );
+        assert!(parser.diagnostics().iter().all(|diagnostic| {
+            diagnostic.span() == TextRange::new(9, 9).expect("valid diagnostic range")
+                && diagnostic.source() == SourceId::from_index(1)
+                && diagnostic.severity() == dotty_core::DiagnosticSeverity::Error
+        }));
     }
 
     #[test]

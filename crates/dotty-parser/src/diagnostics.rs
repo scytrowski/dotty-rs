@@ -218,6 +218,8 @@ pub enum ExpressionIssue {
     ExpressionSuffixNoProgress { found: TokenKind },
     /// No expression can start at the current token.
     ExpectedExpressionAtCurrentToken { found: TokenKind },
+    /// A guard's `if` is not followed by its condition expression.
+    ExpectedGuardExpression { found: TokenKind },
     /// An `if` condition is not followed by `then`.
     ExpectedIfThen { found: TokenKind },
     /// A `while` condition is not followed by `do`.
@@ -354,9 +356,8 @@ impl ExpressionIssue {
             | Self::LegacyWildcardSpliceNotFinal { .. }
             | Self::InvalidApplicationTarget { .. }
             | Self::ExpressionSuffixNoProgress { .. } => ParseDiagnosticKind::UnexpectedToken,
-            Self::ExpectedExpressionAtCurrentToken { .. } => {
-                ParseDiagnosticKind::ExpectedExpression
-            }
+            Self::ExpectedExpressionAtCurrentToken { .. }
+            | Self::ExpectedGuardExpression { .. } => ParseDiagnosticKind::ExpectedExpression,
             Self::MissingDoWhileBody { .. }
             | Self::MissingDoWhileCondition { .. }
             | Self::EmptyCatchHandler { .. }
@@ -478,6 +479,7 @@ impl ExpressionIssue {
             Self::ExpectedExpressionAtCurrentToken { .. } => {
                 "parser.expression.expected_at_current_token"
             }
+            Self::ExpectedGuardExpression { .. } => "parser.expression.expected_guard_expression",
             Self::ExpectedIfThen { .. } => "parser.expression.expected_if_then",
             Self::ExpectedWhileDo { .. } => "parser.expression.expected_while_do",
             Self::MissingDoWhileBody { .. } => "parser.expression.missing_do_while_body",
@@ -906,6 +908,108 @@ impl TypeIssue {
     }
 }
 
+/// Typed failures emitted while parsing Scala patterns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatternIssue {
+    /// The pattern fragment contains tokens after the pattern.
+    TrailingInput { found: TokenKind },
+    /// An alternative operator is not followed by a pattern.
+    ExpectedPatternAfterAlternative { found: TokenKind },
+    /// A binder marker is not preceded by an identifier pattern.
+    ExpectedIdentifierBeforeBinder { found: TokenKind },
+    /// Sequence-pattern syntax is only supported in extractor arguments.
+    SequencePatternOutsideExtractorArguments { found: TokenKind },
+    /// A sequence wildcard in extractor arguments is not preceded by a variable pattern.
+    SequencePatternRequiresVariable { found: TokenKind },
+    /// Equal-precedence pattern operators use conflicting associativities.
+    MixedAssociativityOperators { left: Name, right: Name },
+    /// Parsing an infix pattern did not advance the token source.
+    InfixPatternNoProgress { found: TokenKind },
+    /// A pattern selection dot is not followed by a selector.
+    ExpectedSelectorAfterDot { found: TokenKind },
+    /// An extractor argument comma is not followed by a pattern.
+    ExpectedPatternAfterComma { found: TokenKind },
+    /// A pattern was required at the current token.
+    ExpectedPattern { found: TokenKind },
+    /// The current pattern form is not implemented.
+    UnsupportedPattern { found: TokenKind },
+}
+
+impl PatternIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::ExpectedPatternAfterAlternative { .. }
+            | Self::ExpectedPatternAfterComma { .. }
+            | Self::ExpectedPattern { .. } => ParseDiagnosticKind::ExpectedPattern,
+            Self::ExpectedSelectorAfterDot { .. } => ParseDiagnosticKind::ExpectedToken,
+            Self::SequencePatternOutsideExtractorArguments { .. }
+            | Self::SequencePatternRequiresVariable { .. }
+            | Self::UnsupportedPattern { .. } => ParseDiagnosticKind::UnsupportedSyntax,
+            Self::TrailingInput { .. }
+            | Self::ExpectedIdentifierBeforeBinder { .. }
+            | Self::MixedAssociativityOperators { .. }
+            | Self::InfixPatternNoProgress { .. } => ParseDiagnosticKind::UnexpectedToken,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::TrailingInput { .. } => "parser.pattern.trailing_input",
+            Self::ExpectedPatternAfterAlternative { .. } => {
+                "parser.pattern.expected_after_alternative"
+            }
+            Self::ExpectedIdentifierBeforeBinder { .. } => {
+                "parser.pattern.expected_identifier_before_binder"
+            }
+            Self::SequencePatternOutsideExtractorArguments { .. } => {
+                "parser.pattern.sequence_outside_extractor_arguments"
+            }
+            Self::SequencePatternRequiresVariable { .. } => {
+                "parser.pattern.sequence_requires_variable"
+            }
+            Self::MixedAssociativityOperators { .. } => "parser.pattern.mixed_associativity",
+            Self::InfixPatternNoProgress { .. } => "parser.pattern.infix_no_progress",
+            Self::ExpectedSelectorAfterDot { .. } => "parser.pattern.expected_selector_after_dot",
+            Self::ExpectedPatternAfterComma { .. } => "parser.pattern.expected_after_comma",
+            Self::ExpectedPattern { .. } => "parser.pattern.expected",
+            Self::UnsupportedPattern { .. } => "parser.pattern.unsupported",
+        }
+    }
+}
+
+/// Typed failures emitted while parsing case clauses and their guards/bodies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaseIssue {
+    /// A case clause does not begin with the `case` keyword.
+    ExpectedCaseKeyword { found: TokenKind },
+    /// A case pattern and optional guard are not followed by `=>`.
+    ExpectedCaseArrow { found: TokenKind },
+    /// Parsing a case list did not advance the token source.
+    CaseListNoProgress { found: TokenKind },
+    /// An indented case body is not closed by an outdent.
+    ExpectedCaseBodyOutdent { found: TokenKind },
+}
+
+impl CaseIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::ExpectedCaseKeyword { .. }
+            | Self::ExpectedCaseArrow { .. }
+            | Self::ExpectedCaseBodyOutdent { .. } => ParseDiagnosticKind::ExpectedToken,
+            Self::CaseListNoProgress { .. } => ParseDiagnosticKind::UnexpectedToken,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ExpectedCaseKeyword { .. } => "parser.case.expected_keyword",
+            Self::ExpectedCaseArrow { .. } => "parser.case.expected_arrow",
+            Self::CaseListNoProgress { .. } => "parser.case.no_progress",
+            Self::ExpectedCaseBodyOutdent { .. } => "parser.case.expected_body_outdent",
+        }
+    }
+}
+
 /// Structured parser issue data.
 ///
 /// `Legacy` temporarily retains messages from parser call sites that have not
@@ -944,6 +1048,10 @@ pub enum ParseIssue {
     TypeDefinition(TypeDefinitionIssue),
     /// A structured failure emitted while parsing an expression.
     Expression(ExpressionIssue),
+    /// A structured failure emitted while parsing a pattern.
+    Pattern(PatternIssue),
+    /// A structured failure emitted while parsing a case clause.
+    Case(CaseIssue),
 }
 
 impl ParseIssue {
@@ -962,6 +1070,8 @@ impl ParseIssue {
             Self::TypeParameter(issue) => issue.kind(),
             Self::TypeDefinition(issue) => issue.kind(),
             Self::Expression(issue) => issue.kind(),
+            Self::Pattern(issue) => issue.kind(),
+            Self::Case(issue) => issue.kind(),
         }
     }
 
@@ -990,6 +1100,8 @@ impl ParseIssue {
             Self::TypeParameter(issue) => issue.code(),
             Self::TypeDefinition(issue) => issue.code(),
             Self::Expression(issue) => issue.code(),
+            Self::Pattern(issue) => issue.code(),
+            Self::Case(issue) => issue.code(),
         }
     }
 }
@@ -1069,6 +1181,8 @@ impl ParseDiagnostic {
             ParseIssue::TypeParameter(_) => None,
             ParseIssue::TypeDefinition(_) => None,
             ParseIssue::Expression(_) => None,
+            ParseIssue::Pattern(_) => None,
+            ParseIssue::Case(_) => None,
         }
     }
 }
@@ -1146,5 +1260,42 @@ mod tests {
             }
         ));
         assert_eq!(diagnostic.legacy_message(), None);
+    }
+
+    #[test]
+    fn pattern_and_case_issues_have_stable_codes_and_categories() {
+        let source = SourceId::from_index(9);
+        let range = TextRange::new(4, 4).expect("valid range");
+        let pattern = ParseIssue::Pattern(PatternIssue::ExpectedPatternAfterAlternative {
+            found: TokenKind::Eof,
+        });
+        let case = ParseIssue::Case(CaseIssue::ExpectedCaseArrow {
+            found: TokenKind::Eof,
+        });
+
+        let pattern_diagnostic = ParseDiagnostic::with_issue(
+            SourceSpan::new(source, Span::without_point(range)),
+            pattern.clone(),
+        );
+        let case_diagnostic = ParseDiagnostic::with_issue(
+            SourceSpan::new(source, Span::without_point(range)),
+            case.clone(),
+        );
+
+        assert_eq!(pattern.code(), "parser.pattern.expected_after_alternative");
+        assert_eq!(pattern.kind(), ParseDiagnosticKind::ExpectedPattern);
+        assert_eq!(pattern_diagnostic.issue(), &pattern);
+        assert_eq!(pattern_diagnostic.source(), source);
+        assert_eq!(pattern_diagnostic.span(), range);
+        assert_eq!(pattern_diagnostic.severity(), DiagnosticSeverity::Error);
+        assert_eq!(pattern_diagnostic.legacy_message(), None);
+
+        assert_eq!(case.code(), "parser.case.expected_arrow");
+        assert_eq!(case.kind(), ParseDiagnosticKind::ExpectedToken);
+        assert_eq!(case_diagnostic.issue(), &case);
+        assert_eq!(case_diagnostic.source(), source);
+        assert_eq!(case_diagnostic.span(), range);
+        assert_eq!(case_diagnostic.severity(), DiagnosticSeverity::Error);
+        assert_eq!(case_diagnostic.legacy_message(), None);
     }
 }

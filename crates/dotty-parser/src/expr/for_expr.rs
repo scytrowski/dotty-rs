@@ -486,6 +486,47 @@ mod tests {
     }
 
     #[test]
+    fn missing_for_guard_condition_keeps_the_guard_specific_diagnostic() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "for x <- xs if yield x",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::For), 0, 3),
+                token(TokenKind::Identifier, 4, 5),
+                arrow(6, 8),
+                token(TokenKind::Identifier, 9, 11),
+                token(TokenKind::Keyword(HardKeyword::If), 12, 14),
+                token(TokenKind::Keyword(HardKeyword::Yield), 15, 20),
+                token(TokenKind::Identifier, 21, 22),
+                token(TokenKind::Eof, 22, 22),
+            ],
+            &mut names,
+        );
+
+        let tree = parser.expr();
+
+        assert!(matches!(
+            parser.ast().get(tree).kind,
+            TreeKind::PhaseSpecific(UntypedNode::ForYield(_))
+        ));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Expression(ExpressionIssue::ExpectedGuardExpression {
+                found: TokenKind::Keyword(HardKeyword::Yield),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].issue().code(),
+            "parser.expression.expected_guard_expression"
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(15, 20).unwrap()
+        );
+    }
+
+    #[test]
     fn physical_newline_separates_generators_when_outer_parentheses_suppress_tokens() {
         let source = "for x <- xs\n    _ <- transform(x) yield y";
         let mut names = NameInterner::new();
