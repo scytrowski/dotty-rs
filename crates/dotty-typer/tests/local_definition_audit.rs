@@ -5844,7 +5844,7 @@ fn local_method_signature_profile_classifies_feature_fixtures() {
     );
 
     let inline_parameter = audit_source_inner(
-        "class C { def outer: Int = { def modified(inline value: Int): Int = value; 0 } }",
+        "class C { def outer: Int = { inline def modified(inline value: Int): Int = value; 0 } }",
         "InlineParameter.scala",
         None,
     );

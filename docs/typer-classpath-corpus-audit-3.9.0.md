@@ -86,7 +86,7 @@ The ranked list below excludes parser/namer and classpath-resolution failures, a
 
 ### Recommended next Typer sprint
 
-After #902, the local signature profile contains 0 first-blocker observations, down from 14 affected methods across 3 files in the #899 baseline. The 8 by-name observations moved past the signature guard in #900; the 6 parameter-modifier observations (one direct origin and five inherited siblings in `MegaPhase.scala`) moved past it in #902 by accepting the already-modeled `Inline` parameter flag. This blocker movement is not evidence that all six enclosing methods type; inspect their current first blockers and the `typed_local_defdefs` count below. #901 removes the bounded by-name application blocker in the focused local-call fixture; the two corpus methods originating from by-name signatures remain behind `ImportQualifierNotFound`. Inline expansion and dependent-result signatures remain out of scope. Recommend #903 to harden these signature paths and refresh the Typer ranking.
+After #902, the local signature profile contains 0 first-blocker observations, down from 14 affected methods across 3 files in the #899 baseline. The 8 by-name observations moved past the signature guard in #900; the 6 parameter-modifier observations (one direct origin and five inherited siblings in `MegaPhase.scala`) moved past it in #902 by accepting the already-modeled `Inline` parameter flag on local `inline` methods. This blocker movement is not evidence that all six enclosing methods type; inspect their current first blockers and the `typed_local_defdefs` count below. #901 removes the bounded by-name application blocker in the focused local-call fixture; the two corpus methods originating from by-name signatures remain behind `ImportQualifierNotFound`. Inline expansion and dependent-result signatures remain out of scope. Recommend #903 to harden these signature paths and refresh the Typer ranking.
 
 ### #899–#902 local method signature profile
 
@@ -104,7 +104,7 @@ Residual local signature first-blocker rows appear below with their source path,
 
 #### #902 selected inline-parameter cohort
 
-The six rows from the #899 `parameter modifiers` feature profile are tracked by their pinned source-tree indexes below. A moved blocker is not full method typing.
+The six rows from the #899 `parameter modifiers` feature profile are tracked by their pinned source-tree indexes below. They are local `inline` methods; a moved blocker is not full method typing.
 
 | Baseline local method tree | Current first blocker |
 | --- | --- |

@@ -636,8 +636,10 @@ value widening unwraps the parameter's `Type::ByName` to its result type so
 the method body can be checked against its declared result or infer that
 result type. Parameter-dependent result types, erased parameters, higher-kinded
 and aliased type-parameter bounds, and unsupported parameter modifiers remain
-explicitly deferred. Local inline parameters retain `SymbolFlags::INLINE` and
-use the shared method-signature builder; inline expansion is not implemented.
+explicitly deferred. Inline parameters on local `inline` methods retain
+`SymbolFlags::INLINE` and use the shared method-signature builder; the same
+parameter on a non-inline local method remains deferred. Inline expansion is
+not implemented.
 Bounded non-polymorphic applications accept by-name
 formals by checking each argument against the formal's result type while
 retaining `Type::ByName` in the method signature. The typed `Apply` retains the
