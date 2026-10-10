@@ -622,6 +622,10 @@ mod tests {
             dotty_core::TextRange::new(8, 9).unwrap()
         );
         assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
+        assert_eq!(
             parser.diagnostics()[1].issue(),
             &ParseIssue::ExpectedToken {
                 expected: TokenKind::Punctuation(Punctuation::RightBracket),
@@ -665,6 +669,10 @@ mod tests {
         assert_eq!(
             parser.diagnostics()[0].span(),
             dotty_core::TextRange::new(8, 17).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
         );
     }
 

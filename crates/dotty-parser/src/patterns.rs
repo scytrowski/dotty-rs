@@ -1085,16 +1085,19 @@ mod tests {
         ));
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(
-            result.diagnostics[0].kind(),
-            ParseDiagnosticKind::ExpectedType
-        );
-        assert!(matches!(
             result.diagnostics[0].issue(),
-            ParseIssue::Legacy {
-                kind: ParseDiagnosticKind::ExpectedType,
-                ..
-            }
-        ));
+            &ParseIssue::Modifier(crate::ModifierIssue::ExpectedAnnotationType {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            result.diagnostics[0].span(),
+            dotty_core::TextRange::new(6, 6).unwrap()
+        );
+        assert_eq!(
+            result.diagnostics[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
     }
 
     #[test]

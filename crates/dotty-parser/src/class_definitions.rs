@@ -16,7 +16,7 @@ use dotty_core::{
 use crate::modifiers::DefinitionPrefix;
 use crate::statements::ParsedStatement;
 use crate::templates::{TemplateBody, TemplateBodyResult};
-use crate::{Location, ParseDiagnosticKind, Parser};
+use crate::{ClassDefinitionIssue, Location, ParseIssue, Parser};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ParentSeparator {
@@ -151,8 +151,8 @@ where
         // template tail. It may have constructor-applied parents, but must not
         // consume a body, `derives`, or `uses` after the case.
         let parents = self.parse_parent_clause();
-        if let Some(body_start) = self.enum_case_body_start() {
-            return self.reject_enum_case_body(case_position, body_start);
+        if let Some((body_start, body_kind)) = self.enum_case_body_start() {
+            return self.reject_enum_case_body(case_position, body_start, body_kind);
         }
         if self.enum_case_requires_unsupported_recovery() {
             return self.unsupported_enum_case(case_position);
@@ -269,8 +269,8 @@ where
             );
         }
 
-        if let Some(body_start) = self.enum_case_body_start() {
-            return self.reject_enum_case_body(case_position, body_start);
+        if let Some((body_start, body_kind)) = self.enum_case_body_start() {
+            return self.reject_enum_case_body(case_position, body_start, body_kind);
         }
 
         if self.current().kind == TokenKind::Keyword(HardKeyword::Extends) {
@@ -342,10 +342,11 @@ where
                     if self.enum_case_requires_unsupported_recovery() {
                         return self.unsupported_enum_case(case_position);
                     } else {
-                        self.report(
-                            ParseDiagnosticKind::ExpectedToken,
-                            "expected an enum case constructor parameter clause",
-                        );
+                        self.report_issue(ParseIssue::ClassDefinition(
+                            ClassDefinitionIssue::ExpectedEnumCaseConstructorParameters {
+                                found: self.current().kind,
+                            },
+                        ));
                     }
                 }
                 self.recover_until(crate::RecoverySet::Case);
@@ -361,8 +362,8 @@ where
                 .position
                 .map(|position| position.span().range().start())
         });
-        if let Some(body_start) = self.enum_case_body_start() {
-            return self.reject_enum_case_body(case_position, body_start);
+        if let Some((body_start, body_kind)) = self.enum_case_body_start() {
+            return self.reject_enum_case_body(case_position, body_start, body_kind);
         }
         if self.enum_case_requires_unsupported_recovery() {
             return self.unsupported_enum_case(case_position);
@@ -427,10 +428,11 @@ where
                 TokenKind::Identifier | TokenKind::BackquotedIdentifier => {
                     let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
                     let Ok(name) = self.intern_current_term_name() else {
-                        self.report(
-                            ParseDiagnosticKind::ExpectedPattern,
-                            "expected an identifier after `,` in an enum case",
-                        );
+                        self.report_issue(ParseIssue::ClassDefinition(
+                            ClassDefinitionIssue::ExpectedEnumCaseParentAfterComma {
+                                found: self.current().kind,
+                            },
+                        ));
                         self.recover_until(crate::RecoverySet::Case);
                         break;
                     };
@@ -442,18 +444,19 @@ where
                     );
                 }
                 _ => {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedPattern,
-                        "expected an identifier after `,` in an enum case",
-                    );
+                    self.report_issue(ParseIssue::ClassDefinition(
+                        ClassDefinitionIssue::ExpectedEnumCaseParentAfterComma {
+                            found: self.current().kind,
+                        },
+                    ));
                     self.recover_until(crate::RecoverySet::Case);
                     break;
                 }
             }
         }
 
-        if let Some(body_start) = self.enum_case_body_start() {
-            return self.reject_enum_case_body(case_position, body_start);
+        if let Some((body_start, body_kind)) = self.enum_case_body_start() {
+            return self.reject_enum_case_body(case_position, body_start, body_kind);
         }
 
         let tpt = self.synthetic_type_tree_at(self.last_real_token_end);
@@ -506,7 +509,7 @@ where
             ))
     }
 
-    fn enum_case_body_start(&mut self) -> Option<SourceSpan> {
+    fn enum_case_body_start(&mut self) -> Option<(SourceSpan, TokenKind)> {
         let mut offset = 0;
         while matches!(
             self.cursor.lookahead(offset).kind,
@@ -514,8 +517,9 @@ where
         ) {
             offset += 1;
         }
+        let token = self.cursor.lookahead(offset);
         matches!(
-            self.cursor.lookahead(offset).kind,
+            token.kind,
             TokenKind::Punctuation(Punctuation::LeftBrace)
                 | TokenKind::Indent
                 | TokenKind::ColonFollow
@@ -523,9 +527,9 @@ where
                 | TokenKind::ColonOp
         )
         .then(|| {
-            SourceSpan::new(
-                self.source_id,
-                Span::without_point(self.cursor.lookahead(offset).span),
+            (
+                SourceSpan::new(self.source_id, Span::without_point(token.span)),
+                token.kind,
             )
         })
     }
@@ -534,11 +538,13 @@ where
         &mut self,
         position: dotty_core::SourceSpan,
         body_start: dotty_core::SourceSpan,
+        body_kind: TokenKind,
     ) -> ParsedStatement {
-        self.report_at(
-            ParseDiagnosticKind::UnexpectedToken,
+        self.report_issue_at(
             body_start,
-            "an enum case cannot have a template body in Scala 3.9",
+            ParseIssue::ClassDefinition(ClassDefinitionIssue::EnumCaseTemplateBodyNotAllowed {
+                found: body_kind,
+            }),
         );
         self.recover_enum_case_body();
         ParsedStatement::Expression(self.error_expr(position))
@@ -616,10 +622,11 @@ where
 
     fn enum_case_metadata(&mut self, mut metadata: Modifiers) -> Modifiers {
         metadata.modifiers.retain(|modifier| {
-            self.report(
-                ParseDiagnosticKind::UnsupportedSyntax,
-                format!("modifier `{modifier:?}` is not allowed on an enum case"),
-            );
+            self.report_issue(ParseIssue::ClassDefinition(
+                ClassDefinitionIssue::ModifierNotAllowedOnEnumCase {
+                    modifier: *modifier,
+                },
+            ));
             false
         });
         metadata.modifiers.push(Modifier::EnumCase);
@@ -627,19 +634,21 @@ where
     }
 
     fn malformed_enum_case(&mut self, position: dotty_core::SourceSpan) -> ParsedStatement {
-        self.report(
-            ParseDiagnosticKind::ExpectedPattern,
-            "expected an identifier after `case`",
-        );
+        self.report_issue(ParseIssue::ClassDefinition(
+            ClassDefinitionIssue::ExpectedEnumCaseName {
+                found: self.current().kind,
+            },
+        ));
         self.recover_until(crate::RecoverySet::Case);
         ParsedStatement::Expression(self.error_expr(position))
     }
 
     fn unsupported_enum_case(&mut self, position: dotty_core::SourceSpan) -> ParsedStatement {
-        self.report(
-            ParseDiagnosticKind::UnsupportedSyntax,
-            "unsupported enum case syntax",
-        );
+        self.report_issue(ParseIssue::ClassDefinition(
+            ClassDefinitionIssue::UnsupportedEnumCaseSyntax {
+                found: self.current().kind,
+            },
+        ));
         self.recover_until(crate::RecoverySet::Case);
         ParsedStatement::Expression(self.error_expr(position))
     }
@@ -649,10 +658,11 @@ where
             if matches!(modifier, Modifier::Infix) {
                 return true;
             }
-            self.report(
-                ParseDiagnosticKind::UnsupportedSyntax,
-                format!("modifier `{modifier:?}` is not allowed on an enum"),
-            );
+            self.report_issue(ParseIssue::ClassDefinition(
+                ClassDefinitionIssue::ModifierNotAllowedOnEnum {
+                    modifier: *modifier,
+                },
+            ));
             false
         });
         metadata
@@ -780,10 +790,11 @@ where
             false,
         );
         if required_body && !self.cursor.progressed_since(body_checkpoint) {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected an enum body after its header",
-            );
+            self.report_issue(ParseIssue::ClassDefinition(
+                ClassDefinitionIssue::ExpectedEnumBody {
+                    found: self.current().kind,
+                },
+            ));
         }
         TemplateTail {
             parents,
@@ -826,20 +837,22 @@ where
                 .cursor
                 .at(TokenKind::Punctuation(Punctuation::LeftBracket))
             {
-                self.report(
-                    ParseDiagnosticKind::UnsupportedSyntax,
-                    "type applications are not supported in `derives` clauses",
-                );
+                self.report_issue(ParseIssue::ClassDefinition(
+                    ClassDefinitionIssue::TypeApplicationNotAllowedInDerives {
+                        found: self.current().kind,
+                    },
+                ));
                 self.recover_unsupported_derives_type_application();
             }
             derives.push(derive);
             if self.current().kind == TokenKind::Operator
                 && (self.current_text_is("|") || self.current_text_is("&"))
             {
-                self.report(
-                    ParseDiagnosticKind::UnsupportedSyntax,
-                    "infix type expressions are not supported in `derives` clauses",
-                );
+                self.report_issue(ParseIssue::ClassDefinition(
+                    ClassDefinitionIssue::InfixTypeNotAllowedInDerives {
+                        found: self.current().kind,
+                    },
+                ));
                 self.recover_unsupported_derives_type_expression();
             }
             if !self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
@@ -973,10 +986,11 @@ where
                 self.parse_capture_selection_after_dot(mark, ident)
             }
             _ => {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected a capture reference after `uses`",
-                );
+                self.report_issue(ParseIssue::ClassDefinition(
+                    ClassDefinitionIssue::ExpectedCaptureReference {
+                        found: self.current().kind,
+                    },
+                ));
                 self.error_expr(self.current_span())
             }
         }
@@ -1003,10 +1017,11 @@ where
                 self.current().kind,
                 TokenKind::Identifier | TokenKind::BackquotedIdentifier
             ) {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected a name after `.` in a capture reference",
-                );
+                self.report_issue(ParseIssue::ClassDefinition(
+                    ClassDefinitionIssue::ExpectedCaptureReferenceNameAfterDot {
+                        found: self.current().kind,
+                    },
+                ));
                 return qualifier;
             }
             let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
@@ -1086,10 +1101,11 @@ where
                 TokenKind::Indent | TokenKind::Punctuation(Punctuation::LeftBrace)
             )
         {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected a template body after `with`",
-            );
+            self.report_issue(ParseIssue::ClassDefinition(
+                ClassDefinitionIssue::ExpectedTemplateBodyAfterWith {
+                    found: self.current().kind,
+                },
+            ));
             return TemplateBodyResult {
                 self_val: None,
                 members: Vec::new(),
@@ -1115,10 +1131,11 @@ where
                         delimiter_terminates,
                     );
                 }
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected an indented template body after `:`",
-                );
+                self.report_issue(ParseIssue::ClassDefinition(
+                    ClassDefinitionIssue::ExpectedIndentedTemplateBodyAfterColon {
+                        found: self.current().kind,
+                    },
+                ));
                 return TemplateBodyResult {
                     self_val: None,
                     members: Vec::new(),
@@ -1300,19 +1317,21 @@ where
                 break;
             };
             if separator_mode.is_some_and(|mode| mode != separator) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "cannot mix `,` and `with` in an extends clause",
-                );
+                self.report_issue(ParseIssue::ClassDefinition(
+                    ClassDefinitionIssue::MixedExtendsSeparators {
+                        found: self.current().kind,
+                    },
+                ));
                 break;
             }
             separator_mode = Some(separator);
             self.advance();
             if self.at_enum_body_parent_boundary() {
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "expected a parent after the extends separator",
-                );
+                self.report_issue(ParseIssue::ClassDefinition(
+                    ClassDefinitionIssue::ExpectedParentAfterExtendsSeparator {
+                        found: self.current().kind,
+                    },
+                ));
                 break;
             }
             parents.push(self.parse_parent());
@@ -1404,10 +1423,11 @@ where
             return name;
         }
 
-        self.report(
-            ParseDiagnosticKind::ExpectedType,
-            "expected a type name after class or trait",
-        );
+        self.report_issue(ParseIssue::ClassDefinition(
+            ClassDefinitionIssue::ExpectedClassOrTraitName {
+                found: self.current().kind,
+            },
+        ));
         self.missing_type_name()
     }
 
@@ -1416,10 +1436,11 @@ where
             self.advance();
             TermName::new(name.text())
         } else {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected an object name after `object`",
-            );
+            self.report_issue(ParseIssue::ClassDefinition(
+                ClassDefinitionIssue::ExpectedObjectName {
+                    found: self.current().kind,
+                },
+            ));
             self.missing_object_name()
         }
     }
@@ -1725,6 +1746,7 @@ where
 mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
+    use crate::{ClassDefinitionIssue, ParseDiagnosticKind, ParseIssue};
     use dotty_core::ast::{TypeDef, UntypedNode};
     use dotty_core::{NameInterner, Punctuation};
 
@@ -1808,14 +1830,18 @@ mod tests {
         assert!(matches!(parser.ast().get(*rhs).kind, TreeKind::Template(_)));
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::ExpectedToken
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::ClassDefinition(ClassDefinitionIssue::ExpectedEnumBody {
+                found: TokenKind::Eof,
+            })
         );
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("enum body")
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(6, 6).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
         );
     }
 
@@ -1840,11 +1866,26 @@ mod tests {
             panic!("expected TypeDef");
         };
         assert_eq!(definition.metadata.modifiers, vec![Modifier::Enum]);
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax })
+        assert_eq!(parser.diagnostics().len(), 2);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::ClassDefinition(ClassDefinitionIssue::ExpectedEnumBody {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(12, 12).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[1].issue(),
+            &ParseIssue::ClassDefinition(ClassDefinitionIssue::ModifierNotAllowedOnEnum {
+                modifier: Modifier::Final,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[1].span(),
+            dotty_core::TextRange::new(12, 12).unwrap()
         );
     }
 
@@ -2233,11 +2274,9 @@ mod tests {
                 .count(),
             1
         );
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("enum cases")
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
         );
     }
 
@@ -2334,14 +2373,14 @@ mod tests {
         ));
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::UnsupportedSyntax
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::ClassDefinition(ClassDefinitionIssue::ModifierNotAllowedOnEnumCase {
+                modifier: Modifier::Final,
+            })
         );
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("not allowed on an enum case")
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(15, 19).unwrap()
         );
     }
 
@@ -2388,11 +2427,11 @@ mod tests {
             TreeKind::DefDef(_)
         ));
         assert_eq!(parser.diagnostics().len(), 1);
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("not allowed on an enum case")
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::ClassDefinition(ClassDefinitionIssue::ModifierNotAllowedOnEnumCase {
+                modifier: Modifier::Inline,
+            })
         );
     }
 
@@ -2439,8 +2478,18 @@ mod tests {
         ));
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::ExpectedType
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Modifier(crate::ModifierIssue::ExpectedAnnotationType {
+                found: TokenKind::Keyword(HardKeyword::Case),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(11, 15).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
         );
     }
 
@@ -2489,8 +2538,15 @@ mod tests {
         ));
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::ExpectedToken
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::ExpectedToken {
+                expected: TokenKind::Punctuation(Punctuation::RightBracket),
+                found: TokenKind::Keyword(HardKeyword::Case),
+            }
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(21, 25).unwrap()
         );
     }
 
@@ -2536,8 +2592,14 @@ mod tests {
         ));
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::ExpectedPattern
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::ClassDefinition(ClassDefinitionIssue::ExpectedEnumCaseName {
+                found: TokenKind::Newline,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(21, 22).unwrap()
         );
     }
 
@@ -2594,12 +2656,12 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
         ));
         assert_eq!(parser.diagnostics().len(), 1);
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("not allowed on an enum case")
-        );
+        assert!(matches!(
+            parser.diagnostics()[0].issue(),
+            ParseIssue::ClassDefinition(ClassDefinitionIssue::ModifierNotAllowedOnEnumCase {
+                modifier: Modifier::Inline,
+            })
+        ));
     }
 
     #[test]
@@ -2656,12 +2718,12 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
         ));
         assert_eq!(parser.diagnostics().len(), 1);
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("not allowed on an enum case")
-        );
+        assert!(matches!(
+            parser.diagnostics()[0].issue(),
+            ParseIssue::ClassDefinition(ClassDefinitionIssue::ModifierNotAllowedOnEnumCase {
+                modifier: Modifier::Inline,
+            })
+        ));
     }
 
     #[test]
@@ -2707,12 +2769,12 @@ mod tests {
             TreeKind::DefDef(_)
         ));
         assert_eq!(parser.diagnostics().len(), 1);
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("not allowed on an enum case")
-        );
+        assert!(matches!(
+            parser.diagnostics()[0].issue(),
+            ParseIssue::ClassDefinition(ClassDefinitionIssue::ModifierNotAllowedOnEnumCase {
+                modifier: Modifier::Inline,
+            })
+        ));
     }
 
     #[test]
@@ -2934,12 +2996,10 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
         ));
         assert_eq!(parser.diagnostics().len(), 1);
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("unsupported enum case syntax")
-        );
+        assert!(matches!(
+            parser.diagnostics()[0].issue(),
+            ParseIssue::ClassDefinition(ClassDefinitionIssue::UnsupportedEnumCaseSyntax { .. })
+        ));
     }
 
     #[test]
@@ -3671,11 +3731,15 @@ mod tests {
             ParseDiagnosticKind::UnexpectedToken
         );
         assert_eq!(parser.diagnostics()[0].span().start(), 16);
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("cannot have a template body")
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::ClassDefinition(ClassDefinitionIssue::EnumCaseTemplateBodyNotAllowed {
+                found: TokenKind::Punctuation(Punctuation::LeftBrace),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(16, 17).unwrap()
         );
     }
 
@@ -3731,11 +3795,11 @@ mod tests {
             ParseDiagnosticKind::UnexpectedToken
         );
         assert_eq!(parser.diagnostics()[0].span().start(), 19);
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("cannot have a template body")
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::ClassDefinition(ClassDefinitionIssue::EnumCaseTemplateBodyNotAllowed {
+                found: TokenKind::Punctuation(Punctuation::LeftBrace),
+            })
         );
     }
 
@@ -3790,12 +3854,12 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
         ));
         assert_eq!(parser.diagnostics().len(), 1);
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("cannot have a template body")
-        );
+        assert!(matches!(
+            parser.diagnostics()[0].issue(),
+            ParseIssue::ClassDefinition(ClassDefinitionIssue::EnumCaseTemplateBodyNotAllowed {
+                found: TokenKind::Punctuation(Punctuation::LeftBrace),
+            })
+        ));
     }
 
     #[test]
@@ -3844,12 +3908,12 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
         ));
         assert_eq!(parser.diagnostics().len(), 1);
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("cannot have a template body")
-        );
+        assert!(matches!(
+            parser.diagnostics()[0].issue(),
+            ParseIssue::ClassDefinition(ClassDefinitionIssue::EnumCaseTemplateBodyNotAllowed {
+                found: TokenKind::ColonEol,
+            })
+        ));
     }
 
     #[test]
@@ -3903,12 +3967,12 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
         ));
         assert_eq!(parser.diagnostics().len(), 1);
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("cannot have a template body")
-        );
+        assert!(matches!(
+            parser.diagnostics()[0].issue(),
+            ParseIssue::ClassDefinition(ClassDefinitionIssue::EnumCaseTemplateBodyNotAllowed {
+                found: TokenKind::ColonEol,
+            })
+        ));
     }
 
     #[test]
@@ -4119,10 +4183,12 @@ mod tests {
             parser
                 .diagnostics()
                 .iter()
-                .filter(|diagnostic| diagnostic
-                    .legacy_message()
-                    .expect("legacy parser diagnostic")
-                    .contains("unsupported enum case"))
+                .filter(|diagnostic| matches!(
+                    diagnostic.issue(),
+                    ParseIssue::ClassDefinition(
+                        ClassDefinitionIssue::UnsupportedEnumCaseSyntax { .. }
+                    )
+                ))
                 .count(),
             2
         );
@@ -4174,12 +4240,12 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::ModuleDef(_))
         ));
         assert_eq!(parser.diagnostics().len(), 1);
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("unsupported enum case syntax")
-        );
+        assert!(matches!(
+            parser.diagnostics()[0].issue(),
+            ParseIssue::ClassDefinition(ClassDefinitionIssue::UnsupportedEnumCaseSyntax {
+                found: TokenKind::Identifier,
+            })
+        ));
     }
 
     #[test]
@@ -4231,10 +4297,12 @@ mod tests {
             parser
                 .diagnostics()
                 .iter()
-                .filter(|diagnostic| diagnostic
-                    .legacy_message()
-                    .expect("legacy parser diagnostic")
-                    .contains("unsupported enum case"))
+                .filter(|diagnostic| matches!(
+                    diagnostic.issue(),
+                    ParseIssue::ClassDefinition(
+                        ClassDefinitionIssue::UnsupportedEnumCaseSyntax { .. }
+                    )
+                ))
                 .count(),
             2
         );
@@ -4288,13 +4356,31 @@ mod tests {
             parser.ast().get(template.body[2]).kind,
             TreeKind::DefDef(_)
         ));
+        assert_eq!(parser.diagnostics().len(), 2);
         assert_eq!(
-            parser
-                .diagnostics()
-                .iter()
-                .filter(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::ExpectedPattern)
-                .count(),
-            2
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::ClassDefinition(ClassDefinitionIssue::ExpectedEnumCaseName {
+                found: TokenKind::Newline,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(13, 14).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[1].issue(),
+            &ParseIssue::ClassDefinition(ClassDefinitionIssue::ExpectedEnumCaseParentAfterComma {
+                found: TokenKind::Punctuation(Punctuation::Comma),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[1].span(),
+            dotty_core::TextRange::new(24, 25).unwrap()
+        );
+        assert!(
+            parser.diagnostics().iter().all(|diagnostic| {
+                diagnostic.severity() == dotty_core::DiagnosticSeverity::Error
+            })
         );
     }
 
@@ -4484,8 +4570,16 @@ mod tests {
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::UnsupportedSyntax
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::ClassDefinition(
+                ClassDefinitionIssue::TypeApplicationNotAllowedInDerives {
+                    found: TokenKind::Punctuation(Punctuation::LeftBracket),
+                }
+            )
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(19, 20).unwrap()
         );
     }
 
@@ -5612,11 +5706,16 @@ mod tests {
         };
         assert_eq!(template.parents.len(), 2);
         assert_eq!(parser.current().kind, TokenKind::Keyword(HardKeyword::With));
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken })
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::ClassDefinition(ClassDefinitionIssue::MixedExtendsSeparators {
+                found: TokenKind::Keyword(HardKeyword::With),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(37, 41).unwrap()
         );
     }
 

@@ -1852,10 +1852,20 @@ mod tests {
 
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "expected a template body after `with`"
+            parser.diagnostics()[0].issue(),
+            &crate::ParseIssue::ClassDefinition(
+                crate::ClassDefinitionIssue::ExpectedTemplateBodyAfterWith {
+                    found: TokenKind::Newline,
+                }
+            )
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(12, 13).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
         );
         assert_eq!(parser.current().kind, TokenKind::Newline);
         parser.advance();
