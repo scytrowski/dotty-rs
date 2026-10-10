@@ -1669,6 +1669,14 @@ pub enum TyperError {
         modifiers: Vec<dotty_core::ast::Modifier>,
         classification: &'static str,
     },
+    /// A local value carries source visibility or annotations not preserved by
+    /// the bounded typed local-value representation.
+    LocalValueMetadataDeferred {
+        source: SourceId,
+        tree_index: u32,
+        visibility: Option<dotty_core::ast::VisibilitySyntax>,
+        annotation_count: usize,
+    },
     /// An inferred local initializer widens to a type that cannot be a value info.
     InvalidInferredLocalValueType {
         source: SourceId,

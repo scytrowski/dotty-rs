@@ -651,6 +651,7 @@ mod tests {
     use super::*;
     use dotty_core::{
         Name, Namespace, SourceText, SymbolFlags, SymbolLinks, SymbolOrigin, TermName, Visibility,
+        ast::VisibilitySyntax,
     };
     use dotty_lexer::ContextualScanner;
     use dotty_namer::name_compilation_unit;
@@ -16947,6 +16948,58 @@ mod tests {
         ));
         assert!(typer.local_symbol_at(source, given).is_none());
         assert!(typer.typed_ast().iter().next().is_none());
+    }
+
+    #[test]
+    fn local_contextual_metadata_is_rejected_without_losing_source_information() {
+        for (source_text, expected_visibility, expected_annotations) in [
+            (
+                "class C { def use: Int = { @unchecked implicit val local: Int = 1; local } }",
+                None,
+                1,
+            ),
+            (
+                "class C { def use: Int = { private implicit val local: Int = 1; local } }",
+                Some(VisibilitySyntax::Private { qualifier: None }),
+                0,
+            ),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+            let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+                panic!("local contextual declaration should be in a block")
+            };
+            let local_tree = block.stats[0];
+            let TreeKind::ValDef(definition) = &parsed.ast.get(local_tree).kind else {
+                panic!("local contextual declaration should be a ValDef")
+            };
+            assert_eq!(definition.metadata.visibility, expected_visibility);
+            assert_eq!(definition.metadata.annotations.len(), expected_annotations);
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+            let context = typer.expression_context_for(method).unwrap();
+
+            assert!(matches!(
+                typer.type_expression(rhs, context),
+                Err(TyperError::LocalValueMetadataDeferred {
+                    tree_index,
+                    visibility,
+                    annotation_count,
+                    ..
+                }) if tree_index == local_tree.index()
+                    && visibility == expected_visibility
+                    && annotation_count == expected_annotations
+            ));
+            assert!(typer.local_symbol_at(source, local_tree).is_none());
+            assert!(typer.typed_ast().iter().next().is_none());
+        }
     }
 
     #[test]

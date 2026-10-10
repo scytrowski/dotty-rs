@@ -1193,6 +1193,20 @@ impl SourceTyper<'_> {
     ) -> Result<TreeId<Typed>, TyperError> {
         let symbol_flags =
             local_value_flags_or_defer(self.source, tree, &definition.metadata.modifiers, true)?;
+        let contextual = !symbol_flags
+            .intersection(SymbolFlags::GIVEN.union(SymbolFlags::IMPLICIT))
+            .is_empty();
+        if contextual
+            && (definition.metadata.visibility.is_some()
+                || !definition.metadata.annotations.is_empty())
+        {
+            return Err(TyperError::LocalValueMetadataDeferred {
+                source: self.source,
+                tree_index: tree.index(),
+                visibility: definition.metadata.visibility,
+                annotation_count: definition.metadata.annotations.len(),
+            });
+        }
         let Some(local_stack) = context.local_scopes else {
             return Err(TyperError::ExpressionLocalScopeStackMissing {
                 stack: ExpressionScopeId::new(
@@ -1269,9 +1283,6 @@ impl SourceTyper<'_> {
             position,
             links: dotty_core::SymbolLinks::default(),
         });
-        let contextual = !symbol_flags
-            .intersection(SymbolFlags::GIVEN.union(SymbolFlags::IMPLICIT))
-            .is_empty();
         let enter_before_initializer = !inferred && !contextual;
         if enter_before_initializer {
             self.store.scopes.get_mut(scope).enter(name, symbol);

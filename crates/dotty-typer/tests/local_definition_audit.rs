@@ -485,6 +485,7 @@ fn local_value_baseline_outcome_classification(blocker: &str) -> &'static str {
     if blocker == "typed" {
         "declaration typed and enclosing method typed"
     } else if blocker.starts_with("LocalValueModifierDeferred")
+        || blocker == "LocalValueMetadataDeferred"
         || blocker.starts_with("LocalValueType")
         || blocker.starts_with("LocalValueRightHandSide")
         || blocker.starts_with("LocalValueOutsideBlock")
@@ -7961,6 +7962,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::UnstablePatternValue { .. } => "UnstablePatternValue",
         TyperError::LocalBlockDeclarationDeferred { .. } => "LocalBlockDeclarationDeferred",
         TyperError::LocalValueModifierDeferred { .. } => "LocalValueModifierDeferred",
+        TyperError::LocalValueMetadataDeferred { .. } => "LocalValueMetadataDeferred",
         TyperError::LocalPatDefDeferred { .. } => "LocalPatDefDeferred",
         TyperError::InvalidInferredLocalValueType { .. } => "InvalidInferredLocalValueType",
         TyperError::LocalValueRightHandSideMissing { .. } => "LocalValueRightHandSideMissing",

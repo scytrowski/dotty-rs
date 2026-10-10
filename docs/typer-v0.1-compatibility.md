@@ -746,7 +746,10 @@ scope only after their initializer and type checks succeed; their initializer
 does not see the new local as already initialized. Anonymous givens remain
 deferred when their AST has no authoritative local term name. The preserved
 `LAZY` flag on named givens does not enable general lazy-value typing or runtime
-lowering.
+lowering. Local contextual values with source annotations or explicit
+visibility modifiers return `LocalValueMetadataDeferred` before symbol
+allocation, because the bounded typed local-value node does not yet preserve
+those metadata fields.
 
 Contextual search, contextual argument insertion, implicit conversions, and
 summon remain unsupported. `lazy val` and `inline val` declarations remain
