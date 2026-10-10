@@ -1,7 +1,7 @@
 use dotty_core::ast::{PolyFunction, UntypedNode};
 use dotty_core::{Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
-use crate::{ParamOwner, ParseDiagnosticKind, Parser};
+use crate::{ExpressionIssue, ParamOwner, ParseIssue, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -14,10 +14,11 @@ where
     pub(super) fn parse_poly_function(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         let type_params = self.parse_type_param_clause(ParamOwner::Type);
         if !self.current_is_arrow() {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `=>` after polymorphic function type parameters",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedPolyFunctionArrow {
+                    found: self.current().kind,
+                },
+            ));
             return self.error_expr(self.current_span());
         }
 
@@ -28,10 +29,11 @@ where
         let body = self.parse_poly_function_body();
 
         if self.get_function_body(body).is_none() {
-            self.report(
-                ParseDiagnosticKind::UnexpectedToken,
-                "polymorphic function literals require a value-parameter function body",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::InvalidPolyFunctionBody {
+                    found: self.current().kind,
+                },
+            ));
             let position = self
                 .ast
                 .get(body)
@@ -311,12 +313,16 @@ mod tests {
             parser.ast().get(tree).kind,
             TreeKind::PhaseSpecific(UntypedNode::Error(_))
         ));
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("value-parameter function body")
-        }));
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Expression(ExpressionIssue::InvalidPolyFunctionBody {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(12, 12).unwrap()
+        );
     }
 
     #[test]

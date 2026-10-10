@@ -1,7 +1,7 @@
 use dotty_core::ast::{Block, InterpolatedString, Literal, This, UntypedNode};
 use dotty_core::{Constant, Punctuation, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped};
 
-use crate::{Location, ParseKind, Parser};
+use crate::{ExpressionIssue, Location, ParseIssue, ParseKind, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -30,10 +30,11 @@ where
         self.advance();
 
         if self.current().kind != TokenKind::StringPart {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedExpression,
-                "expected an interpolated string part",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedInterpolatedStringPart {
+                    found: self.current().kind,
+                },
+            ));
             return self.alloc_from(
                 mark,
                 TreeKind::PhaseSpecific(UntypedNode::InterpolatedString(InterpolatedString {
@@ -73,10 +74,11 @@ where
                             parser.with_location(Location::InPattern, |parser| parser.pattern())
                         });
                         if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-                            self.report(
-                                crate::ParseDiagnosticKind::ExpectedToken,
-                                "expected `}` to close interpolated pattern splice",
-                            );
+                            self.report_issue(ParseIssue::Expression(
+                                ExpressionIssue::ExpectedInterpolatedPatternSpliceCloseBrace {
+                                    found: self.current().kind,
+                                },
+                            ));
                         }
                         parts.push(self.alloc_from(
                             block_mark,

@@ -2967,12 +2967,16 @@ fn recovers_from_a_colon_lambda_argument_without_a_body() {
 
     let tree = parser.expr();
     assert!(matches!(parser.ast().get(tree).kind, TreeKind::Apply(_)));
-    assert!(parser.diagnostics().iter().any(|diagnostic| {
-        diagnostic
-            .legacy_message()
-            .expect("legacy parser diagnostic")
-            .contains("expected an expression after lambda arrow")
-    }));
+    assert_eq!(
+        parser.diagnostics()[0].issue(),
+        &ParseIssue::Expression(ExpressionIssue::ExpectedLambdaBody {
+            found: TokenKind::Eof,
+        })
+    );
+    assert_eq!(
+        parser.diagnostics()[0].span(),
+        TextRange::new(10, 10).unwrap()
+    );
     assert_eq!(parser.current().kind, TokenKind::Eof);
 }
 

@@ -279,6 +279,30 @@ pub enum ExpressionIssue {
     ExpectedMatchCaseRegion { found: TokenKind },
     /// A match expression has no case clauses.
     ExpectedMatchCase { found: TokenKind },
+    /// A legacy implicit lambda parameter is not followed by `=>`.
+    ExpectedLegacyLambdaArrow { found: TokenKind },
+    /// A context-function literal has no formal parameters.
+    ContextFunctionRequiresParameter { found: TokenKind },
+    /// Lambda parameters are not followed by `=>`.
+    ExpectedLambdaArrow { found: TokenKind },
+    /// A lambda parameter list contains a missing parameter.
+    ExpectedLambdaParameter { found: TokenKind },
+    /// Lambda parameters are not followed by `)` before the arrow.
+    ExpectedLambdaParameterCloseParen { found: TokenKind },
+    /// A lambda parameter is not followed by `,` or `)`.
+    ExpectedLambdaParameterSeparator { found: TokenKind },
+    /// A lambda parameter does not begin with an identifier or `_`.
+    ExpectedLambdaParameterName { found: TokenKind },
+    /// A lambda arrow is not followed by a body expression.
+    ExpectedLambdaBody { found: TokenKind },
+    /// Polymorphic function type parameters are not followed by `=>`.
+    ExpectedPolyFunctionArrow { found: TokenKind },
+    /// A polymorphic function body is not a value-parameter function.
+    InvalidPolyFunctionBody { found: TokenKind },
+    /// An interpolated identifier is not followed by a string part.
+    ExpectedInterpolatedStringPart { found: TokenKind },
+    /// An interpolated pattern splice is missing its closing brace.
+    ExpectedInterpolatedPatternSpliceCloseBrace { found: TokenKind },
 }
 
 /// Layout-delimited expression positions which may need a recovery node.
@@ -339,7 +363,14 @@ impl ExpressionIssue {
             | Self::ExpectedControlFlowBranch { .. }
             | Self::ExpectedLayoutExpression { .. }
             | Self::ExpectedForEnumeratorExpression { .. }
-            | Self::ExpectedForBodyExpression { .. } => ParseDiagnosticKind::ExpectedExpression,
+            | Self::ExpectedForBodyExpression { .. }
+            | Self::ContextFunctionRequiresParameter { .. }
+            | Self::ExpectedLambdaParameter { .. }
+            | Self::ExpectedLambdaParameterName { .. }
+            | Self::ExpectedLambdaBody { .. }
+            | Self::ExpectedInterpolatedStringPart { .. } => {
+                ParseDiagnosticKind::ExpectedExpression
+            }
             Self::ExpectedCatchCase { .. }
             | Self::ForGuardMissingGenerator { .. }
             | Self::ForMissingGenerator { .. }
@@ -360,6 +391,15 @@ impl ExpressionIssue {
             | Self::ExpectedMatchCloseBrace { .. }
             | Self::ExpectedMatchOutdent { .. }
             | Self::ExpectedMatchCaseRegion { .. } => ParseDiagnosticKind::ExpectedToken,
+            Self::ExpectedLegacyLambdaArrow { .. }
+            | Self::ExpectedLambdaArrow { .. }
+            | Self::ExpectedLambdaParameterCloseParen { .. }
+            | Self::ExpectedLambdaParameterSeparator { .. }
+            | Self::ExpectedPolyFunctionArrow { .. }
+            | Self::ExpectedInterpolatedPatternSpliceCloseBrace { .. } => {
+                ParseDiagnosticKind::ExpectedToken
+            }
+            Self::InvalidPolyFunctionBody { .. } => ParseDiagnosticKind::UnexpectedToken,
             Self::ControlFlowNewlineNoProgress { .. } | Self::ForEnumeratorsNoProgress { .. } => {
                 ParseDiagnosticKind::UnexpectedToken
             }
@@ -494,6 +534,34 @@ impl ExpressionIssue {
             Self::ExpectedMatchOutdent { .. } => "parser.expression.expected_match_outdent",
             Self::ExpectedMatchCaseRegion { .. } => "parser.expression.expected_match_case_region",
             Self::ExpectedMatchCase { .. } => "parser.expression.expected_match_case",
+            Self::ExpectedLegacyLambdaArrow { .. } => {
+                "parser.expression.expected_legacy_lambda_arrow"
+            }
+            Self::ContextFunctionRequiresParameter { .. } => {
+                "parser.expression.context_function_requires_parameter"
+            }
+            Self::ExpectedLambdaArrow { .. } => "parser.expression.expected_lambda_arrow",
+            Self::ExpectedLambdaParameter { .. } => "parser.expression.expected_lambda_parameter",
+            Self::ExpectedLambdaParameterCloseParen { .. } => {
+                "parser.expression.expected_lambda_parameter_close_paren"
+            }
+            Self::ExpectedLambdaParameterSeparator { .. } => {
+                "parser.expression.expected_lambda_parameter_separator"
+            }
+            Self::ExpectedLambdaParameterName { .. } => {
+                "parser.expression.expected_lambda_parameter_name"
+            }
+            Self::ExpectedLambdaBody { .. } => "parser.expression.expected_lambda_body",
+            Self::ExpectedPolyFunctionArrow { .. } => {
+                "parser.expression.expected_poly_function_arrow"
+            }
+            Self::InvalidPolyFunctionBody { .. } => "parser.expression.invalid_poly_function_body",
+            Self::ExpectedInterpolatedStringPart { .. } => {
+                "parser.expression.expected_interpolated_string_part"
+            }
+            Self::ExpectedInterpolatedPatternSpliceCloseBrace { .. } => {
+                "parser.expression.expected_interpolated_pattern_splice_close_brace"
+            }
         }
     }
 }
@@ -1026,6 +1094,30 @@ mod tests {
         assert_eq!(diagnostic.span(), range);
         assert_eq!(diagnostic.legacy_message(), Some("expected expression"));
         assert!(matches!(diagnostic.issue(), ParseIssue::Legacy { .. }));
+    }
+
+    #[test]
+    fn expression_issue_codes_preserve_layout_context_without_messages() {
+        let try_issue = ParseIssue::Expression(ExpressionIssue::ExpectedLayoutExpression {
+            context: LayoutExpressionContext::TryBody,
+            found: TokenKind::Eof,
+        });
+        let finally_issue = ParseIssue::Expression(ExpressionIssue::ExpectedLayoutExpression {
+            context: LayoutExpressionContext::FinallyBody,
+            found: TokenKind::Eof,
+        });
+
+        assert_eq!(try_issue.kind(), ParseDiagnosticKind::ExpectedExpression);
+        assert_eq!(try_issue.code(), "parser.expression.expected_try_body");
+        assert_eq!(
+            finally_issue.kind(),
+            ParseDiagnosticKind::ExpectedExpression
+        );
+        assert_eq!(
+            finally_issue.code(),
+            "parser.expression.expected_finally_body"
+        );
+        assert_ne!(try_issue.code(), finally_issue.code());
     }
 
     #[test]
