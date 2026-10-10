@@ -630,14 +630,14 @@ Scala 3.9.0 compiler by
 Local by-name parameters in explicit local method signatures now use the
 shared method-signature builder, which projects them as `Type::ByName` and
 preserves the same parameter symbol in the method scope and body. Mixed
-ordinary/by-name clauses and an existing inferred-result path are covered by
-focused tests. When inference would produce the by-name parameter's own type,
-the existing `InvalidInferredMethodResult` validation still rejects it;
-inference semantics are unchanged. Parameter-dependent result types, erased
-parameters, higher-kinded and aliased type-parameter bounds, and unsupported
-parameter modifiers remain explicitly deferred. Applying a by-name method
-parameter remains separately deferred as
-`ByNameApplicationParameterDeferred`.
+ordinary/by-name clauses and an inferred-result path are covered by focused
+tests. A value reference keeps its `TermRef` to the parameter symbol, while
+value widening unwraps the parameter's `Type::ByName` to its result type so
+the method body can be checked against its declared result or infer that
+result type. Parameter-dependent result types, erased parameters, higher-kinded
+and aliased type-parameter bounds, and unsupported parameter modifiers remain
+explicitly deferred. Applying a by-name method parameter remains separately
+deferred as `ByNameApplicationParameterDeferred`.
 
 The #899 profile recorded 14 `LocalMethodSignatureDeferred` first-blocker
 observations: 8 by-name observations (2 direct origins and 6 inherited

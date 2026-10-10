@@ -14255,10 +14255,26 @@ mod tests {
             panic!("by-name body reference should remain a reference to its parameter symbol")
         };
         assert_eq!(*body_parameter, parameter);
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed_rhs).ty)
+                .unwrap(),
+            definitions.int
+        );
+
+        let typed_block = typer
+            .type_expression_expected(block_tree, outer_context, definitions.int)
+            .unwrap();
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed_block).ty)
+                .unwrap(),
+            definitions.int
+        );
     }
 
     #[test]
-    fn local_by_name_parameter_reaches_existing_inferred_result_validation() {
+    fn local_by_name_parameter_supports_existing_inferred_result_path() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def outer: Int = { def use(value: => Int) = value; 0 } }");
         let (outer, block_tree) =
@@ -14279,11 +14295,16 @@ mod tests {
         preindex_block_for_test(&mut typer, block_tree, context);
         let method = typer.local_method_symbol_at(source, method_tree).unwrap();
 
+        let signature = typer.complete_symbol(method).unwrap();
+        let Type::Method(signature) = typer.store().types.get(signature) else {
+            panic!("inferred local method should retain a Method signature")
+        };
+        assert_eq!(signature.result, definitions.int);
+        assert_eq!(signature.params.len(), 1);
         assert!(matches!(
-            typer.complete_symbol(method),
-            Err(TyperError::InvalidInferredMethodResult { symbol, .. }) if symbol == method
+            typer.store().types.get(signature.params[0].ty),
+            Type::ByName { result } if *result == definitions.int
         ));
-        assert_eq!(*typer.store().symbols.info(method), SymbolInfo::Missing);
     }
 
     #[test]
