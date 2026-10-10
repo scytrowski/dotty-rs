@@ -171,7 +171,7 @@ where
         if !crate::expr::can_start_prefix_expr(self.current().kind) {
             let position = self.current_span();
             self.report_issue(ParseIssue::Expression(
-                ExpressionIssue::ExpectedExpressionAtCurrentToken {
+                ExpressionIssue::ExpectedGuardExpression {
                     found: self.current().kind,
                 },
             ));
@@ -1001,7 +1001,7 @@ mod tests {
         assert_eq!(parser.diagnostics().len(), 2);
         assert_eq!(
             parser.diagnostics()[0].issue(),
-            &ParseIssue::Expression(ExpressionIssue::ExpectedExpressionAtCurrentToken {
+            &ParseIssue::Expression(ExpressionIssue::ExpectedGuardExpression {
                 found: TokenKind::Eof,
             })
         );

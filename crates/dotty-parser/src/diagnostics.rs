@@ -218,6 +218,8 @@ pub enum ExpressionIssue {
     ExpressionSuffixNoProgress { found: TokenKind },
     /// No expression can start at the current token.
     ExpectedExpressionAtCurrentToken { found: TokenKind },
+    /// A guard's `if` is not followed by its condition expression.
+    ExpectedGuardExpression { found: TokenKind },
     /// An `if` condition is not followed by `then`.
     ExpectedIfThen { found: TokenKind },
     /// A `while` condition is not followed by `do`.
@@ -354,9 +356,8 @@ impl ExpressionIssue {
             | Self::LegacyWildcardSpliceNotFinal { .. }
             | Self::InvalidApplicationTarget { .. }
             | Self::ExpressionSuffixNoProgress { .. } => ParseDiagnosticKind::UnexpectedToken,
-            Self::ExpectedExpressionAtCurrentToken { .. } => {
-                ParseDiagnosticKind::ExpectedExpression
-            }
+            Self::ExpectedExpressionAtCurrentToken { .. }
+            | Self::ExpectedGuardExpression { .. } => ParseDiagnosticKind::ExpectedExpression,
             Self::MissingDoWhileBody { .. }
             | Self::MissingDoWhileCondition { .. }
             | Self::EmptyCatchHandler { .. }
@@ -478,6 +479,7 @@ impl ExpressionIssue {
             Self::ExpectedExpressionAtCurrentToken { .. } => {
                 "parser.expression.expected_at_current_token"
             }
+            Self::ExpectedGuardExpression { .. } => "parser.expression.expected_guard_expression",
             Self::ExpectedIfThen { .. } => "parser.expression.expected_if_then",
             Self::ExpectedWhileDo { .. } => "parser.expression.expected_while_do",
             Self::MissingDoWhileBody { .. } => "parser.expression.missing_do_while_body",
