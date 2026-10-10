@@ -4,8 +4,8 @@ use dotty_core::ast::{ApplyKind, AstArena, Untyped, UntypedNode};
 use dotty_core::{NameInterner, SourceId, SourceText, Tree, TreeId, TreeKind};
 use dotty_lexer::ContextualScanner;
 use dotty_parser::{
-    Parser, ParserFeatures, parse_compilation_unit, parse_expression_fragment,
-    parse_pattern_fragment,
+    ExpressionIssue, ParseIssue, Parser, ParserFeatures, parse_compilation_unit,
+    parse_expression_fragment, parse_pattern_fragment,
 };
 
 fn main() {
@@ -2118,10 +2118,10 @@ mod tests {
             dotty_parser::ParseDiagnosticKind::ExpectedToken
         );
         assert_eq!(
-            result.diagnostics[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "expected `=>` after legacy implicit lambda parameter"
+            result.diagnostics[0].issue(),
+            &ParseIssue::Expression(ExpressionIssue::ExpectedLegacyLambdaArrow {
+                found: dotty_core::TokenKind::Identifier,
+            })
         );
         assert_eq!(
             result.diagnostics[0].span(),
@@ -2310,19 +2310,42 @@ mod tests {
             scanner.tokens()[bang_index - 1].kind,
             dotty_core::TokenKind::Newline
         );
+        let newline = SOURCE.find("\n  val following").unwrap() as u32;
+        let separator_span = scanner
+            .tokens()
+            .iter()
+            .find(|token| {
+                token.kind == dotty_core::TokenKind::Newline && token.span.start() == newline
+            })
+            .expect("statement separator token")
+            .span;
 
         let source_text = SourceText::new(SOURCE).expect("source should be valid");
         let mut names = NameInterner::new();
         let result =
             parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
 
-        assert!(result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.kind() == dotty_parser::ParseDiagnosticKind::UnexpectedToken
-                && diagnostic
-                    .legacy_message()
-                    .expect("legacy parser diagnostic")
-                    == "left-hand side is not assignable"
-        }));
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                matches!(
+                    diagnostic.issue(),
+                    ParseIssue::Expression(ExpressionIssue::UnassignableAssignmentTarget { .. })
+                )
+            })
+            .expect("unassignable assignment target diagnostic");
+        assert_eq!(
+            diagnostic.issue(),
+            &ParseIssue::Expression(ExpressionIssue::UnassignableAssignmentTarget {
+                found: dotty_core::TokenKind::Newline,
+            })
+        );
+        assert_eq!(
+            diagnostic.kind(),
+            dotty_parser::ParseDiagnosticKind::UnexpectedToken
+        );
+        assert_eq!(diagnostic.span(), separator_span);
         let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
             panic!("expected package root");
         };
@@ -3444,12 +3467,31 @@ mod tests {
         let result =
             parse_expression_fragment(source_text, SourceId::from_index(0), scanner, &mut names);
 
-        assert!(result.diagnostics.iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("expected an expression after lambda arrow")
-        }));
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                matches!(
+                    diagnostic.issue(),
+                    ParseIssue::Expression(ExpressionIssue::ExpectedLambdaBody { .. })
+                )
+            })
+            .expect("missing lambda body diagnostic");
+        assert_eq!(
+            diagnostic.issue(),
+            &ParseIssue::Expression(ExpressionIssue::ExpectedLambdaBody {
+                found: dotty_core::TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+            })
+        );
+        assert_eq!(
+            diagnostic.kind(),
+            dotty_parser::ParseDiagnosticKind::ExpectedExpression
+        );
+        let closing_paren = source.find("\n)").unwrap() as u32 + 1;
+        assert_eq!(
+            diagnostic.span(),
+            dotty_core::TextRange::new(closing_paren, closing_paren + 1).unwrap()
+        );
         let TreeKind::Apply(outer) = &result.ast.get(result.root).kind else {
             panic!("expected the outer call despite the missing lambda body");
         };
