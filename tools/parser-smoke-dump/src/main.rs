@@ -4,8 +4,8 @@ use dotty_core::ast::{ApplyKind, AstArena, Untyped, UntypedNode};
 use dotty_core::{NameInterner, SourceId, SourceText, Tree, TreeId, TreeKind};
 use dotty_lexer::ContextualScanner;
 use dotty_parser::{
-    ExpressionIssue, ParseIssue, Parser, ParserFeatures, parse_compilation_unit,
-    parse_expression_fragment, parse_pattern_fragment,
+    Parser, ParserFeatures, parse_compilation_unit, parse_expression_fragment,
+    parse_pattern_fragment,
 };
 
 fn main() {
@@ -1445,6 +1445,7 @@ fn quote(value: impl AsRef<str>) -> String {
 mod tests {
     use super::*;
     use dotty_core::{ScannerEvent, TokenKind, TokenSource};
+    use dotty_parser::{ExpressionIssue, ParseIssue};
 
     struct AdjacentEndMarkerSource(ContextualScanner);
 
