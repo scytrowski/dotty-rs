@@ -195,16 +195,14 @@ patterns, and case clauses. They retain reason-specific data instead of
 preformatted messages.
 Expression issues cover expected syntax and recovery reasons for arguments,
 operators, lambdas, interpolations, and layout bodies.
-Unmigrated sites remain `Legacy` payloads with their
-existing category and optional message; typed issues are not converted into
-synthetic text. The report JSON schema version 7 adds an optional `code` to
-each parser diagnostic summary; legacy categories/messages and parser outcome
-counts remain unchanged.
+All parser reporting sites now emit typed issues; parser diagnostics no longer
+store rendered messages. The corpus report schema version 8 keys diagnostic
+histograms and first-failure buckets by stable issue code. Its issue counts,
+source paths, and parser outcomes retain their existing meanings; historical
+schema versions are not rewritten.
 
-The supported diagnostic categories are `ExpectedToken`,
-`UnexpectedToken`, `ExpectedExpression`, `ExpectedType`, `ExpectedPattern`,
-`UnsupportedSyntax`, and `UnboundPlaceholderParameter`, with a source ID and
-source span. `UnboundPlaceholderParameter` is reported when an expression
+Each diagnostic preserves a source ID, source span, severity, and its typed
+issue payload. `UnboundPlaceholderParameter` is reported when an expression
 placeholder reaches the end of a compilation unit or expression block without
 being captured by a complete expression.
 
@@ -1102,8 +1100,8 @@ tools/parser-corpus-report/run /path/to/scala3-3.9.0 \
 ```
 
 The report separates clean files, files with recoverable diagnostics, scanner
-failures, panics, and hangs. It also aggregates `ParseDiagnosticKind` and
-normalized first-failure buckets with representative paths. The initial
+failures, panics, and hangs. It also aggregates stable parser issue-code
+histograms and first-failure buckets with representative paths. The initial
 baseline is checked in at
 `tools/parser-corpus-report/baseline-scala3-3.9.0.json`, generated from Scala
 3.9.0 revision `777528f19a58e794c9954a42f433373472ec57f8`. The baseline is a

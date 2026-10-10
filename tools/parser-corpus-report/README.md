@@ -36,10 +36,11 @@ contains:
 
 - attempted, clean, recoverable, and hard-failure file counts;
 - panic, hang, and scanner-diagnostic counts;
-- a `ParseDiagnosticKind` histogram;
-- stable text-independent parser diagnostic `code` values (schema version 7);
-- a first-failure histogram, including normalized `UnsupportedSyntax`
-  messages and representative source paths.
+- a histogram keyed by stable, text-independent parser issue codes, plus
+  `tool.*` codes for corpus-runner failures;
+- a first-failure histogram keyed by the same issue codes and representative
+  source paths. Unsupported syntax is grouped by its concrete issue code, not
+  by rendered or normalized messages.
 
 `scala_oracle_files` records how many files the reference batch emitted. It is
 an oracle liveness/count check, not a full-tree equality claim for the source
@@ -49,8 +50,8 @@ corpus; exact normalized tree equality remains the job of
 building its source tree; the batch keeps going so those failures remain
 visible instead of truncating the corpus measurement.
 
-Schema version 7 records the parser commit as `parser_revision`, includes
-stable parser issue codes in per-file diagnostics, and partitions
+Schema version 8 records the parser commit as `parser_revision`, uses typed
+issue codes as diagnostic histogram keys, and partitions
 outcomes into `capture_checking_cohorts`
 (`enabled`, `disabled`, and `unknown`) using the parser's effective
 `ParserFeatures` after compilation-unit imports have been processed. Each

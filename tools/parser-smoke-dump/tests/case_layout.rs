@@ -446,8 +446,8 @@ fn missing_nested_case_arrow_reports_and_preserves_the_enclosing_match_case() {
 
     assert_eq!(result.diagnostics.len(), 1);
     assert_eq!(
-        result.diagnostics[0].kind(),
-        dotty_parser::ParseDiagnosticKind::ExpectedToken
+        result.diagnostics[0].issue().code(),
+        "parser.case.expected_arrow"
     );
     assert_eq!(
         result.diagnostics[0].span(),
