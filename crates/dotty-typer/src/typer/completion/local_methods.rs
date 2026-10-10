@@ -173,16 +173,6 @@ impl SourceTyper<'_> {
                 }) {
                     return Err(deferred("parameter modifiers"));
                 }
-                let parameter_type =
-                    self.arena
-                        .try_get(parameter.tpt)
-                        .ok_or(TyperError::TreeOutsideArena {
-                            source: self.source,
-                            tree_index: parameter.tpt.index(),
-                        })?;
-                if matches!(parameter_type.kind, TreeKind::ByNameTypeTree(_)) {
-                    return Err(deferred("by-name parameters"));
-                }
                 if self
                     .local_methods
                     .parameter_symbol_at(self.source, *parameter_tree)
