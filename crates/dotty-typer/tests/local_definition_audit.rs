@@ -358,10 +358,14 @@ struct LocalValueBaselineRow {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct LocalValueBaselineOutcome {
     observation: LocalValueBlockerObservation,
+    baseline_first_blocker: &'static str,
     current_first_blocker: String,
     declaration_typed: bool,
     classification: &'static str,
 }
+
+const LOCAL_VALUE_BASELINE_FIRST_BLOCKER: &str =
+    "LocalBlockDeclarationDeferred::val/var definition";
 
 struct LocalValueBaselineAuditContext<'typer, 'source> {
     arena: &'typer dotty_core::AstArena<Untyped>,
@@ -499,6 +503,13 @@ const LOCAL_VALUE_LAZY_BASELINE_ROWS: &[LocalValueBaselineRow] = &[
     },
 ];
 
+const LOCAL_VALUE_INLINE_BASELINE_ROWS: &[LocalValueBaselineRow] = &[LocalValueBaselineRow {
+    path: "compiler/src/dotty/tools/dotc/core/NameOps.scala",
+    method_tree: 895,
+    blocker_origin_tree: 903,
+    declaration_tree: 851,
+}];
+
 impl LocalValueBlockerProfile {
     fn record(&mut self, observation: LocalValueBlockerObservation) {
         self.observations.insert(observation);
@@ -572,6 +583,7 @@ fn record_local_value_baseline_outcomes(
     for baseline in LOCAL_VALUE_CONTEXTUAL_BASELINE_ROWS
         .iter()
         .chain(LOCAL_VALUE_LAZY_BASELINE_ROWS)
+        .chain(LOCAL_VALUE_INLINE_BASELINE_ROWS)
         .filter(|row| row.path == context.path && row.method_tree == context.method_tree.index())
     {
         let observation = local_value_blocker_observation(
@@ -602,6 +614,7 @@ fn record_local_value_baseline_outcomes(
             .local_value_baseline_outcomes
             .insert(LocalValueBaselineOutcome {
                 observation,
+                baseline_first_blocker: LOCAL_VALUE_BASELINE_FIRST_BLOCKER,
                 current_first_blocker: current_first_blocker.to_owned(),
                 declaration_typed,
                 classification: local_value_baseline_outcome_classification(
@@ -1225,7 +1238,50 @@ fn pinned_scala39_local_definition_audit() {
     assert_eq!(count_modifier("Inline"), 1);
     assert_eq!(count_modifier("Final"), 0);
     assert_eq!(count_modifier("Var"), 0);
-    assert_eq!(audit.local_value_baseline_outcomes.len(), 20);
+    assert_eq!(audit.local_value_baseline_outcomes.len(), 21);
+    assert_eq!(
+        audit
+            .local_value_baseline_outcomes
+            .iter()
+            .map(|outcome| (
+                outcome.observation.path.as_str(),
+                outcome.observation.declaration_tree
+            ))
+            .collect::<BTreeSet<_>>()
+            .len(),
+        14,
+        "all 14 source declarations in the pinned #929 cohort must remain observable"
+    );
+    assert_eq!(
+        audit
+            .local_value_baseline_outcomes
+            .iter()
+            .map(|outcome| outcome.observation.path.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        8,
+        "the complete pinned #929 cohort must retain all eight source files"
+    );
+    assert!(
+        audit.local_value_baseline_outcomes.iter().all(|outcome| {
+            outcome.baseline_first_blocker == LOCAL_VALUE_BASELINE_FIRST_BLOCKER
+        })
+    );
+    let inline_local_value_rows = audit
+        .local_value_baseline_outcomes
+        .iter()
+        .filter(|outcome| outcome.observation.declaration_kind == "inline val")
+        .collect::<Vec<_>>();
+    assert_eq!(inline_local_value_rows.len(), 1);
+    assert_eq!(
+        inline_local_value_rows[0].current_first_blocker,
+        "LocalBlockDeclarationDeferred::val/var definition"
+    );
+    assert_eq!(
+        inline_local_value_rows[0].classification,
+        "residual local-value declaration blocker"
+    );
+    assert!(!inline_local_value_rows[0].declaration_typed);
     assert_eq!(
         audit
             .local_value_baseline_outcomes
@@ -1255,9 +1311,24 @@ fn pinned_scala39_local_definition_audit() {
             || (outcome.current_first_blocker == "ImportQualifierNotFound"
                 && !outcome.declaration_typed)
     }));
-    assert!(audit.local_value_baseline_outcomes.iter().all(|outcome| {
-        outcome.current_first_blocker != "LocalBlockDeclarationDeferred::val/var definition"
-    }));
+    let remaining_generic_local_value_rows = audit
+        .local_value_baseline_outcomes
+        .iter()
+        .filter(|outcome| {
+            outcome.current_first_blocker == "LocalBlockDeclarationDeferred::val/var definition"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remaining_generic_local_value_rows.len(),
+        1,
+        "the only remaining generic local-value blocker should be the pinned inline val"
+    );
+    assert_eq!(
+        remaining_generic_local_value_rows[0]
+            .observation
+            .declaration_kind,
+        "inline val"
+    );
     assert_eq!(
         audit
             .failures
@@ -5916,12 +5987,13 @@ fn print_local_value_baseline_outcomes(outcomes: &BTreeSet<LocalValueBaselineOut
     for outcome in outcomes {
         let row = &outcome.observation;
         println!(
-            "    {}:method={} declaration_tree={} kind={} modifiers=[{}] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition declaration_typed={} current_first_blocker={} classification={}",
+            "    {}:method={} declaration_tree={} kind={} modifiers=[{}] baseline_first_blocker={} declaration_typed={} current_first_blocker={} classification={}",
             row.path,
             row.enclosing_method,
             row.declaration_tree,
             row.declaration_kind,
             row.modifiers,
+            outcome.baseline_first_blocker,
             outcome.declaration_typed,
             outcome.current_first_blocker,
             outcome.classification,
