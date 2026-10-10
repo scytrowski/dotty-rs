@@ -636,8 +636,14 @@ value widening unwraps the parameter's `Type::ByName` to its result type so
 the method body can be checked against its declared result or infer that
 result type. Parameter-dependent result types, erased parameters, higher-kinded
 and aliased type-parameter bounds, and unsupported parameter modifiers remain
-explicitly deferred. Applying a by-name method parameter remains separately
-deferred as `ByNameApplicationParameterDeferred`.
+explicitly deferred. Bounded non-polymorphic applications accept by-name
+formals by checking each argument against the formal's result type while
+retaining `Type::ByName` in the method signature. The typed `Apply` retains the
+original typed argument expression; the typer does not synthesize a thunk or
+change runtime evaluation semantics. This works for local calls and ordinary
+resolved method signatures. Generic by-name inference and overload sets with
+by-name candidates remain deferred; erased and repeated parameters retain
+their existing application deferrals.
 
 The #899 profile recorded 14 `LocalMethodSignatureDeferred` first-blocker
 observations: 8 by-name observations (2 direct origins and 6 inherited
@@ -647,11 +653,22 @@ signature observations, all from the `parameter modifiers` group in
 `MegaPhase.scala`. The direct by-name origins, `instantiateCFT` and `cases`,
 now have `ImportQualifierNotFound` as their first blocker. Their applications
 remain behind the enclosing blocker, so the audit does not observe
-`ByNameApplicationParameterDeferred` at those sites; the focused application
-fixture still confirms that boundary. No local methods became fully typed in
-the corpus audit. Parameter-dependent results remain covered by a focused
-unsupported-case fixture. These profile results are blocker movements, not
-semantic success.
+`ByNameApplicationParameterDeferred` at those sites. At the #900 snapshot, the
+focused application fixture still confirmed that boundary; #901's follow-up
+below removes it for the bounded local-call shape. No additional local methods
+became fully typed in the full corpus audit. Parameter-dependent results
+remain covered by a focused unsupported-case fixture. These profile results
+are blocker movements, not semantic success.
+
+The #901 application audit keeps the corpus and focused fixture results
+separate. Before #901, the `ByNameCall.scala` local-call fixture produced one
+`ByNameApplicationParameterDeferred` failure; after #901 it produces zero and
+its local method types successfully. The two direct by-name corpus methods
+still have `ImportQualifierNotFound` as their first blocker, so zero corpus
+calls reach application typing before or after this change. This increment
+therefore moves one focused fixture past the application blocker and no corpus
+method past its enclosing blocker.
+
 Ordinary repeated parameters use `Type::Repeated` in parameter symbol info and
 the shared method-signature builder's `varargs` marker; references to them in
 method bodies remain deferred. A method body is typed in a method
@@ -1012,8 +1029,11 @@ legacy implicit clauses passed with `using`, and the supported direct-parameter
 and matching applied-type constraints also participate in overload selection.
 Curried plain-then-contextual calls continue from the exact result callable of
 the first clause, including after generic inference. Automatic contextual or
-implicit argument insertion and implicit search remain deferred. Erased and
-by-name parameters remain unsupported for explicit application. The Scala
+implicit argument insertion and implicit search remain deferred. Erased
+parameters remain unsupported for explicit application. Bounded by-name
+formals use their result type for argument conformance and retain the source
+argument node in the typed `Apply`; polymorphic inference and overload sets
+containing by-name candidates remain deferred. The Scala
 grammar rejects repeated parameters in contextual clauses; ordinary repeated
 parameter application remains deferred. Source and local-method parameter
 types ending in `*` project to `Type::Repeated { element }`; the parameter

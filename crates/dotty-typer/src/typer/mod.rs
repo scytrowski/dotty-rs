@@ -27209,10 +27209,181 @@ mod tests {
     }
 
     #[test]
-    fn by_name_application_parameter_is_deferred() {
-        let source_text = "class C { def f(using x: => Int): Int = x; def use: Int = f(using 1) }";
+    fn local_by_name_application_uses_result_type_and_preserves_signature() {
+        let source_text = "class C { def outer: Int = { def use(prefix: Int, value: => Int): Int = value; use(4, 2) } }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
-        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let (outer, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let TreeKind::Block(source_block) = &parsed.ast.get(rhs).kind else {
+            panic!("outer body should be a block")
+        };
+        let local_tree = source_block.stats[0];
+        let TreeKind::Apply(source_application) = &parsed.ast.get(source_block.expr).kind else {
+            panic!("block result should be the local call")
+        };
+        let source_argument = source_application.args[1];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(outer).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed).kind else {
+            panic!("outer body should remain a typed block")
+        };
+        let TreeKind::Apply(typed_application) = &typer.typed_ast().get(typed_block.expr).kind
+        else {
+            panic!("local call should remain a typed Apply")
+        };
+        assert_eq!(typed_application.kind, ApplyKind::Regular);
+        assert_eq!(typed_application.args.len(), 2);
+        let typed_function = typed_application.function;
+        let typed_arguments = typed_application.args.clone();
+        assert_eq!(
+            typer.source_typed_index().get(source, source_argument),
+            Some(typed_arguments[1]),
+            "typed Apply should retain the exact typed source argument"
+        );
+        let local = typer
+            .local_method_symbol_at(source, local_tree)
+            .expect("local method should have been preindexed");
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_function).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == local
+        ));
+        let signature = typer.complete_symbol(local).unwrap();
+        let Type::Method(method_type) = typer.store().types.get(signature) else {
+            panic!("local method should have a method signature")
+        };
+        assert_eq!(method_type.params.len(), 2);
+        assert_eq!(method_type.params[0].ty, definitions.int);
+        let Type::ByName { result } = typer.store().types.get(method_type.params[1].ty) else {
+            panic!("method signature should retain its by-name formal")
+        };
+        assert_eq!(*result, definitions.int);
+        assert_eq!(
+            typer.typed_ast().get(typed_arguments[1]).position,
+            parsed.ast.get(source_argument).position
+        );
+    }
+
+    #[test]
+    fn by_name_application_accepts_nontrivial_and_nonlocal_arguments() {
+        for source_text in [
+            "class C { def outer: Int = { def use(value: => Int): Int = value; use(if true then 1 else 2) } }",
+            "class C { def use(value: => Int): Int = value; def outer: Int = use(1) }",
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+            let context = ExpressionContext {
+                lexical: index.declaration_context_of(method).unwrap(),
+                owner: method,
+                local_scopes: None,
+            };
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+
+            let typed = typer.type_expression(rhs, context).unwrap();
+
+            assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+        }
+    }
+
+    #[test]
+    fn by_name_application_mismatch_rolls_back_and_retry_is_deterministic() {
+        let source_text =
+            "class C { def outer: Int = { def use(value: => Int): Int = value; use(true) } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (outer, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(outer).unwrap(),
+            owner: outer,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let checkpoint = typer.store().checkpoint();
+
+        let first = typer.type_expression(rhs, context).unwrap_err();
+        assert!(matches!(
+            &first,
+            TyperError::ApplicationArgumentTypeMismatch {
+                argument_index: 0,
+                actual,
+                expected,
+                ..
+            } if *actual == definitions.boolean && *expected == definitions.int
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
+
+        let retry = typer.type_expression(rhs, context).unwrap_err();
+        assert_eq!(format!("{retry:?}"), format!("{first:?}"));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.typed_ast().iter().next().is_none());
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
+    }
+
+    #[test]
+    fn by_name_overload_candidates_remain_deferred() {
+        let source_text = "class C { def choose(value: => Int): Int = value; def choose(value: Boolean): Int = 0; def outer: Int = choose(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "outer");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let result = typer.type_expression(rhs, context);
+        assert!(
+            matches!(
+                &result,
+                Err(TyperError::OverloadResolutionRequiresUnsupportedCandidate { .. })
+            ),
+            "unexpected by-name overload result: {result:?}"
+        );
+    }
+
+    #[test]
+    fn polymorphic_by_name_application_remains_deferred() {
+        let source_text = "class C { def use[A](value: => A): A = value; def outer: Int = use(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "outer");
         let context = ExpressionContext {
             lexical: index.declaration_context_of(method).unwrap(),
             owner: method,
@@ -27229,10 +27400,7 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::ByNameApplicationParameterDeferred {
-                parameter_index: 0,
-                ..
-            })
+            Err(TyperError::UnsupportedPolymorphicApplicationShape { .. })
         ));
     }
 
