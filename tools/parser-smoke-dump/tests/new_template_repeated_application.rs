@@ -1,7 +1,9 @@
 use dotty_core::ast::{Block, DefDef, ModuleDef, PackageDef, Template, UntypedNode};
 use dotty_core::{NameInterner, SourceId, SourceText, TreeKind};
 use dotty_lexer::ContextualScanner;
-use dotty_parser::parse_compilation_unit;
+use dotty_parser::{
+    ExpressionApplicationTarget, ExpressionIssue, ParseIssue, parse_compilation_unit,
+};
 
 #[test]
 fn reports_repeated_constructor_application_and_preserves_the_next_tuple() {
@@ -17,15 +19,27 @@ fn reports_repeated_constructor_application_and_preserves_the_next_tuple() {
         &mut names,
     );
 
-    assert!(
-        result.diagnostics.iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                == "a constructor application cannot be applied again"
-        }),
-        "expected the repeated constructor application diagnostic, got {:?}",
-        result.diagnostics
+    let diagnostic = result
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            matches!(
+                diagnostic.issue(),
+                ParseIssue::Expression(ExpressionIssue::InvalidApplicationTarget { .. })
+            )
+        })
+        .expect("repeated constructor application diagnostic");
+    assert_eq!(
+        diagnostic.issue(),
+        &ParseIssue::Expression(ExpressionIssue::InvalidApplicationTarget {
+            target: ExpressionApplicationTarget::ConstructorApplication,
+            found: dotty_core::TokenKind::Punctuation(dotty_core::Punctuation::LeftParen),
+        })
+    );
+    let repeated_application = source.find("{}(").unwrap() as u32 + 2;
+    assert_eq!(
+        diagnostic.span(),
+        dotty_core::TextRange::new(repeated_application, repeated_application + 1).unwrap()
     );
     let TreeKind::PackageDef(PackageDef { stats, .. }) = &result.ast.get(result.root).kind else {
         panic!("expected a package root");

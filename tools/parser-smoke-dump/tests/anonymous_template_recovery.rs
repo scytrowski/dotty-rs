@@ -1,7 +1,7 @@
 use dotty_core::ast::{Apply, DefDef, ModuleDef, New, Template, UntypedNode};
 use dotty_core::{NameInterner, SourceId, SourceText, TextRange, TreeKind};
 use dotty_lexer::ContextualScanner;
-use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
+use dotty_parser::{ExpressionIssue, ParseIssue, parse_compilation_unit};
 
 #[test]
 fn missing_argument_after_indented_new_template_does_not_swallow_later_argument() {
@@ -20,13 +20,18 @@ fn missing_argument_after_indented_new_template_does_not_swallow_later_argument(
         .diagnostics
         .iter()
         .find(|diagnostic| {
-            diagnostic.kind() == ParseDiagnosticKind::ExpectedExpression
-                && diagnostic
-                    .legacy_message()
-                    .expect("legacy parser diagnostic")
-                    == "expected an expression"
+            matches!(
+                diagnostic.issue(),
+                ParseIssue::Expression(ExpressionIssue::ExpectedExpressionAtCurrentToken { .. })
+            )
         })
         .expect("the incomplete following argument should be diagnosed");
+    assert_eq!(
+        missing_rhs.issue(),
+        &ParseIssue::Expression(ExpressionIssue::ExpectedExpressionAtCurrentToken {
+            found: dotty_core::TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
+        })
+    );
     let closing_paren = source.rfind(')').unwrap() as u32;
     assert_eq!(
         missing_rhs.span(),
