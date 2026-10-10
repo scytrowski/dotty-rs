@@ -3,7 +3,7 @@ use dotty_core::{SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, TypeN
 
 use super::simple::is_term_operator_identifier;
 use super::{PendingOperator, can_start_prefix_expr, is_numeric_literal};
-use crate::Parser;
+use crate::{ExpressionIssue, ParseIssue, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -55,10 +55,9 @@ where
                 continue;
             }
             if self.is_nonfinal_argument_spread() {
-                self.report(
-                    crate::ParseDiagnosticKind::UnexpectedToken,
-                    "spread operator `*` not allowed here; must come last in a parameter list",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::NonFinalArgumentSpread,
+                ));
                 self.advance();
                 break;
             }
@@ -69,10 +68,11 @@ where
             if self.features().postfix_ops && !self.operator_has_following_operand() {
                 self.advance();
                 if !self.cursor.progressed_since(checkpoint) {
-                    self.report(
-                        crate::ParseDiagnosticKind::UnexpectedToken,
-                        "parser made no progress while parsing a postfix operator",
-                    );
+                    self.report_issue(ParseIssue::Expression(
+                        ExpressionIssue::PostfixOperatorNoProgress {
+                            found: self.current().kind,
+                        },
+                    ));
                     break;
                 }
                 top = self.reduce_operator_stack(&mut operators, top, 0, true, None);
@@ -118,10 +118,11 @@ where
             }
 
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    crate::ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing an infix expression",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::InfixExpressionNoProgress {
+                        found: self.current().kind,
+                    },
+                ));
                 break;
             }
         }
@@ -329,15 +330,15 @@ where
         next_operator: Option<dotty_core::Name>,
     ) -> TreeId<Untyped> {
         if let (Some(stack_top), Some(next_operator)) = (operators.last(), next_operator) {
-            let stack_spelling = self.names.resolve(stack_top.operator.text()).to_owned();
-            let next_spelling = self.names.resolve(next_operator.text()).to_owned();
-            if crate::infix::has_mixed_associativity(&stack_spelling, &next_spelling) {
-                self.report(
-                    crate::ParseDiagnosticKind::UnexpectedToken,
-                    format!(
-                        "mixed left- and right-associative operators `{stack_spelling}` and `{next_spelling}`"
-                    ),
-                );
+            let stack_spelling = self.names.resolve(stack_top.operator.text());
+            let next_spelling = self.names.resolve(next_operator.text());
+            if crate::infix::has_mixed_associativity(stack_spelling, next_spelling) {
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::MixedAssociativityOperators {
+                        left: stack_top.operator,
+                        right: next_operator,
+                    },
+                ));
             }
         }
 
@@ -423,10 +424,11 @@ where
             TokenKind::Newline | TokenKind::Newlines
         ) || self.has_physical_line_break(operator_end, self.current().span.start())
         {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedExpression,
-                "a prefix operator must be followed by its operand on the same line",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::PrefixOperandMustShareLine {
+                    found: self.current().kind,
+                },
+            ));
             return self.error_expr(operator_position);
         }
 

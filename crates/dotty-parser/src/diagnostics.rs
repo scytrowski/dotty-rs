@@ -160,6 +160,55 @@ impl TypeDefinitionIssue {
     }
 }
 
+/// Typed failures emitted by expression parsing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpressionIssue {
+    /// A `using` application has no argument.
+    MissingUsingArgument { found: TokenKind },
+    /// An application argument is missing.
+    MissingArgument { found: TokenKind },
+    /// A spread argument appears before the final argument.
+    NonFinalArgumentSpread,
+    /// Parsing a postfix operator did not advance the token source.
+    PostfixOperatorNoProgress { found: TokenKind },
+    /// Parsing an infix expression did not advance the token source.
+    InfixExpressionNoProgress { found: TokenKind },
+    /// Equal-precedence infix operators use conflicting associativities.
+    MixedAssociativityOperators { left: Name, right: Name },
+    /// A prefix operator is not followed by its operand on the same line.
+    PrefixOperandMustShareLine { found: TokenKind },
+}
+
+impl ExpressionIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::MissingUsingArgument { .. }
+            | Self::MissingArgument { .. }
+            | Self::PrefixOperandMustShareLine { .. } => ParseDiagnosticKind::ExpectedExpression,
+            Self::NonFinalArgumentSpread
+            | Self::PostfixOperatorNoProgress { .. }
+            | Self::InfixExpressionNoProgress { .. }
+            | Self::MixedAssociativityOperators { .. } => ParseDiagnosticKind::UnexpectedToken,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::MissingUsingArgument { .. } => "parser.expression.missing_using_argument",
+            Self::MissingArgument { .. } => "parser.expression.missing_argument",
+            Self::NonFinalArgumentSpread => "parser.expression.nonfinal_argument_spread",
+            Self::PostfixOperatorNoProgress { .. } => {
+                "parser.expression.postfix_operator_no_progress"
+            }
+            Self::InfixExpressionNoProgress { .. } => "parser.expression.infix_no_progress",
+            Self::MixedAssociativityOperators { .. } => {
+                "parser.expression.mixed_operator_associativity"
+            }
+            Self::PrefixOperandMustShareLine { .. } => "parser.expression.prefix_operand_newline",
+        }
+    }
+}
+
 /// Typed reasons emitted by the type-grammar portion owned by issue #910.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypeIssue {
@@ -536,6 +585,8 @@ pub enum ParseIssue {
     TypeParameter(TypeParamIssue),
     /// A structured failure emitted while parsing a type definition.
     TypeDefinition(TypeDefinitionIssue),
+    /// A structured failure emitted while parsing an expression.
+    Expression(ExpressionIssue),
 }
 
 impl ParseIssue {
@@ -553,6 +604,7 @@ impl ParseIssue {
             Self::Type(issue) => issue.kind(),
             Self::TypeParameter(issue) => issue.kind(),
             Self::TypeDefinition(issue) => issue.kind(),
+            Self::Expression(issue) => issue.kind(),
         }
     }
 
@@ -580,6 +632,7 @@ impl ParseIssue {
             Self::Type(issue) => issue.code(),
             Self::TypeParameter(issue) => issue.code(),
             Self::TypeDefinition(issue) => issue.code(),
+            Self::Expression(issue) => issue.code(),
         }
     }
 }
@@ -658,6 +711,7 @@ impl ParseDiagnostic {
             ParseIssue::Type(_) => None,
             ParseIssue::TypeParameter(_) => None,
             ParseIssue::TypeDefinition(_) => None,
+            ParseIssue::Expression(_) => None,
         }
     }
 }
