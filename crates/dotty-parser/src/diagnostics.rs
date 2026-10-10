@@ -2,6 +2,8 @@ use dotty_core::{
     Diagnostic, DiagnosticSeverity, Name, SourceId, SourceSpan, TextRange, TokenKind,
 };
 
+use crate::ParamOwner;
+
 /// Parser-specific category for a recoverable diagnostic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseDiagnosticKind {
@@ -12,6 +14,100 @@ pub enum ParseDiagnosticKind {
     ExpectedPattern,
     UnsupportedSyntax,
     UnboundPlaceholderParameter,
+}
+
+/// Typed failures in Scala type-parameter and context-bound clauses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeParamIssue {
+    /// A type-parameter clause is empty.
+    EmptyParameterClause { found: TokenKind },
+    /// A comma is not followed by a type parameter.
+    ExpectedParameterAfterComma { found: TokenKind },
+    /// A type parameter has no valid name.
+    ExpectedParameterName { found: TokenKind },
+    /// A type-parameter clause is missing a comma or closing bracket.
+    ExpectedParameterSeparator { found: TokenKind },
+    /// Parsing a type parameter did not advance the token source.
+    ParameterNoProgress { found: TokenKind },
+    /// Variance is not permitted on a polymorphic function type parameter.
+    VarianceNotAllowedForPolyFunctionParameter,
+    /// Context bounds are not supported for this parameter owner.
+    ContextBoundsNotAllowedForOwner { owner: Option<ParamOwner> },
+    /// Context bounds are not supported on polymorphic function type parameters.
+    ContextBoundsNotAllowedForPolyFunctionParameter,
+    /// An empty braced context-bound list needs a type.
+    EmptyBracedContextBoundList { found: TokenKind },
+    /// A braced context-bound list begins with a comma instead of a type.
+    ExpectedContextBoundAtListStart { found: TokenKind },
+    /// Parsing a context bound did not advance the token source.
+    ContextBoundNoProgress { found: TokenKind },
+    /// A comma is not followed by another context-bound type.
+    ExpectedContextBoundAfterComma { found: TokenKind },
+    /// A type parameter's context bound has no type.
+    ExpectedContextBoundType { found: TokenKind },
+    /// A context-bound `as` clause is missing its alias name.
+    ExpectedContextBoundAlias { found: TokenKind },
+}
+
+impl TypeParamIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::EmptyParameterClause { .. }
+            | Self::ExpectedParameterAfterComma { .. }
+            | Self::ExpectedParameterName { .. }
+            | Self::EmptyBracedContextBoundList { .. }
+            | Self::ExpectedContextBoundAtListStart { .. }
+            | Self::ExpectedContextBoundAfterComma { .. }
+            | Self::ExpectedContextBoundType { .. } => ParseDiagnosticKind::ExpectedType,
+            Self::ExpectedParameterSeparator { .. } => ParseDiagnosticKind::ExpectedToken,
+            Self::ParameterNoProgress { .. } | Self::ContextBoundNoProgress { .. } => {
+                ParseDiagnosticKind::UnexpectedToken
+            }
+            Self::VarianceNotAllowedForPolyFunctionParameter
+            | Self::ContextBoundsNotAllowedForOwner { .. }
+            | Self::ContextBoundsNotAllowedForPolyFunctionParameter => {
+                ParseDiagnosticKind::UnsupportedSyntax
+            }
+            Self::ExpectedContextBoundAlias { .. } => ParseDiagnosticKind::ExpectedExpression,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::EmptyParameterClause { .. } => "parser.type_param.empty_clause",
+            Self::ExpectedParameterAfterComma { .. } => {
+                "parser.type_param.expected_parameter_after_comma"
+            }
+            Self::ExpectedParameterName { .. } => "parser.type_param.expected_name",
+            Self::ExpectedParameterSeparator { .. } => "parser.type_param.expected_separator",
+            Self::ParameterNoProgress { .. } => "parser.type_param.no_progress",
+            Self::VarianceNotAllowedForPolyFunctionParameter => {
+                "parser.type_param.variance_not_allowed_for_polyfunction"
+            }
+            Self::ContextBoundsNotAllowedForOwner { .. } => {
+                "parser.type_param.context_bounds_not_allowed_for_owner"
+            }
+            Self::ContextBoundsNotAllowedForPolyFunctionParameter => {
+                "parser.type_param.context_bounds_not_allowed_for_polyfunction"
+            }
+            Self::EmptyBracedContextBoundList { .. } => {
+                "parser.type_param.empty_braced_context_bound_list"
+            }
+            Self::ExpectedContextBoundAtListStart { .. } => {
+                "parser.type_param.expected_context_bound_at_list_start"
+            }
+            Self::ContextBoundNoProgress { .. } => "parser.type_param.context_bound_no_progress",
+            Self::ExpectedContextBoundAfterComma { .. } => {
+                "parser.type_param.expected_context_bound_after_comma"
+            }
+            Self::ExpectedContextBoundType { .. } => {
+                "parser.type_param.expected_context_bound_type"
+            }
+            Self::ExpectedContextBoundAlias { .. } => {
+                "parser.type_param.expected_context_bound_alias"
+            }
+        }
+    }
 }
 
 /// Typed reasons emitted by the type-grammar portion owned by issue #910.
@@ -386,6 +482,8 @@ pub enum ParseIssue {
     UnboundPlaceholderParameter,
     /// A structured failure emitted by the Scala type grammar.
     Type(TypeIssue),
+    /// A structured failure emitted while parsing a type parameter clause.
+    TypeParameter(TypeParamIssue),
 }
 
 impl ParseIssue {
@@ -401,6 +499,7 @@ impl ParseIssue {
             Self::TrailingInput { .. } => ParseDiagnosticKind::UnexpectedToken,
             Self::UnboundPlaceholderParameter => ParseDiagnosticKind::UnboundPlaceholderParameter,
             Self::Type(issue) => issue.kind(),
+            Self::TypeParameter(issue) => issue.kind(),
         }
     }
 
@@ -426,6 +525,7 @@ impl ParseIssue {
             Self::TrailingInput { .. } => "parser.trailing_input",
             Self::UnboundPlaceholderParameter => "parser.unbound_placeholder_parameter",
             Self::Type(issue) => issue.code(),
+            Self::TypeParameter(issue) => issue.code(),
         }
     }
 }
@@ -502,6 +602,7 @@ impl ParseDiagnostic {
             | ParseIssue::TrailingInput { .. }
             | ParseIssue::UnboundPlaceholderParameter => None,
             ParseIssue::Type(_) => None,
+            ParseIssue::TypeParameter(_) => None,
         }
     }
 }
