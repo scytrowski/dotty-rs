@@ -1,12 +1,12 @@
 # Typer classpath corpus audit: Scala 3.9.0
 
-The full audit and ranking below are a JDK 21 snapshot from before #900. Their raw `top_semantic_gaps` data therefore retains the pre-#900 count of 14 `LocalMethodSignatureDeferred` observations in 3 files. The later #900 supplemental section records the post-change profile using JDK 25; its 6 / 1 count is current for that profile. The full report is generated from two byte-identical runs of the pinned Scala 3.9.0 audit and records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success.
+The report is generated from two byte-identical runs of the pinned Scala 3.9.0 audit. It records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success. The source corpus, parser/namer setup, Scala revision, JDK feature release 21, and classpath remain pinned.
 
 Run `tools/typer-classpath-corpus-audit/run` with the environment documented in `docs/typer-v0.1-compatibility.md` to regenerate this report.
 
 ## Historical #767–#771 expression sprint snapshot
 
-At the #772 snapshot, first blockers for term prefix operators and term annotations had moved to zero. These historical measurements are retained here for context; the full JDK 21 baseline and ranking are below.
+At the #772 snapshot, first blockers for term prefix operators and term annotations had moved to zero. These historical measurements are retained here for context; current values and ranking come from the report below.
 
 | First blocker | Before #767 | At #772 snapshot |
 | --- | ---: | ---: |
@@ -67,69 +67,67 @@ The initial local-extension blocker was 25 occurrences in 5 files. The current a
 
 Receiver or ordinary-argument mismatches remain non-applicable candidates and preserve `MemberNotFound`; the audit does not relabel those as successful typing. Multiple viable same-name local extensions produce `OverloadedSelectionDeferred` in a focused regression. Primitive definitions have no modeled member scopes. If nominal lookup cannot inspect a primitive member index, local extension resolution is not attempted and the original `MemberLookup` error is retained; fallback is available only after a completed index confirms that the ordinary name has no member. External member materialization remains zero.
 
-### Pre-#900 JDK 21 top ten Typer-owned semantic blockers
+### Current top ten Typer-owned semantic blockers
 
-This ranking predates #900 and excludes parser/namer and classpath-resolution failures, as well as the downstream `NoSuccessfulEnclosingMethodTyping` counter. Counts and representative paths are in the matching pre-#900 `top_semantic_gaps` raw snapshot below. The current #900 supplemental local-signature profile above is 6 / 1.
+The ranked list below excludes parser/namer and classpath-resolution failures, and excludes the downstream `NoSuccessfulEnclosingMethodTyping` counter. Counts and representative paths are in `top_semantic_gaps` in the raw report.
 
 | Rank | First blocker | Count / files |
 | ---: | --- | ---: |
 | 1 | `AnonymousClassInstantiationDeferred` | 32 / 15 |
 | 2 | `LocalBlockDeclarationDeferred::val/var definition` | 21 / 8 |
-| 3 | `LocalMethodSignatureDeferred` | 14 / 3 |
-| 4 | `RecursiveInferredMethodResult` | 13 / 1 |
-| 5 | `UnsupportedTypeTree::FunctionWithMods` | 13 / 2 |
-| 6 | `LocalBlockDeclarationDeferred::type definition` | 11 / 4 |
-| 7 | `SymbolSourceKindMismatch` | 11 / 3 |
-| 8 | `UnsupportedExpression::ParsedTry` | 11 / 6 |
-| 9 | `MissingDeclaredType` | 10 / 3 |
-| 10 | `LocalBlockDeclarationDeferred::module definition` | 9 / 2 |
+| 3 | `UnsupportedTypeTree::FunctionWithMods` | 13 / 2 |
+| 4 | `LocalBlockDeclarationDeferred::type definition` | 11 / 4 |
+| 5 | `SymbolSourceKindMismatch` | 11 / 3 |
+| 6 | `UnsupportedExpression::ParsedTry` | 11 / 6 |
+| 7 | `MissingDeclaredType` | 10 / 3 |
+| 8 | `LocalBlockDeclarationDeferred::module definition` | 9 / 2 |
+| 9 | `TypedPatternRuntimeTestDeferred` | 9 / 2 |
+| 10 | `UnsupportedFunctionLiteralParameter` | 9 / 1 |
 
-### Recommended next Typer sprint after #901
+### Recommended next Typer sprint
 
-Before #900, the 14 `LocalMethodSignatureDeferred` observations split into 3 direct signature failures and 11 inherited sibling methods. The #900 audit shows that all 8 by-name signature observations now reach deeper first blockers; `instantiateCFT` and `cases` both reach `ImportQualifierNotFound`. #901 removes the by-name application blocker for the focused local-call fixture. No application in those two corpus methods reaches application typing because each enclosing method still stops at `ImportQualifierNotFound`. The remaining local signature group is parameter modifiers (6 affected methods in one file), with one direct `inline` parameter origin in `MegaPhase.scala`; `source_method_flags` already preserves `Inline`, so this is the next bounded local-signature candidate. Dependent-result signatures have no corpus first-blocker observations and remain covered only by focused fixtures. The other high-ranked buckets still need separate prerequisites: anonymous classes (32 / 15) need stable identity and ownership, while local values/variables (21 / 8) need a PatDef shape breakdown.
+After #902, the local signature profile contains 0 first-blocker observations, down from 14 affected methods across 3 files in the #899 baseline. The 8 by-name observations moved past the signature guard in #900; the 6 parameter-modifier observations (one direct origin and five inherited siblings in `MegaPhase.scala`) moved past it in #902 by accepting the already-modeled `Inline` parameter flag on local `inline` methods. This blocker movement is not evidence that all six enclosing methods type; inspect their current first blockers and the `typed_local_defdefs` count below. #901 removes the bounded by-name application blocker in the focused local-call fixture; the two corpus methods originating from by-name signatures remain behind `ImportQualifierNotFound`. Inline expansion and dependent-result signatures remain out of scope. Recommend #903 to harden these signature paths and refresh the Typer ranking.
 
-### #899 baseline local method signature profile (before #900)
+### #899–#902 local method signature profile
 
-The profile counts local methods whose first blocker is a local signature failure. `direct_origins` identifies methods carrying that signature feature; `inherited_methods` are sibling methods attributed to the same enclosing failure. Thus 14 affected methods do not mean 14 independently unsupported signatures. The audit was run twice with JDK feature release 25 and the pinned Scala 3.9.0 source/artifact inputs; normalized output matched byte-for-byte. The profile is diagnostic only and does not type additional methods.
+The profile counts local methods whose first blocker is a local signature failure. `direct_origins` identifies methods carrying that signature feature; `inherited_methods` are sibling methods attributed to the same enclosing failure. The #899 baseline had 14 affected methods across 3 files; after #900 and #902, none remain at this blocker. This deterministic supplemental audit was run twice with JDK feature release 21 and the pinned Scala 3.9.0 source/artifact inputs; normalized output matched byte-for-byte. Full method typing is reported separately.
 
 | Feature payload | Affected methods | Files | Distinct methods | Direct origins | Inherited methods | Blocker origins |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `by-name parameters` | 8 | 2 | 8 | 2 | 6 | 2 |
-| `parameter modifiers` | 6 | 1 | 6 | 1 | 5 | 1 |
+| (none) | 0 | 0 | 0 | 0 | 0 | 0 |
 
-Every affected local method is listed below with its source path, line/span, tree index, exact feature payload, signature shape, blocker origin, and direct/inherited attribution.
+Residual local signature first-blocker rows appear below with their source path, line/span, tree index, feature payload, signature shape, blocker origin, and direct/inherited attribution. No rows remain at this blocker after #902.
 
 ```text
-compiler/src/dotty/tools/dotc/core/SymUtils.scala:line=464 span=20134..20480 tree=1839 method=instantiateCFT feature="by-name parameters" type_parameter_clauses=0 value_parameter_clauses=1 clause_kinds=[plain] parameter_modifiers=[] by_name_parameter=true result_depends_on_parameter=false extension=false result=explicit blocker_origin=compiler/src/dotty/tools/dotc/core/SymUtils.scala#tree=1839:instantiateCFT attribution=direct
-compiler/src/dotty/tools/dotc/core/SymUtils.scala:line=472 span=20488..20695 tree=1874 method=iftParamss feature="by-name parameters" type_parameter_clauses=0 value_parameter_clauses=0 clause_kinds=[] parameter_modifiers=[] by_name_parameter=false result_depends_on_parameter=false extension=false result=inferred blocker_origin=compiler/src/dotty/tools/dotc/core/SymUtils.scala#tree=1839:instantiateCFT attribution=inherited
-compiler/src/dotty/tools/dotc/typer/Typer.scala:line=1297 span=59687..60072 tree=5163 method=cases feature="by-name parameters" type_parameter_clauses=0 value_parameter_clauses=1 clause_kinds=[plain] parameter_modifiers=[] by_name_parameter=true result_depends_on_parameter=false extension=false result=inferred blocker_origin=compiler/src/dotty/tools/dotc/typer/Typer.scala#tree=5163:cases attribution=direct
-compiler/src/dotty/tools/dotc/typer/Typer.scala:line=1307 span=60078..60624 tree=5232 method=ascription feature="by-name parameters" type_parameter_clauses=0 value_parameter_clauses=1 clause_kinds=[plain] parameter_modifiers=[] by_name_parameter=false result_depends_on_parameter=false extension=false result=inferred blocker_origin=compiler/src/dotty/tools/dotc/typer/Typer.scala#tree=5163:cases attribution=inherited
-compiler/src/dotty/tools/dotc/typer/Typer.scala:line=1322 span=60674..61206 tree=5296 method=fromRepeated feature="by-name parameters" type_parameter_clauses=0 value_parameter_clauses=1 clause_kinds=[plain] parameter_modifiers=[] by_name_parameter=false result_depends_on_parameter=false extension=false result=explicit blocker_origin=compiler/src/dotty/tools/dotc/typer/Typer.scala#tree=5163:cases attribution=inherited
-compiler/src/dotty/tools/dotc/typer/Typer.scala:line=1333 span=61214..62313 tree=5380 method=typedWildcardStarArgExpr feature="by-name parameters" type_parameter_clauses=0 value_parameter_clauses=0 clause_kinds=[] parameter_modifiers=[] by_name_parameter=false result_depends_on_parameter=false extension=false result=inferred blocker_origin=compiler/src/dotty/tools/dotc/typer/Typer.scala#tree=5163:cases attribution=inherited
-compiler/src/dotty/tools/dotc/typer/Typer.scala:line=1360 span=62526..62604 tree=5420 method=typedTpt feature="by-name parameters" type_parameter_clauses=0 value_parameter_clauses=0 clause_kinds=[] parameter_modifiers=[] by_name_parameter=false result_depends_on_parameter=false extension=false result=inferred blocker_origin=compiler/src/dotty/tools/dotc/typer/Typer.scala#tree=5163:cases attribution=inherited
-compiler/src/dotty/tools/dotc/typer/Typer.scala:line=1361 span=62611..63314 tree=5491 method=handlePattern feature="by-name parameters" type_parameter_clauses=0 value_parameter_clauses=0 clause_kinds=[] parameter_modifiers=[] by_name_parameter=false result_depends_on_parameter=false extension=false result=explicit blocker_origin=compiler/src/dotty/tools/dotc/typer/Typer.scala#tree=5163:cases attribution=inherited
-compiler/src/dotty/tools/dotc/transform/MegaPhase.scala:line=233 span=10922..11097 tree=1125 method=inLocalContext feature="parameter modifiers" type_parameter_clauses=1 value_parameter_clauses=2 clause_kinds=[plain,contextual] parameter_modifiers=[Given,Inline] by_name_parameter=false result_depends_on_parameter=false extension=false result=explicit blocker_origin=compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1125:inLocalContext attribution=direct
-compiler/src/dotty/tools/dotc/transform/MegaPhase.scala:line=237 span=11103..13341 tree=1440 method=transformNamed feature="parameter modifiers" type_parameter_clauses=0 value_parameter_clauses=1 clause_kinds=[plain] parameter_modifiers=[] by_name_parameter=false result_depends_on_parameter=false extension=false result=explicit blocker_origin=compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1125:inLocalContext attribution=inherited
-compiler/src/dotty/tools/dotc/transform/MegaPhase.scala:line=249 span=11628..11828 tree=1224 method=mapValDef feature="parameter modifiers" type_parameter_clauses=0 value_parameter_clauses=1 clause_kinds=[contextual] parameter_modifiers=[Given] by_name_parameter=false result_depends_on_parameter=false extension=false result=inferred blocker_origin=compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1125:inLocalContext attribution=inherited
-compiler/src/dotty/tools/dotc/transform/MegaPhase.scala:line=261 span=12098..12439 tree=1301 method=mapDefDef feature="parameter modifiers" type_parameter_clauses=0 value_parameter_clauses=1 clause_kinds=[contextual] parameter_modifiers=[Given] by_name_parameter=false result_depends_on_parameter=false extension=false result=inferred blocker_origin=compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1125:inLocalContext attribution=inherited
-compiler/src/dotty/tools/dotc/transform/MegaPhase.scala:line=292 span=13347..20217 tree=2407 method=transformUnnamed feature="parameter modifiers" type_parameter_clauses=0 value_parameter_clauses=1 clause_kinds=[plain] parameter_modifiers=[] by_name_parameter=false result_depends_on_parameter=false extension=false result=explicit blocker_origin=compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1125:inLocalContext attribution=inherited
-compiler/src/dotty/tools/dotc/transform/MegaPhase.scala:line=394 span=17855..18077 tree=2116 method=mapPackage feature="parameter modifiers" type_parameter_clauses=0 value_parameter_clauses=1 clause_kinds=[contextual] parameter_modifiers=[Given] by_name_parameter=false result_depends_on_parameter=false extension=false result=inferred blocker_origin=compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1125:inLocalContext attribution=inherited
+(none; 0 occurrences)
 ```
 
-### #900 by-name signature follow-up
+#### #902 selected inline-parameter cohort
 
-The pinned Scala 3.9.0 audit was rerun twice after #900 with JDK feature release 25 and the same source/artifact inputs. Normalized output matched byte-for-byte. The local signature profile dropped from 14 observations in 3 files to 6 in 1 file: all 8 by-name observations (2 direct origins and 6 inherited sibling methods) no longer stop at `LocalMethodSignatureDeferred`. The six remaining observations are the `parameter modifiers` group in `MegaPhase.scala`.
+The six rows from the #899 `parameter modifiers` feature profile are tracked by their pinned source-tree indexes below. They are local `inline` methods; a moved blocker is not full method typing.
+
+| Baseline local method tree | Current first blocker |
+| --- | --- |
+| `compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1125` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1440` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1224` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1301` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=2407` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=2116` | `ImportQualifierNotFound` |
+
+### #900 by-name downstream blocker inspection
+
+The two direct by-name origins are measured individually after signature support. In the whole-file audit, both now reach `ImportQualifierNotFound` as their first blocker. No matching `ByNameApplicationParameterDeferred` observation is emitted for these methods; their application sites are still behind the enclosing method blocker. At the #900 snapshot the `ByNameCall.scala` fixture reached the application deferral boundary; the #901 follow-up below removes it for that bounded local-call shape.
 
 | Corpus method | Result shape | First blocker after #900 | Application sites reached by audit |
 | --- | --- | --- | --- |
-| `SymUtils.scala::instantiateCFT` | Explicit | `ImportQualifierNotFound` | No; recursive RHS call (line 469) and `returnProto` call (line 479) remain behind the enclosing blocker. |
-| `Typer.scala::cases` | Inferred | `ImportQualifierNotFound` | No; calls from `typedTyped` (lines 1354 and 1378) remain behind the enclosing blocker. |
-
-These two methods do not produce a corpus `ByNameApplicationParameterDeferred` observation because their enclosing blocker prevents those applications from being typed. The #900 version of the focused `ByNameCall.scala` fixture did reach that separate application boundary; see the #901 follow-up below. The audit is diagnostic only: no additional local methods typed, and the first-blocker movement is not semantic success.
+| `SymUtils.scala::instantiateCFT` | Explicit | `ImportQualifierNotFound` | No; recursive RHS and `returnProto` calls remain behind the enclosing blocker. |
+| `Typer.scala::cases` | Inferred | `ImportQualifierNotFound` | No; calls from `typedTyped` remain behind the enclosing blocker. |
 
 ### #901 by-name application follow-up
 
-The focused local `ByNameCall.scala` fixture previously produced one `ByNameApplicationParameterDeferred` failure. After #901 it produces zero such failures and its one local method types successfully. In the pinned corpus, zero applications from the two direct by-name origins reached application typing before or after #901: both remain blocked by `ImportQualifierNotFound` in their enclosing methods. Thus the corpus count is 0 moved past the application blocker; the focused regression demonstrates the implemented call behavior.
+The focused local `ByNameCall.scala` fixture previously produced one `ByNameApplicationParameterDeferred` observation. After #901 it produces zero such failures and its one local method types successfully. In the pinned corpus, zero applications from the two direct by-name origins reached application typing before or after #901: both remain blocked by `ImportQualifierNotFound` in their enclosing methods. Thus the corpus count is 0 moved past the application blocker; the focused regression demonstrates the implemented call behavior.
+
 
 ### Historical #825 next-sprint candidates (pre-#856)
 
@@ -139,7 +137,7 @@ The focused local `ByNameCall.scala` fixture previously produced one `ByNameAppl
 | `AnonymousClassInstantiationDeferred` (32 / 15) | Support one anonymous `new` with one concrete parent in `typer/expression/new.rs`. | Reuse ordinary `New` typing and parent projection; define stable anonymous symbol ownership and class info. | Closure capture, refinement synthesis, and general anonymous-class members. |
 | `UnsupportedSingletonReference` (historical 22 / 1) | #880 profiled the baseline; #881–#883 now project, relate, and preserve supported literal constants. | Reuse `Type::Constant`, literal expression typing, bounded relations, expected adaptation, and stable-prefix validation. | Arbitrary paths, unstable prefixes, and path-dependent relation redesign. |
 | `LocalBlockDeclarationDeferred::val/var definition` (21 / 8) | Split remaining cases by PatDef root/binder shape in `typer/expression/blocks.rs`. | Reuse transactional PatDef lowering, local binders, and assignment support. | General destructuring and reopening supported PatDef forms. |
-| `LocalMethodSignatureDeferred` (6 / 1; after #900) | The 8 by-name observations from #899 no longer stop at the signature guard; 6 parameter-modifier observations remain in `MegaPhase.scala`. | Reuse `source_method_flags` and the shared method-signature builder; parameter symbols already retain `Inline`. | Inline expansion; dependent results; general erased parameter support or new method inference. |
+| `LocalMethodSignatureDeferred` (0 current; after #902) | #900 moved 8 by-name and #902 moved 6 inline-parameter observations past the signature guard. | Reuse `source_method_flags` and the shared method-signature builder; local parameter symbols retain `Inline`. | Inline expansion; dependent results; erased parameter support or new method inference. |
 
 ## Historical #825 MissingDeclaredType producer profile (pre-#856)
 
@@ -318,9 +316,9 @@ The raw profile below lists the current first blocker for each of the 22 pinned 
 
 The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.
 
-## Full JDK 21 raw audit snapshot (before #900)
+## Full raw audit output (JDK feature release 21)
 
-The raw report below was generated before #900 and is retained as a baseline snapshot. Its `top_semantic_gaps` section reports `LocalMethodSignatureDeferred: 14` in 3 files; the post-#900 supplemental profile above reports 6 in 1 file. Other raw counts also belong to this baseline run.
+The raw audit below corresponds to the pinned source state processed by this run. Its aggregate counts and rankings should be read together with the source-state and JDK provenance in this report.
 
 ```text
 scala_revision=777528f19a58e794c9954a42f433373472ec57f8
@@ -335,7 +333,7 @@ audit_v1_comparison:
   local_declarations=22713 (delta=-505)
   local_methods=3297 (delta=-481)
   typed_local_methods=0 (delta=+0)
-  ImportQualifierNotFound=2849 (delta=+803)
+  ImportQualifierNotFound=2876 (delta=+830)
   UnsupportedExpression_total=25 (delta=-547)
   LocalBlockDeclarationDeferred=41 (delta=-231)
   NoSuccessfulEnclosingMethodTyping=34 (delta=-449)
@@ -558,16 +556,16 @@ unsupported_type_tree_failures:
   UnsupportedTypeTree::Tuple: count=2, files=1 [compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala]
 local_block_declaration_deferred=41
 no_successful_enclosing_method_typing=34
-import_qualifier_not_found=2849
+import_qualifier_not_found=2876
 external_name_or_member_resolution_failures=202
 failure_families:
-  resolution/classpath environment=3052
+  resolution/classpath environment=3079
   other=141
   local declaration deferral=46
-  type relation/inference/completion=33
   unsupported expression syntax/semantics=25
+  type relation/inference/completion=6
 local_defdef_failures:
-  ImportQualifierNotFound [resolution/classpath environment]: 2849 (273 files) [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
+  ImportQualifierNotFound [resolution/classpath environment]: 2876 (273 files) [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
   TypeNameNotFound [resolution/classpath environment]: 80 (30 files) [compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/dotc/core/tasty/CommentPickler.scala, compiler/src/dotty/tools/dotc/core/tasty/TreeBuffer.scala, compiler/src/dotty/tools/dotc/coverage/Serializer.scala, compiler/src/dotty/tools/dotc/util/Chars.scala]
   MemberLookup [resolution/classpath environment]: 61 (28 files) [compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/SymDenotations.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/core/classfile/ClassfileParser.scala]
   SymbolResolution [resolution/classpath environment]: 40 (17 files) [compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/core/Decorators.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala]
@@ -575,8 +573,6 @@ local_defdef_failures:
   AnonymousClassInstantiationDeferred [other]: 32 (15 files) [compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala]
   LocalBlockDeclarationDeferred::val/var definition [local declaration deferral]: 21 (8 files) [compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala]
   TermNameNotFound [resolution/classpath environment]: 20 (12 files) [compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/backend/jvm/opt/MethodMax.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala, compiler/src/dotty/tools/dotc/util/ClasspathFromClassloader.scala, compiler/src/dotty/tools/dotc/util/WeakHashSet.scala]
-  LocalMethodSignatureDeferred [type relation/inference/completion]: 14 (3 files) [compiler/src/dotty/tools/dotc/core/SymUtils.scala, compiler/src/dotty/tools/dotc/transform/MegaPhase.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala]
-  RecursiveInferredMethodResult [type relation/inference/completion]: 13 (1 files) [compiler/src/dotty/tools/dotc/typer/Typer.scala]
   UnsupportedTypeTree::FunctionWithMods [other]: 13 (2 files) [library/src/scala/collection/StringParsers.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala]
   LocalBlockDeclarationDeferred::type definition [local declaration deferral]: 11 (4 files) [compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/typer/Checking.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala]
   SymbolSourceKindMismatch [other]: 11 (3 files) [compiler/src/dotty/tools/dotc/parsing/Tokens.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala, library/src/scala/collection/immutable/Vector.scala]
@@ -650,25 +646,25 @@ missing_declared_type_records:
 top_semantic_gaps:
   1. AnonymousClassInstantiationDeferred: count=32, files=15, category=other, examples=compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala
   2. LocalBlockDeclarationDeferred::val/var definition: count=21, files=8, category=local declaration support, examples=compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala
-  3. LocalMethodSignatureDeferred: count=14, files=3, category=other, examples=compiler/src/dotty/tools/dotc/core/SymUtils.scala, compiler/src/dotty/tools/dotc/transform/MegaPhase.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala
-  4. RecursiveInferredMethodResult: count=13, files=1, category=other, examples=compiler/src/dotty/tools/dotc/typer/Typer.scala
-  5. UnsupportedTypeTree::FunctionWithMods: count=13, files=2, category=other, examples=library/src/scala/collection/StringParsers.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala
-  6. LocalBlockDeclarationDeferred::type definition: count=11, files=4, category=local declaration support, examples=compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/typer/Checking.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala
-  7. SymbolSourceKindMismatch: count=11, files=3, category=other, examples=compiler/src/dotty/tools/dotc/parsing/Tokens.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala, library/src/scala/collection/immutable/Vector.scala
-  8. UnsupportedExpression::ParsedTry: count=11, files=6, category=expression typing, examples=compiler/src/dotty/tools/dotc/ast/Positioned.scala, compiler/src/dotty/tools/dotc/core/TypeComparer.scala, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala, compiler/src/dotty/tools/dotc/transform/Erasure.scala, compiler/src/dotty/tools/dotc/transform/ExplicitOuter.scala
-  9. MissingDeclaredType: count=10, files=3, category=other, examples=compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala
-  10. LocalBlockDeclarationDeferred::module definition: count=9, files=2, category=local declaration support, examples=compiler/src/dotty/tools/dotc/ast/DesugarEnums.scala, compiler/src/dotty/tools/dotc/typer/Implicits.scala
+  3. UnsupportedTypeTree::FunctionWithMods: count=13, files=2, category=other, examples=library/src/scala/collection/StringParsers.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala
+  4. LocalBlockDeclarationDeferred::type definition: count=11, files=4, category=local declaration support, examples=compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/typer/Checking.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala
+  5. SymbolSourceKindMismatch: count=11, files=3, category=other, examples=compiler/src/dotty/tools/dotc/parsing/Tokens.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala, library/src/scala/collection/immutable/Vector.scala
+  6. UnsupportedExpression::ParsedTry: count=11, files=6, category=expression typing, examples=compiler/src/dotty/tools/dotc/ast/Positioned.scala, compiler/src/dotty/tools/dotc/core/TypeComparer.scala, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala, compiler/src/dotty/tools/dotc/transform/Erasure.scala, compiler/src/dotty/tools/dotc/transform/ExplicitOuter.scala
+  7. MissingDeclaredType: count=10, files=3, category=other, examples=compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala
+  8. LocalBlockDeclarationDeferred::module definition: count=9, files=2, category=local declaration support, examples=compiler/src/dotty/tools/dotc/ast/DesugarEnums.scala, compiler/src/dotty/tools/dotc/typer/Implicits.scala
+  9. TypedPatternRuntimeTestDeferred: count=9, files=2, category=pattern typing, examples=compiler/src/dotty/tools/dotc/core/Types.scala, library/src/scala/collection/immutable/HashMap.scala
+  10. UnsupportedFunctionLiteralParameter: count=9, files=1, category=other, examples=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala
 top_gap_implementation_scope_notes:
   AnonymousClassInstantiationDeferred (32 occurrences, 15 files): first_slice=support one anonymous new with one concrete parent and explicit member ownership; owner=dotty-typer/src/typer/expression/new.rs; prerequisites=ordinary New typing, parent projection, and stable anonymous class identity; non_goals=closure capture, refinement synthesis, and general anonymous-class members
   LocalBlockDeclarationDeferred::val/var definition (21 occurrences, 8 files): first_slice=split remaining local definitions by PatDef root and binder shape before adding one form; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=transactional PatDef lowering, local binders, and assignment support; non_goals=general destructuring or reopening already supported PatDef forms
-  LocalMethodSignatureDeferred (14 occurrences, 3 files): first_slice=split the feature payload and add a fixture for the most frequent unsupported signature; owner=dotty-typer/src/typer/completion/local_methods.rs; prerequisites=the shared signature builder and existing parameter/type-parameter scopes; non_goals=general dependent-result, erased/by-name, or method-inference redesign
-  RecursiveInferredMethodResult (13 occurrences, 1 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
   UnsupportedTypeTree::FunctionWithMods (13 occurrences, 2 files): first_slice=inspect the remaining modifier-bearing function types and keep erased/capture-specific forms deferred; owner=dotty-typer/src/typer/type_projection.rs; prerequisites=plain contextual `Given` forms now use the canonical ContextFunction identity and existing Applied types; non_goals=capture checking, erased-function semantics, and arbitrary modifiers
   LocalBlockDeclarationDeferred::type definition (11 occurrences, 4 files): first_slice=enter one local declaration kind transactionally in block typing; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=source symbol and scope metadata from dotty-core; non_goals=local classes, imports, or type definitions beyond the selected kind
   SymbolSourceKindMismatch (11 occurrences, 3 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
   UnsupportedExpression::ParsedTry (11 occurrences, 6 files): first_slice=lower one reported expression node through existing expression typing; owner=dotty-typer/src/typer/expression; prerequisites=the parsed AST node and its child typing rules; non_goals=control-flow or inference redesign
   MissingDeclaredType (10 occurrences, 3 files): first_slice=infer one ordinary or inline inferred module-class field after source class val/var inference; the remaining bucket is 10 occurrences across 3 files; owner=dotty-typer/src/typer/completion/mod.rs, completion/declarations.rs, type_projection.rs, and existing expression typing; prerequisites=module initialization context, RHS typing and widening, cycle behavior, and completion rollback; non_goals=class fields, method results, local PatDef, and generalized expected-type inference
   LocalBlockDeclarationDeferred::module definition (9 occurrences, 2 files): first_slice=enter one local declaration kind transactionally in block typing; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=source symbol and scope metadata from dotty-core; non_goals=local classes, imports, or type definitions beyond the selected kind
+  TypedPatternRuntimeTestDeferred (9 occurrences, 2 files): first_slice=type one pattern form against an already known expected type; owner=dotty-typer/src/typer/patterns; prerequisites=the expected type and existing pattern AST shape; non_goals=exhaustivity analysis and match-result inference
+  UnsupportedFunctionLiteralParameter (9 occurrences, 1 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
 highest_ranked_semantic_gap: AnonymousClassInstantiationDeferred (32 occurrences in 15 files); count ranks the audit only and does not select a sprint increment; keep classpath materialization as a separate gate because the pinned audit resolved no external members
 match_readiness:
   first_blocker_methods=279
@@ -831,31 +827,31 @@ match_corpus_profile:
   infix_pattern_forms=781
   extractor_representative_files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala]
 resolver_metrics:
-  resolver_package_requests=22953
-  external_package_requests=14141
-  external_package_successes=3530
-  external_package_unresolved=10611
+  resolver_package_requests=22962
+  external_package_requests=14150
+  external_package_successes=3531
+  external_package_unresolved=10619
   external_package_errors=0
   source_package_reuse=8812
-  resolver_member_requests=7493
-  external_member_requests=7493
+  resolver_member_requests=7502
+  external_member_requests=7502
   external_member_successes=0
   external_class_symbol_successes=0
   external_non_class_member_successes=0
   source_member_reuse=0
-  external_member_unresolved=7150
+  external_member_unresolved=7159
   external_member_errors=342
   distinct_packages=25
   distinct_classes=0
   distinct_members=0
   classloader_success_gate=BLOCKED: external members not materialized
 resolver_581_comparison:
-  external_package_successes=3530 (baseline=1965, delta=+1565)
-  external_package_unresolved=10611 (baseline=5816, delta=+4795)
+  external_package_successes=3531 (baseline=1965, delta=+1566)
+  external_package_unresolved=10619 (baseline=5816, delta=+4803)
   external_package_errors=0 (baseline=0, delta=+0)
   external_class_materializations=0 (baseline=0, delta=+0)
   external_non_class_member_successes=0 (baseline=0, delta=+0)
-  external_member_unresolved=7150 (baseline=3884, delta=+3266)
+  external_member_unresolved=7159 (baseline=3884, delta=+3275)
   external_member_errors=342 (baseline=91, delta=+251)
   distinct_packages=25 (baseline=23, delta=+2)
   member_error_kinds:
@@ -912,13 +908,13 @@ resolver_581_comparison:
     Malformed { reason: "invalid .tasty file for scala/collection/mutable/Queue: a supertype reference could not be resolved to a name" }=1
     Malformed { reason: "invalid .tasty file for scala/collection/mutable/StringBuilder: a supertype reference could not be resolved to a name" }=7
   most_requested_unresolved_member_names:
-    tpd=725
+    tpd=731
     scala=640
     Contexts=519
     Int=399
     core=274
     CollectionConverters=270
-    ast=224
+    ast=225
     Array=212
     Type=151
     Boolean=108
@@ -930,7 +926,7 @@ resolver_581_comparison:
     dotty=87
     Context=76
     reflect=74
-    Types=69
+    Types=70
     List=65
 immutable_class_field_completion_outcomes:
   compiler/src/dotty/tools/dotc/core/TypeErrors.scala: tree=584 field=cycleSym baseline_occurrences=1 outcome=blocked::ImportQualifierNotFound::ImportQualifierNotFound { source: SourceId(0), import_tree_index: 5 }
@@ -974,6 +970,21 @@ mutable_class_field_baseline_method_outcomes:
   compiler/src/dotty/tools/dotc/util/WeakHashSet.scala#tree=708 outcome=TypeNameNotFound
   library/src/scala/collection/Iterator.scala#tree=3805 outcome=UnsupportedTypeTree::Annotated
   library/src/scala/collection/Iterator.scala#tree=3865 outcome=UnsupportedTypeTree::Annotated
+local_method_signature_profile:
+  total_occurrences=0
+  distinct_files=0
+  features:
+  records:
+inline_parameter_signature_outcomes_after_902:
+  compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1125=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1440=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1224=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=1301=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=2407=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/transform/MegaPhase.scala#tree=2116=ImportQualifierNotFound
+by_name_method_outcomes:
+  compiler/src/dotty/tools/dotc/core/SymUtils.scala::instantiateCFT=ImportQualifierNotFound
+  compiler/src/dotty/tools/dotc/typer/Typer.scala::cases=ImportQualifierNotFound
 singleton_reference_profile:
   total_first_blockers=0
   profile_entries=0

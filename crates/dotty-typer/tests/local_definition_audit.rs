@@ -863,8 +863,8 @@ fn pinned_scala39_local_definition_audit() {
         audit.local_method_signature_profile.total, local_method_signature_failure_count,
         "every LocalMethodSignatureDeferred first blocker must retain its exact payload and source shape"
     );
-    assert_eq!(local_method_signature_failure_count, 6);
-    assert_eq!(audit.local_method_signature_profile.features.len(), 1);
+    assert_eq!(local_method_signature_failure_count, 0);
+    assert_eq!(audit.local_method_signature_profile.features.len(), 0);
     assert!(
         !audit
             .local_method_signature_profile
@@ -872,22 +872,49 @@ fn pinned_scala39_local_definition_audit() {
             .contains_key("by-name parameters"),
         "the by-name signature blocker should be resolved by the local-method signature increment"
     );
-    let parameter_modifiers = audit
-        .local_method_signature_profile
-        .features
-        .get("parameter modifiers")
-        .expect("the pinned local-method profile should classify parameter modifiers");
-    assert_eq!(parameter_modifiers.count, 6);
-    assert_eq!(parameter_modifiers.files.len(), 1);
-    assert_eq!(parameter_modifiers.direct_methods.len(), 1);
-    assert_eq!(parameter_modifiers.inherited_methods.len(), 5);
     let local_method_signature_files = audit
         .local_method_signature_profile
         .features
         .values()
         .flat_map(|bucket| bucket.files.iter())
         .collect::<BTreeSet<_>>();
-    assert_eq!(local_method_signature_files.len(), 1);
+    assert_eq!(local_method_signature_files.len(), 0);
+    let inline_signature_methods = [
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            1125,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            1440,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            1224,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            1301,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            2407,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            2116,
+        ),
+    ];
+    for (path, tree_index) in inline_signature_methods {
+        let outcome = audit
+            .local_method_first_blockers
+            .get(&format!("{path}#tree={tree_index}"))
+            .unwrap_or_else(|| panic!("missing post-#902 outcome for {path}#tree={tree_index}"));
+        assert_ne!(
+            outcome, "LocalMethodSignatureDeferred",
+            "inline signature row {path}#tree={tree_index} should move past its old blocker"
+        );
+    }
     assert_eq!(audit.by_name_method_outcomes.len(), 2);
     assert_eq!(
         audit
@@ -1148,6 +1175,7 @@ fn pinned_scala39_local_definition_audit() {
     print_pinned_immutable_field_method_outcomes(&audit.local_method_first_blockers);
     print_pinned_mutable_field_method_outcomes(&audit.local_method_first_blockers);
     print_local_method_signature_profile(&audit.local_method_signature_profile);
+    print_inline_signature_outcomes(&audit.local_method_first_blockers);
     println!("by_name_method_outcomes:");
     for (method, outcome) in &audit.by_name_method_outcomes {
         println!("  {method}={outcome}");
@@ -1233,6 +1261,44 @@ fn print_local_method_signature_profile(profile: &LocalMethodSignatureProfile) {
         .flat_map(|bucket| bucket.records.iter())
     {
         println!("    {record}");
+    }
+}
+
+fn print_inline_signature_outcomes(outcomes: &BTreeMap<String, String>) {
+    const METHODS: [(&str, u32); 6] = [
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            1125,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            1440,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            1224,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            1301,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            2407,
+        ),
+        (
+            "compiler/src/dotty/tools/dotc/transform/MegaPhase.scala",
+            2116,
+        ),
+    ];
+
+    println!("inline_parameter_signature_outcomes_after_902:");
+    for (path, tree_index) in METHODS {
+        let key = format!("{path}#tree={tree_index}");
+        let outcome = outcomes
+            .get(&key)
+            .unwrap_or_else(|| panic!("missing post-#902 outcome for {key}"));
+        println!("  {key}={outcome}");
     }
 }
 
@@ -5777,20 +5843,17 @@ fn local_method_signature_profile_classifies_feature_fixtures() {
             .any(|record| record.contains("result_depends_on_parameter=true"))
     );
 
-    let modifier = audit_source_inner(
-        "class C { def outer: Int = { def modified(inline value: Int): Int = value; 0 } }",
-        "ParameterModifier.scala",
+    let inline_parameter = audit_source_inner(
+        "class C { def outer: Int = { inline def modified(inline value: Int): Int = value; 0 } }",
+        "InlineParameter.scala",
         None,
     );
-    let modifier_feature = modifier
-        .local_method_signature_profile
-        .features
-        .get("parameter modifiers")
-        .expect("inline parameter fixture should preserve the modifier boundary");
-    assert_eq!(modifier_feature.count, 1);
-    assert!(modifier_feature.records.iter().any(|record| {
-        record.contains("parameter_modifiers=[Inline]") && record.contains("attribution=direct")
-    }));
+    assert!(
+        inline_parameter
+            .local_method_signature_profile
+            .features
+            .is_empty()
+    );
 
     let supported = audit_source_inner(
         "class C { def outer: Int = { def supported(value: Int): Int = value; supported(1) } }",

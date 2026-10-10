@@ -165,10 +165,20 @@ impl SourceTyper<'_> {
                 if parameter.metadata.modifiers.contains(&Modifier::Erased) {
                     return Err(deferred("erased parameters"));
                 }
+                if parameter.metadata.modifiers.contains(&Modifier::Inline)
+                    && !self
+                        .store
+                        .symbols
+                        .get(method)
+                        .flags
+                        .contains(SymbolFlags::INLINE)
+                {
+                    return Err(deferred("inline parameter on non-inline method"));
+                }
                 if parameter.metadata.modifiers.iter().any(|modifier| {
                     !matches!(
                         modifier,
-                        Modifier::Param | Modifier::Given | Modifier::Implicit
+                        Modifier::Param | Modifier::Given | Modifier::Implicit | Modifier::Inline
                     )
                 }) {
                     return Err(deferred("parameter modifiers"));

@@ -636,7 +636,11 @@ value widening unwraps the parameter's `Type::ByName` to its result type so
 the method body can be checked against its declared result or infer that
 result type. Parameter-dependent result types, erased parameters, higher-kinded
 and aliased type-parameter bounds, and unsupported parameter modifiers remain
-explicitly deferred. Bounded non-polymorphic applications accept by-name
+explicitly deferred. Inline parameters on local `inline` methods retain
+`SymbolFlags::INLINE` and use the shared method-signature builder; the same
+parameter on a non-inline local method remains deferred. Inline expansion is
+not implemented.
+Bounded non-polymorphic applications accept by-name
 formals by checking each argument against the formal's result type while
 retaining `Type::ByName` in the method signature. The typed `Apply` retains the
 original typed argument expression; the typer does not synthesize a thunk or
@@ -647,18 +651,22 @@ their existing application deferrals.
 
 The #899 profile recorded 14 `LocalMethodSignatureDeferred` first-blocker
 observations: 8 by-name observations (2 direct origins and 6 inherited
-siblings) and 6 parameter-modifier observations. After #900, the supplemental
-Scala 3.9.0 corpus audit (run twice with JDK feature release 25) records 6
-signature observations, all from the `parameter modifiers` group in
-`MegaPhase.scala`. The direct by-name origins, `instantiateCFT` and `cases`,
-now have `ImportQualifierNotFound` as their first blocker. Their applications
+siblings) and 6 parameter-modifier observations. After #900 and #902, the
+supplemental Scala 3.9.0 corpus audit records zero signature observations. The
+8 by-name observations moved past the signature guard in #900; all 6
+parameter-modifier observations (one direct origin and five inherited
+siblings in `MegaPhase.scala`) moved past it in #902 by accepting the existing
+`Inline` symbol flag. The audit was run twice with JDK feature release 21 and
+the pinned Scala source/artifact inputs; normalized output matched
+byte-for-byte. The two direct by-name origins, `instantiateCFT` and `cases`,
+still have `ImportQualifierNotFound` as their first blocker. Their applications
 remain behind the enclosing blocker, so the audit does not observe
-`ByNameApplicationParameterDeferred` at those sites. At the #900 snapshot, the
-focused application fixture still confirmed that boundary; #901's follow-up
-below removes it for the bounded local-call shape. No additional local methods
-became fully typed in the full corpus audit. Parameter-dependent results
-remain covered by a focused unsupported-case fixture. These profile results
-are blocker movements, not semantic success.
+`ByNameApplicationParameterDeferred` at those sites. #901 removes that failure
+for the bounded local-call fixture. No additional local methods became fully
+typed in the full corpus audit. Parameter-dependent results, erased
+parameters, and other unsupported modifiers remain covered by focused
+unsupported-case fixtures. These profile results are blocker movements, not
+semantic success.
 
 The #901 application audit keeps the corpus and focused fixture results
 separate. Before #901, the `ByNameCall.scala` local-call fixture produced one
