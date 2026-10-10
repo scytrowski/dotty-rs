@@ -3,7 +3,7 @@ use dotty_core::{
     Diagnostic, DiagnosticSeverity, Name, SourceId, SourceSpan, TextRange, TokenKind,
 };
 
-use crate::ParamOwner;
+use crate::{Location, ParamOwner};
 
 /// Parser-specific category for a recoverable diagnostic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,6 +323,111 @@ impl ExtensionIssue {
             Self::OnlyMethodsAndExportsAllowed => {
                 "parser.extension.only_methods_and_exports_allowed"
             }
+        }
+    }
+}
+
+/// Typed syntax failures emitted while parsing imports and exports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportIssue {
+    /// A capture-checking language import is not at the compilation-unit level.
+    LanguageImportNotTopLevel,
+    /// The name before `as` is not a simple importable identifier.
+    AsRequiresSimpleName,
+    /// An import path is missing the dot before its selector.
+    ExpectedDotBeforeImportedName { found: TokenKind },
+    /// A dot in an import path is not followed by a name.
+    ExpectedImportedNameAfterDot { found: TokenKind },
+    /// A comma in a braced selector list is not followed by a selector.
+    ExpectedSelectorAfterComma { found: TokenKind },
+    /// A selector is not followed by a comma or the closing brace.
+    ExpectedSelectorSeparator { found: TokenKind },
+    /// A named selector follows a wildcard or `given` selector.
+    NamedSelectorAfterWildcardOrGiven,
+    /// An import/export selector was expected.
+    ExpectedSelector { found: TokenKind },
+    /// A braced selector list is missing its closing brace.
+    ExpectedRightBraceAfterSelectors { found: TokenKind },
+    /// An `as`/arrow rename is not followed by a target name.
+    ExpectedRenameTarget { found: TokenKind },
+    /// An import/export clause is missing its initial qualifier.
+    ExpectedQualifier { found: TokenKind },
+}
+
+impl ImportIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::NamedSelectorAfterWildcardOrGiven => ParseDiagnosticKind::UnexpectedToken,
+            Self::LanguageImportNotTopLevel
+            | Self::AsRequiresSimpleName
+            | Self::ExpectedDotBeforeImportedName { .. }
+            | Self::ExpectedImportedNameAfterDot { .. }
+            | Self::ExpectedSelectorAfterComma { .. }
+            | Self::ExpectedSelectorSeparator { .. }
+            | Self::ExpectedSelector { .. }
+            | Self::ExpectedRightBraceAfterSelectors { .. }
+            | Self::ExpectedRenameTarget { .. }
+            | Self::ExpectedQualifier { .. } => ParseDiagnosticKind::ExpectedToken,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::LanguageImportNotTopLevel => "parser.import.language_import_not_top_level",
+            Self::AsRequiresSimpleName => "parser.import.as_requires_simple_name",
+            Self::ExpectedDotBeforeImportedName { .. } => {
+                "parser.import.expected_dot_before_selector"
+            }
+            Self::ExpectedImportedNameAfterDot { .. } => "parser.import.expected_name_after_dot",
+            Self::ExpectedSelectorAfterComma { .. } => {
+                "parser.import.expected_selector_after_comma"
+            }
+            Self::ExpectedSelectorSeparator { .. } => "parser.import.expected_selector_separator",
+            Self::NamedSelectorAfterWildcardOrGiven => {
+                "parser.import.named_selector_after_wildcard"
+            }
+            Self::ExpectedSelector { .. } => "parser.import.expected_selector",
+            Self::ExpectedRightBraceAfterSelectors { .. } => {
+                "parser.import.expected_right_brace_after_selectors"
+            }
+            Self::ExpectedRenameTarget { .. } => "parser.import.expected_rename_target",
+            Self::ExpectedQualifier { .. } => "parser.import.expected_qualifier",
+        }
+    }
+}
+
+/// Typed syntax failures emitted while parsing package clauses and bodies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackageIssue {
+    /// A package object appears outside a top-level or package-body location.
+    PackageObjectNotAllowedHere { location: Location },
+    /// A package clause is missing its name.
+    ExpectedName { found: TokenKind },
+    /// A dot in a package name is not followed by another name.
+    ExpectedNameAfterDot { found: TokenKind },
+    /// A delimited package body is missing its closing token.
+    ExpectedBodyEnd {
+        expected: TokenKind,
+        found: TokenKind,
+    },
+}
+
+impl PackageIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::PackageObjectNotAllowedHere { .. } => ParseDiagnosticKind::UnsupportedSyntax,
+            Self::ExpectedName { .. }
+            | Self::ExpectedNameAfterDot { .. }
+            | Self::ExpectedBodyEnd { .. } => ParseDiagnosticKind::ExpectedToken,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::PackageObjectNotAllowedHere { .. } => "parser.package.object_not_allowed_here",
+            Self::ExpectedName { .. } => "parser.package.expected_name",
+            Self::ExpectedNameAfterDot { .. } => "parser.package.expected_name_after_dot",
+            Self::ExpectedBodyEnd { .. } => "parser.package.expected_body_end",
         }
     }
 }
@@ -1541,6 +1646,10 @@ pub enum ParseIssue {
     Pattern(PatternIssue),
     /// A structured failure emitted while parsing a case clause.
     Case(CaseIssue),
+    /// A structured failure emitted while parsing an import or export.
+    Import(ImportIssue),
+    /// A structured failure emitted while parsing a package clause or body.
+    Package(PackageIssue),
 }
 
 impl ParseIssue {
@@ -1567,6 +1676,8 @@ impl ParseIssue {
             Self::Expression(issue) => issue.kind(),
             Self::Pattern(issue) => issue.kind(),
             Self::Case(issue) => issue.kind(),
+            Self::Import(issue) => issue.kind(),
+            Self::Package(issue) => issue.kind(),
         }
     }
 
@@ -1603,6 +1714,8 @@ impl ParseIssue {
             Self::Expression(issue) => issue.code(),
             Self::Pattern(issue) => issue.code(),
             Self::Case(issue) => issue.code(),
+            Self::Import(issue) => issue.code(),
+            Self::Package(issue) => issue.code(),
         }
     }
 }
@@ -1690,6 +1803,8 @@ impl ParseDiagnostic {
             ParseIssue::Expression(_) => None,
             ParseIssue::Pattern(_) => None,
             ParseIssue::Case(_) => None,
+            ParseIssue::Import(_) => None,
+            ParseIssue::Package(_) => None,
         }
     }
 }
@@ -1846,6 +1961,51 @@ mod tests {
             "parser.parameter.by_name_class_parameter"
         );
         assert_eq!(parameter_issue.kind(), ParseDiagnosticKind::UnexpectedToken);
+    }
+
+    #[test]
+    fn import_and_package_issues_have_stable_codes_and_categories() {
+        let issues = [
+            (
+                ParseIssue::Import(ImportIssue::NamedSelectorAfterWildcardOrGiven),
+                "parser.import.named_selector_after_wildcard",
+                ParseDiagnosticKind::UnexpectedToken,
+            ),
+            (
+                ParseIssue::Import(ImportIssue::ExpectedRenameTarget {
+                    found: TokenKind::Eof,
+                }),
+                "parser.import.expected_rename_target",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+            (
+                ParseIssue::Package(PackageIssue::PackageObjectNotAllowedHere {
+                    location: Location::InBlock,
+                }),
+                "parser.package.object_not_allowed_here",
+                ParseDiagnosticKind::UnsupportedSyntax,
+            ),
+            (
+                ParseIssue::Package(PackageIssue::ExpectedBodyEnd {
+                    expected: TokenKind::Outdent,
+                    found: TokenKind::Eof,
+                }),
+                "parser.package.expected_body_end",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+        ];
+        let span = SourceSpan::new(
+            SourceId::from_index(12),
+            Span::without_point(TextRange::new(2, 5).unwrap()),
+        );
+
+        for (issue, code, kind) in issues {
+            let diagnostic = ParseDiagnostic::with_issue(span, issue.clone());
+            assert_eq!(issue.code(), code);
+            assert_eq!(issue.kind(), kind);
+            assert_eq!(diagnostic.issue(), &issue);
+            assert_eq!(diagnostic.legacy_message(), None);
+        }
     }
 
     #[test]
