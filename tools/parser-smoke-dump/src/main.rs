@@ -3988,10 +3988,12 @@ mod tests {
             dotty_parser::ParseDiagnosticKind::ExpectedToken
         );
         assert_eq!(
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "expected an indented refinement body after `:`"
+            diagnostic.issue(),
+            &dotty_parser::ParseIssue::Type(
+                dotty_parser::TypeIssue::ExpectedIndentedRefinementBody {
+                    found: dotty_core::TokenKind::Outdent,
+                }
+            )
         );
         let next_member = SOURCE.find("def after").unwrap() as u32;
         assert_eq!(

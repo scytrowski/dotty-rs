@@ -107,6 +107,32 @@ pub enum TypeIssue {
     ExpectedCaptureFilterType { found: TokenKind },
     /// A capture reference started where no simple reference is valid.
     InvalidCaptureReference { found: TokenKind },
+    /// No type operand starts at the current type-expression position.
+    ExpectedTypeOperand { found: TokenKind },
+    /// A singleton type expected a literal token.
+    ExpectedLiteralType { found: TokenKind },
+    /// An empty parenthesized type is not followed by a function arrow.
+    EmptyParenthesizedType { found: TokenKind },
+    /// A tuple type comma is not followed by another type.
+    ExpectedTypeAfterTupleComma { found: TokenKind },
+    /// A named tuple type is missing an element name.
+    ExpectedNamedTupleElement { found: TokenKind },
+    /// A named tuple element name is not followed by a colon.
+    ExpectedNamedTupleElementColon { found: TokenKind },
+    /// A named tuple comma is not followed by another element.
+    ExpectedNamedTupleElementAfterComma { found: TokenKind },
+    /// A type projection `#` is missing its member name.
+    ExpectedTypeProjectionMember { found: TokenKind },
+    /// A singleton type has no path before `.type`.
+    ExpectedPathBeforeSingletonType { found: TokenKind },
+    /// A simple type reference is missing its initial name.
+    ExpectedSimpleType { found: TokenKind },
+    /// A qualified type reference is missing a name after `.`.
+    ExpectedTypeNameAfterDot { found: TokenKind },
+    /// A braced legacy type splice is missing its closing brace.
+    ExpectedLegacyTypeSpliceCloseBrace { found: TokenKind },
+    /// A type splice appears in a quoted type, where Scala 3.9 rejects it.
+    LegacyTypeSpliceUnsupported,
 }
 
 /// Function-arrow shape expected by a parsed function-type parameter clause.
@@ -167,13 +193,26 @@ impl TypeIssue {
             | Self::ExpectedCaptureReferenceAfterComma { .. }
             | Self::ExpectedCaptureReferenceMember { .. }
             | Self::ExpectedCaptureFilterType { .. }
-            | Self::InvalidCaptureReference { .. } => ParseDiagnosticKind::ExpectedType,
+            | Self::InvalidCaptureReference { .. }
+            | Self::ExpectedTypeOperand { .. }
+            | Self::ExpectedLiteralType { .. }
+            | Self::EmptyParenthesizedType { .. }
+            | Self::ExpectedTypeAfterTupleComma { .. }
+            | Self::ExpectedNamedTupleElement { .. }
+            | Self::ExpectedNamedTupleElementAfterComma { .. }
+            | Self::ExpectedTypeProjectionMember { .. }
+            | Self::ExpectedPathBeforeSingletonType { .. }
+            | Self::ExpectedSimpleType { .. }
+            | Self::ExpectedTypeNameAfterDot { .. } => ParseDiagnosticKind::ExpectedType,
+            Self::ExpectedNamedTupleElementColon { .. }
+            | Self::ExpectedLegacyTypeSpliceCloseBrace { .. } => ParseDiagnosticKind::ExpectedToken,
             Self::ClassLikeRefinementMemberNotAllowed { .. }
             | Self::ModifiedRefinementMemberNotAllowed { .. }
             | Self::UnsupportedRefinementMember { .. }
             | Self::RefinementMethodDefaultArgumentNotAllowed
             | Self::RefinementMemberRightHandSideNotAllowed
-            | Self::ReadOnlyCaptureSuffixUnsupported => ParseDiagnosticKind::UnsupportedSyntax,
+            | Self::ReadOnlyCaptureSuffixUnsupported
+            | Self::LegacyTypeSpliceUnsupported => ParseDiagnosticKind::UnsupportedSyntax,
         }
     }
 
@@ -288,6 +327,29 @@ impl TypeIssue {
             }
             Self::ExpectedCaptureFilterType { .. } => "parser.type.expected_capture_filter_type",
             Self::InvalidCaptureReference { .. } => "parser.type.invalid_capture_reference",
+            Self::ExpectedTypeOperand { .. } => "parser.type.expected_operand",
+            Self::ExpectedLiteralType { .. } => "parser.type.expected_literal_type",
+            Self::EmptyParenthesizedType { .. } => "parser.type.empty_parenthesized_type",
+            Self::ExpectedTypeAfterTupleComma { .. } => {
+                "parser.type.expected_type_after_tuple_comma"
+            }
+            Self::ExpectedNamedTupleElement { .. } => "parser.type.expected_named_tuple_element",
+            Self::ExpectedNamedTupleElementColon { .. } => {
+                "parser.type.expected_named_tuple_element_colon"
+            }
+            Self::ExpectedNamedTupleElementAfterComma { .. } => {
+                "parser.type.expected_named_tuple_element_after_comma"
+            }
+            Self::ExpectedTypeProjectionMember { .. } => "parser.type.expected_projection_member",
+            Self::ExpectedPathBeforeSingletonType { .. } => {
+                "parser.type.expected_path_before_singleton_type"
+            }
+            Self::ExpectedSimpleType { .. } => "parser.type.expected_simple_type",
+            Self::ExpectedTypeNameAfterDot { .. } => "parser.type.expected_name_after_dot",
+            Self::ExpectedLegacyTypeSpliceCloseBrace { .. } => {
+                "parser.type.expected_legacy_splice_close_brace"
+            }
+            Self::LegacyTypeSpliceUnsupported => "parser.type.legacy_splice_unsupported",
         }
     }
 }

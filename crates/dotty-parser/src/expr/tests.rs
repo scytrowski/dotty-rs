@@ -1,6 +1,6 @@
 use super::*;
-use crate::ParseDiagnosticKind;
 use crate::compilation_unit::tests::{parser_for, token};
+use crate::{ParseDiagnosticKind, ParseIssue, TypeIssue};
 use dotty_core::ast::{
     Annotated, Apply, ApplyKind, Block, CaseDef, Literal, Match, New, NumberKind, Parens, Select,
     Super, This, Tuple, UntypedNode,
@@ -3122,13 +3122,17 @@ fn malformed_parenthesized_new_ascription_recovers_without_suffix_stall() {
         parser.ast().get(tree).kind,
         TreeKind::PhaseSpecific(UntypedNode::Parens(_))
     ));
-    assert!(!parser.diagnostics().is_empty());
-    assert!(parser.diagnostics().iter().all(|diagnostic| {
-        !diagnostic
-            .legacy_message()
-            .expect("legacy parser diagnostic")
-            .contains("no progress while parsing an expression suffix")
-    }));
+    assert_eq!(parser.diagnostics().len(), 1);
+    assert_eq!(
+        parser.diagnostics()[0].issue(),
+        &ParseIssue::Type(TypeIssue::ExpectedTypeOperand {
+            found: TokenKind::Punctuation(Punctuation::RightParen),
+        })
+    );
+    assert_eq!(
+        parser.diagnostics()[0].span(),
+        TextRange::new(12, 13).unwrap()
+    );
     assert_eq!(parser.current().kind, TokenKind::Eof);
 }
 
