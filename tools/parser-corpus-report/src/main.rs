@@ -1062,7 +1062,7 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
         .map(|diagnostic| DiagnosticSummary {
             kind: diagnostic_kind_name(diagnostic.kind()).to_owned(),
             code: Some(diagnostic.issue().code().to_owned()),
-            message: diagnostic.legacy_message().map(str::to_owned),
+            message: None,
         })
         .collect::<Vec<_>>();
     let capture_checking_enabled = Some(result.effective_features.capture_checking);

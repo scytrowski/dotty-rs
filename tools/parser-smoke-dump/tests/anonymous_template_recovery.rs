@@ -83,7 +83,4 @@ fn missing_argument_after_indented_new_template_does_not_swallow_later_argument(
         panic!("expected the next argument's left operand to remain an identifier");
     };
     assert_eq!(names.resolve(identifier.name.text()), "next");
-    assert!(result.diagnostics.iter().all(|diagnostic| {
-        diagnostic.legacy_message() != Some("expected a template member separator")
-    }));
 }

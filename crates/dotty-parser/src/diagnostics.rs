@@ -1746,18 +1746,8 @@ impl CaseIssue {
 }
 
 /// Structured parser issue data.
-///
-/// `Legacy` temporarily retains messages from parser call sites that have not
-/// yet migrated to typed issues. Typed variants carry issue data rather than
-/// preformatted diagnostic text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParseIssue {
-    /// Transitional payload for parser diagnostics that still use free-form
-    /// messages. New reporting code should use a typed variant instead.
-    Legacy {
-        kind: ParseDiagnosticKind,
-        message: String,
-    },
     /// A required parser-facing token was absent.
     ExpectedToken {
         expected: TokenKind,
@@ -1815,7 +1805,6 @@ impl ParseIssue {
     /// Returns the stable parser diagnostic category for this issue.
     pub const fn kind(&self) -> ParseDiagnosticKind {
         match self {
-            Self::Legacy { kind, .. } => *kind,
             Self::ExpectedToken { .. } => ParseDiagnosticKind::ExpectedToken,
             Self::ExpectedExpression { .. } => ParseDiagnosticKind::ExpectedExpression,
             Self::ExpectedType { .. } => ParseDiagnosticKind::ExpectedType,
@@ -1846,17 +1835,6 @@ impl ParseIssue {
     /// Returns a stable, text-independent identifier for corpus reporting.
     pub const fn code(&self) -> &'static str {
         match self {
-            Self::Legacy { kind, .. } => match kind {
-                ParseDiagnosticKind::ExpectedToken => "parser.expected_token",
-                ParseDiagnosticKind::UnexpectedToken => "parser.unexpected_token",
-                ParseDiagnosticKind::ExpectedExpression => "parser.expected_expression",
-                ParseDiagnosticKind::ExpectedType => "parser.expected_type",
-                ParseDiagnosticKind::ExpectedPattern => "parser.expected_pattern",
-                ParseDiagnosticKind::UnsupportedSyntax => "parser.unsupported_syntax",
-                ParseDiagnosticKind::UnboundPlaceholderParameter => {
-                    "parser.unbound_placeholder_parameter"
-                }
-            },
             Self::ExpectedToken { .. } => "parser.expected_token",
             Self::ExpectedExpression { .. } => "parser.expected_expression",
             Self::ExpectedType { .. } => "parser.expected_type",
@@ -1893,17 +1871,6 @@ pub struct ParseDiagnostic {
 }
 
 impl ParseDiagnostic {
-    /// Creates a transitional legacy-message error diagnostic at `span`.
-    pub fn error(kind: ParseDiagnosticKind, span: SourceSpan, message: impl Into<String>) -> Self {
-        Self::with_issue(
-            span,
-            ParseIssue::Legacy {
-                kind,
-                message: message.into(),
-            },
-        )
-    }
-
     /// Creates a parser error diagnostic with structured issue data.
     pub fn with_issue(span: SourceSpan, issue: ParseIssue) -> Self {
         Self {
@@ -1943,62 +1910,12 @@ impl ParseDiagnostic {
     pub const fn span(&self) -> TextRange {
         self.diagnostic.span()
     }
-
-    /// Returns the message when this issue still uses the transitional legacy
-    /// payload. Typed issues intentionally have no rendered message here.
-    pub fn legacy_message(&self) -> Option<&str> {
-        match self.issue() {
-            ParseIssue::Legacy { message, .. } => Some(message),
-            ParseIssue::ExpectedToken { .. }
-            | ParseIssue::ExpectedExpression { .. }
-            | ParseIssue::ExpectedType { .. }
-            | ParseIssue::ExpectedPattern { .. }
-            | ParseIssue::UnexpectedToken { .. }
-            | ParseIssue::TrailingInput { .. }
-            | ParseIssue::UnboundPlaceholderParameter => None,
-            ParseIssue::Type(_) => None,
-            ParseIssue::ClassDefinition(_) => None,
-            ParseIssue::Declaration(_) => None,
-            ParseIssue::Parameter(_) => None,
-            ParseIssue::Given(_) => None,
-            ParseIssue::Extension(_) => None,
-            ParseIssue::Modifier(_) => None,
-            ParseIssue::TypeParameter(_) => None,
-            ParseIssue::TypeDefinition(_) => None,
-            ParseIssue::Expression(_) => None,
-            ParseIssue::Pattern(_) => None,
-            ParseIssue::Case(_) => None,
-            ParseIssue::Import(_) => None,
-            ParseIssue::Package(_) => None,
-            ParseIssue::Statement(_) => None,
-            ParseIssue::Layout(_) => None,
-            ParseIssue::Template(_) => None,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use dotty_core::{Span, TextRange};
-
-    #[test]
-    fn parser_diagnostic_preserves_legacy_kind_source_range_and_message() {
-        let range = TextRange::new(2, 5).expect("valid range");
-        let source = SourceId::from_index(4);
-        let diagnostic = ParseDiagnostic::error(
-            ParseDiagnosticKind::ExpectedExpression,
-            SourceSpan::new(source, Span::without_point(range)),
-            "expected expression",
-        );
-
-        assert_eq!(diagnostic.kind(), ParseDiagnosticKind::ExpectedExpression);
-        assert_eq!(diagnostic.source(), source);
-        assert_eq!(diagnostic.severity(), DiagnosticSeverity::Error);
-        assert_eq!(diagnostic.span(), range);
-        assert_eq!(diagnostic.legacy_message(), Some("expected expression"));
-        assert!(matches!(diagnostic.issue(), ParseIssue::Legacy { .. }));
-    }
 
     #[test]
     fn expression_issue_codes_preserve_layout_context_without_messages() {
@@ -2049,7 +1966,6 @@ mod tests {
                 found: TokenKind::Identifier
             }
         ));
-        assert_eq!(diagnostic.legacy_message(), None);
     }
 
     #[test]
@@ -2078,7 +1994,6 @@ mod tests {
         assert_eq!(pattern_diagnostic.source(), source);
         assert_eq!(pattern_diagnostic.span(), range);
         assert_eq!(pattern_diagnostic.severity(), DiagnosticSeverity::Error);
-        assert_eq!(pattern_diagnostic.legacy_message(), None);
 
         assert_eq!(case.code(), "parser.case.expected_arrow");
         assert_eq!(case.kind(), ParseDiagnosticKind::ExpectedToken);
@@ -2086,7 +2001,6 @@ mod tests {
         assert_eq!(case_diagnostic.source(), source);
         assert_eq!(case_diagnostic.span(), range);
         assert_eq!(case_diagnostic.severity(), DiagnosticSeverity::Error);
-        assert_eq!(case_diagnostic.legacy_message(), None);
     }
 
     #[test]
@@ -2172,7 +2086,6 @@ mod tests {
             assert_eq!(issue.code(), code);
             assert_eq!(issue.kind(), kind);
             assert_eq!(diagnostic.issue(), &issue);
-            assert_eq!(diagnostic.legacy_message(), None);
         }
     }
 
@@ -2277,7 +2190,6 @@ mod tests {
             assert_eq!(diagnostic.source(), source);
             assert_eq!(diagnostic.span(), range);
             assert_eq!(diagnostic.severity(), DiagnosticSeverity::Error);
-            assert_eq!(diagnostic.legacy_message(), None);
         }
 
         for (extension, code, kind) in extension_issues {
@@ -2292,7 +2204,6 @@ mod tests {
             assert_eq!(diagnostic.source(), source);
             assert_eq!(diagnostic.span(), range);
             assert_eq!(diagnostic.severity(), DiagnosticSeverity::Error);
-            assert_eq!(diagnostic.legacy_message(), None);
         }
     }
 }
