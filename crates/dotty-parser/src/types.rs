@@ -2206,7 +2206,7 @@ where
             {
                 let position = self.zero_width_span(self.current().span.start());
                 self.report_issue_at(
-                    position,
+                    self.current_span(),
                     ParseIssue::Type(TypeIssue::ExpectedTypeAfterTupleComma {
                         found: self.current().kind,
                     }),
@@ -4973,11 +4973,20 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::Error(_))
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| matches!(diagnostic.kind(), ParseDiagnosticKind::ExpectedType))
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Type(TypeIssue::ExpectedTypeAfterTupleComma {
+                found: TokenKind::Punctuation(Punctuation::RightParen),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::ExpectedType
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(3, 4).unwrap()
         );
     }
 
