@@ -12318,7 +12318,7 @@ mod tests {
         assert_eq!(declaration.origin, SymbolOrigin::Source(source));
         assert_eq!(declaration.position, local_position);
         assert_eq!(declaration.info, SymbolInfo::Complete(definitions.int));
-        assert!(!declaration.flags.contains(SymbolFlags::MUTABLE));
+        assert_eq!(declaration.flags, SymbolFlags::EMPTY);
 
         let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_block_id).kind else {
             panic!("source block should produce a typed block");
@@ -12503,14 +12503,7 @@ mod tests {
 
         let local = typer.local_symbol_at(source, local_tree).unwrap();
         assert_eq!(typer.store().symbols.get(local).kind, SymbolKind::Local);
-        assert!(
-            typer
-                .store()
-                .symbols
-                .get(local)
-                .flags
-                .contains(SymbolFlags::MUTABLE)
-        );
+        assert_eq!(typer.store().symbols.get(local).flags, SymbolFlags::MUTABLE);
         let TreeKind::Block(block) = &typer.typed_ast().get(typed_block).kind else {
             panic!("source block should produce a typed block");
         };
