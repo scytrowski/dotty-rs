@@ -84,9 +84,9 @@ This ranking predates #900 and excludes parser/namer and classpath-resolution fa
 | 9 | `MissingDeclaredType` | 10 / 3 |
 | 10 | `LocalBlockDeclarationDeferred::module definition` | 9 / 2 |
 
-### Recommended next Typer sprint after #900
+### Recommended next Typer sprint after #901
 
-Before #900, the 14 `LocalMethodSignatureDeferred` observations split into 3 direct signature failures and 11 inherited sibling methods. The #900 audit shows that all 8 by-name signature observations now reach deeper first blockers; `instantiateCFT` and `cases` both reach `ImportQualifierNotFound`, while no corpus by-name application site is typed. A bounded next slice is the separate by-name application boundary (`ByNameApplicationParameterDeferred`); keep evaluation/thunk semantics out of scope until its behavior is specified. The remaining local signature group is parameter modifiers (6 affected methods in one file), with one direct `inline` parameter origin in `MegaPhase.scala`; `source_method_flags` already preserves `Inline`, so that signature-only slice remains bounded. Dependent-result signatures have no corpus first-blocker observations and remain covered only by focused fixtures. The other high-ranked buckets still need separate prerequisites: anonymous classes (32 / 15) need stable identity and ownership, while local values/variables (21 / 8) need a PatDef shape breakdown.
+Before #900, the 14 `LocalMethodSignatureDeferred` observations split into 3 direct signature failures and 11 inherited sibling methods. The #900 audit shows that all 8 by-name signature observations now reach deeper first blockers; `instantiateCFT` and `cases` both reach `ImportQualifierNotFound`. #901 removes the by-name application blocker for the focused local-call fixture. No application in those two corpus methods reaches application typing because each enclosing method still stops at `ImportQualifierNotFound`. The remaining local signature group is parameter modifiers (6 affected methods in one file), with one direct `inline` parameter origin in `MegaPhase.scala`; `source_method_flags` already preserves `Inline`, so this is the next bounded local-signature candidate. Dependent-result signatures have no corpus first-blocker observations and remain covered only by focused fixtures. The other high-ranked buckets still need separate prerequisites: anonymous classes (32 / 15) need stable identity and ownership, while local values/variables (21 / 8) need a PatDef shape breakdown.
 
 ### #899 baseline local method signature profile (before #900)
 
@@ -125,7 +125,11 @@ The pinned Scala 3.9.0 audit was rerun twice after #900 with JDK feature release
 | `SymUtils.scala::instantiateCFT` | Explicit | `ImportQualifierNotFound` | No; recursive RHS call (line 469) and `returnProto` call (line 479) remain behind the enclosing blocker. |
 | `Typer.scala::cases` | Inferred | `ImportQualifierNotFound` | No; calls from `typedTyped` (lines 1354 and 1378) remain behind the enclosing blocker. |
 
-These two methods do not produce a corpus `ByNameApplicationParameterDeferred` observation because their enclosing blocker prevents those applications from being typed. The focused `ByNameCall.scala` fixture continues to verify that separate application boundary. The audit is diagnostic only: no additional local methods typed, and the first-blocker movement is not semantic success.
+These two methods do not produce a corpus `ByNameApplicationParameterDeferred` observation because their enclosing blocker prevents those applications from being typed. The #900 version of the focused `ByNameCall.scala` fixture did reach that separate application boundary; see the #901 follow-up below. The audit is diagnostic only: no additional local methods typed, and the first-blocker movement is not semantic success.
+
+### #901 by-name application follow-up
+
+The focused local `ByNameCall.scala` fixture previously produced one `ByNameApplicationParameterDeferred` failure. After #901 it produces zero such failures and its one local method types successfully. In the pinned corpus, zero applications from the two direct by-name origins reached application typing before or after #901: both remain blocked by `ImportQualifierNotFound` in their enclosing methods. Thus the corpus count is 0 moved past the application blocker; the focused regression demonstrates the implemented call behavior.
 
 ### Historical #825 next-sprint candidates (pre-#856)
 
@@ -135,7 +139,7 @@ These two methods do not produce a corpus `ByNameApplicationParameterDeferred` o
 | `AnonymousClassInstantiationDeferred` (32 / 15) | Support one anonymous `new` with one concrete parent in `typer/expression/new.rs`. | Reuse ordinary `New` typing and parent projection; define stable anonymous symbol ownership and class info. | Closure capture, refinement synthesis, and general anonymous-class members. |
 | `UnsupportedSingletonReference` (historical 22 / 1) | #880 profiled the baseline; #881–#883 now project, relate, and preserve supported literal constants. | Reuse `Type::Constant`, literal expression typing, bounded relations, expected adaptation, and stable-prefix validation. | Arbitrary paths, unstable prefixes, and path-dependent relation redesign. |
 | `LocalBlockDeclarationDeferred::val/var definition` (21 / 8) | Split remaining cases by PatDef root/binder shape in `typer/expression/blocks.rs`. | Reuse transactional PatDef lowering, local binders, and assignment support. | General destructuring and reopening supported PatDef forms. |
-| `LocalMethodSignatureDeferred` (6 / 1; after #900) | The 8 by-name observations from #899 no longer stop at the signature guard; 6 parameter-modifier observations remain in `MegaPhase.scala`. | Reuse `source_method_flags` and the shared method-signature builder; parameter symbols already retain `Inline`. | Inline expansion and argument evaluation; by-name application typing; dependent results; general erased parameter support or new method inference. |
+| `LocalMethodSignatureDeferred` (6 / 1; after #900) | The 8 by-name observations from #899 no longer stop at the signature guard; 6 parameter-modifier observations remain in `MegaPhase.scala`. | Reuse `source_method_flags` and the shared method-signature builder; parameter symbols already retain `Inline`. | Inline expansion; dependent results; general erased parameter support or new method inference. |
 
 ## Historical #825 MissingDeclaredType producer profile (pre-#856)
 

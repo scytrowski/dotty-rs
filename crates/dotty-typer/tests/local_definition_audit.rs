@@ -5837,10 +5837,12 @@ fn local_method_signature_profile_classifies_feature_fixtures() {
         None,
     );
     assert!(
-        by_name_call
+        !by_name_call
             .failures
-            .contains_key("ByNameApplicationParameterDeferred")
+            .contains_key("ByNameApplicationParameterDeferred"),
+        "a local by-name call should pass application typing"
     );
+    assert_eq!(by_name_call.typed_local_defdefs, 1);
 }
 
 #[derive(Debug)]

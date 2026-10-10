@@ -27243,6 +27243,7 @@ mod tests {
         };
         assert_eq!(typed_application.kind, ApplyKind::Regular);
         assert_eq!(typed_application.args.len(), 2);
+        let typed_function = typed_application.function;
         let typed_arguments = typed_application.args.clone();
         assert_eq!(
             typer.source_typed_index().get(source, source_argument),
@@ -27252,6 +27253,16 @@ mod tests {
         let local = typer
             .local_method_symbol_at(source, local_tree)
             .expect("local method should have been preindexed");
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_function).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == local
+        ));
         let signature = typer.complete_symbol(local).unwrap();
         let Type::Method(method_type) = typer.store().types.get(signature) else {
             panic!("local method should have a method signature")
