@@ -1,7 +1,7 @@
 use dotty_core::ast::{Export, Ident, Import, ImportSelector, Select};
 use dotty_core::{Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
-use crate::{Location, ParseDiagnosticKind, ParseKind, Parser};
+use crate::{ImportIssue, Location, ParseIssue, ParseKind, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -20,10 +20,9 @@ where
                         .get(*import_id)
                         .position
                         .unwrap_or_else(|| self.current_span());
-                    self.report_at(
-                        ParseDiagnosticKind::ExpectedToken,
+                    self.report_issue_at(
                         span,
-                        "this language import is only allowed at the toplevel",
+                        ParseIssue::Import(ImportIssue::LanguageImportNotTopLevel),
                     );
                 }
             }
@@ -106,10 +105,7 @@ where
             let imported = match self.ast.get(qualifier).kind {
                 TreeKind::Ident(ident) => ident.name,
                 _ => {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedToken,
-                        "expected an importable name before `as`",
-                    );
+                    self.report_issue(ParseIssue::Import(ImportIssue::AsRequiresSimpleName));
                     return (qualifier, Vec::new());
                 }
             };
@@ -131,10 +127,11 @@ where
 
         loop {
             if !self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `.` and an imported name",
-                );
+                self.report_issue(ParseIssue::Import(
+                    ImportIssue::ExpectedDotBeforeImportedName {
+                        found: self.current().kind,
+                    },
+                ));
                 return (qualifier, Vec::new());
             }
 
@@ -151,10 +148,11 @@ where
             }
 
             let Some((name, backquoted)) = self.current_term_name() else {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected an imported name after `.`",
-                );
+                self.report_issue(ParseIssue::Import(
+                    ImportIssue::ExpectedImportedNameAfterDot {
+                        found: self.current().kind,
+                    },
+                ));
                 return (qualifier, Vec::new());
             };
             self.advance();
@@ -195,10 +193,11 @@ where
                     self.current().kind,
                     TokenKind::Punctuation(Punctuation::RightBrace) | TokenKind::Eof
                 ) {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedToken,
-                        "expected an import/export selector after `,`",
-                    );
+                    self.report_issue(ParseIssue::Import(
+                        ImportIssue::ExpectedSelectorAfterComma {
+                            found: self.current().kind,
+                        },
+                    ));
                     selectors.push(self.error_selector(position));
                 }
                 continue;
@@ -211,10 +210,9 @@ where
                         self.current().kind == TokenKind::Punctuation(Punctuation::RightBrace);
                     continue;
                 }
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `,` or `}` after an import/export selector",
-                );
+                self.report_issue(ParseIssue::Import(ImportIssue::ExpectedSelectorSeparator {
+                    found: self.current().kind,
+                }));
                 self.recover_until(crate::RecoverySet::Statement);
                 break;
             }
@@ -223,10 +221,9 @@ where
                 || self.current_is_legacy_wildcard()
                 || self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Given);
             if !names_allowed && !wildcard {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "named import/export selectors cannot follow a wildcard or `given` selector",
-                );
+                self.report_issue(ParseIssue::Import(
+                    ImportIssue::NamedSelectorAfterWildcardOrGiven,
+                ));
             }
 
             let selector =
@@ -239,10 +236,9 @@ where
                     self.parse_named_selector(name, backquoted)
                 } else {
                     let position = self.current_span();
-                    self.report(
-                        ParseDiagnosticKind::ExpectedToken,
-                        "expected an import/export selector",
-                    );
+                    self.report_issue(ParseIssue::Import(ImportIssue::ExpectedSelector {
+                        found: self.current().kind,
+                    }));
                     if self.current().kind != TokenKind::Eof {
                         self.advance();
                     }
@@ -257,18 +253,18 @@ where
 
         if expect_selector && !trailing_comma {
             let position = self.current_span();
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected an import/export selector",
-            );
+            self.report_issue(ParseIssue::Import(ImportIssue::ExpectedSelector {
+                found: self.current().kind,
+            }));
             selectors.push(self.error_selector(position));
         }
 
         if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `}` after import/export selectors",
-            );
+            self.report_issue(ParseIssue::Import(
+                ImportIssue::ExpectedRightBraceAfterSelectors {
+                    found: self.current().kind,
+                },
+            ));
         }
         selectors
     }
@@ -300,10 +296,9 @@ where
                     }),
                 ))
             } else {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected an identifier after `as`",
-                );
+                self.report_issue(ParseIssue::Import(ImportIssue::ExpectedRenameTarget {
+                    found: self.current().kind,
+                }));
                 None
             }
         } else {
@@ -359,10 +354,9 @@ where
     fn parse_import_name(&mut self, mark: crate::Mark) -> TreeId<Untyped> {
         let Some((name, backquoted)) = self.current_term_name() else {
             let position = self.current_span();
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected an import or export qualifier",
-            );
+            self.report_issue(ParseIssue::Import(ImportIssue::ExpectedQualifier {
+                found: self.current().kind,
+            }));
             if self.current().kind != TokenKind::Eof {
                 self.advance();
             }
@@ -399,6 +393,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ParseDiagnosticKind;
     use crate::compilation_unit::tests::{parser_for, token};
     use crate::statements::StatementSequenceBoundary;
     use dotty_core::{HardKeyword, NameInterner, Punctuation, TextRange, Token, TreeKind};
@@ -651,10 +646,8 @@ mod tests {
         assert!(parser.features().capture_checking);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "this language import is only allowed at the toplevel"
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Import(ImportIssue::LanguageImportNotTopLevel)
         );
     }
 
@@ -1229,8 +1222,10 @@ mod tests {
         assert!(import.selectors[0].renamed.is_none());
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::ExpectedToken
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Import(ImportIssue::ExpectedRenameTarget {
+                found: TokenKind::Punctuation(Punctuation::RightBrace),
+            })
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
@@ -1315,8 +1310,106 @@ mod tests {
 
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::UnexpectedToken
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Import(ImportIssue::NamedSelectorAfterWildcardOrGiven)
+        );
+        assert_eq!(
+            parser.diagnostics()[0].issue().code(),
+            "parser.import.named_selector_after_wildcard_or_given"
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(15, 18).unwrap()
+        );
+    }
+
+    #[test]
+    fn diagnoses_a_named_selector_after_a_given_selector_with_a_shared_code() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.{given, bar}",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Keyword(HardKeyword::Given), 12, 17),
+                token(TokenKind::Punctuation(Punctuation::Comma), 17, 18),
+                token(TokenKind::Identifier, 19, 22),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 22, 23),
+                token(TokenKind::Eof, 23, 23),
+            ],
+            &mut names,
+        );
+
+        parser.parse_import_clause(Location::Elsewhere);
+
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Import(ImportIssue::NamedSelectorAfterWildcardOrGiven)
+        );
+        assert_eq!(
+            parser.diagnostics()[0].issue().code(),
+            "parser.import.named_selector_after_wildcard_or_given"
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(19, 22).unwrap()
+        );
+    }
+
+    #[test]
+    fn malformed_selector_list_reports_its_span_and_preserves_the_next_definition() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "import foo.{bar baz}\ndef next = 1",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Import), 0, 6),
+                token(TokenKind::Identifier, 7, 10),
+                token(TokenKind::Punctuation(Punctuation::Dot), 10, 11),
+                token(TokenKind::Punctuation(Punctuation::LeftBrace), 11, 12),
+                token(TokenKind::Identifier, 12, 15),
+                token(TokenKind::Identifier, 16, 19),
+                token(TokenKind::Punctuation(Punctuation::RightBrace), 19, 20),
+                token(TokenKind::Newline, 20, 21),
+                token(TokenKind::Keyword(HardKeyword::Def), 21, 24),
+                token(TokenKind::Identifier, 25, 29),
+                token(TokenKind::Operator, 30, 31),
+                token(TokenKind::IntegerLiteral, 32, 33),
+                token(TokenKind::Eof, 33, 33),
+            ],
+            &mut names,
+        );
+
+        let trees = parser.parse_top_level_sequence(
+            StatementSequenceBoundary::CompilationUnit,
+            Location::Elsewhere,
+        );
+
+        assert_eq!(trees.len(), 2);
+        assert!(matches!(
+            parser.ast().get(trees[0]).kind,
+            TreeKind::Import(_)
+        ));
+        let TreeKind::DefDef(definition) = &parser.ast().get(trees[1]).kind else {
+            panic!("the definition after the malformed import must be parsed");
+        };
+        assert_eq!(
+            parser.names.resolve(definition.name.as_name().text()),
+            "next"
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Import(ImportIssue::ExpectedSelectorSeparator {
+                found: TokenKind::Identifier,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(16, 19).unwrap()
         );
     }
 

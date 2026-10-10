@@ -41,10 +41,11 @@ pub use context::{Location, ParamOwner, ParseContext, ParseKind, ParserFeatures}
 pub use cursor::{Cursor, CursorCheckpoint};
 pub use diagnostics::{
     CaseIssue, ClassDefinitionIssue, ContextualParameterClause, DeclarationIssue,
-    ExpressionApplicationTarget, ExpressionIssue, ExtensionIssue, GivenIssue,
-    LayoutExpressionContext, ModifierIssue, ParameterIssue, ParameterMutability, ParseDiagnostic,
-    ParseDiagnosticKind, ParseIssue, PatternIssue, TypeDefinitionIssue, TypeFunctionArrow,
-    TypeIssue, TypeParamIssue, ValueDefinitionKind,
+    ExpressionApplicationTarget, ExpressionIssue, ExtensionIssue, GivenIssue, ImportIssue,
+    LayoutExpressionContext, LayoutIssue, ModifierIssue, PackageIssue, ParameterIssue,
+    ParameterMutability, ParseDiagnostic, ParseDiagnosticKind, ParseIssue, PatternIssue,
+    StatementIssue, StatementSequenceContext, TemplateIssue, TypeDefinitionIssue,
+    TypeFunctionArrow, TypeIssue, TypeParamIssue, ValueDefinitionKind,
 };
 pub use infix::{OpInfo, is_assignment_operator, is_right_associative, precedence};
 pub use names::KnownNames;

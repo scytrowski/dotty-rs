@@ -9,7 +9,7 @@
 use dotty_core::ast::{Modifier, Modifiers, ValDef};
 use dotty_core::{HardKeyword, Name, Punctuation, TermName, TokenKind, TreeId, TreeKind, Untyped};
 
-use crate::{Location, ParseDiagnosticKind, Parser, RecoverySet};
+use crate::{Location, ParseIssue, Parser, RecoverySet, TemplateIssue};
 
 /// Delimiters accepted by the template-body parser.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,10 +109,10 @@ where
             && !closes_at_eof
             && !closes_at_delimiter
         {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                format!("expected {closing:?} to close template body"),
-            );
+            self.report_issue(ParseIssue::Template(TemplateIssue::ExpectedBodyEnd {
+                expected: closing,
+                found: self.current().kind,
+            }));
         }
 
         result
@@ -249,10 +249,9 @@ where
             }
 
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing a template body",
-                );
+                self.report_issue(ParseIssue::Template(TemplateIssue::BodyNoProgress {
+                    found: self.current().kind,
+                }));
                 let recovery_checkpoint = self.cursor.checkpoint();
                 self.advance();
                 if !self.cursor.progressed_since(recovery_checkpoint) {
@@ -305,10 +304,11 @@ where
                 // next statement/member, including inside a braced template
                 // where the outer body itself has no layout delimiter.
             } else if !self.template_body_ended(closing) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "expected a template member separator",
-                );
+                self.report_issue(ParseIssue::Template(
+                    TemplateIssue::ExpectedMemberSeparator {
+                        found: self.current().kind,
+                    },
+                ));
                 self.recover_until(RecoverySet::Statement);
                 self.consume_template_separators(closing);
             }
@@ -338,10 +338,9 @@ where
         };
         let has_colon = self.accept_self_colon();
         if is_this && !has_colon {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `:` after `this` in a template self type",
-            );
+            self.report_issue(ParseIssue::Template(TemplateIssue::ExpectedSelfTypeColon {
+                found: self.current().kind,
+            }));
         }
         let tpt = if has_colon {
             self.with_parse_kind(crate::ParseKind::Type, |parser| parser.parse_infix_type())
@@ -349,20 +348,20 @@ where
             self.synthetic_type_tree_at(mark.start())
         };
         if self.starts_unsupported_self_type_tail() {
-            self.report(
-                ParseDiagnosticKind::UnsupportedSyntax,
-                "compound template self types are not supported yet",
-            );
+            self.report_issue(ParseIssue::Template(
+                TemplateIssue::CompoundSelfTypeUnsupported {
+                    found: self.current().kind,
+                },
+            ));
             self.recover_self_type_tail();
         }
         if self.current_is_arrow() {
             self.observe_self_arrow();
             self.advance();
         } else {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `=>` after a template self type",
-            );
+            self.report_issue(ParseIssue::Template(TemplateIssue::ExpectedSelfTypeArrow {
+                found: self.current().kind,
+            }));
         }
 
         Some(self.alloc_from(
@@ -604,6 +603,7 @@ const fn is_self_colon(kind: TokenKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ParseDiagnosticKind;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::UntypedNode;
     use dotty_core::{
@@ -902,12 +902,25 @@ mod tests {
 
         parser.parse_template_body(TemplateBody::Braced);
 
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                == "expected a template member separator"
-        }));
+        let diagnostic = parser
+            .diagnostics()
+            .last()
+            .expect("template separator diagnostic");
+        assert_eq!(
+            diagnostic.issue(),
+            &ParseIssue::Template(TemplateIssue::ExpectedMemberSeparator {
+                found: TokenKind::Keyword(HardKeyword::Private),
+            })
+        );
+        assert_eq!(
+            diagnostic.issue().code(),
+            "parser.template.expected_member_separator"
+        );
+        assert_eq!(
+            diagnostic.kind(),
+            crate::ParseDiagnosticKind::UnexpectedToken
+        );
+        assert_eq!(diagnostic.span(), TextRange::new(16, 23).unwrap());
     }
 
     #[test]

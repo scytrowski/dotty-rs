@@ -1445,7 +1445,7 @@ fn quote(value: impl AsRef<str>) -> String {
 mod tests {
     use super::*;
     use dotty_core::{ScannerEvent, TokenKind, TokenSource};
-    use dotty_parser::{ExpressionIssue, ParseIssue};
+    use dotty_parser::{ExpressionIssue, LayoutIssue, ParseIssue};
 
     struct AdjacentEndMarkerSource(ContextualScanner);
 
@@ -1574,10 +1574,10 @@ mod tests {
 
         assert!(
             result.diagnostics.iter().any(|diagnostic| {
-                diagnostic
-                    .legacy_message()
-                    .expect("legacy parser diagnostic")
-                    == "misaligned end marker"
+                matches!(
+                    diagnostic.issue(),
+                    ParseIssue::Layout(LayoutIssue::MisalignedEndMarker)
+                )
             }),
             "expected the misaligned `end new` to be diagnosed: {:?}",
             result.diagnostics
@@ -2586,10 +2586,8 @@ mod tests {
             dotty_parser::ParseDiagnosticKind::UnexpectedToken
         );
         assert_eq!(
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "misaligned end marker"
+            diagnostic.issue(),
+            &ParseIssue::Layout(LayoutIssue::MisalignedEndMarker)
         );
         let marker_start = SOURCE.find("end !==").expect("mismatched marker") as u32;
         assert_eq!(
@@ -3619,12 +3617,10 @@ mod tests {
             parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
 
         assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
-        assert!(
-            result.diagnostics[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("misaligned end marker")
-        );
+        assert!(matches!(
+            result.diagnostics[0].issue(),
+            ParseIssue::Layout(LayoutIssue::MisalignedEndMarker)
+        ));
         assert_eq!(
             result.diagnostics[0].span(),
             dotty_core::TextRange::new(
@@ -3722,12 +3718,10 @@ mod tests {
             parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
 
         assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
-        assert!(
-            result.diagnostics[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("duplicate end marker")
-        );
+        assert!(matches!(
+            result.diagnostics[0].issue(),
+            ParseIssue::Layout(LayoutIssue::DuplicateEndMarker)
+        ));
         let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
             panic!("expected package root");
         };
@@ -3915,10 +3909,10 @@ mod tests {
 
         assert!(
             result.diagnostics.iter().any(|diagnostic| {
-                diagnostic
-                    .legacy_message()
-                    .expect("legacy parser diagnostic")
-                    .contains("end marker")
+                matches!(
+                    diagnostic.issue(),
+                    ParseIssue::Layout(LayoutIssue::MisalignedEndMarker)
+                )
             }),
             "{:?}",
             result.diagnostics

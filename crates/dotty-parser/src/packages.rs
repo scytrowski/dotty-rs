@@ -4,7 +4,7 @@ use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped}
 use crate::modifiers::DefinitionPrefix;
 use crate::references::{QualifiedReferenceError, ReferenceNamespace};
 use crate::statements::{ParsedStatement, StatementSequenceBoundary};
-use crate::{Location, ParseDiagnosticKind, Parser};
+use crate::{Location, PackageIssue, ParseIssue, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -17,10 +17,9 @@ where
 
         if self.current().kind == TokenKind::Keyword(HardKeyword::Object) {
             if !matches!(location, Location::Elsewhere | Location::InPackageBody) {
-                self.report_at(
-                    ParseDiagnosticKind::UnsupportedSyntax,
+                self.report_issue_at(
                     package_span,
-                    "package object definitions are only allowed at top level or in a package body",
+                    ParseIssue::Package(PackageIssue::PackageObjectNotAllowedHere { location }),
                 );
                 let _ = self.parse_object_definition(Location::InBlock);
                 return ParsedStatement::Expression(self.error_expr(package_span));
@@ -43,20 +42,18 @@ where
             Ok(tree) => tree,
             Err(QualifiedReferenceError::MissingInitial) => {
                 let position = self.current_span();
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected a package name",
-                );
+                self.report_issue(ParseIssue::Package(PackageIssue::ExpectedName {
+                    found: self.current().kind,
+                }));
                 if self.current().kind != TokenKind::Eof {
                     self.advance();
                 }
                 self.error_expr(position)
             }
             Err(QualifiedReferenceError::MissingSegment) => {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected a package name after `.`",
-                );
+                self.report_issue(ParseIssue::Package(PackageIssue::ExpectedNameAfterDot {
+                    found: self.current().kind,
+                }));
                 self.error_expr(self.current_span())
             }
         }
@@ -93,10 +90,10 @@ where
             self.observe_outdented();
         }
         if !self.accept(end) {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                format!("expected {end:?} to close package body"),
-            );
+            self.report_issue(ParseIssue::Package(PackageIssue::ExpectedBodyEnd {
+                expected: end,
+                found: self.current().kind,
+            }));
         }
         stats
     }
@@ -412,8 +409,10 @@ mod tests {
         ));
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(
-            result.diagnostics[0].kind(),
-            crate::ParseDiagnosticKind::UnsupportedSyntax
+            result.diagnostics[0].issue(),
+            &ParseIssue::Package(PackageIssue::PackageObjectNotAllowedHere {
+                location: Location::InBlock,
+            })
         );
     }
 
@@ -443,8 +442,10 @@ mod tests {
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            crate::ParseDiagnosticKind::UnsupportedSyntax
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Package(PackageIssue::PackageObjectNotAllowedHere {
+                location: Location::InBlock,
+            })
         );
     }
 }
