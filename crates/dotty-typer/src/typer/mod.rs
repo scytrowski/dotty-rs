@@ -12384,7 +12384,7 @@ mod tests {
     }
 
     #[test]
-    fn implicit_local_value_keeps_semantics_deferred_with_modifier_identity() {
+    fn implicit_local_value_types_with_modifier_identity() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def use: Int = { implicit val local: Int = 1; 0 } }");
         let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
@@ -12399,7 +12399,6 @@ mod tests {
             );
         };
         assert_eq!(local_definition.metadata.modifiers, [Modifier::Implicit]);
-        let checkpoint = store.checkpoint();
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -12410,23 +12409,16 @@ mod tests {
         );
         let context = typer.expression_context_for(method).unwrap();
 
-        let result = typer.type_expression(rhs, context);
+        assert!(typer.type_expression(rhs, context).is_ok());
+        let local = typer.local_symbol_at(source, local_tree).unwrap();
         assert!(
-            matches!(
-                &result,
-                Err(TyperError::LocalValueModifierDeferred {
-                    source: actual_source,
-                    tree_index,
-                    modifiers,
-                    classification: "declaration semantics deferred",
-                }) if *actual_source == source
-                    && *tree_index == local_tree.index()
-                    && modifiers == &[Modifier::Implicit]
-            ),
-            "{result:?}"
+            typer
+                .store()
+                .symbols
+                .get(local)
+                .flags
+                .contains(SymbolFlags::IMPLICIT)
         );
-        assert_eq!(typer.store().checkpoint(), checkpoint);
-        assert!(typer.local_symbols.is_empty());
     }
 
     #[test]
@@ -12613,18 +12605,14 @@ mod tests {
     }
 
     #[test]
-    fn local_value_feature_flags_remain_gated_until_their_semantics_are_typed() {
-        for modifier in [
-            Modifier::Given,
-            Modifier::Implicit,
-            Modifier::Lazy,
-            Modifier::Inline,
-        ] {
+    fn contextual_flags_map_while_runtime_feature_flags_remain_deferred() {
+        for modifier in [Modifier::Given, Modifier::Implicit] {
             let flags = expression::blocks::local_value_symbol_flags(&[modifier]).unwrap();
-            assert!(
-                expression::blocks::local_value_semantics_deferred(flags),
-                "{modifier:?}"
-            );
+            assert!(!expression::blocks::local_value_semantics_deferred(flags));
+        }
+        for modifier in [Modifier::Lazy, Modifier::Inline] {
+            let flags = expression::blocks::local_value_symbol_flags(&[modifier]).unwrap();
+            assert!(expression::blocks::local_value_semantics_deferred(flags));
         }
         assert!(!expression::blocks::local_value_semantics_deferred(
             SymbolFlags::EMPTY
@@ -16867,6 +16855,310 @@ mod tests {
             typer.store().symbols.get(local).info,
             SymbolInfo::Complete(definitions.int)
         );
+    }
+
+    #[test]
+    fn local_contextual_values_keep_flags_and_resolve_explicit_references() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def explicit: Int = { implicit val explicitValue: Int = 1; explicitValue }; def inferred: Int = { implicit val inferredValue = 2; inferredValue }; def namedGiven: Int = { given named: Int = 3; named } }",
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for (method_name, expected_name, expected_flags) in [
+            ("explicit", "explicitValue", SymbolFlags::IMPLICIT),
+            ("inferred", "inferredValue", SymbolFlags::IMPLICIT),
+            (
+                "namedGiven",
+                "named",
+                SymbolFlags::GIVEN | SymbolFlags::FINAL | SymbolFlags::LAZY,
+            ),
+        ] {
+            let (method, rhs) =
+                method_definition_and_rhs(&parsed, typer.store(), &index, source, method_name);
+            let TreeKind::Block(source_block) = &parsed.ast.get(rhs).kind else {
+                panic!("{method_name} should have a block body")
+            };
+            let local_tree = source_block.stats[0];
+            let context = typer.expression_context_for(method).unwrap();
+            let typed_block = typer
+                .type_expression(rhs, context)
+                .unwrap_or_else(|error| panic!("{method_name}: {error:?}"));
+            let local = typer.local_symbol_at(source, local_tree).unwrap();
+            let local_symbol = typer.store().symbols.get(local);
+            assert_eq!(local_symbol.flags, expected_flags, "{method_name}");
+            assert_eq!(local_symbol.info, SymbolInfo::Complete(definitions.int));
+            assert_eq!(
+                typer.store().names.resolve(local_symbol.name.text()),
+                expected_name
+            );
+            let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_block).kind else {
+                panic!("{method_name} should remain a typed block")
+            };
+            assert!(matches!(
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(typed_block.expr).ty),
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } if *symbol == local
+            ));
+        }
+    }
+
+    #[test]
+    fn anonymous_local_given_without_a_term_identity_remains_deferred() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = { given Int = 1; 0 } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+            unreachable!();
+        };
+        let given = block.stats[0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let context = typer.expression_context_for(method).unwrap();
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::LocalValueModifierDeferred {
+                tree_index,
+                classification: "anonymous given has no local term identity",
+                ..
+            }) if tree_index == given.index()
+        ));
+        assert!(typer.local_symbol_at(source, given).is_none());
+        assert!(typer.typed_ast().iter().next().is_none());
+    }
+
+    #[test]
+    fn contextual_local_initializer_resolves_outer_binding_before_shadowing() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { val local: Int = 7; def use: Int = { implicit val local: Int = local; local } }",
+        );
+        let outer = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "local"
+                        && index.symbol_at(source, tree).is_some() =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("class field should have a source symbol");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+            unreachable!();
+        };
+        let local_tree = block.stats[0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed_block = typer.type_expression(rhs, context).unwrap();
+
+        let local = typer.local_symbol_at(source, local_tree).unwrap();
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_block).kind else {
+            unreachable!();
+        };
+        let TreeKind::ValDef(typed_local) = &typer.typed_ast().get(typed_block.stats[0]).kind
+        else {
+            unreachable!();
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_local.rhs.unwrap()).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == outer
+        ));
+        assert_ne!(outer, local);
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(typed_block.expr).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == local
+        ));
+    }
+
+    #[test]
+    fn contextual_local_shadowing_is_limited_to_its_nested_block() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def use: Int = { val value: Int = 4; { implicit val value: Int = 5; value }; value } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+            unreachable!();
+        };
+        let outer_tree = block.stats[0];
+        let inner_tree = block.stats[1];
+        let TreeKind::Block(inner) = &parsed.ast.get(inner_tree).kind else {
+            unreachable!();
+        };
+        let contextual_tree = inner.stats[0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed_block = typer.type_expression(rhs, context).unwrap();
+
+        let outer = typer.local_symbol_at(source, outer_tree).unwrap();
+        let contextual = typer.local_symbol_at(source, contextual_tree).unwrap();
+        let TreeKind::Block(typed_outer) = &typer.typed_ast().get(typed_block).kind else {
+            unreachable!();
+        };
+        let TreeKind::Block(typed_inner) = &typer.typed_ast().get(typed_outer.stats[1]).kind else {
+            unreachable!();
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_inner.expr).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if *symbol == contextual
+        ));
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_outer.expr).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if *symbol == outer
+        ));
+    }
+
+    #[test]
+    fn inferred_contextual_local_does_not_enter_scope_during_its_initializer() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = { implicit val value = value; value } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+            unreachable!();
+        };
+        let local_tree = block.stats[0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+        assert!(typer.local_symbol_at(source, local_tree).is_none());
+        assert!(typer.typed_ast().iter().next().is_none());
+    }
+
+    #[test]
+    fn contextual_local_duplicates_use_the_existing_duplicate_error() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def use: Int = { implicit val value = 1; val value = 2; value } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::DuplicateLocalValue { .. })
+        ));
+    }
+
+    #[test]
+    fn contextual_local_type_failure_rolls_back_and_retries_deterministically() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = { implicit val local: Int = true; local } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+            unreachable!();
+        };
+        let local_tree = block.stats[0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let checkpoint = typer.store().checkpoint();
+
+        for _ in 0..2 {
+            assert!(matches!(
+                typer.type_expression(rhs, context),
+                Err(TyperError::LocalValueTypeMismatch { expected, .. })
+                    if expected == definitions.int
+            ));
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert!(typer.local_symbol_at(source, local_tree).is_none());
+            assert!(typer.source_typed_index().is_empty());
+            assert_eq!(typer.typed_ast().iter().count(), 0);
+            assert!(typer.initializing_local_symbols.is_empty());
+        }
+    }
+
+    #[test]
+    fn local_contextual_search_remains_outside_declaration_typing() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def need(using value: Int): Int = value; def use: Int = { given local: Int = 1; need() } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::ApplicationMethodKindMismatch {
+                application_kind: ApplyKind::Regular,
+                method_kind: MethodKind::Contextual,
+                ..
+            })
+        ));
     }
 
     #[test]

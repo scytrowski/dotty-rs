@@ -7,6 +7,7 @@ use dotty_classloader::classloader::{
     LoadingSession,
 };
 use dotty_core::ast::{Match, Modifier, Tree, TreeKind, Untyped, UntypedNode, VisibilitySyntax};
+use dotty_core::ids::TreeId;
 use dotty_core::{
     Definitions, MemberRequest, Packages, ResolutionError, ResolverCheckpoint, SemanticStore,
     SourceId, SourceText, SymbolId, SymbolResolver, TextRange,
@@ -265,6 +266,7 @@ struct Audit {
     missing_declared_type_profile: MissingDeclaredTypeProfile,
     local_method_first_blockers: BTreeMap<String, String>,
     local_value_blocker_profile: LocalValueBlockerProfile,
+    local_value_baseline_outcomes: BTreeSet<LocalValueBaselineOutcome>,
     by_name_method_outcomes: BTreeMap<String, String>,
     local_method_signature_profile: LocalMethodSignatureProfile,
     singleton_reference_profile: SingletonReferenceProfile,
@@ -305,6 +307,7 @@ impl Default for Audit {
             missing_declared_type_profile: MissingDeclaredTypeProfile::default(),
             local_method_first_blockers: BTreeMap::new(),
             local_value_blocker_profile: LocalValueBlockerProfile::default(),
+            local_value_baseline_outcomes: BTreeSet::new(),
             by_name_method_outcomes: BTreeMap::new(),
             local_method_signature_profile: LocalMethodSignatureProfile::default(),
             singleton_reference_profile: SingletonReferenceProfile::default(),
@@ -344,6 +347,126 @@ struct LocalValueBlockerProfile {
     observations: BTreeSet<LocalValueBlockerObservation>,
 }
 
+#[derive(Clone, Copy)]
+struct LocalValueBaselineRow {
+    path: &'static str,
+    method_tree: u32,
+    blocker_origin_tree: u32,
+    declaration_tree: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct LocalValueBaselineOutcome {
+    observation: LocalValueBlockerObservation,
+    current_first_blocker: String,
+    classification: &'static str,
+}
+
+const LOCAL_VALUE_CONTEXTUAL_BASELINE_ROWS: &[LocalValueBaselineRow] = &[
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
+        method_tree: 167,
+        blocker_origin_tree: 331,
+        declaration_tree: 95,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
+        method_tree: 367,
+        blocker_origin_tree: 1640,
+        declaration_tree: 338,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
+        method_tree: 440,
+        blocker_origin_tree: 1640,
+        declaration_tree: 338,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala",
+        method_tree: 236,
+        blocker_origin_tree: 453,
+        declaration_tree: 195,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 10367,
+        blocker_origin_tree: 10456,
+        declaration_tree: 10316,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 11524,
+        blocker_origin_tree: 11809,
+        declaration_tree: 11493,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 11629,
+        blocker_origin_tree: 11809,
+        declaration_tree: 11493,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 11651,
+        blocker_origin_tree: 11809,
+        declaration_tree: 11493,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 11745,
+        blocker_origin_tree: 11809,
+        declaration_tree: 11493,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 4923,
+        blocker_origin_tree: 5172,
+        declaration_tree: 4843,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 4975,
+        blocker_origin_tree: 5172,
+        declaration_tree: 4843,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 5228,
+        blocker_origin_tree: 5328,
+        declaration_tree: 5197,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 6279,
+        blocker_origin_tree: 6447,
+        declaration_tree: 5662,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 6327,
+        blocker_origin_tree: 6447,
+        declaration_tree: 5662,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 6966,
+        blocker_origin_tree: 7061,
+        declaration_tree: 6904,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala",
+        method_tree: 2075,
+        blocker_origin_tree: 2169,
+        declaration_tree: 1862,
+    },
+    LocalValueBaselineRow {
+        path: "compiler/src/dotty/tools/dotc/ast/Trees.scala",
+        method_tree: 10108,
+        blocker_origin_tree: 10270,
+        declaration_tree: 10035,
+    },
+];
+
 impl LocalValueBlockerProfile {
     fn record(&mut self, observation: LocalValueBlockerObservation) {
         self.observations.insert(observation);
@@ -355,6 +478,74 @@ impl LocalValueBlockerProfile {
             .map(|row| (row.path.as_str(), row.declaration_tree))
             .collect::<BTreeSet<_>>()
             .len()
+    }
+}
+
+fn local_value_baseline_outcome_classification(blocker: &str) -> &'static str {
+    if blocker == "typed" {
+        "declaration typed and enclosing method typed"
+    } else if blocker.starts_with("LocalValueModifierDeferred")
+        || blocker.starts_with("LocalValueType")
+        || blocker.starts_with("LocalValueRightHandSide")
+        || blocker.starts_with("LocalValueOutsideBlock")
+        || blocker.starts_with("LocalBlockDeclarationDeferred::val/var definition")
+        || blocker == "DuplicateLocalValue"
+    {
+        "residual local-value declaration blocker"
+    } else if blocker == "UsingApplicationDeferred"
+        || blocker == "ApplicationMethodKindMismatch"
+        || blocker == "ApplicationCalleeNotMethod"
+        || blocker == "UnsupportedApplicationMethodKind"
+    {
+        "downstream contextual-search/application blocker"
+    } else if blocker == "ImportQualifierNotFound"
+        || blocker == "TermNameNotFound"
+        || blocker == "TypeNameNotFound"
+        || blocker == "MemberNotFound"
+        || blocker == "MemberLookup"
+        || blocker == "SymbolResolution"
+    {
+        "resolution/classpath blocker"
+    } else {
+        "declaration typed; enclosing method moved deeper"
+    }
+}
+
+fn record_local_value_baseline_outcomes(
+    audit: &mut Audit,
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::names::NameInterner,
+    source_text: &str,
+    path: &str,
+    method_tree: TreeId<Untyped>,
+    current_first_blocker: &str,
+) {
+    for baseline in LOCAL_VALUE_CONTEXTUAL_BASELINE_ROWS
+        .iter()
+        .filter(|row| row.path == path && row.method_tree == method_tree.index())
+    {
+        let observation = local_value_blocker_observation(
+            arena,
+            names,
+            source_text,
+            path,
+            method_tree,
+            baseline.declaration_tree,
+            baseline.blocker_origin_tree,
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "pinned local-value baseline tree path={} method={} declaration={} must remain observable",
+                baseline.path, baseline.method_tree, baseline.declaration_tree
+            )
+        });
+        audit
+            .local_value_baseline_outcomes
+            .insert(LocalValueBaselineOutcome {
+                observation,
+                current_first_blocker: current_first_blocker.to_owned(),
+                classification: local_value_baseline_outcome_classification(current_first_blocker),
+            });
     }
 }
 
@@ -558,6 +749,8 @@ impl Audit {
         self.local_value_blocker_profile
             .observations
             .extend(other.local_value_blocker_profile.observations);
+        self.local_value_baseline_outcomes
+            .extend(other.local_value_baseline_outcomes);
         self.by_name_method_outcomes
             .extend(other.by_name_method_outcomes);
         self.local_method_signature_profile
@@ -913,13 +1106,13 @@ fn pinned_scala39_local_definition_audit() {
         .failures
         .get("LocalBlockDeclarationDeferred::val/var definition")
         .map_or(0, |bucket| bucket.count);
-    assert_eq!(local_value_blocker_count, 21);
-    assert_eq!(audit.local_value_blocker_profile.observations.len(), 21);
+    assert_eq!(local_value_blocker_count, 4);
+    assert_eq!(audit.local_value_blocker_profile.observations.len(), 4);
     assert_eq!(
         audit
             .local_value_blocker_profile
             .distinct_declaration_count(),
-        14
+        3
     );
     assert_eq!(
         audit
@@ -929,7 +1122,7 @@ fn pinned_scala39_local_definition_audit() {
             .map(|row| row.path.as_str())
             .collect::<BTreeSet<_>>()
             .len(),
-        8
+        3
     );
     let rows = &audit.local_value_blocker_profile.observations;
     assert!(rows.iter().all(|row| row.node_kind == "ValDef"));
@@ -942,33 +1135,60 @@ fn pinned_scala39_local_definition_audit() {
             .filter(|row| row.declaration_kind == kind)
             .count()
     };
-    assert_eq!(count_kind("given"), 5);
-    assert_eq!(count_kind("implicit val"), 12);
+    assert_eq!(count_kind("given"), 0);
+    assert_eq!(count_kind("implicit val"), 0);
     assert_eq!(count_kind("inline val"), 1);
     assert_eq!(count_kind("lazy val"), 3);
     assert_eq!(
         rows.iter()
             .filter(|row| row.type_form == "explicit")
             .count(),
-        7
+        0
     );
     assert_eq!(
         rows.iter()
             .filter(|row| row.type_form == "inferred")
             .count(),
-        14
+        4
     );
     let count_modifier = |modifier: &str| {
         rows.iter()
             .filter(|row| row.modifiers.split(',').any(|value| value == modifier))
             .count()
     };
-    assert_eq!(count_modifier("Given"), 5);
-    assert_eq!(count_modifier("Implicit"), 12);
-    assert_eq!(count_modifier("Lazy"), 8);
+    assert_eq!(count_modifier("Given"), 0);
+    assert_eq!(count_modifier("Implicit"), 0);
+    assert_eq!(count_modifier("Lazy"), 3);
     assert_eq!(count_modifier("Inline"), 1);
-    assert_eq!(count_modifier("Final"), 5);
+    assert_eq!(count_modifier("Final"), 0);
     assert_eq!(count_modifier("Var"), 0);
+    assert_eq!(audit.local_value_baseline_outcomes.len(), 17);
+    assert_eq!(
+        audit
+            .local_value_baseline_outcomes
+            .iter()
+            .filter(|outcome| outcome.observation.declaration_kind == "given")
+            .count(),
+        5
+    );
+    assert_eq!(
+        audit
+            .local_value_baseline_outcomes
+            .iter()
+            .filter(|outcome| outcome.observation.declaration_kind == "implicit val")
+            .count(),
+        12
+    );
+    assert!(audit.local_value_baseline_outcomes.iter().all(|outcome| {
+        outcome.current_first_blocker != "LocalBlockDeclarationDeferred::val/var definition"
+    }));
+    assert_eq!(
+        audit
+            .failures
+            .get("LocalValueModifierDeferred::anonymous given has no local term identity")
+            .map_or(0, |bucket| bucket.count),
+        4
+    );
     assert_eq!(
         audit.local_method_signature_profile.total, local_method_signature_failure_count,
         "every LocalMethodSignatureDeferred first blocker must retain its exact payload and source shape"
@@ -1158,6 +1378,7 @@ fn pinned_scala39_local_definition_audit() {
     println!("typed_local_defdefs={}", audit.typed_local_defdefs);
     print_local_patdefs(&audit.patdef_profile);
     print_local_value_blocker_profile(&audit.local_value_blocker_profile);
+    print_local_value_baseline_outcomes(&audit.local_value_baseline_outcomes);
     println!(
         "unsupported_expression_total={}",
         sum_buckets_with_prefix(&audit.failures, "UnsupportedExpression::")
@@ -4072,6 +4293,15 @@ fn audit_source_inner(
             audit
                 .local_method_first_blockers
                 .insert(format!("{path}#tree={}", tree.index()), "typed".to_owned());
+            record_local_value_baseline_outcomes(
+                &mut audit,
+                &parsed.ast,
+                &typer.store().names,
+                text,
+                path,
+                tree,
+                "typed",
+            );
             if (path == "compiler/src/dotty/tools/dotc/core/SymUtils.scala"
                 || path == "compiler/src/dotty/tools/dotc/typer/Typer.scala")
                 && let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind
@@ -4149,6 +4379,15 @@ fn audit_source_inner(
             audit
                 .local_method_first_blockers
                 .insert(format!("{path}#tree={}", tree.index()), kind.bucket.clone());
+            record_local_value_baseline_outcomes(
+                &mut audit,
+                &parsed.ast,
+                &typer.store().names,
+                text,
+                path,
+                tree,
+                &kind.bucket,
+            );
             if kind.bucket == "LocalBlockDeclarationDeferred::val/var definition"
                 && let (Some(declaration_tree), Some(blocker_method_tree)) =
                     (local_value_declaration, blocker_method_tree)
@@ -5574,6 +5813,33 @@ fn print_local_value_blocker_profile(profile: &LocalValueBlockerProfile) {
             row.binder_count
                 .map_or_else(|| "n/a".to_owned(), |count| count.to_string()),
             row.attribution,
+        );
+    }
+}
+
+fn print_local_value_baseline_outcomes(outcomes: &BTreeSet<LocalValueBaselineOutcome>) {
+    println!("local_value_contextual_baseline_outcomes:");
+    println!("  baseline_observations={}", outcomes.len());
+    let mut classifications = BTreeMap::<&str, usize>::new();
+    for outcome in outcomes {
+        *classifications.entry(outcome.classification).or_default() += 1;
+    }
+    println!("  classifications:");
+    for (classification, count) in classifications {
+        println!("    {classification}={count}");
+    }
+    println!("  rows:");
+    for outcome in outcomes {
+        let row = &outcome.observation;
+        println!(
+            "    {}:method={} declaration_tree={} kind={} modifiers=[{}] baseline_first_blocker=LocalBlockDeclarationDeferred::val/var definition current_first_blocker={} classification={}",
+            row.path,
+            row.enclosing_method,
+            row.declaration_tree,
+            row.declaration_kind,
+            row.modifiers,
+            outcome.current_first_blocker,
+            outcome.classification,
         );
     }
 }
