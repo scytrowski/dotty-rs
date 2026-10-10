@@ -704,7 +704,7 @@ full-corpus audit does not report `RecursiveInferredMethodResult`; focused
 self- and mutual-recursion tests still pin its deterministic error and
 rollback behavior. The
 current Typer ranking and evidence-based next-slice recommendation are in the
-[corpus audit](typer-classpath-corpus-audit-3.9.0.md#recommended-next-typer-sprint).
+[corpus audit](typer-classpath-corpus-audit-3.9.0.md#933-hardening-result-and-next-sprint-recommendation).
 
 Ordinary repeated parameters use `Type::Repeated` in parameter symbol info and
 the shared method-signature builder's `varargs` marker; references to them in
