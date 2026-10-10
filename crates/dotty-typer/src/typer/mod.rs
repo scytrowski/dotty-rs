@@ -12605,14 +12605,18 @@ mod tests {
     }
 
     #[test]
-    fn contextual_flags_map_while_runtime_feature_flags_remain_deferred() {
-        for modifier in [Modifier::Given, Modifier::Implicit] {
+    fn contextual_and_runtime_feature_flags_keep_semantics_separate_from_flag_mapping() {
+        for modifier in [
+            Modifier::Given,
+            Modifier::Implicit,
+            Modifier::Lazy,
+            Modifier::Inline,
+        ] {
             let flags = expression::blocks::local_value_symbol_flags(&[modifier]).unwrap();
-            assert!(!expression::blocks::local_value_semantics_deferred(flags));
-        }
-        for modifier in [Modifier::Lazy, Modifier::Inline] {
-            let flags = expression::blocks::local_value_symbol_flags(&[modifier]).unwrap();
-            assert!(expression::blocks::local_value_semantics_deferred(flags));
+            assert!(
+                expression::blocks::local_value_semantics_deferred(flags),
+                "{modifier:?}"
+            );
         }
         assert!(!expression::blocks::local_value_semantics_deferred(
             SymbolFlags::EMPTY

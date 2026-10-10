@@ -7,7 +7,10 @@ use dotty_core::types::*;
 use dotty_core::*;
 use std::collections::HashMap;
 
-const LOCAL_VALUE_SEMANTICS_DEFERRED: SymbolFlags = SymbolFlags::LAZY.union(SymbolFlags::INLINE);
+const LOCAL_VALUE_SEMANTICS_DEFERRED: SymbolFlags = SymbolFlags::GIVEN
+    .union(SymbolFlags::IMPLICIT)
+    .union(SymbolFlags::LAZY)
+    .union(SymbolFlags::INLINE);
 
 pub(in crate::typer) fn local_value_symbol_flags(
     modifiers: &[Modifier],
