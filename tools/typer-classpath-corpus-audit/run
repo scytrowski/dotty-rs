@@ -186,9 +186,9 @@ mkdir -p "$(dirname -- "$output_path")"
     ' "$tmp_dir/first.report"
     printf '\n'
     printf '### Recommended next Typer sprint\n\n'
-    printf 'After #900, the local signature profile contains 6 observations (1 file), down from the #899 baseline of 14 observations (3 files). The 8 by-name observations (2 direct origins and 6 inherited sibling methods) no longer stop at `LocalMethodSignatureDeferred`; all 6 remaining observations are the separate `parameter modifiers` group in `MegaPhase.scala`. The direct by-name methods `instantiateCFT` and `cases` still report `ImportQualifierNotFound` as their first blocker. #901 removes the bounded by-name application blocker in the focused local-call fixture, but no matching call in those corpus methods reaches application typing. Recommend a narrow follow-up for local `inline` parameter signatures: the direct modifier origin is one method in `MegaPhase.scala`, and the shared signature builder already preserves `Inline` on parameter symbols. Keep inline expansion out of scope. Dependent-result signatures remain covered only by focused fixtures. The other high-ranked buckets still need separate prerequisites: anonymous classes (32 / 15) need stable identity and ownership, while local values/variables (21 / 8) need a PatDef shape breakdown.\n\n'
-    printf '### #899–#900 local method signature profile\n\n'
-    printf 'The profile counts local methods whose first blocker is a local signature failure. `direct_origins` identifies methods carrying that signature feature; `inherited_methods` are sibling methods attributed to the same enclosing failure. The #899 baseline had 14 affected methods; after #900, 6 remain. This deterministic supplemental audit was run twice with JDK feature release %s and the pinned Scala 3.9.0 source/artifact inputs; normalized output matched byte-for-byte. The profile is diagnostic only and does not type additional methods.\n\n' "$jdk_release"
+    printf 'After #902, the local signature profile contains 0 first-blocker observations, down from 14 affected methods across 3 files in the #899 baseline. The 8 by-name observations moved past the signature guard in #900; the 6 parameter-modifier observations (one direct origin and five inherited siblings in `MegaPhase.scala`) moved past it in #902 by accepting the already-modeled `Inline` parameter flag. This blocker movement is not evidence that all six enclosing methods type; inspect their current first blockers and the `typed_local_defdefs` count below. #901 removes the bounded by-name application blocker in the focused local-call fixture; the two corpus methods originating from by-name signatures remain behind `ImportQualifierNotFound`. Inline expansion and dependent-result signatures remain out of scope. Recommend #903 to harden these signature paths and refresh the Typer ranking.\n\n'
+    printf '### #899–#902 local method signature profile\n\n'
+    printf 'The profile counts local methods whose first blocker is a local signature failure. `direct_origins` identifies methods carrying that signature feature; `inherited_methods` are sibling methods attributed to the same enclosing failure. The #899 baseline had 14 affected methods across 3 files; after #900 and #902, none remain at this blocker. This deterministic supplemental audit was run twice with JDK feature release %s and the pinned Scala 3.9.0 source/artifact inputs; normalized output matched byte-for-byte. Full method typing is reported separately.\n\n' "$jdk_release"
     printf '| Feature payload | Affected methods | Files | Distinct methods | Direct origins | Inherited methods | Blocker origins |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n'
     awk '
         /^  features:$/ { in_features = 1; next }
@@ -204,16 +204,33 @@ mkdir -p "$(dirname -- "$output_path")"
             split(values, fields, " ")
             for (i = 1; i <= 6; i++) sub(/^[^=]*=/, "", fields[i])
             printf "| `%s` | %s | %s | %s | %s | %s | %s |\n", feature, fields[1], fields[2], fields[3], fields[4], fields[5], fields[6]
+            found = 1
         }
+        END { if (!found) print "| (none) | 0 | 0 | 0 | 0 | 0 | 0 |" }
     ' "$tmp_dir/first.report"
-    printf '\nEvery affected local method is listed below with its source path, line/span, tree index, exact feature payload, signature shape, blocker origin, and direct/inherited attribution.\n\n'
+    printf '\nResidual local signature first-blocker rows appear below with their source path, line/span, tree index, feature payload, signature shape, blocker origin, and direct/inherited attribution. No rows remain at this blocker after #902.\n\n'
     printf '```text\n'
     awk '
         /^  records:$/ { in_records = 1; next }
-        /^singleton_reference_profile:$/ { in_records = 0 }
-        in_records { sub(/^    /, ""); print }
+        /^by_name_method_outcomes:$/ { in_records = 0 }
+        in_records && /^    / { sub(/^    /, ""); print; found = 1 }
+        END { if (!found) print "(none; 0 occurrences)" }
     ' "$tmp_dir/first.report"
     printf '```\n\n'
+    printf '#### #902 selected inline-parameter cohort\n\n'
+    printf 'The six rows from the #899 `parameter modifiers` feature profile are tracked by their pinned source-tree indexes below. A moved blocker is not full method typing.\n\n'
+    printf '| Baseline local method tree | Current first blocker |\n| --- | --- |\n'
+    awk '
+        /^inline_parameter_signature_outcomes_after_902:$/ { in_cohort = 1; next }
+        /^by_name_method_outcomes:$/ { in_cohort = 0 }
+        in_cohort && /^  / {
+            line = $0
+            sub(/^  /, "", line)
+            split(line, fields, "=")
+            printf "| `%s=%s` | `%s` |\n", fields[1], fields[2], fields[3]
+        }
+    ' "$tmp_dir/first.report"
+    printf '\n'
     printf '### #900 by-name downstream blocker inspection\n\n'
     printf 'The two direct by-name origins are measured individually after signature support. In the whole-file audit, both now reach `ImportQualifierNotFound` as their first blocker. No matching `ByNameApplicationParameterDeferred` observation is emitted for these methods; their application sites are still behind the enclosing method blocker. At the #900 snapshot the `ByNameCall.scala` fixture reached the application deferral boundary; the #901 follow-up below removes it for that bounded local-call shape.\n\n'
     printf '| Corpus method | Result shape | First blocker after #900 | Application sites reached by audit |\n| --- | --- | --- | --- |\n'
@@ -243,7 +260,7 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '| `AnonymousClassInstantiationDeferred` (32 / 15) | Support one anonymous `new` with one concrete parent in `typer/expression/new.rs`. | Reuse ordinary `New` typing and parent projection; define stable anonymous symbol ownership and class info. | Closure capture, refinement synthesis, and general anonymous-class members. |\n'
     printf '| `UnsupportedSingletonReference` (historical 22 / 1) | #880 profiled the baseline; #881–#883 now project, relate, and preserve supported literal constants. | Reuse `Type::Constant`, literal expression typing, bounded relations, expected adaptation, and stable-prefix validation. | Arbitrary paths, unstable prefixes, and path-dependent relation redesign. |\n'
     printf '| `LocalBlockDeclarationDeferred::val/var definition` (21 / 8) | Split remaining cases by PatDef root/binder shape in `typer/expression/blocks.rs`. | Reuse transactional PatDef lowering, local binders, and assignment support. | General destructuring and reopening supported PatDef forms. |\n'
-    printf '| `LocalMethodSignatureDeferred` (6 / 1; after #900) | The 8 by-name observations from #899 no longer stop at the signature guard; 6 parameter-modifier observations remain in `MegaPhase.scala`. | Reuse `source_method_flags` and the shared method-signature builder; parameter symbols already retain `Inline`. | Inline expansion; dependent results; general erased parameter support or new method inference. |\n\n'
+    printf '| `LocalMethodSignatureDeferred` (0 current; after #902) | #900 moved 8 by-name and #902 moved 6 inline-parameter observations past the signature guard. | Reuse `source_method_flags` and the shared method-signature builder; local parameter symbols retain `Inline`. | Inline expansion; dependent results; erased parameter support or new method inference. |\n\n'
     printf '## Historical #825 MissingDeclaredType producer profile (pre-#856)\n\n'
     printf 'Before #856, the 34 first blockers across 15 files were all attributed to source `ValDef` declarations with a right-hand side and a zero-width synthetic inferred `TypeTree`. They split into 24 immutable values and 10 mutable variables; all have semantic `Field` identity. Source `val` versus `var` comes from the AST modifier and is cross-checked against the semantic `MUTABLE` flag; `SymbolKind::Field` alone does not preserve that distinction. The owner kind is `Class` for 24 occurrences and `ModuleClass` for 10. Four immutable module-class values carry `Inline`. Counts are downstream local-method first blockers, so one source declaration can appear more than once. The baseline profile is frozen here; current profile values are listed separately below.\n\n'
     printf '| Source declaration bucket | Occurrences / files | Representative paths |\n| --- | ---: | --- |\n'
@@ -368,7 +385,7 @@ mkdir -p "$(dirname -- "$output_path")"
     printf '| Baseline mutable-field method attempt | Current first blocker |\n| --- | --- |\n'
     awk '
         /^mutable_class_field_baseline_method_outcomes:$/ { in_outcomes = 1; next }
-        in_outcomes && /^singleton_reference_profile:$/ { in_outcomes = 0 }
+        in_outcomes && /^local_method_signature_profile:$/ { in_outcomes = 0 }
         in_outcomes && /^```/ { in_outcomes = 0 }
         in_outcomes && /^  / {
             line = $0
