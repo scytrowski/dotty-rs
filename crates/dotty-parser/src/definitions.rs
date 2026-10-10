@@ -2531,14 +2531,21 @@ mod tests {
         assert_eq!(names.resolve(second.name.as_name().text()), "g");
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(
-            result.diagnostics[0].kind(),
-            ParseDiagnosticKind::UnsupportedSyntax
+            result.diagnostics[0].issue(),
+            &ParseIssue::Parameter(
+                crate::ParameterIssue::HardModifierNotAllowedOnNamedUsingParameter {
+                    owner: crate::ParamOwner::Def,
+                    found: TokenKind::Keyword(HardKeyword::Private),
+                }
+            )
         );
         assert_eq!(
-            result.diagnostics[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "hard modifiers are not allowed on a named `using` parameter for this owner"
+            result.diagnostics[0].span(),
+            TextRange::new(12, 19).unwrap()
+        );
+        assert_eq!(
+            result.diagnostics[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
         );
     }
 

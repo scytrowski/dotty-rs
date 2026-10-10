@@ -188,10 +188,13 @@ remain distinct without accepting same-line members that lack a separator.
 Parser diagnostics retain a stable category and source range. Common parser
 expectation/recovery failures use typed `ParseIssue` payloads (for example,
 `ExpectedToken { expected, found }`) and expose stable text-independent codes
-to corpus tooling. Typed issue families distinguish expression/control-flow,
-type-grammar, type-parameter/context-bound, and type-definition failures without
-preformatted messages. Expression issues cover expected syntax and recovery
-reasons for arguments, operators, lambdas, interpolations, and layout bodies.
+to corpus tooling. Typed issue families cover expression/control-flow,
+value/method declarations and term parameters, class/template declarations,
+modifiers and annotations, type grammar, type parameters and context bounds,
+patterns, and case clauses. They retain reason-specific data instead of
+preformatted messages.
+Expression issues cover expected syntax and recovery reasons for arguments,
+operators, lambdas, interpolations, and layout bodies.
 Unmigrated sites remain `Legacy` payloads with their
 existing category and optional message; typed issues are not converted into
 synthetic text. The report JSON schema version 7 adds an optional `code` to

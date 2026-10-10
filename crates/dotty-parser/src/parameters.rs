@@ -9,7 +9,10 @@ use dotty_core::ast::{ByNameTypeTree, Modifier, Modifiers, ValDef};
 use dotty_core::{Punctuation, SourceSpan, TermName, TokenKind, TreeId, TreeKind, Untyped};
 
 use crate::names::synthetic_term_param_name;
-use crate::{ParamOwner, ParseDiagnosticKind, ParseKind, Parser};
+use crate::{
+    ContextualParameterClause, ParamOwner, ParameterIssue, ParameterMutability, ParseIssue,
+    ParseKind, Parser,
+};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -123,10 +126,9 @@ where
                     | ParamOwner::ExtensionFollow
             )
         {
-            self.report(
-                ParseDiagnosticKind::UnsupportedSyntax,
-                "legacy `implicit` clauses are not allowed for this parameter owner",
-            );
+            self.report_issue(ParseIssue::Parameter(
+                ParameterIssue::LegacyImplicitClauseNotAllowed { owner },
+            ));
         }
 
         if is_using || owner == ParamOwner::Given {
@@ -137,10 +139,9 @@ where
             metadata.modifiers.push(Modifier::Implicit);
             self.advance();
             if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected a parameter after `implicit`",
-                );
+                self.report_issue(ParseIssue::Parameter(ParameterIssue::EmptyImplicitClause {
+                    found: self.current().kind,
+                }));
                 return params;
             }
         }
@@ -156,10 +157,9 @@ where
                 );
             }
             if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected a parameter after `using`",
-                );
+                self.report_issue(ParseIssue::Parameter(ParameterIssue::EmptyUsingClause {
+                    found: self.current().kind,
+                }));
                 return params;
             }
         }
@@ -191,10 +191,11 @@ where
                         | TokenKind::Punctuation(Punctuation::RightBrace)
                 )
             {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected a parameter before the end of the clause",
-                );
+                self.report_issue(ParseIssue::Parameter(
+                    ParameterIssue::ExpectedParameterBeforeClauseEnd {
+                        found: self.current().kind,
+                    },
+                ));
                 break;
             }
             let checkpoint = self.cursor.checkpoint();
@@ -206,10 +207,11 @@ where
             ));
 
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing a term parameter",
-                );
+                self.report_issue(ParseIssue::Parameter(
+                    ParameterIssue::TermParameterNoProgress {
+                        found: self.current().kind,
+                    },
+                ));
                 self.recover_term_param_clause();
                 break;
             }
@@ -222,10 +224,11 @@ where
                     .at(TokenKind::Punctuation(Punctuation::RightParen))
                 {
                     if !self.comma_is_followed_by_line_break_before_right_paren(comma_end) {
-                        self.report(
-                            ParseDiagnosticKind::ExpectedToken,
-                            "expected a parameter after `,`",
-                        );
+                        self.report_issue(ParseIssue::Parameter(
+                            ParameterIssue::ExpectedParameterAfterComma {
+                                found: self.current().kind,
+                            },
+                        ));
                     }
                     self.advance();
                     break;
@@ -259,10 +262,14 @@ where
             self.advance();
             false
         } else if is_using_clause && crate::modifiers::is_hard_modifier(self.current().kind) {
-            self.report_at(
-                ParseDiagnosticKind::UnsupportedSyntax,
+            self.report_issue_at(
                 self.current_span(),
-                "hard modifiers are not allowed on a named `using` parameter for this owner",
+                ParseIssue::Parameter(
+                    ParameterIssue::HardModifierNotAllowedOnNamedUsingParameter {
+                        owner,
+                        found: self.current().kind,
+                    },
+                ),
             );
             while crate::modifiers::is_hard_modifier(self.current().kind) {
                 self.advance();
@@ -285,10 +292,11 @@ where
         };
         if let Some(is_var) = explicit_accessor {
             if !is_class_parameter_owner(owner) {
-                self.report(
-                    ParseDiagnosticKind::UnsupportedSyntax,
-                    "`val` and `var` parameter accessors are only valid on class constructors",
-                );
+                self.report_issue(ParseIssue::Parameter(
+                    ParameterIssue::AccessorOnlyAllowedOnClassConstructor {
+                        accessor: parameter_mutability(is_var),
+                    },
+                ));
             } else {
                 metadata.modifiers.push(Modifier::ParamAccessor);
                 if is_var {
@@ -297,10 +305,11 @@ where
             }
         } else if is_class_parameter_owner(owner) {
             if requires_class_accessor {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "`val` or `var` expected",
-                );
+                self.report_issue(ParseIssue::Parameter(
+                    ParameterIssue::ExpectedClassParameterAccessor {
+                        found: self.current().kind,
+                    },
+                ));
             }
             if owner == ParamOwner::CaseClass && first_ordinary_clause {
                 metadata.modifiers.push(Modifier::ParamAccessor);
@@ -323,12 +332,16 @@ where
                     if is_class_parameter_owner(owner)
                         && !metadata.modifiers.contains(&Modifier::PrivateLocal)
                     {
-                        let mutable = metadata.modifiers.contains(&Modifier::Var);
-                        let modifier = if mutable { "var" } else { "val" };
-                        parser.report_at(
-                            ParseDiagnosticKind::UnexpectedToken,
+                        let accessor = if metadata.modifiers.contains(&Modifier::Var) {
+                            ParameterMutability::Var
+                        } else {
+                            ParameterMutability::Val
+                        };
+                        parser.report_issue_at(
                             parser.current_span(),
-                            format!("`{modifier}` parameters may not be call-by-name"),
+                            ParseIssue::Parameter(ParameterIssue::ByNameClassParameterNotAllowed {
+                                accessor,
+                            }),
                         );
                     }
                     parser.advance();
@@ -339,10 +352,11 @@ where
                 }
             })
         } else {
-            self.report(
-                ParseDiagnosticKind::ExpectedType,
-                "expected `:` and a parameter type",
-            );
+            self.report_issue(ParseIssue::Parameter(
+                ParameterIssue::ExpectedParameterColonAndType {
+                    found: self.current().kind,
+                },
+            ));
             self.error_type(self.current_span())
         };
         if matches!(
@@ -354,10 +368,16 @@ where
             .any(|modifier| matches!(modifier, Modifier::Given | Modifier::Implicit))
             && let Some(position) = self.ast.get(tpt).position
         {
-            self.report_at(
-                ParseDiagnosticKind::UnexpectedToken,
+            let clause = if metadata.modifiers.contains(&Modifier::Given) {
+                ContextualParameterClause::Given
+            } else {
+                ContextualParameterClause::Implicit
+            };
+            self.report_issue_at(
                 SourceSpan::new(self.source_id, position.span()),
-                "repeated parameters are not allowed in `given` or `implicit` clauses",
+                ParseIssue::Parameter(
+                    ParameterIssue::RepeatedParameterNotAllowedInContextualClause { clause },
+                ),
             );
         }
         let rhs = if is_bare_assignment(self) {
@@ -511,10 +531,11 @@ where
         loop {
             if self.current().kind == TokenKind::Punctuation(Punctuation::RightParen) {
                 if params.is_empty() {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedToken,
-                        "expected a parameter type after `using`",
-                    );
+                    self.report_issue(ParseIssue::Parameter(
+                        ParameterIssue::ExpectedUsingParameterType {
+                            found: self.current().kind,
+                        },
+                    ));
                 }
                 self.advance();
                 break;
@@ -527,10 +548,11 @@ where
                     | TokenKind::Indent
                     | TokenKind::Outdent
             ) {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected a parameter type after `using`",
-                );
+                self.report_issue(ParseIssue::Parameter(
+                    ParameterIssue::ExpectedUsingParameterType {
+                        found: self.current().kind,
+                    },
+                ));
                 break;
             }
 
@@ -538,10 +560,11 @@ where
             let checkpoint = self.cursor.checkpoint();
             let tpt = self.with_parse_kind(ParseKind::Type, |parser| parser.type_expr());
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing an anonymous `using` parameter",
-                );
+                self.report_issue(ParseIssue::Parameter(
+                    ParameterIssue::AnonymousUsingParameterTypeNoProgress {
+                        found: self.current().kind,
+                    },
+                ));
                 self.recover_term_param_clause();
                 break;
             }
@@ -561,10 +584,11 @@ where
                 self.advance();
                 if self.current().kind == TokenKind::Punctuation(Punctuation::RightParen) {
                     if !self.comma_is_followed_by_line_break_before_right_paren(comma_end) {
-                        self.report(
-                            ParseDiagnosticKind::ExpectedToken,
-                            "expected a parameter type after `,`",
-                        );
+                        self.report_issue(ParseIssue::Parameter(
+                            ParameterIssue::ExpectedUsingParameterTypeAfterComma {
+                                found: self.current().kind,
+                            },
+                        ));
                     }
                     self.advance();
                     break;
@@ -610,10 +634,11 @@ where
                 }
             }
             _ => {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected a parameter name",
-                );
+                self.report_issue(ParseIssue::Parameter(
+                    ParameterIssue::ExpectedParameterName {
+                        found: self.current().kind,
+                    },
+                ));
                 self.missing_param_name()
             }
         }
@@ -655,6 +680,14 @@ where
             }
         }
         self.accept(TokenKind::Punctuation(Punctuation::RightParen));
+    }
+}
+
+fn parameter_mutability(is_var: bool) -> ParameterMutability {
+    if is_var {
+        ParameterMutability::Var
+    } else {
+        ParameterMutability::Val
     }
 }
 
@@ -710,6 +743,7 @@ fn is_bare_assignment<S: dotty_core::TokenSource>(parser: &mut Parser<'_, '_, S>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ParseDiagnosticKind;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::NameInterner;
     use dotty_core::ast::UntypedNode;
@@ -897,13 +931,23 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
         ));
         assert!(parameter.metadata.modifiers.contains(&Modifier::Given));
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
-                && diagnostic
-                    .legacy_message()
-                    .expect("legacy parser diagnostic")
-                    .contains("not allowed in `given` or `implicit`")
-        }));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Parameter(
+                ParameterIssue::RepeatedParameterNotAllowedInContextualClause {
+                    clause: ContextualParameterClause::Given,
+                }
+            )
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(5, 7).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
@@ -935,13 +979,23 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::PostfixOp(_))
         ));
         assert!(parameter.metadata.modifiers.contains(&Modifier::Implicit));
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
-                && diagnostic
-                    .legacy_message()
-                    .expect("legacy parser diagnostic")
-                    .contains("not allowed in `given` or `implicit`")
-        }));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Parameter(
+                ParameterIssue::RepeatedParameterNotAllowedInContextualClause {
+                    clause: ContextualParameterClause::Implicit,
+                }
+            )
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(14, 16).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
@@ -1574,14 +1628,18 @@ mod tests {
         assert_eq!(clauses[0].len(), 1);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::ExpectedToken
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Parameter(ParameterIssue::ExpectedClassParameterAccessor {
+                found: TokenKind::Identifier,
+            })
         );
         assert_eq!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "`val` or `var` expected"
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(7, 8).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
@@ -1868,18 +1926,18 @@ mod tests {
         assert_eq!(clauses[0].len(), 1);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::UnexpectedToken
-        );
-        assert_eq!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "`val` parameters may not be call-by-name"
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Parameter(ParameterIssue::ByNameClassParameterNotAllowed {
+                accessor: ParameterMutability::Val,
+            })
         );
         assert_eq!(
             parser.diagnostics()[0].span(),
             dotty_core::TextRange::new(13, 15).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
@@ -1907,18 +1965,18 @@ mod tests {
         assert_eq!(clauses[0].len(), 1);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::UnexpectedToken
-        );
-        assert_eq!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "`var` parameters may not be call-by-name"
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Parameter(ParameterIssue::ByNameClassParameterNotAllowed {
+                accessor: ParameterMutability::Var,
+            })
         );
         assert_eq!(
             parser.diagnostics()[0].span(),
             dotty_core::TextRange::new(13, 15).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
@@ -1945,10 +2003,18 @@ mod tests {
         assert_eq!(clauses[0].len(), 1);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "`val` parameters may not be call-by-name"
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Parameter(ParameterIssue::ByNameClassParameterNotAllowed {
+                accessor: ParameterMutability::Val,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(9, 11).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
@@ -2120,14 +2186,18 @@ mod tests {
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::ExpectedToken
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Parameter(ParameterIssue::ExpectedClassParameterAccessor {
+                found: TokenKind::Identifier,
+            })
         );
         assert_eq!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "`val` or `var` expected"
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(10, 11).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
         );
     }
 

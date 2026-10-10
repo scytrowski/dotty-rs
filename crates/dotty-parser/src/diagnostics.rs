@@ -31,6 +31,13 @@ pub enum ParameterMutability {
     Var,
 }
 
+/// Contextual parameter-clause form relevant to a parser diagnostic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextualParameterClause {
+    Given,
+    Implicit,
+}
+
 /// Typed failures emitted while parsing `val`, `var`, and `def` declarations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeclarationIssue {
@@ -134,7 +141,7 @@ pub enum ParameterIssue {
     /// A `val`/`var` constructor parameter cannot use a by-name type.
     ByNameClassParameterNotAllowed { accessor: ParameterMutability },
     /// Repeated parameters are not allowed in legacy contextual clauses.
-    RepeatedParameterNotAllowedInContextualClause { modifier: Modifier },
+    RepeatedParameterNotAllowedInContextualClause { clause: ContextualParameterClause },
     /// An anonymous or named `using` clause has no parameter type.
     ExpectedUsingParameterType { found: TokenKind },
     /// Parsing an anonymous `using` parameter type did not advance the source.
