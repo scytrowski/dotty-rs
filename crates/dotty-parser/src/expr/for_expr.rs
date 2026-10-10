@@ -2,7 +2,7 @@ use dotty_core::ast::{ForDo, ForYield, GenAlias, GenCheckMode, GenFrom, UntypedN
 use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
 use super::can_start_expr;
-use crate::{ExpressionIssue, Location, ParseDiagnosticKind, ParseIssue, ParseKind, Parser};
+use crate::{ExpressionIssue, Location, ParseIssue, ParseKind, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -435,6 +435,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ParseDiagnosticKind;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::ast::UntypedNode;
     use dotty_core::{NameInterner, Token, TokenValue};
