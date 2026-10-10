@@ -6,7 +6,7 @@ use dotty_classloader::classloader::{
     ClassPathEntry, ClasspathSymbolResolver, CompositeClassPath, JarClassPath, JdkClassPath,
     LoadingSession,
 };
-use dotty_core::ast::{Match, Tree, TreeKind, Untyped, UntypedNode};
+use dotty_core::ast::{Match, Modifier, Tree, TreeKind, Untyped, UntypedNode, VisibilitySyntax};
 use dotty_core::{
     Definitions, MemberRequest, Packages, ResolutionError, ResolverCheckpoint, SemanticStore,
     SourceId, SourceText, SymbolId, SymbolResolver, TextRange,
@@ -233,10 +233,12 @@ struct FailureClassification {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RootFailure {
     range: TextRange,
+    enclosing_method_tree: u32,
     failure: FailureClassification,
     missing_type_tree: Option<u32>,
     singleton_reference_tree: Option<u32>,
     local_method_signature: Option<(u32, String)>,
+    local_value_declaration: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -262,6 +264,7 @@ struct Audit {
     patdef_profile: PatDefProfile,
     missing_declared_type_profile: MissingDeclaredTypeProfile,
     local_method_first_blockers: BTreeMap<String, String>,
+    local_value_blocker_profile: LocalValueBlockerProfile,
     by_name_method_outcomes: BTreeMap<String, String>,
     local_method_signature_profile: LocalMethodSignatureProfile,
     singleton_reference_profile: SingletonReferenceProfile,
@@ -301,6 +304,7 @@ impl Default for Audit {
             patdef_profile: PatDefProfile::default(),
             missing_declared_type_profile: MissingDeclaredTypeProfile::default(),
             local_method_first_blockers: BTreeMap::new(),
+            local_value_blocker_profile: LocalValueBlockerProfile::default(),
             by_name_method_outcomes: BTreeMap::new(),
             local_method_signature_profile: LocalMethodSignatureProfile::default(),
             singleton_reference_profile: SingletonReferenceProfile::default(),
@@ -308,6 +312,47 @@ impl Default for Audit {
             source_function_method_outcomes: BTreeSet::new(),
             source_function_outcomes: BTreeMap::new(),
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct LocalValueBlockerObservation {
+    path: String,
+    enclosing_method: String,
+    enclosing_method_tree: u32,
+    declaration_tree: u32,
+    line: usize,
+    span: String,
+    node_kind: String,
+    declaration_name: String,
+    declaration_kind: String,
+    modifiers: String,
+    visibility: String,
+    annotations: bool,
+    type_form: String,
+    rhs_present: bool,
+    pattern_roots: String,
+    source_pattern_count: Option<usize>,
+    binder_count: Option<usize>,
+    attribution: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct LocalValueBlockerProfile {
+    observations: BTreeSet<LocalValueBlockerObservation>,
+}
+
+impl LocalValueBlockerProfile {
+    fn record(&mut self, observation: LocalValueBlockerObservation) {
+        self.observations.insert(observation);
+    }
+
+    fn distinct_declaration_count(&self) -> usize {
+        self.observations
+            .iter()
+            .map(|row| (row.path.as_str(), row.declaration_tree))
+            .collect::<BTreeSet<_>>()
+            .len()
     }
 }
 
@@ -508,6 +553,9 @@ impl Audit {
             .merge(other.missing_declared_type_profile);
         self.local_method_first_blockers
             .extend(other.local_method_first_blockers);
+        self.local_value_blocker_profile
+            .observations
+            .extend(other.local_value_blocker_profile.observations);
         self.by_name_method_outcomes
             .extend(other.by_name_method_outcomes);
         self.local_method_signature_profile
@@ -859,6 +907,22 @@ fn pinned_scala39_local_definition_audit() {
         .failures
         .get("LocalMethodSignatureDeferred")
         .map_or(0, |bucket| bucket.count);
+    let local_value_blocker_count = audit
+        .failures
+        .get("LocalBlockDeclarationDeferred::val/var definition")
+        .map_or(0, |bucket| bucket.count);
+    assert_eq!(local_value_blocker_count, 21);
+    assert_eq!(audit.local_value_blocker_profile.observations.len(), 21);
+    assert_eq!(
+        audit
+            .local_value_blocker_profile
+            .observations
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        8
+    );
     assert_eq!(
         audit.local_method_signature_profile.total, local_method_signature_failure_count,
         "every LocalMethodSignatureDeferred first blocker must retain its exact payload and source shape"
@@ -1047,6 +1111,7 @@ fn pinned_scala39_local_definition_audit() {
     println!("local_defdefs={}", audit.local_defdefs);
     println!("typed_local_defdefs={}", audit.typed_local_defdefs);
     print_local_patdefs(&audit.patdef_profile);
+    print_local_value_blocker_profile(&audit.local_value_blocker_profile);
     println!(
         "unsupported_expression_total={}",
         sum_buckets_with_prefix(&audit.failures, "UnsupportedExpression::")
@@ -2282,6 +2347,111 @@ fn local_definition_audit_counts_pattern_bindings_in_local_definitions() {
         Some(&1),
         "{audit:?}"
     );
+}
+
+#[test]
+fn local_value_blocker_profiler_classifies_declaration_shapes_and_deduplicates() {
+    let source = "object Audit { def sample: Int = { val plain = 1; var mutable = 2; given context: Int = 3; implicit val legacy: Int = 4; lazy val delayed = 5; inline val constant = 6; val (left, right): (Int, Int) = (1, 2); val explicit: Int = 7; 0 }; def sibling: Int = 0 }";
+    let source_id = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source).expect("test source should scan");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source).expect("test source should be valid UTF-8"),
+        source_id,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let method = |name: &str| {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == name =>
+                {
+                    Some(tree)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing fixture method {name}"))
+    };
+    let sample = method("sample");
+    let sibling = method("sibling");
+    let observation = |name: &str| {
+        let declaration = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::ValDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == name =>
+                {
+                    Some(tree)
+                }
+                TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
+                    let mut binders = BTreeSet::new();
+                    for pattern in &definition.patterns {
+                        collect_patdef_binders(&parsed.ast, &store.names, *pattern, &mut binders);
+                    }
+                    binders.contains(name).then_some(tree)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing fixture declaration {name}"));
+        local_value_blocker_observation(
+            &parsed.ast,
+            &store.names,
+            source,
+            "Audit.scala",
+            sample,
+            declaration.index(),
+            sample.index(),
+        )
+        .unwrap()
+    };
+
+    let plain = observation("plain");
+    assert_eq!(plain.node_kind, "ValDef");
+    assert_eq!(plain.declaration_kind, "val");
+    assert_eq!(plain.type_form, "inferred");
+    assert!(plain.rhs_present);
+    assert_eq!(plain.visibility, "default");
+    assert_eq!(plain.annotations, false);
+
+    let mutable = observation("mutable");
+    assert_eq!(mutable.declaration_kind, "var");
+    assert_eq!(mutable.modifiers, "Var");
+    assert_eq!(observation("context").declaration_kind, "given");
+    assert_eq!(observation("legacy").declaration_kind, "implicit val");
+    assert_eq!(observation("delayed").declaration_kind, "lazy val");
+    assert_eq!(observation("constant").declaration_kind, "inline val");
+
+    let patdef = observation("left");
+    assert_eq!(patdef.node_kind, "PatDef");
+    assert_eq!(patdef.declaration_name, "left,right");
+    assert_eq!(patdef.pattern_roots, "Tuple");
+    assert_eq!(patdef.source_pattern_count, Some(1));
+    assert_eq!(patdef.binder_count, Some(2));
+    assert_eq!(patdef.type_form, "explicit");
+    assert_eq!(observation("explicit").type_form, "explicit");
+
+    let mut inherited = plain.clone();
+    inherited.enclosing_method_tree = sibling.index();
+    inherited.enclosing_method = "Audit.scala#tree=sibling:sibling".to_owned();
+    inherited.attribution = "inherited".to_owned();
+    let mut first = LocalValueBlockerProfile::default();
+    first.record(plain.clone());
+    first.record(inherited);
+    let mut second = LocalValueBlockerProfile::default();
+    second.record(plain.clone());
+    let mut inherited_again = plain;
+    inherited_again.enclosing_method_tree = sibling.index();
+    inherited_again.enclosing_method = "Audit.scala#tree=sibling:sibling".to_owned();
+    inherited_again.attribution = "inherited".to_owned();
+    second.record(inherited_again);
+    assert_eq!(first, second, "profile rows should have stable ordering");
+    assert_eq!(first.observations.len(), 2);
+    assert_eq!(first.distinct_declaration_count(), 1);
 }
 
 #[test]
@@ -3619,7 +3789,7 @@ fn audit_source_inner(
             let rhs = definition.rhs?;
             let method = index.symbol_at(source, tree)?;
             let range = parsed.ast.get(rhs).position?.span().range();
-            Some((method, rhs, range))
+            Some((method, tree, rhs, range))
         })
         .collect::<Vec<_>>();
 
@@ -3666,14 +3836,14 @@ fn audit_source_inner(
     let mut root_failures = Vec::new();
     let mut method_ranges = root_methods
         .iter()
-        .map(|(_, _, range)| *range)
+        .map(|(_, _, _, range)| *range)
         .collect::<Vec<_>>();
     method_ranges.extend(parsed.ast.iter().filter_map(|(_, node)| {
         matches!(&node.kind, TreeKind::DefDef(definition) if definition.rhs.is_some())
             .then(|| node.position.map(|position| position.span().range()))
             .flatten()
     }));
-    for (method, rhs, range) in root_methods {
+    for (method, method_tree, rhs, range) in root_methods {
         let outcome = typer
             .expression_context_for(method)
             .and_then(|context| typer.type_expression(rhs, context));
@@ -3751,12 +3921,22 @@ fn audit_source_inner(
                 } => Some((*tree_index, (*feature).to_owned())),
                 _ => None,
             };
+            let local_value_declaration = match &error {
+                TyperError::LocalBlockDeclarationDeferred {
+                    tree_index,
+                    kind: "val/var definition",
+                    ..
+                } => Some(*tree_index),
+                _ => None,
+            };
             root_failures.push(RootFailure {
                 range,
+                enclosing_method_tree: method_tree.index(),
                 failure,
                 missing_type_tree,
                 singleton_reference_tree,
                 local_method_signature,
+                local_value_declaration,
             });
         }
     }
@@ -3853,32 +4033,42 @@ fn audit_source_inner(
                 }
             }
         } else {
-            let (kind, missing_type_tree, singleton_reference_tree, local_method_signature) =
-                root_failures
-                    .iter()
-                    .filter(|failure| {
-                        failure.range.start() <= range.start() && range.end() <= failure.range.end()
-                    })
-                    .min_by_key(|failure| failure.range.end().saturating_sub(failure.range.start()))
-                    .map(|failure| {
-                        (
-                            failure.failure.clone(),
-                            failure.missing_type_tree,
-                            failure.singleton_reference_tree,
-                            failure.local_method_signature.clone(),
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        (
-                            FailureClassification {
-                                bucket: "NoSuccessfulEnclosingMethodTyping".to_owned(),
-                                family: FailureFamily::Other,
-                            },
-                            None,
-                            None,
-                            None,
-                        )
-                    });
+            let (
+                kind,
+                missing_type_tree,
+                singleton_reference_tree,
+                local_method_signature,
+                local_value_declaration,
+                blocker_method_tree,
+            ) = root_failures
+                .iter()
+                .filter(|failure| {
+                    failure.range.start() <= range.start() && range.end() <= failure.range.end()
+                })
+                .min_by_key(|failure| failure.range.end().saturating_sub(failure.range.start()))
+                .map(|failure| {
+                    (
+                        failure.failure.clone(),
+                        failure.missing_type_tree,
+                        failure.singleton_reference_tree,
+                        failure.local_method_signature.clone(),
+                        failure.local_value_declaration,
+                        Some(failure.enclosing_method_tree),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (
+                        FailureClassification {
+                            bucket: "NoSuccessfulEnclosingMethodTyping".to_owned(),
+                            family: FailureFamily::Other,
+                        },
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                });
             if kind.bucket == "UnsupportedSingletonReference" {
                 let detail = singleton_reference_tree
                     .and_then(|reference_tree| {
@@ -3899,6 +4089,21 @@ fn audit_source_inner(
             audit
                 .local_method_first_blockers
                 .insert(format!("{path}#tree={}", tree.index()), kind.bucket.clone());
+            if kind.bucket == "LocalBlockDeclarationDeferred::val/var definition"
+                && let (Some(declaration_tree), Some(blocker_method_tree)) =
+                    (local_value_declaration, blocker_method_tree)
+                && let Some(observation) = local_value_blocker_observation(
+                    &parsed.ast,
+                    &typer.store().names,
+                    text,
+                    path,
+                    tree,
+                    declaration_tree,
+                    blocker_method_tree,
+                )
+            {
+                audit.local_value_blocker_profile.record(observation);
+            }
             if (path == "compiler/src/dotty/tools/dotc/core/SymUtils.scala"
                 || path == "compiler/src/dotty/tools/dotc/typer/Typer.scala")
                 && let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind
@@ -4777,6 +4982,216 @@ fn collect_local_patdefs(
     profile
 }
 
+fn local_value_blocker_observation(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::names::NameInterner,
+    source_text: &str,
+    path: &str,
+    enclosing_method_tree: dotty_core::TreeId<Untyped>,
+    declaration_tree_index: u32,
+    blocker_method_tree_index: u32,
+) -> Option<LocalValueBlockerObservation> {
+    let declaration_tree = arena
+        .iter()
+        .find_map(|(tree, _)| (tree.index() == declaration_tree_index).then_some(tree))?;
+    let declaration = arena.try_get(declaration_tree)?;
+    let span = declaration.position.map(|position| position.span().range());
+    let declaration_start = span.map_or(0, |range| range.start() as usize);
+    let line = source_text
+        .get(..declaration_start.min(source_text.len()))
+        .map_or(1, |prefix| {
+            prefix.bytes().filter(|byte| *byte == b'\n').count() + 1
+        });
+    let (
+        node_kind,
+        declaration_name,
+        declaration_kind,
+        modifiers,
+        visibility,
+        annotations,
+        tpt,
+        rhs,
+        pattern_roots,
+        source_pattern_count,
+        binder_count,
+    ) = match &declaration.kind {
+        TreeKind::ValDef(definition) => {
+            let name = names.resolve(definition.name.as_name().text());
+            (
+                "ValDef".to_owned(),
+                if name.is_empty() {
+                    "<anonymous>".to_owned()
+                } else {
+                    name.to_owned()
+                },
+                source_declaration_kind(&definition.metadata),
+                source_modifier_list(&definition.metadata),
+                source_visibility(names, definition.metadata.visibility),
+                !definition.metadata.annotations.is_empty(),
+                Some(definition.tpt),
+                definition.rhs.is_some(),
+                String::new(),
+                None,
+                None,
+            )
+        }
+        TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => {
+            let mut binders = BTreeSet::new();
+            for pattern in &definition.patterns {
+                collect_patdef_binders(arena, names, *pattern, &mut binders);
+            }
+            let binder_count = binders.len();
+            let roots = definition
+                .patterns
+                .iter()
+                .map(|pattern| patdef_root_shape(arena, names, *pattern))
+                .collect::<Vec<_>>()
+                .join(",");
+            (
+                "PatDef".to_owned(),
+                if binders.is_empty() {
+                    "<pattern>".to_owned()
+                } else {
+                    binders.into_iter().collect::<Vec<_>>().join(",")
+                },
+                source_declaration_kind(&definition.modifiers),
+                source_modifier_list(&definition.modifiers),
+                source_visibility(names, definition.modifiers.visibility),
+                !definition.modifiers.annotations.is_empty(),
+                Some(definition.tpt),
+                definition.rhs.is_some(),
+                roots,
+                Some(definition.patterns.len()),
+                Some(binder_count),
+            )
+        }
+        _ => (
+            format!("{:?}", declaration.kind),
+            "<none>".to_owned(),
+            "other".to_owned(),
+            String::new(),
+            "default".to_owned(),
+            false,
+            None,
+            false,
+            String::new(),
+            None,
+            None,
+        ),
+    };
+    let type_form = tpt.map_or_else(
+        || "unavailable".to_owned(),
+        |tree| source_type_form(arena, tree),
+    );
+    let range = span.map_or_else(
+        || "unknown".to_owned(),
+        |range| format!("{}..{}", range.start(), range.end()),
+    );
+    let method_name = arena
+        .try_get(enclosing_method_tree)
+        .and_then(|node| match &node.kind {
+            TreeKind::DefDef(definition) => Some(names.resolve(definition.name.as_name().text())),
+            _ => None,
+        })
+        .unwrap_or("<unknown>");
+
+    Some(LocalValueBlockerObservation {
+        path: path.to_owned(),
+        enclosing_method: format!(
+            "{path}#tree={}:{}",
+            enclosing_method_tree.index(),
+            method_name
+        ),
+        enclosing_method_tree: enclosing_method_tree.index(),
+        declaration_tree: declaration_tree_index,
+        line,
+        span: range,
+        node_kind,
+        declaration_name,
+        declaration_kind,
+        modifiers,
+        visibility,
+        annotations,
+        type_form,
+        rhs_present: rhs,
+        pattern_roots,
+        source_pattern_count,
+        binder_count,
+        attribution: if enclosing_method_tree.index() == blocker_method_tree_index {
+            "direct".to_owned()
+        } else {
+            "inherited".to_owned()
+        },
+    })
+}
+
+fn source_declaration_kind(modifiers: &dotty_core::ast::Modifiers) -> String {
+    let kind = if modifiers.modifiers.contains(&Modifier::Given) {
+        "given"
+    } else if modifiers.modifiers.contains(&Modifier::Implicit) {
+        "implicit val"
+    } else if modifiers.modifiers.contains(&Modifier::Lazy) {
+        "lazy val"
+    } else if modifiers.modifiers.contains(&Modifier::Inline) {
+        "inline val"
+    } else if modifiers.modifiers.contains(&Modifier::Var) {
+        "var"
+    } else {
+        "val"
+    };
+    kind.to_owned()
+}
+
+fn source_modifier_list(modifiers: &dotty_core::ast::Modifiers) -> String {
+    modifiers
+        .modifiers
+        .iter()
+        .map(|modifier| format!("{modifier:?}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn source_visibility(
+    names: &dotty_core::names::NameInterner,
+    visibility: Option<VisibilitySyntax>,
+) -> String {
+    match visibility {
+        None => "default".to_owned(),
+        Some(VisibilitySyntax::Private { qualifier }) => {
+            format!(
+                "private{}",
+                qualifier.map_or_else(String::new, |name| {
+                    format!("[{}]", names.resolve(name.text()))
+                })
+            )
+        }
+        Some(VisibilitySyntax::Protected { qualifier }) => format!(
+            "protected{}",
+            qualifier.map_or_else(String::new, |name| {
+                format!("[{}]", names.resolve(name.text()))
+            })
+        ),
+    }
+}
+
+fn source_type_form(
+    arena: &dotty_core::AstArena<Untyped>,
+    tree: dotty_core::TreeId<Untyped>,
+) -> String {
+    let Some(node) = arena.try_get(tree) else {
+        return "unknown".to_owned();
+    };
+    if matches!(node.kind, TreeKind::TypeTree(_))
+        && node
+            .position
+            .is_none_or(|position| position.span().range().is_empty())
+    {
+        "inferred".to_owned()
+    } else {
+        "explicit".to_owned()
+    }
+}
+
 fn patdef_modifier(modifiers: &dotty_core::ast::Modifiers) -> &'static str {
     use dotty_core::ast::Modifier;
     if modifiers.modifiers.contains(&Modifier::Lazy) {
@@ -4997,6 +5412,40 @@ fn print_local_patdefs(profile: &PatDefProfile) {
             .collect::<Vec<_>>()
             .join(", ")
     );
+}
+
+fn print_local_value_blocker_profile(profile: &LocalValueBlockerProfile) {
+    println!("local_value_blocker_profile:");
+    println!("  occurrences={}", profile.observations.len());
+    println!(
+        "  distinct_declarations={}",
+        profile.distinct_declaration_count()
+    );
+    println!("  observations:");
+    for row in &profile.observations {
+        println!(
+            "    {}:method={} declaration_tree={} line={} span={} node={} name={} kind={} modifiers=[{}] visibility={} annotations={} type={} rhs={} pattern_roots=[{}] source_patterns={} binders={} attribution={}",
+            row.path,
+            row.enclosing_method,
+            row.declaration_tree,
+            row.line,
+            row.span,
+            row.node_kind,
+            row.declaration_name,
+            row.declaration_kind,
+            row.modifiers,
+            row.visibility,
+            row.annotations,
+            row.type_form,
+            row.rhs_present,
+            row.pattern_roots,
+            row.source_pattern_count
+                .map_or_else(|| "n/a".to_owned(), |count| count.to_string()),
+            row.binder_count
+                .map_or_else(|| "n/a".to_owned(), |count| count.to_string()),
+            row.attribution,
+        );
+    }
 }
 
 fn print_patdef_counts(name: &str, counts: &BTreeMap<String, usize>) {
