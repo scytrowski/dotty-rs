@@ -656,7 +656,7 @@ supplemental Scala 3.9.0 corpus audit records zero signature observations. The
 8 by-name observations moved past the signature guard in #900; all 6
 parameter-modifier observations (one direct origin and five inherited
 siblings in `MegaPhase.scala`) moved past it in #902 by accepting the existing
-`Inline` symbol flag. The audit was run twice with JDK feature release 26 and
+`Inline` symbol flag. The audit was run twice with JDK feature release 21 and
 the pinned Scala source/artifact inputs; normalized output matched
 byte-for-byte. The two direct by-name origins, `instantiateCFT` and `cases`,
 still have `ImportQualifierNotFound` as their first blocker. Their applications
