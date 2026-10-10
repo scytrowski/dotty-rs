@@ -7,7 +7,7 @@
 use dotty_core::ast::{Apply, ApplyKind, Modifier, Modifiers, New};
 use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
-use crate::{Location, ParseDiagnosticKind, Parser};
+use crate::{Location, ModifierIssue, ParseIssue, Parser};
 
 /// Metadata parsed before a source definition.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -67,7 +67,7 @@ where
         is_annotation_start(self)
             || is_hard_modifier(self.current().kind)
             || self.soft_modifier().is_some()
-            || self.is_deferred_soft_modifier()
+            || self.deferred_soft_modifier().is_some()
     }
 
     /// Parses annotations and modifiers until the definition keyword.
@@ -78,10 +78,11 @@ where
         loop {
             if is_annotation_start(self) {
                 if !prefix.metadata.modifiers.is_empty() || prefix.metadata.visibility.is_some() {
-                    self.report(
-                        ParseDiagnosticKind::UnexpectedToken,
-                        "annotations must precede definition modifiers",
-                    );
+                    self.report_issue(ParseIssue::Modifier(
+                        ModifierIssue::AnnotationAfterModifier {
+                            found: self.current().kind,
+                        },
+                    ));
                 }
                 let annotation = self.parse_annotation();
                 prefix.metadata.annotations.push(annotation);
@@ -111,11 +112,10 @@ where
                 continue;
             }
 
-            if self.is_deferred_soft_modifier() {
-                self.report(
-                    ParseDiagnosticKind::UnsupportedSyntax,
-                    "this contextual modifier is not supported yet",
-                );
+            if let Some(name) = self.deferred_soft_modifier() {
+                self.report_issue(ParseIssue::Modifier(
+                    ModifierIssue::UnsupportedContextualModifier { name },
+                ));
                 self.advance();
                 self.consume_prefix_newlines();
                 continue;
@@ -161,16 +161,16 @@ where
 
     pub(crate) fn add_modifier(&mut self, metadata: &mut Modifiers, modifier: Modifier) {
         if metadata.modifiers.contains(&modifier) {
-            self.report(
-                ParseDiagnosticKind::UnexpectedToken,
-                format!("duplicate definition modifier `{modifier:?}`"),
-            );
+            self.report_issue(ParseIssue::Modifier(ModifierIssue::DuplicateModifier {
+                modifier,
+            }));
         }
         metadata.modifiers.push(modifier);
     }
 
     pub(crate) fn parse_visibility(&mut self, metadata: &mut Modifiers) {
         let visibility_span = self.current_span();
+        let visibility_kind = self.current().kind;
         let visibility = match self.current().kind {
             TokenKind::Keyword(HardKeyword::Private) => {
                 dotty_core::ast::VisibilitySyntax::Private {
@@ -186,10 +186,11 @@ where
         };
 
         if metadata.visibility.is_some() {
-            self.report_at(
-                ParseDiagnosticKind::UnexpectedToken,
+            self.report_issue_at(
                 visibility_span,
-                "duplicate definition visibility",
+                ParseIssue::Modifier(ModifierIssue::DuplicateVisibility {
+                    found: visibility_kind,
+                }),
             );
         } else {
             metadata.visibility = Some(visibility);
@@ -223,10 +224,11 @@ where
                     .map(|name| *name.as_name())
             }
             _ => {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected a visibility qualifier",
-                );
+                self.report_issue(ParseIssue::Modifier(
+                    ModifierIssue::ExpectedVisibilityQualifier {
+                        found: self.current().kind,
+                    },
+                ));
                 None
             }
         };
@@ -273,22 +275,23 @@ where
         }
     }
 
-    fn is_deferred_soft_modifier(&mut self) -> bool {
+    fn deferred_soft_modifier(&mut self) -> Option<dotty_core::Name> {
         if !matches!(self.current().kind, TokenKind::Identifier) {
-            return false;
+            return None;
         }
-        let Ok(name) = self.intern_current_term_name() else {
-            return false;
+        let Ok(interned_name) = self.intern_current_term_name() else {
+            return None;
         };
         let known = self.known_names();
-        name == known.erased
-            || name == known.tracked
-            || name == known.into
-            || (name == known.update && !self.features().capture_checking)
+        (interned_name == known.erased
+            || interned_name == known.tracked
+            || interned_name == known.into
+            || (interned_name == known.update && !self.features().capture_checking)
             // `opaque` is a contextual modifier only for `opaque type`, but
             // it must remain deferred elsewhere so unsupported modifier
             // recovery preserves the following definition boundary.
-            || name == known.opaque
+            || interned_name == known.opaque)
+            .then_some(*interned_name.as_name())
     }
 
     fn starts_opaque_type_definition(&mut self) -> bool {
@@ -346,10 +349,11 @@ where
             })
         } else {
             let position = self.current_span();
-            self.report(
-                ParseDiagnosticKind::ExpectedType,
-                "expected an annotation type after `@`",
-            );
+            self.report_issue(ParseIssue::Modifier(
+                ModifierIssue::ExpectedAnnotationType {
+                    found: self.current().kind,
+                },
+            ));
             self.error_type(position)
         };
         let new_tree = self.alloc_from(mark, TreeKind::New(New { tpt }));
@@ -437,7 +441,7 @@ fn is_prefix_continuation(kind: TokenKind) -> bool {
 }
 
 fn is_soft_modifier<S: dotty_core::TokenSource>(parser: &mut Parser<'_, '_, S>) -> bool {
-    parser.soft_modifier().is_some() || parser.is_deferred_soft_modifier()
+    parser.soft_modifier().is_some() || parser.deferred_soft_modifier().is_some()
 }
 
 #[cfg(test)]
@@ -445,6 +449,7 @@ mod tests {
     use super::*;
     use crate::compilation_unit::tests::{parser_for, token};
     use crate::statements::ParsedStatement;
+    use crate::{ModifierIssue, ParseDiagnosticKind, ParseIssue};
     use dotty_core::ast::UntypedNode;
     use dotty_core::{NameInterner, TokenKind, TreeKind};
 
@@ -601,12 +606,105 @@ mod tests {
             Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
         ));
         assert_eq!(parser.current().kind, TokenKind::Operator);
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                == "expected a visibility qualifier"
-        }));
+        assert_eq!(parser.diagnostics().len(), 2);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Modifier(ModifierIssue::ExpectedVisibilityQualifier {
+                found: TokenKind::Operator,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].issue().code(),
+            "parser.modifier.expected_visibility_qualifier"
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(8, 9).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[1].issue(),
+            &ParseIssue::ExpectedToken {
+                expected: TokenKind::Punctuation(Punctuation::RightBracket),
+                found: TokenKind::Operator,
+            }
+        );
+        assert_eq!(
+            parser.diagnostics()[1].span(),
+            dotty_core::TextRange::new(8, 9).unwrap()
+        );
+    }
+
+    #[test]
+    fn duplicate_visibility_reports_the_second_visibility_token() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "private protected val",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Private), 0, 7),
+                token(TokenKind::Keyword(HardKeyword::Protected), 8, 17),
+                token(TokenKind::Keyword(HardKeyword::Val), 18, 21),
+                token(TokenKind::Eof, 21, 21),
+            ],
+            &mut names,
+        );
+
+        let prefix = parser.parse_definition_prefix();
+
+        assert!(matches!(
+            prefix.metadata.visibility,
+            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None })
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Keyword(HardKeyword::Val));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Modifier(ModifierIssue::DuplicateVisibility {
+                found: TokenKind::Keyword(HardKeyword::Protected),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(8, 17).unwrap()
+        );
+    }
+
+    #[test]
+    fn unsupported_contextual_modifier_retains_its_interned_name() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "into class A",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Keyword(HardKeyword::Class), 5, 10),
+                token(TokenKind::Identifier, 11, 12),
+                token(TokenKind::Eof, 12, 12),
+            ],
+            &mut names,
+        );
+
+        assert!(parser.starts_definition_prefix());
+        let prefix = parser.parse_definition_prefix();
+
+        assert!(prefix.metadata.modifiers.is_empty());
+        assert_eq!(
+            parser.current().kind,
+            TokenKind::Keyword(HardKeyword::Class)
+        );
+        assert_eq!(parser.diagnostics().len(), 1);
+        let ParseIssue::Modifier(ModifierIssue::UnsupportedContextualModifier { name }) =
+            parser.diagnostics()[0].issue()
+        else {
+            panic!("expected an unsupported-contextual-modifier issue");
+        };
+        assert_eq!(parser.names.resolve(name.text()), "into");
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(0, 4).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
     }
 
     #[test]
@@ -756,7 +854,24 @@ mod tests {
             panic!("expected a definition");
         };
         assert_eq!(parser.diagnostics().len(), 1);
-        assert_eq!(parser.diagnostics()[0].span().start(), 6);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Modifier(ModifierIssue::DuplicateModifier {
+                modifier: Modifier::Final,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnexpectedToken
+        );
+        assert_eq!(
+            parser.diagnostics()[0].issue().code(),
+            "parser.modifier.duplicate_modifier"
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(6, 11).unwrap()
+        );
     }
 
     #[test]
@@ -777,6 +892,16 @@ mod tests {
             panic!("expected the class to remain parseable");
         };
         assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Modifier(ModifierIssue::ExpectedAnnotationType {
+                found: TokenKind::Keyword(HardKeyword::Class),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(2, 7).unwrap()
+        );
         assert!(parser.current().kind == TokenKind::Eof);
     }
 
@@ -799,8 +924,14 @@ mod tests {
         assert_eq!(parser.current().kind, TokenKind::Newline);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::ExpectedType
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Modifier(ModifierIssue::ExpectedAnnotationType {
+                found: TokenKind::Newline,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(1, 2).unwrap()
         );
     }
 
@@ -824,7 +955,16 @@ mod tests {
             panic!("expected a definition");
         };
         assert_eq!(parser.diagnostics().len(), 1);
-        assert_eq!(parser.diagnostics()[0].span().start(), 6);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Modifier(ModifierIssue::AnnotationAfterModifier {
+                found: TokenKind::Operator,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(6, 7).unwrap()
+        );
         assert!(parser.current().kind == TokenKind::Eof);
     }
 
