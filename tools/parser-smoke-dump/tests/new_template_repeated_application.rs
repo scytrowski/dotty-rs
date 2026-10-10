@@ -19,7 +19,10 @@ fn reports_repeated_constructor_application_and_preserves_the_next_tuple() {
 
     assert!(
         result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message() == "a constructor application cannot be applied again"
+            diagnostic
+                .legacy_message()
+                .expect("legacy parser diagnostic")
+                == "a constructor application cannot be applied again"
         }),
         "expected the repeated constructor application diagnostic, got {:?}",
         result.diagnostics

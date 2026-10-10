@@ -920,7 +920,8 @@ mod tests {
         assert_eq!(parser.current().kind, TokenKind::Newline);
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("expected an expression after lambda arrow")
         }));
     }
@@ -1114,7 +1115,8 @@ mod tests {
         ));
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("at least one formal parameter")
         }));
     }
@@ -1145,7 +1147,8 @@ mod tests {
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("expected an expression after lambda arrow")
         }));
     }
@@ -1180,7 +1183,8 @@ mod tests {
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("expected `,` or `)` after lambda parameter")
         }));
     }

@@ -1109,7 +1109,12 @@ mod tests {
         assert_eq!(parser.diagnostics().len(), 1);
         let diagnostic = &parser.diagnostics()[0];
         assert_eq!(diagnostic.kind(), ParseDiagnosticKind::ExpectedType);
-        assert_eq!(diagnostic.message(), "expected a type parameter name");
+        assert_eq!(
+            diagnostic
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
+            "expected a type parameter name"
+        );
         assert_eq!(diagnostic.span(), TextRange::new(1, 2).unwrap());
     }
 
@@ -1517,7 +1522,8 @@ mod tests {
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("expected `,` or `]` after a type parameter")
         }));
     }
@@ -1537,11 +1543,11 @@ mod tests {
 
         let params = parser.parse_type_param_clause(ParamOwner::Type);
         assert!(params.is_empty());
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.message().contains("expected a type parameter") })
-        );
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .legacy_message()
+                .expect("legacy parser diagnostic")
+                .contains("expected a type parameter")
+        }));
     }
 }

@@ -21,7 +21,10 @@ fn missing_argument_after_indented_new_template_does_not_swallow_later_argument(
         .iter()
         .find(|diagnostic| {
             diagnostic.kind() == ParseDiagnosticKind::ExpectedExpression
-                && diagnostic.message() == "expected an expression"
+                && diagnostic
+                    .legacy_message()
+                    .expect("legacy parser diagnostic")
+                    == "expected an expression"
         })
         .expect("the incomplete following argument should be diagnosed");
     let closing_paren = source.rfind(')').unwrap() as u32;
@@ -75,10 +78,10 @@ fn missing_argument_after_indented_new_template_does_not_swallow_later_argument(
         panic!("expected the next argument's left operand to remain an identifier");
     };
     assert_eq!(names.resolve(identifier.name.text()), "next");
-    assert!(
-        result
-            .diagnostics
-            .iter()
-            .all(|diagnostic| diagnostic.message() != "expected a template member separator")
-    );
+    assert!(result.diagnostics.iter().all(|diagnostic| {
+        diagnostic
+            .legacy_message()
+            .expect("legacy parser diagnostic")
+            != "expected a template member separator"
+    }));
 }

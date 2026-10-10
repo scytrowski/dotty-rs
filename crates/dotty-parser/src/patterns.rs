@@ -1081,7 +1081,9 @@ mod tests {
             ParseDiagnosticKind::ExpectedType
         );
         assert_eq!(
-            result.diagnostics[0].message(),
+            result.diagnostics[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "expected an annotation type after `@`"
         );
     }
@@ -1331,7 +1333,9 @@ mod tests {
         assert_eq!(parser.current().kind, TokenKind::Operator);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].message(),
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "expected a selector after `.` in pattern"
         );
     }
@@ -1355,7 +1359,9 @@ mod tests {
         assert_eq!(parser.current().kind, TokenKind::Operator);
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].message(),
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "expected a selector after `.` in pattern"
         );
     }
@@ -1761,7 +1767,12 @@ mod tests {
             result.diagnostics[0].kind(),
             ParseDiagnosticKind::UnexpectedToken
         );
-        assert!(result.diagnostics[0].message().contains("mixed"));
+        assert!(
+            result.diagnostics[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic")
+                .contains("mixed")
+        );
     }
 
     #[test]
@@ -1786,7 +1797,12 @@ mod tests {
             result.diagnostics[0].kind(),
             ParseDiagnosticKind::UnexpectedToken
         );
-        assert!(result.diagnostics[0].message().contains("mixed"));
+        assert!(
+            result.diagnostics[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic")
+                .contains("mixed")
+        );
     }
 
     #[test]

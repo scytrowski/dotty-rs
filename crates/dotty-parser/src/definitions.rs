@@ -1293,7 +1293,9 @@ mod tests {
             ParseDiagnosticKind::ExpectedToken
         );
         assert_eq!(
-            result.diagnostics[0].message(),
+            result.diagnostics[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "expected `:` or `=` after a value definition name"
         );
         assert_eq!(result.diagnostics[0].span(), TextRange::new(5, 6).unwrap());
@@ -2474,7 +2476,9 @@ mod tests {
             ParseDiagnosticKind::UnsupportedSyntax
         );
         assert_eq!(
-            result.diagnostics[0].message(),
+            result.diagnostics[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "hard modifiers are not allowed on a named `using` parameter for this owner"
         );
     }

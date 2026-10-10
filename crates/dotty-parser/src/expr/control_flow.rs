@@ -1724,7 +1724,10 @@ mod tests {
         assert!(matches!(parser.ast().get(expr).kind, TreeKind::Block(_)));
         assert_eq!(parser.current().kind, TokenKind::Eof);
         assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic.message() == "expected an outdent to close an indented block"
+            diagnostic
+                .legacy_message()
+                .expect("legacy parser diagnostic")
+                == "expected an outdent to close an indented block"
         }));
     }
 

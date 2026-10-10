@@ -3296,7 +3296,8 @@ mod tests {
         ));
         assert!(parser.diagnostics().iter().all(|diagnostic| {
             !diagnostic
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("capture checking is not enabled")
         }));
     }
@@ -9607,7 +9608,8 @@ mod tests {
         parser.type_expr();
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("mixed left- and right-associative")
         }));
         assert_eq!(parser.current().kind, TokenKind::Eof);
@@ -11526,7 +11528,9 @@ mod tests {
         assert_eq!(parser.names.resolve(following.name.as_name().text()), "Y");
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].message(),
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "refinement val, var, and def declarations cannot have a right-hand side"
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
@@ -11564,7 +11568,9 @@ mod tests {
         assert!(refined.refinements.is_empty());
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].message(),
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "refinement methods cannot have default arguments"
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
@@ -11604,7 +11610,9 @@ mod tests {
         assert_eq!(parser.names.resolve(following.name.as_name().text()), "Y");
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].message(),
+            parser.diagnostics()[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "refinement val, var, and def declarations cannot have a right-hand side"
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);

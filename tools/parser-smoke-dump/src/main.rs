@@ -1572,10 +1572,12 @@ mod tests {
             parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
 
         assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|diagnostic| { diagnostic.message() == "misaligned end marker" }),
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic
+                    .legacy_message()
+                    .expect("legacy parser diagnostic")
+                    == "misaligned end marker"
+            }),
             "expected the misaligned `end new` to be diagnosed: {:?}",
             result.diagnostics
         );
@@ -2116,7 +2118,9 @@ mod tests {
             dotty_parser::ParseDiagnosticKind::ExpectedToken
         );
         assert_eq!(
-            result.diagnostics[0].message(),
+            result.diagnostics[0]
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "expected `=>` after legacy implicit lambda parameter"
         );
         assert_eq!(
@@ -2314,7 +2318,10 @@ mod tests {
 
         assert!(result.diagnostics.iter().any(|diagnostic| {
             diagnostic.kind() == dotty_parser::ParseDiagnosticKind::UnexpectedToken
-                && diagnostic.message() == "left-hand side is not assignable"
+                && diagnostic
+                    .legacy_message()
+                    .expect("legacy parser diagnostic")
+                    == "left-hand side is not assignable"
         }));
         let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
             panic!("expected package root");
@@ -2554,7 +2561,12 @@ mod tests {
             diagnostic.kind(),
             dotty_parser::ParseDiagnosticKind::UnexpectedToken
         );
-        assert_eq!(diagnostic.message(), "misaligned end marker");
+        assert_eq!(
+            diagnostic
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
+            "misaligned end marker"
+        );
         let marker_start = SOURCE.find("end !==").expect("mismatched marker") as u32;
         assert_eq!(
             diagnostic.span(),
@@ -3434,7 +3446,8 @@ mod tests {
 
         assert!(result.diagnostics.iter().any(|diagnostic| {
             diagnostic
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("expected an expression after lambda arrow")
         }));
         let TreeKind::Apply(outer) = &result.ast.get(result.root).kind else {
@@ -3565,7 +3578,8 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
         assert!(
             result.diagnostics[0]
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("misaligned end marker")
         );
         assert_eq!(
@@ -3667,7 +3681,8 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
         assert!(
             result.diagnostics[0]
-                .message()
+                .legacy_message()
+                .expect("legacy parser diagnostic")
                 .contains("duplicate end marker")
         );
         let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
@@ -3856,10 +3871,12 @@ mod tests {
             parse_compilation_unit(source_text, SourceId::from_index(0), scanner, &mut names);
 
         assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|diagnostic| { diagnostic.message().contains("end marker") }),
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic
+                    .legacy_message()
+                    .expect("legacy parser diagnostic")
+                    .contains("end marker")
+            }),
             "{:?}",
             result.diagnostics
         );
@@ -3971,7 +3988,9 @@ mod tests {
             dotty_parser::ParseDiagnosticKind::ExpectedToken
         );
         assert_eq!(
-            diagnostic.message(),
+            diagnostic
+                .legacy_message()
+                .expect("legacy parser diagnostic"),
             "expected an indented refinement body after `:`"
         );
         let next_member = SOURCE.find("def after").unwrap() as u32;

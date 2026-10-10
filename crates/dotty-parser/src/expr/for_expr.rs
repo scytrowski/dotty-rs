@@ -1066,12 +1066,12 @@ mod tests {
 
         let _ = parser.expr();
 
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.message().contains("outdent") })
-        );
+        assert!(parser.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .legacy_message()
+                .expect("legacy parser diagnostic")
+                .contains("outdent")
+        }));
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
