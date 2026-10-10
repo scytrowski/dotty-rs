@@ -5,7 +5,7 @@ use dotty_core::{
 };
 
 use super::can_start_expr;
-use crate::{Location, ParseDiagnosticKind, ParseKind, Parser};
+use crate::{ExpressionIssue, Location, ParseIssue, ParseKind, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -112,10 +112,11 @@ where
             self.advance();
             self.parse_lambda_body()
         } else {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `=>` after legacy implicit lambda parameter",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedLegacyLambdaArrow {
+                    found: self.current().kind,
+                },
+            ));
             let parameter_end = params
                 .last()
                 .and_then(|parameter| self.ast.get(*parameter).position)
@@ -201,10 +202,11 @@ where
         let params = self.parse_fun_params();
         let context_arrow = self.current_is_context_arrow();
         if context_arrow && params.is_empty() {
-            self.report(
-                ParseDiagnosticKind::ExpectedExpression,
-                "context function literals require at least one formal parameter",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ContextFunctionRequiresParameter {
+                    found: self.current().kind,
+                },
+            ));
         }
         if context_arrow {
             self.add_given_to_params(&params);
@@ -216,10 +218,11 @@ where
             }
             self.advance();
         } else {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `=>` after lambda parameters",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedLambdaArrow {
+                    found: self.current().kind,
+                },
+            ));
         }
 
         let body = self.parse_lambda_body();
@@ -246,10 +249,11 @@ where
         let mut params = Vec::new();
         loop {
             if self.current().kind == TokenKind::Punctuation(Punctuation::Comma) {
-                self.report(
-                    ParseDiagnosticKind::ExpectedExpression,
-                    "expected a lambda parameter",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ExpectedLambdaParameter {
+                        found: self.current().kind,
+                    },
+                ));
                 self.advance();
                 continue;
             }
@@ -258,10 +262,11 @@ where
                 break;
             }
             if self.current_is_arrow() || self.current_is_context_arrow() {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `)` after lambda parameters",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ExpectedLambdaParameterCloseParen {
+                        found: self.current().kind,
+                    },
+                ));
                 break;
             }
 
@@ -273,10 +278,11 @@ where
                 break;
             }
 
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `,` or `)` after lambda parameter",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedLambdaParameterSeparator {
+                    found: self.current().kind,
+                },
+            ));
             self.recover_lambda_params();
             if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 continue;
@@ -319,10 +325,11 @@ where
                 Err(_) => self.missing_binding_name(),
             }
         } else {
-            self.report(
-                ParseDiagnosticKind::ExpectedExpression,
-                "expected an identifier or `_` in lambda parameters",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedLambdaParameterName {
+                    found: self.current().kind,
+                },
+            ));
             self.missing_binding_name()
         };
 
@@ -404,10 +411,11 @@ where
         if self.context.location == Location::InBlock && self.definition_after_newlines().is_some()
         {
             let position = self.current_span();
-            self.report(
-                ParseDiagnosticKind::ExpectedExpression,
-                "expected an expression after lambda arrow",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedLambdaBody {
+                    found: self.current().kind,
+                },
+            ));
             return self.error_expr(position);
         }
         if self.current().kind == TokenKind::Indent {
@@ -454,10 +462,11 @@ where
             self.expr()
         } else {
             let position = self.current_span();
-            self.report(
-                ParseDiagnosticKind::ExpectedExpression,
-                "expected an expression after lambda arrow",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedLambdaBody {
+                    found: self.current().kind,
+                },
+            ));
             self.error_expr(position)
         }
     }
@@ -918,12 +927,17 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::Function(_))
         ));
         assert_eq!(parser.current().kind, TokenKind::Newline);
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("expected an expression after lambda arrow")
-        }));
+        let diagnostic = parser
+            .diagnostics()
+            .last()
+            .expect("missing body diagnostic");
+        assert_eq!(
+            diagnostic.issue(),
+            &ParseIssue::Expression(ExpressionIssue::ExpectedLambdaBody {
+                found: TokenKind::Newline,
+            })
+        );
+        assert_eq!(diagnostic.span(), TextRange::new(4, 5).unwrap());
     }
 
     #[test]
@@ -1113,12 +1127,17 @@ mod tests {
             parser.ast().get(tree).kind,
             TreeKind::PhaseSpecific(UntypedNode::Function(_))
         ));
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("at least one formal parameter")
-        }));
+        let diagnostic = parser
+            .diagnostics()
+            .last()
+            .expect("missing parameter diagnostic");
+        assert_eq!(
+            diagnostic.issue(),
+            &ParseIssue::Expression(ExpressionIssue::ContextFunctionRequiresParameter {
+                found: TokenKind::Operator,
+            })
+        );
+        assert_eq!(diagnostic.span(), TextRange::new(3, 6).unwrap());
     }
 
     #[test]
@@ -1145,12 +1164,16 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::Function(_))
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("expected an expression after lambda arrow")
-        }));
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Expression(ExpressionIssue::ExpectedLambdaBody {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(4, 4).unwrap()
+        );
     }
 
     #[test]
@@ -1181,12 +1204,16 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::Function(_))
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("expected `,` or `)` after lambda parameter")
-        }));
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Expression(ExpressionIssue::ExpectedLambdaParameterSeparator {
+                found: TokenKind::Identifier,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(3, 4).unwrap()
+        );
     }
 
     #[test]

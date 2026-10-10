@@ -1,7 +1,7 @@
 use dotty_core::ast::{Apply, ApplyKind, NamedArg};
 use dotty_core::{Punctuation, TokenKind, TreeId, TreeKind, Untyped};
 
-use crate::Parser;
+use crate::{ExpressionIssue, ParseIssue, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -78,10 +78,11 @@ where
                 .cursor
                 .at(TokenKind::Punctuation(Punctuation::RightParen))
         {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedExpression,
-                "expected an argument after `using`",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::MissingUsingArgument {
+                    found: self.current().kind,
+                },
+            ));
         }
         let mut args = Vec::new();
         if !self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
@@ -94,10 +95,9 @@ where
                             | TokenKind::Eof
                     )
                 {
-                    self.report(
-                        crate::ParseDiagnosticKind::ExpectedExpression,
-                        "expected an argument",
-                    );
+                    self.report_issue(ParseIssue::Expression(ExpressionIssue::MissingArgument {
+                        found: self.current().kind,
+                    }));
                     args.push(self.error_expr(self.current_span()));
                 } else {
                     args.push(self.argument_expr());
@@ -541,10 +541,7 @@ mod tests {
             TreeKind::Ident(_)
         ));
         assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("must come last in a parameter list")
+            diagnostic.issue() == &ParseIssue::Expression(ExpressionIssue::NonFinalArgumentSpread)
         }));
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }

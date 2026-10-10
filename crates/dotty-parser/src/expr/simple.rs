@@ -6,8 +6,8 @@ use dotty_core::{
     Constant, Punctuation, SourceSpan, Span, TextRange, TokenKind, TreeId, TreeKind, Untyped,
 };
 
-use crate::Parser;
 use crate::statements::{ParsedStatement, StatementSequenceBoundary};
+use crate::{ExpressionApplicationTarget, ExpressionIssue, ParseIssue, Parser};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -190,10 +190,11 @@ where
                     )
                 };
                 if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-                    self.report(
-                        crate::ParseDiagnosticKind::ExpectedToken,
-                        "expected `}` to close quoted expression",
-                    );
+                    self.report_issue(ParseIssue::Expression(
+                        ExpressionIssue::ExpectedQuotedExpressionCloseBrace {
+                            found: self.current().kind,
+                        },
+                    ));
                 }
                 self.alloc_from(
                     mark,
@@ -211,10 +212,11 @@ where
                 });
                 self.type_quote_depth -= 1;
                 if !self.accept(TokenKind::Punctuation(Punctuation::RightBracket)) {
-                    self.report(
-                        crate::ParseDiagnosticKind::ExpectedToken,
-                        "expected `]` to close quoted type",
-                    );
+                    self.report_issue(ParseIssue::Expression(
+                        ExpressionIssue::ExpectedQuotedTypeCloseBracket {
+                            found: self.current().kind,
+                        },
+                    ));
                 }
                 self.alloc_from(
                     mark,
@@ -225,10 +227,11 @@ where
                 )
             }
             _ => {
-                self.report(
-                    crate::ParseDiagnosticKind::ExpectedToken,
-                    "expected `{` or `[` after quote marker",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ExpectedQuoteBodyStart {
+                        found: self.current().kind,
+                    },
+                ));
                 let body = self.error_expr(self.current_span());
                 self.alloc_from(
                     mark,
@@ -293,10 +296,11 @@ where
             if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Type)
                 && !consumed_separator
             {
-                self.report(
-                    crate::ParseDiagnosticKind::UnexpectedToken,
-                    "expected a separator between quoted type definitions",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ExpectedQuotedTypeDefinitionSeparator {
+                        found: self.current().kind,
+                    },
+                ));
                 break;
             }
         }
@@ -351,10 +355,11 @@ where
                 parser.with_location(crate::Location::InPattern, |parser| parser.pattern())
             });
             if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-                self.report(
-                    crate::ParseDiagnosticKind::ExpectedToken,
-                    "expected `}` to close pattern splice",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ExpectedPatternSpliceCloseBrace {
+                        found: self.current().kind,
+                    },
+                ));
             }
             return self.alloc_from(
                 mark,
@@ -394,10 +399,11 @@ where
             )
         };
         if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedToken,
-                "expected `}` to close expression splice",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedExpressionSpliceCloseBrace {
+                    found: self.current().kind,
+                },
+            ));
         }
         self.alloc_from(
             mark,
@@ -480,10 +486,11 @@ where
         if self.current().kind == TokenKind::Keyword(dotty_core::HardKeyword::Case) {
             let cases = self.case_clauses();
             if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-                self.report(
-                    crate::ParseDiagnosticKind::ExpectedToken,
-                    "expected `}` to close case-lambda clauses",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ExpectedCaseLambdaCloseBrace {
+                        found: self.current().kind,
+                    },
+                ));
             }
             let selector = self.synthetic_unit_at(mark.start());
             return self.alloc_from(
@@ -494,10 +501,11 @@ where
         let (stats, expr) =
             self.parse_expression_block_body(TokenKind::Punctuation(Punctuation::RightBrace));
         if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedToken,
-                "expected `}` to close block",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedBlockCloseBrace {
+                    found: self.current().kind,
+                },
+            ));
         }
         self.alloc_from(mark, TreeKind::Block(Block { stats, expr }))
     }
@@ -631,10 +639,11 @@ where
                     Some(*name.as_name())
                 }
                 _ => {
-                    self.report(
-                        crate::ParseDiagnosticKind::ExpectedType,
-                        "expected a super type qualifier",
-                    );
+                    self.report_issue(ParseIssue::Expression(
+                        ExpressionIssue::ExpectedSuperTypeQualifier {
+                            found: self.current().kind,
+                        },
+                    ));
                     None
                 }
             };
@@ -653,18 +662,20 @@ where
         );
 
         if !self.accept(TokenKind::Punctuation(Punctuation::Dot)) {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedToken,
-                "expected a selector after `super`",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedSelectorAfterSuper {
+                    found: self.current().kind,
+                },
+            ));
             return super_tree;
         }
 
         let Some((name, backquoted)) = self.current_selector_name() else {
-            self.report(
-                crate::ParseDiagnosticKind::ExpectedToken,
-                "expected a selector after `super.`",
-            );
+            self.report_issue(ParseIssue::Expression(
+                ExpressionIssue::ExpectedSelectorAfterSuperDot {
+                    found: self.current().kind,
+                },
+            ));
             return super_tree;
         };
         self.advance();
@@ -839,10 +850,11 @@ where
                         }),
                     );
                 } else {
-                    self.report(
-                        crate::ParseDiagnosticKind::ExpectedToken,
-                        "expected a selector after `.`",
-                    );
+                    self.report_issue(ParseIssue::Expression(
+                        ExpressionIssue::ExpectedSelectorAfterDot {
+                            found: self.current().kind,
+                        },
+                    ));
                     return qualifier;
                 }
                 can_apply = true;
@@ -857,12 +869,17 @@ where
                 .at(TokenKind::Punctuation(Punctuation::LeftParen))
             {
                 if !can_apply {
-                    let message = match &self.ast.get(qualifier).kind {
-                        TreeKind::Block(_) => "a block expression cannot be applied as a function",
-                        TreeKind::Match(_) => "a case-lambda cannot be applied directly",
-                        _ => "a constructor application cannot be applied again",
+                    let target = match &self.ast.get(qualifier).kind {
+                        TreeKind::Block(_) => ExpressionApplicationTarget::Block,
+                        TreeKind::Match(_) => ExpressionApplicationTarget::CaseLambda,
+                        _ => ExpressionApplicationTarget::ConstructorApplication,
                     };
-                    self.report(crate::ParseDiagnosticKind::UnexpectedToken, message);
+                    self.report_issue(ParseIssue::Expression(
+                        ExpressionIssue::InvalidApplicationTarget {
+                            target,
+                            found: self.current().kind,
+                        },
+                    ));
                     break;
                 }
                 let is_constructor_application =
@@ -916,10 +933,11 @@ where
             }
 
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    crate::ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing an expression suffix",
-                );
+                self.report_issue(ParseIssue::Expression(
+                    ExpressionIssue::ExpressionSuffixNoProgress {
+                        found: self.current().kind,
+                    },
+                ));
                 break;
             }
         }
@@ -1026,10 +1044,11 @@ where
 
     pub(crate) fn unexpected_expression(&mut self) -> TreeId<Untyped> {
         let position = self.current_span();
-        self.report(
-            crate::ParseDiagnosticKind::ExpectedExpression,
-            "expected an expression",
-        );
+        self.report_issue(ParseIssue::Expression(
+            ExpressionIssue::ExpectedExpressionAtCurrentToken {
+                found: self.current().kind,
+            },
+        ));
         if self.current().kind != TokenKind::Eof {
             self.advance();
         }
