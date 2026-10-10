@@ -14,7 +14,7 @@ use dotty_core::{
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamerError, name_compilation_unit};
-use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
+use dotty_parser::parse_compilation_unit;
 use dotty_typer::{SourceTyper, TyperError};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -3275,8 +3275,11 @@ fn local_expression_audit_keeps_parser_and_namer_failures_distinct() {
     assert_eq!(namer.bucket, "NamerError::RootIsNotPackage");
     assert_eq!(namer.family, FailureFamily::ParserNamer);
 
-    let parser = classify_parse_diagnostic(ParseDiagnosticKind::ExpectedExpression);
-    assert_eq!(parser.bucket, "ParserDiagnostic::ExpectedExpression");
+    let parser = classify_parse_diagnostic("parser.expected_expression");
+    assert_eq!(
+        parser.bucket,
+        "ParserDiagnostic::parser.expected_expression"
+    );
     assert_eq!(parser.family, FailureFamily::ParserNamer);
     assert_ne!(namer.bucket, parser.bucket);
 }
@@ -4027,7 +4030,7 @@ fn audit_source_inner(
     audit.recovered_parser_files = usize::from(!parsed.diagnostics.is_empty());
     collect_match_profile(&parsed.ast, path, &store, &mut audit.match_profile);
     for diagnostic in &parsed.diagnostics {
-        let failure = classify_parse_diagnostic(diagnostic.kind());
+        let failure = classify_parse_diagnostic(diagnostic.issue().code());
         *audit.parser_diagnostics.entry(failure.bucket).or_default() += 1;
     }
     let mut packages = Packages::new();
@@ -8078,21 +8081,9 @@ fn parser_error_node_name(kind: dotty_core::ast::ErrorNodeKind) -> &'static str 
     }
 }
 
-fn parse_diagnostic_name(kind: ParseDiagnosticKind) -> &'static str {
-    match kind {
-        ParseDiagnosticKind::ExpectedToken => "ExpectedToken",
-        ParseDiagnosticKind::UnexpectedToken => "UnexpectedToken",
-        ParseDiagnosticKind::ExpectedExpression => "ExpectedExpression",
-        ParseDiagnosticKind::ExpectedType => "ExpectedType",
-        ParseDiagnosticKind::ExpectedPattern => "ExpectedPattern",
-        ParseDiagnosticKind::UnsupportedSyntax => "UnsupportedSyntax",
-        ParseDiagnosticKind::UnboundPlaceholderParameter => "UnboundPlaceholderParameter",
-    }
-}
-
-fn classify_parse_diagnostic(kind: ParseDiagnosticKind) -> FailureClassification {
+fn classify_parse_diagnostic(code: &str) -> FailureClassification {
     FailureClassification {
-        bucket: format!("ParserDiagnostic::{}", parse_diagnostic_name(kind)),
+        bucket: format!("ParserDiagnostic::{code}"),
         family: FailureFamily::ParserNamer,
     }
 }

@@ -6,6 +6,7 @@ use dotty_core::{
 use crate::{Location, ParamOwner};
 
 /// Parser-specific category for a recoverable diagnostic.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseDiagnosticKind {
     ExpectedToken,
@@ -70,6 +71,7 @@ pub enum DeclarationIssue {
 }
 
 impl DeclarationIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::ExpectedMethodSeparator { .. }
@@ -155,6 +157,7 @@ pub enum ParameterIssue {
 }
 
 impl ParameterIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::LegacyImplicitClauseNotAllowed { .. }
@@ -242,6 +245,7 @@ pub enum GivenIssue {
 }
 
 impl GivenIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::ExpectedResultTypeAfterTypeParameters { .. }
@@ -291,6 +295,7 @@ pub enum ExtensionIssue {
 }
 
 impl ExtensionIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::OnlyUsingClausesMayFollowReceiver { .. } | Self::OnlyMethodsAndExportsAllowed => {
@@ -355,6 +360,7 @@ pub enum ImportIssue {
 }
 
 impl ImportIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::NamedSelectorAfterWildcardOrGiven => ParseDiagnosticKind::UnexpectedToken,
@@ -413,6 +419,7 @@ pub enum PackageIssue {
 }
 
 impl PackageIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::PackageObjectNotAllowedHere { .. } => ParseDiagnosticKind::UnsupportedSyntax,
@@ -453,6 +460,7 @@ pub enum StatementIssue {
 }
 
 impl StatementIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::ExpectedDefinitionAfterModifiers { .. } => ParseDiagnosticKind::ExpectedToken,
@@ -502,6 +510,7 @@ pub enum LayoutIssue {
 }
 
 impl LayoutIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::StatementSequenceNoProgress { .. }
@@ -559,6 +568,7 @@ pub enum TemplateIssue {
 }
 
 impl TemplateIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::ExpectedBodyEnd { .. }
@@ -619,6 +629,7 @@ pub enum TypeParamIssue {
 }
 
 impl TypeParamIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::EmptyParameterClause { .. }
@@ -697,6 +708,7 @@ pub enum TypeDefinitionIssue {
 }
 
 impl TypeDefinitionIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::ExpectedName { .. } | Self::ExpectedAliasType { .. } => {
@@ -771,6 +783,7 @@ pub enum ClassDefinitionIssue {
 }
 
 impl ClassDefinitionIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::ExpectedEnumCaseParentAfterComma { .. } | Self::ExpectedEnumCaseName { .. } => {
@@ -868,6 +881,7 @@ pub enum ModifierIssue {
 }
 
 impl ModifierIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::AnnotationAfterModifier { .. }
@@ -1067,6 +1081,7 @@ pub enum ExpressionApplicationTarget {
 }
 
 impl ExpressionIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::MissingUsingArgument { .. }
@@ -1438,6 +1453,7 @@ pub enum TypeFunctionArrow {
 }
 
 impl TypeIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::EmptyTypeArgumentList
@@ -1671,6 +1687,7 @@ pub enum PatternIssue {
 }
 
 impl PatternIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::ExpectedPatternAfterAlternative { .. }
@@ -1726,6 +1743,7 @@ pub enum CaseIssue {
 }
 
 impl CaseIssue {
+    #[cfg(test)]
     const fn kind(self) -> ParseDiagnosticKind {
         match self {
             Self::ExpectedCaseKeyword { .. }
@@ -1803,6 +1821,7 @@ pub enum ParseIssue {
 
 impl ParseIssue {
     /// Returns the stable parser diagnostic category for this issue.
+    #[cfg(test)]
     pub const fn kind(&self) -> ParseDiagnosticKind {
         match self {
             Self::ExpectedToken { .. } => ParseDiagnosticKind::ExpectedToken,
@@ -1864,7 +1883,54 @@ impl ParseIssue {
 
     /// Whether this issue represents syntax that the parser intentionally does not support.
     pub fn is_unsupported_syntax(&self) -> bool {
-        self.kind() == ParseDiagnosticKind::UnsupportedSyntax
+        match self {
+            Self::Parameter(issue) => matches!(
+                issue,
+                ParameterIssue::LegacyImplicitClauseNotAllowed { .. }
+                    | ParameterIssue::HardModifierNotAllowedOnNamedUsingParameter { .. }
+                    | ParameterIssue::AccessorOnlyAllowedOnClassConstructor { .. }
+            ),
+            Self::Extension(issue) => matches!(
+                issue,
+                ExtensionIssue::OnlyUsingClausesMayFollowReceiver { .. }
+                    | ExtensionIssue::OnlyMethodsAndExportsAllowed
+            ),
+            Self::Package(PackageIssue::PackageObjectNotAllowedHere { .. }) => true,
+            Self::Statement(
+                StatementIssue::TopLevelExpressionUnsupported { .. }
+                | StatementIssue::UnsupportedSyntaxStart { .. }
+                | StatementIssue::UnsupportedEnumCase,
+            ) => true,
+            Self::Template(TemplateIssue::CompoundSelfTypeUnsupported { .. }) => true,
+            Self::TypeParameter(
+                TypeParamIssue::VarianceNotAllowedForPolyFunctionParameter
+                | TypeParamIssue::ContextBoundsNotAllowedForOwner { .. }
+                | TypeParamIssue::ContextBoundsNotAllowedForPolyFunctionParameter,
+            ) => true,
+            Self::ClassDefinition(
+                ClassDefinitionIssue::ModifierNotAllowedOnEnumCase { .. }
+                | ClassDefinitionIssue::UnsupportedEnumCaseSyntax { .. }
+                | ClassDefinitionIssue::ModifierNotAllowedOnEnum { .. }
+                | ClassDefinitionIssue::TypeApplicationNotAllowedInDerives { .. }
+                | ClassDefinitionIssue::InfixTypeNotAllowedInDerives { .. },
+            ) => true,
+            Self::Modifier(ModifierIssue::UnsupportedContextualModifier { .. }) => true,
+            Self::Type(
+                TypeIssue::ClassLikeRefinementMemberNotAllowed { .. }
+                | TypeIssue::ModifiedRefinementMemberNotAllowed { .. }
+                | TypeIssue::UnsupportedRefinementMember { .. }
+                | TypeIssue::RefinementMethodDefaultArgumentNotAllowed
+                | TypeIssue::RefinementMemberRightHandSideNotAllowed
+                | TypeIssue::ReadOnlyCaptureSuffixUnsupported
+                | TypeIssue::LegacyTypeSpliceUnsupported,
+            ) => true,
+            Self::Pattern(
+                PatternIssue::SequencePatternOutsideExtractorArguments { .. }
+                | PatternIssue::SequencePatternRequiresVariable { .. }
+                | PatternIssue::UnsupportedPattern { .. },
+            ) => true,
+            _ => false,
+        }
     }
 }
 
@@ -1896,7 +1962,8 @@ impl ParseDiagnostic {
     /// Returns the parser-specific diagnostic category.
     ///
     /// This compatibility classification is derived from the issue payload;
-    /// typed callers should inspect [`Self::issue`] for its structured data.
+    /// it exists only for unit-test helpers in this crate.
+    #[cfg(test)]
     pub const fn kind(&self) -> ParseDiagnosticKind {
         self.diagnostic.issue().kind()
     }

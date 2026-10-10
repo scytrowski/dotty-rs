@@ -1,7 +1,7 @@
 use dotty_core::ast::{DefDef, ModuleDef, Template, UntypedNode};
 use dotty_core::{NameInterner, SourceId, SourceText, TextRange, TreeKind};
 use dotty_lexer::ContextualScanner;
-use dotty_parser::{GivenIssue, ParseDiagnosticKind, ParseIssue, parse_compilation_unit};
+use dotty_parser::{GivenIssue, ParseIssue, parse_compilation_unit};
 
 #[test]
 fn incomplete_named_given_type_parameters_report_error_and_preserve_next_member() {
@@ -19,16 +19,15 @@ fn incomplete_named_given_type_parameters_report_error_and_preserve_next_member(
         .diagnostics
         .iter()
         .find(|diagnostic| {
-            diagnostic.kind() == ParseDiagnosticKind::ExpectedToken
-                && matches!(
-                    diagnostic.issue(),
-                    dotty_parser::ParseIssue::ExpectedToken {
-                        expected: dotty_core::TokenKind::Punctuation(
-                            dotty_core::Punctuation::RightBracket
-                        ),
-                        found: dotty_core::TokenKind::Newline,
-                    }
-                )
+            matches!(
+                diagnostic.issue(),
+                ParseIssue::ExpectedToken {
+                    expected: dotty_core::TokenKind::Punctuation(
+                        dotty_core::Punctuation::RightBracket
+                    ),
+                    found: dotty_core::TokenKind::Newline,
+                }
+            )
         })
         .unwrap_or_else(|| {
             panic!(
@@ -85,11 +84,10 @@ fn missing_named_given_result_type_is_reported_before_next_member() {
         .diagnostics
         .iter()
         .find(|diagnostic| {
-            diagnostic.kind() == ParseDiagnosticKind::ExpectedType
-                && diagnostic.issue()
-                    == &ParseIssue::Given(GivenIssue::ExpectedResultTypeAfterTypeParameters {
-                        found: dotty_core::TokenKind::Newline,
-                    })
+            diagnostic.issue()
+                == &ParseIssue::Given(GivenIssue::ExpectedResultTypeAfterTypeParameters {
+                    found: dotty_core::TokenKind::Newline,
+                })
         })
         .expect("a named given without a result type should be diagnosed");
     let line_break = source.find("\n  def after").unwrap() as u32;
