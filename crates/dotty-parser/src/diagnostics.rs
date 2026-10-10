@@ -2136,7 +2136,7 @@ mod tests {
         let issues = [
             (
                 ParseIssue::Import(ImportIssue::NamedSelectorAfterWildcardOrGiven),
-                "parser.import.named_selector_after_wildcard",
+                "parser.import.named_selector_after_wildcard_or_given",
                 ParseDiagnosticKind::UnexpectedToken,
             ),
             (
