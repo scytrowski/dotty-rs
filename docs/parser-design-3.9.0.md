@@ -188,7 +188,9 @@ remain distinct without accepting same-line members that lack a separator.
 Parser diagnostics retain a stable category and source range. Common parser
 expectation/recovery failures use typed `ParseIssue` payloads (for example,
 `ExpectedToken { expected, found }`) and expose stable text-independent codes
-to corpus tooling. Unmigrated sites remain `Legacy` payloads with their
+to corpus tooling. The `TypeIssue` family distinguishes type-argument,
+function-type, and match-type recovery reasons without preformatted messages.
+Unmigrated sites remain `Legacy` payloads with their
 existing category and optional message; typed issues are not converted into
 synthetic text. The report JSON schema version 7 adds an optional `code` to
 each parser diagnostic summary; legacy categories/messages and parser outcome

@@ -11,7 +11,10 @@ use dotty_core::{
 
 use crate::references::{QualifiedReferenceError, ReferenceNamespace};
 use crate::statements::ParsedStatement;
-use crate::{Location, ParamOwner, ParseDiagnosticKind, ParseKind, Parser};
+use crate::{
+    Location, ParamOwner, ParseDiagnosticKind, ParseIssue, ParseKind, Parser,
+    TypeFunctionArrow as TypeFunctionTypeArrow, TypeIssue,
+};
 
 impl<'src, 'names, S> Parser<'src, 'names, S>
 where
@@ -27,10 +30,7 @@ where
 
         let mut args = Vec::new();
         if self.accept(TokenKind::Punctuation(Punctuation::RightBracket)) {
-            self.report(
-                ParseDiagnosticKind::ExpectedType,
-                "expected a type argument between `[` and `]`",
-            );
+            self.report_issue(ParseIssue::Type(TypeIssue::EmptyTypeArgumentList));
             return args;
         }
 
@@ -45,10 +45,9 @@ where
                 .cursor
                 .at(TokenKind::Punctuation(Punctuation::RightBracket))
             {
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "expected a type argument after `,`",
-                );
+                self.report_issue(ParseIssue::Type(TypeIssue::MissingTypeArgumentAfterComma {
+                    found: self.current().kind,
+                }));
                 self.advance();
                 break;
             }
@@ -77,10 +76,11 @@ where
             let operator = match self.intern_current_type_name() {
                 Ok(operator) => *operator.as_name(),
                 Err(_) => {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedType,
-                        "invalid repeated-parameter marker",
-                    );
+                    self.report_issue(ParseIssue::Type(
+                        TypeIssue::InvalidRepeatedParameterMarker {
+                            found: self.current().kind,
+                        },
+                    ));
                     self.advance();
                     return tpt;
                 }
@@ -95,10 +95,9 @@ where
             );
         }
 
-        self.report(
-            ParseDiagnosticKind::UnexpectedToken,
-            "spread operator `*` is not allowed here; it must come last in a parameter list",
-        );
+        self.report_issue(ParseIssue::Type(TypeIssue::RepeatedParameterMustBeLast {
+            found: self.current().kind,
+        }));
         self.advance();
         tpt
     }
@@ -120,10 +119,9 @@ where
             self.advance();
             self.advance();
             self.advance();
-            self.report(
-                ParseDiagnosticKind::ExpectedType,
-                "a context function type requires at least one parameter",
-            );
+            self.report_issue(ParseIssue::Type(
+                TypeIssue::EmptyContextFunctionParameterList,
+            ));
             let _ = self.type_expr();
             return self.error_type(self.span_from(mark));
         }
@@ -168,10 +166,9 @@ where
                     .get(parameter)
                     .position
                     .unwrap_or_else(|| self.current_span());
-                self.report_at(
-                    ParseDiagnosticKind::ExpectedType,
+                self.report_issue_at(
                     position,
-                    "a wildcard type is not valid in this type position",
+                    ParseIssue::Type(TypeIssue::WildcardTypeNotAllowed),
                 );
                 return self.error_type(position);
             }
@@ -323,10 +320,9 @@ where
             if self.accept(TokenKind::Indent) {
                 true
             } else {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `{` or an indented case region after `match`",
-                );
+                self.report_issue(ParseIssue::Type(TypeIssue::ExpectedMatchTypeCaseRegion {
+                    found: self.current().kind,
+                }));
                 false
             }
         };
@@ -352,23 +348,18 @@ where
                 }
             }
             if !self.accept(TokenKind::Outdent) && !closed_by_delimiter {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected an outdent to close match-type cases",
-                );
+                self.report_issue(ParseIssue::Type(TypeIssue::ExpectedMatchTypeOutdent {
+                    found: self.current().kind,
+                }));
             }
         } else if braced && !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `}` to close match-type cases",
-            );
+            self.report_issue(ParseIssue::Type(TypeIssue::ExpectedMatchTypeRightBrace {
+                found: self.current().kind,
+            }));
         }
 
         if cases.is_empty() {
-            self.report(
-                ParseDiagnosticKind::ExpectedType,
-                "expected at least one `case` clause after match type",
-            );
+            self.report_issue(ParseIssue::Type(TypeIssue::MissingMatchTypeCase));
         }
 
         self.alloc_from(
@@ -389,10 +380,9 @@ where
             cases.push(self.parse_match_type_case());
             self.consume_match_type_separators();
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing match-type cases",
-                );
+                self.report_issue(ParseIssue::Type(TypeIssue::MatchTypeCaseNoProgress {
+                    found: self.current().kind,
+                }));
                 break;
             }
         }
@@ -410,10 +400,9 @@ where
         });
 
         if !self.current_is_arrow() {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `=>` after match-type case pattern",
-            );
+            self.report_issue(ParseIssue::Type(TypeIssue::ExpectedMatchTypeCaseArrow {
+                found: self.current().kind,
+            }));
             self.recover_match_type_case();
             let body = self.error_type(self.current_span());
             return self.alloc_from(
@@ -444,10 +433,11 @@ where
                 }
             }
             if !self.accept(TokenKind::Outdent) {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected an outdent to close match-type case result",
-                );
+                self.report_issue(ParseIssue::Type(
+                    TypeIssue::ExpectedMatchTypeResultOutdent {
+                        found: self.current().kind,
+                    },
+                ));
             }
         }
         self.consume_match_type_case_end();
@@ -469,10 +459,9 @@ where
             let mark = self.mark();
             let Ok(type_name) = self.intern_current_type_name() else {
                 let position = self.current_span();
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "expected a valid match-type wildcard",
-                );
+                self.report_issue(ParseIssue::Type(TypeIssue::InvalidMatchTypeWildcard {
+                    found: self.current().kind,
+                }));
                 return self.error_type(position);
             };
             self.advance();
@@ -545,10 +534,7 @@ where
             self.strip_type_lambda_context_bounds(&type_params);
             let body = self.type_expr();
             if type_params.is_empty() {
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "a type lambda requires at least one type parameter",
-                );
+                self.report_issue(ParseIssue::Type(TypeIssue::EmptyTypeLambdaParameterList));
                 return self.error_type(self.span_from(mark));
             }
             return self.alloc_from(
@@ -557,20 +543,25 @@ where
             );
         }
         if !self.current_is_arrow() {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `=>` after polymorphic function type parameters",
-            );
+            self.report_issue(ParseIssue::Type(
+                TypeIssue::ExpectedPolymorphicFunctionTypeArrow {
+                    found: self.current().kind,
+                },
+            ));
             return self.error_type(self.span_from(mark));
         }
 
         self.advance();
         let body = self.type_expr();
-        if type_params.is_empty() || !self.is_function_type(body) {
-            self.report(
-                ParseDiagnosticKind::UnexpectedToken,
-                "polymorphic function types require a function type body and at least one type parameter",
-            );
+        let has_type_parameters = !type_params.is_empty();
+        let has_function_body = self.is_function_type(body);
+        if !has_type_parameters || !has_function_body {
+            self.report_issue(ParseIssue::Type(
+                TypeIssue::InvalidPolymorphicFunctionTypeShape {
+                    has_type_parameters,
+                    has_function_body,
+                },
+            ));
             return self.error_type(self.span_from(mark));
         }
 
@@ -815,10 +806,12 @@ where
                     .cursor
                     .at(TokenKind::Punctuation(Punctuation::RightParen))
                 {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedType,
-                        "expected a function type parameter after `,`",
-                    );
+                    self.report_issue(ParseIssue::Type(
+                        TypeIssue::MissingFunctionTypeParameterAfterComma {
+                            named: false,
+                            found: self.current().kind,
+                        },
+                    ));
                     self.advance();
                     break;
                 }
@@ -828,10 +821,12 @@ where
                 break;
             }
 
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `,` or `)` after function type parameter",
-            );
+            self.report_issue(ParseIssue::Type(
+                TypeIssue::ExpectedFunctionTypeParameterSeparator {
+                    named: false,
+                    found: self.current().kind,
+                },
+            ));
             self.recover_unnamed_function_params();
             if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 continue;
@@ -849,10 +844,11 @@ where
         let mut erased_params = Vec::new();
 
         if !self.current_is_erased_name() {
-            self.report(
-                ParseDiagnosticKind::ExpectedType,
-                "expected a leading `erased` function type parameter",
-            );
+            self.report_issue(ParseIssue::Type(
+                TypeIssue::ExpectedLeadingErasedFunctionTypeParameter {
+                    found: self.current().kind,
+                },
+            ));
             return NamedFunctionParams {
                 params,
                 erased_params,
@@ -869,18 +865,21 @@ where
                     .cursor
                     .at(TokenKind::Punctuation(Punctuation::RightParen))
                 {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedType,
-                        "expected a function type parameter after `,`",
-                    );
+                    self.report_issue(ParseIssue::Type(
+                        TypeIssue::MissingFunctionTypeParameterAfterComma {
+                            named: false,
+                            found: self.current().kind,
+                        },
+                    ));
                     self.advance();
                     break;
                 }
                 if self.current_is_erased_name() {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedType,
-                        "only the leading unnamed function type parameter may be `erased`",
-                    );
+                    self.report_issue(ParseIssue::Type(
+                        TypeIssue::OnlyLeadingUnnamedFunctionTypeParameterMayBeErased {
+                            found: self.current().kind,
+                        },
+                    ));
                     self.recover_unnamed_function_params();
                     self.accept(TokenKind::Punctuation(Punctuation::RightParen));
                     break;
@@ -894,10 +893,12 @@ where
                 break;
             }
 
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `,` or `)` after function type parameter",
-            );
+            self.report_issue(ParseIssue::Type(
+                TypeIssue::ExpectedFunctionTypeParameterSeparator {
+                    named: false,
+                    found: self.current().kind,
+                },
+            ));
             self.recover_unnamed_function_params();
             self.accept(TokenKind::Punctuation(Punctuation::RightParen));
             break;
@@ -934,10 +935,11 @@ where
             }
             if self.current().kind == TokenKind::Eof || self.current_function_type_arrow().is_some()
             {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `)` after named function type parameters",
-                );
+                self.report_issue(ParseIssue::Type(
+                    TypeIssue::ExpectedNamedFunctionTypeCloseParen {
+                        found: self.current().kind,
+                    },
+                ));
                 break;
             }
 
@@ -957,10 +959,11 @@ where
                     name
                 }
                 _ => {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedToken,
-                        "expected a named function type parameter",
-                    );
+                    self.report_issue(ParseIssue::Type(
+                        TypeIssue::ExpectedNamedFunctionTypeParameter {
+                            found: self.current().kind,
+                        },
+                    ));
                     self.recover_named_function_params();
                     if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                         continue;
@@ -971,10 +974,11 @@ where
             };
 
             if !self.accept_function_param_colon() {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `:` after named function type parameter",
-                );
+                self.report_issue(ParseIssue::Type(
+                    TypeIssue::ExpectedNamedFunctionTypeParameterColon {
+                        found: self.current().kind,
+                    },
+                ));
                 self.recover_named_function_params();
                 if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                     continue;
@@ -1000,10 +1004,12 @@ where
                     .cursor
                     .at(TokenKind::Punctuation(Punctuation::RightParen))
                 {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedToken,
-                        "expected a named function type parameter after `,`",
-                    );
+                    self.report_issue(ParseIssue::Type(
+                        TypeIssue::MissingFunctionTypeParameterAfterComma {
+                            named: true,
+                            found: self.current().kind,
+                        },
+                    ));
                     self.advance();
                     break;
                 }
@@ -1013,10 +1019,12 @@ where
                 break;
             }
 
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `,` or `)` after named function type parameter",
-            );
+            self.report_issue(ParseIssue::Type(
+                TypeIssue::ExpectedFunctionTypeParameterSeparator {
+                    named: true,
+                    found: self.current().kind,
+                },
+            ));
             self.recover_named_function_params();
             if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 continue;
@@ -1068,21 +1076,16 @@ where
     fn consume_function_type_arrow(&mut self, arrow: FunctionTypeArrow) {
         let matches_arrow = self.current_function_type_arrow() == Some(arrow);
         if !matches_arrow {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                match arrow {
-                    FunctionTypeArrow::Ordinary => {
-                        "expected `=>` after named function type parameters"
-                    }
-                    FunctionTypeArrow::Context => {
-                        "expected `?=>` after named context function type parameters"
-                    }
-                    FunctionTypeArrow::Pure => "expected `->` after named function type parameters",
-                    FunctionTypeArrow::PureContext => {
-                        "expected `?->` after named context function type parameters"
-                    }
-                },
-            );
+            let arrow = match arrow {
+                FunctionTypeArrow::Ordinary => TypeFunctionTypeArrow::Ordinary,
+                FunctionTypeArrow::Context => TypeFunctionTypeArrow::Context,
+                FunctionTypeArrow::Pure => TypeFunctionTypeArrow::Pure,
+                FunctionTypeArrow::PureContext => TypeFunctionTypeArrow::PureContext,
+            };
+            self.report_issue(ParseIssue::Type(TypeIssue::ExpectedFunctionTypeArrow {
+                arrow,
+                found: self.current().kind,
+            }));
         } else {
             self.advance();
         }
@@ -2824,7 +2827,35 @@ mod tests {
         CaseDef, ContextBoundTypeTree, ContextBounds, DefDef, InfixOp, LambdaTypeTree,
         MatchTypeTree, RefinedTypeTree, Select, Super, This, TypeDef, ValDef,
     };
-    use dotty_core::{HardKeyword, NameInterner, Punctuation, TextRange, TreeKind};
+    use dotty_core::{
+        HardKeyword, NameInterner, Punctuation, ScannerEvent, SourceId, SourceText, TextRange,
+        Token, TokenSource, TreeKind,
+    };
+
+    struct PositionlessTokenSource {
+        tokens: Vec<Token>,
+        index: usize,
+    }
+
+    impl TokenSource for PositionlessTokenSource {
+        fn current(&self) -> &Token {
+            &self.tokens[self.index.min(self.tokens.len() - 1)]
+        }
+
+        fn position(&self) -> usize {
+            0
+        }
+
+        fn advance(&mut self) {
+            self.index = (self.index + 1).min(self.tokens.len() - 1);
+        }
+
+        fn lookahead(&mut self, n: usize) -> &Token {
+            &self.tokens[(self.index + n).min(self.tokens.len() - 1)]
+        }
+
+        fn observe(&mut self, _event: ScannerEvent) {}
+    }
 
     fn capture_type_tokens(source: &str) -> Vec<dotty_core::Token> {
         let mut tokens = Vec::new();
@@ -3730,7 +3761,44 @@ mod tests {
             TreeKind::MatchTypeTree(_)
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(!parser.diagnostics().is_empty());
+        assert!(parser.diagnostics().iter().any(|diagnostic| matches!(
+            diagnostic.issue(),
+            ParseIssue::Type(TypeIssue::ExpectedMatchTypeCaseArrow {
+                found: TokenKind::Identifier,
+            })
+        )));
+    }
+
+    #[test]
+    fn reports_a_match_type_case_source_that_violates_the_progress_contract() {
+        let mut names = NameInterner::new();
+        let mut parser = Parser::new(
+            SourceText::new("case A => B").expect("source text is valid"),
+            SourceId::from_index(9),
+            PositionlessTokenSource {
+                tokens: vec![
+                    token(TokenKind::Keyword(HardKeyword::Case), 0, 4),
+                    token(TokenKind::Identifier, 5, 6),
+                    token(TokenKind::Operator, 7, 9),
+                    token(TokenKind::Identifier, 10, 11),
+                    token(TokenKind::Eof, 11, 11),
+                ],
+                index: 0,
+            },
+            &mut names,
+        );
+
+        let cases = parser.parse_match_type_cases();
+
+        assert_eq!(cases.len(), 1);
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Type(TypeIssue::MatchTypeCaseNoProgress {
+                found: TokenKind::Eof,
+            })
+        );
     }
 
     #[test]
@@ -3756,7 +3824,12 @@ mod tests {
             TreeKind::MatchTypeTree(_)
         ));
         assert_eq!(parser.current().kind, TokenKind::Eof);
-        assert!(!parser.diagnostics().is_empty());
+        assert!(parser.diagnostics().iter().any(|diagnostic| matches!(
+            diagnostic.issue(),
+            ParseIssue::Type(TypeIssue::ExpectedMatchTypeRightBrace {
+                found: TokenKind::Eof,
+            })
+        )));
     }
 
     #[test]
@@ -6618,8 +6691,46 @@ mod tests {
         );
 
         let _ = parser.type_expr();
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(matches!(
+            parser.diagnostics()[0].issue(),
+            ParseIssue::Type(TypeIssue::MissingFunctionTypeParameterAfterComma {
+                named: true,
+                found: TokenKind::Punctuation(Punctuation::RightParen),
+            })
+        ));
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(6, 7).unwrap()
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_the_expected_function_arrow_shape_without_consuming_input() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "x",
+            vec![
+                token(TokenKind::Identifier, 0, 1),
+                token(TokenKind::Eof, 1, 1),
+            ],
+            &mut names,
+        );
+
+        parser.consume_function_type_arrow(FunctionTypeArrow::PureContext);
+
+        let diagnostic = &parser.diagnostics()[0];
+        assert_eq!(diagnostic.kind(), ParseDiagnosticKind::ExpectedToken);
+        assert_eq!(diagnostic.span(), TextRange::new(0, 1).unwrap());
+        assert!(matches!(
+            diagnostic.issue(),
+            ParseIssue::Type(TypeIssue::ExpectedFunctionTypeArrow {
+                arrow: TypeFunctionTypeArrow::PureContext,
+                found: TokenKind::Identifier,
+            })
+        ));
+        assert_eq!(parser.current().kind, TokenKind::Identifier);
     }
 
     #[test]
@@ -8650,7 +8761,10 @@ mod tests {
         );
 
         let result = parser.compilation_unit();
-        assert!(!result.diagnostics.is_empty());
+        assert!(result.diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic.issue(),
+            ParseIssue::Type(TypeIssue::EmptyContextFunctionParameterList)
+        )));
     }
 
     #[test]
@@ -10243,6 +10357,43 @@ mod tests {
             parser.diagnostics()[0].kind(),
             ParseDiagnosticKind::ExpectedType
         ));
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Type(TypeIssue::EmptyTypeArgumentList)
+        );
+        assert_eq!(
+            parser.diagnostics()[0].issue().code(),
+            "parser.type.empty_type_argument_list"
+        );
+    }
+
+    #[test]
+    fn reports_a_missing_type_argument_after_a_trailing_comma_structurally() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "List[Int,]",
+            vec![
+                token(TokenKind::Identifier, 0, 4),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 4, 5),
+                token(TokenKind::Identifier, 5, 8),
+                token(TokenKind::Punctuation(Punctuation::Comma), 8, 9),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        parser.simple_type();
+
+        let diagnostic = &parser.diagnostics()[0];
+        assert_eq!(diagnostic.kind(), ParseDiagnosticKind::ExpectedType);
+        assert_eq!(diagnostic.span(), TextRange::new(9, 10).unwrap());
+        assert!(matches!(
+            diagnostic.issue(),
+            ParseIssue::Type(TypeIssue::MissingTypeArgumentAfterComma {
+                found: TokenKind::Punctuation(Punctuation::RightBracket),
+            })
+        ));
     }
 
     #[test]
@@ -10291,6 +10442,17 @@ mod tests {
             parser.diagnostics()[0].kind(),
             ParseDiagnosticKind::ExpectedToken
         ));
+        assert!(matches!(
+            parser.diagnostics()[0].issue(),
+            ParseIssue::ExpectedToken {
+                expected: TokenKind::Punctuation(Punctuation::RightBracket),
+                found: TokenKind::Eof,
+            }
+        ));
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(8, 8).unwrap()
+        );
     }
 
     #[test]

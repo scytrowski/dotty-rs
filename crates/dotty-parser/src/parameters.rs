@@ -1002,10 +1002,12 @@ mod tests {
         assert_eq!(clauses[0].len(), 2);
         assert!(parser.diagnostics().iter().any(|diagnostic| {
             diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken
-                && diagnostic
-                    .legacy_message()
-                    .expect("legacy parser diagnostic")
-                    .contains("must come last")
+                && matches!(
+                    diagnostic.issue(),
+                    crate::ParseIssue::Type(crate::TypeIssue::RepeatedParameterMustBeLast {
+                        found: TokenKind::Operator,
+                    })
+                )
         }));
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
