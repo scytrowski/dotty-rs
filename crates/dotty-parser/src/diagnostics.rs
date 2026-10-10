@@ -224,6 +224,109 @@ impl ParameterIssue {
     }
 }
 
+/// Typed syntax failures emitted while parsing Scala 3 `given` definitions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GivenIssue {
+    /// A parameterized given type is followed directly by another definition.
+    ExpectedResultTypeAfterTypeParameters { found: TokenKind },
+    /// A named given signature is missing the colon before its result type.
+    ExpectedColonAfterNamedSignature { found: TokenKind },
+    /// A given type is not followed by its required alias equals.
+    ExpectedEqualsAfterType { found: TokenKind },
+    /// A parent separator is not followed by another parent type.
+    ExpectedParentAfterSeparator { found: TokenKind },
+    /// An empty later parameter clause has no context parameter.
+    ExpectedParameterAfterEmptyClause { found: TokenKind },
+    /// A given context-parameter clause is missing its arrow.
+    ExpectedArrowInSignature { found: TokenKind },
+}
+
+impl GivenIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::ExpectedResultTypeAfterTypeParameters { .. }
+            | Self::ExpectedParentAfterSeparator { .. } => ParseDiagnosticKind::ExpectedType,
+            Self::ExpectedColonAfterNamedSignature { .. }
+            | Self::ExpectedEqualsAfterType { .. }
+            | Self::ExpectedParameterAfterEmptyClause { .. }
+            | Self::ExpectedArrowInSignature { .. } => ParseDiagnosticKind::ExpectedToken,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ExpectedResultTypeAfterTypeParameters { .. } => {
+                "parser.given.expected_result_type_after_type_parameters"
+            }
+            Self::ExpectedColonAfterNamedSignature { .. } => {
+                "parser.given.expected_colon_after_named_signature"
+            }
+            Self::ExpectedEqualsAfterType { .. } => "parser.given.expected_equals_after_type",
+            Self::ExpectedParentAfterSeparator { .. } => {
+                "parser.given.expected_parent_after_separator"
+            }
+            Self::ExpectedParameterAfterEmptyClause { .. } => {
+                "parser.given.expected_parameter_after_empty_clause"
+            }
+            Self::ExpectedArrowInSignature { .. } => "parser.given.expected_arrow_in_signature",
+        }
+    }
+}
+
+/// Typed syntax failures emitted while parsing Scala 3 extension definitions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtensionIssue {
+    /// An extension header is missing its receiver parameter clause.
+    ExpectedReceiverParameter { found: TokenKind },
+    /// An extension receiver clause has a count other than one.
+    ReceiverMustHaveExactlyOneParameter { found_count: usize },
+    /// Only `using` clauses may follow the extension receiver.
+    OnlyUsingClausesMayFollowReceiver { found: TokenKind },
+    /// A colon appears between an extension header and its methods.
+    UnexpectedColonAfterHeader { found: TokenKind },
+    /// An extension header is not followed by any method or export.
+    ExpectedMethodsAfterHeader { found: TokenKind },
+    /// An extension body contains a member other than a method or export.
+    OnlyMethodsAndExportsAllowed,
+}
+
+impl ExtensionIssue {
+    const fn kind(self) -> ParseDiagnosticKind {
+        match self {
+            Self::OnlyUsingClausesMayFollowReceiver { .. } | Self::OnlyMethodsAndExportsAllowed => {
+                ParseDiagnosticKind::UnsupportedSyntax
+            }
+            Self::UnexpectedColonAfterHeader { .. } => ParseDiagnosticKind::UnexpectedToken,
+            Self::ExpectedReceiverParameter { .. }
+            | Self::ReceiverMustHaveExactlyOneParameter { .. }
+            | Self::ExpectedMethodsAfterHeader { .. } => ParseDiagnosticKind::ExpectedToken,
+        }
+    }
+
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ExpectedReceiverParameter { .. } => {
+                "parser.extension.expected_receiver_parameter"
+            }
+            Self::ReceiverMustHaveExactlyOneParameter { .. } => {
+                "parser.extension.receiver_must_have_exactly_one_parameter"
+            }
+            Self::OnlyUsingClausesMayFollowReceiver { .. } => {
+                "parser.extension.only_using_clauses_may_follow_receiver"
+            }
+            Self::UnexpectedColonAfterHeader { .. } => {
+                "parser.extension.unexpected_colon_after_header"
+            }
+            Self::ExpectedMethodsAfterHeader { .. } => {
+                "parser.extension.expected_methods_after_header"
+            }
+            Self::OnlyMethodsAndExportsAllowed => {
+                "parser.extension.only_methods_and_exports_allowed"
+            }
+        }
+    }
+}
+
 /// Typed failures in Scala type-parameter and context-bound clauses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypeParamIssue {
@@ -1422,6 +1525,10 @@ pub enum ParseIssue {
     Declaration(DeclarationIssue),
     /// A structured failure emitted while parsing term parameter clauses.
     Parameter(ParameterIssue),
+    /// A structured failure emitted while parsing a `given` definition.
+    Given(GivenIssue),
+    /// A structured failure emitted while parsing an extension definition.
+    Extension(ExtensionIssue),
     /// A structured failure emitted while parsing modifiers and annotations.
     Modifier(ModifierIssue),
     /// A structured failure emitted while parsing a type parameter clause.
@@ -1452,6 +1559,8 @@ impl ParseIssue {
             Self::ClassDefinition(issue) => issue.kind(),
             Self::Declaration(issue) => issue.kind(),
             Self::Parameter(issue) => issue.kind(),
+            Self::Given(issue) => issue.kind(),
+            Self::Extension(issue) => issue.kind(),
             Self::Modifier(issue) => issue.kind(),
             Self::TypeParameter(issue) => issue.kind(),
             Self::TypeDefinition(issue) => issue.kind(),
@@ -1486,6 +1595,8 @@ impl ParseIssue {
             Self::ClassDefinition(issue) => issue.code(),
             Self::Declaration(issue) => issue.code(),
             Self::Parameter(issue) => issue.code(),
+            Self::Given(issue) => issue.code(),
+            Self::Extension(issue) => issue.code(),
             Self::Modifier(issue) => issue.code(),
             Self::TypeParameter(issue) => issue.code(),
             Self::TypeDefinition(issue) => issue.code(),
@@ -1571,6 +1682,8 @@ impl ParseDiagnostic {
             ParseIssue::ClassDefinition(_) => None,
             ParseIssue::Declaration(_) => None,
             ParseIssue::Parameter(_) => None,
+            ParseIssue::Given(_) => None,
+            ParseIssue::Extension(_) => None,
             ParseIssue::Modifier(_) => None,
             ParseIssue::TypeParameter(_) => None,
             ParseIssue::TypeDefinition(_) => None,
@@ -1733,5 +1846,125 @@ mod tests {
             "parser.parameter.by_name_class_parameter"
         );
         assert_eq!(parameter_issue.kind(), ParseDiagnosticKind::UnexpectedToken);
+    }
+
+    #[test]
+    fn given_and_extension_issues_have_stable_codes_and_categories() {
+        let given_issues = [
+            (
+                GivenIssue::ExpectedResultTypeAfterTypeParameters {
+                    found: TokenKind::Eof,
+                },
+                "parser.given.expected_result_type_after_type_parameters",
+                ParseDiagnosticKind::ExpectedType,
+            ),
+            (
+                GivenIssue::ExpectedColonAfterNamedSignature {
+                    found: TokenKind::Eof,
+                },
+                "parser.given.expected_colon_after_named_signature",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+            (
+                GivenIssue::ExpectedEqualsAfterType {
+                    found: TokenKind::Eof,
+                },
+                "parser.given.expected_equals_after_type",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+            (
+                GivenIssue::ExpectedParentAfterSeparator {
+                    found: TokenKind::Eof,
+                },
+                "parser.given.expected_parent_after_separator",
+                ParseDiagnosticKind::ExpectedType,
+            ),
+            (
+                GivenIssue::ExpectedParameterAfterEmptyClause {
+                    found: TokenKind::Eof,
+                },
+                "parser.given.expected_parameter_after_empty_clause",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+            (
+                GivenIssue::ExpectedArrowInSignature {
+                    found: TokenKind::Eof,
+                },
+                "parser.given.expected_arrow_in_signature",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+        ];
+        let extension_issues = [
+            (
+                ExtensionIssue::ExpectedReceiverParameter {
+                    found: TokenKind::Eof,
+                },
+                "parser.extension.expected_receiver_parameter",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+            (
+                ExtensionIssue::ReceiverMustHaveExactlyOneParameter { found_count: 2 },
+                "parser.extension.receiver_must_have_exactly_one_parameter",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+            (
+                ExtensionIssue::OnlyUsingClausesMayFollowReceiver {
+                    found: TokenKind::Eof,
+                },
+                "parser.extension.only_using_clauses_may_follow_receiver",
+                ParseDiagnosticKind::UnsupportedSyntax,
+            ),
+            (
+                ExtensionIssue::UnexpectedColonAfterHeader {
+                    found: TokenKind::Eof,
+                },
+                "parser.extension.unexpected_colon_after_header",
+                ParseDiagnosticKind::UnexpectedToken,
+            ),
+            (
+                ExtensionIssue::ExpectedMethodsAfterHeader {
+                    found: TokenKind::Eof,
+                },
+                "parser.extension.expected_methods_after_header",
+                ParseDiagnosticKind::ExpectedToken,
+            ),
+            (
+                ExtensionIssue::OnlyMethodsAndExportsAllowed,
+                "parser.extension.only_methods_and_exports_allowed",
+                ParseDiagnosticKind::UnsupportedSyntax,
+            ),
+        ];
+        let source = SourceId::from_index(11);
+        let range = TextRange::new(5, 7).expect("valid range");
+
+        for (given, code, kind) in given_issues {
+            let issue = ParseIssue::Given(given);
+            let diagnostic = ParseDiagnostic::with_issue(
+                SourceSpan::new(source, Span::without_point(range)),
+                issue.clone(),
+            );
+            assert_eq!(issue.code(), code);
+            assert_eq!(issue.kind(), kind);
+            assert_eq!(diagnostic.issue(), &issue);
+            assert_eq!(diagnostic.source(), source);
+            assert_eq!(diagnostic.span(), range);
+            assert_eq!(diagnostic.severity(), DiagnosticSeverity::Error);
+            assert_eq!(diagnostic.legacy_message(), None);
+        }
+
+        for (extension, code, kind) in extension_issues {
+            let issue = ParseIssue::Extension(extension);
+            let diagnostic = ParseDiagnostic::with_issue(
+                SourceSpan::new(source, Span::without_point(range)),
+                issue.clone(),
+            );
+            assert_eq!(issue.code(), code);
+            assert_eq!(issue.kind(), kind);
+            assert_eq!(diagnostic.issue(), &issue);
+            assert_eq!(diagnostic.source(), source);
+            assert_eq!(diagnostic.span(), range);
+            assert_eq!(diagnostic.severity(), DiagnosticSeverity::Error);
+            assert_eq!(diagnostic.legacy_message(), None);
+        }
     }
 }
