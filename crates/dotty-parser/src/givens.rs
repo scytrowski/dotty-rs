@@ -9,7 +9,7 @@ use dotty_core::{HardKeyword, Punctuation, TokenKind, TreeId, TreeKind, Untyped}
 use crate::modifiers::DefinitionPrefix;
 use crate::names::{anonymous_term_name, anonymous_type_name};
 use crate::statements::ParsedStatement;
-use crate::{Location, ParamOwner, ParseDiagnosticKind, ParseKind, Parser};
+use crate::{GivenIssue, Location, ParamOwner, ParseIssue, ParseKind, Parser};
 
 struct GivenSignature {
     name: dotty_core::TermName,
@@ -74,10 +74,11 @@ where
             Vec::new()
         };
         if !type_params.is_empty() && self.type_param_clause_followed_by_definition() {
-            self.report(
-                ParseDiagnosticKind::ExpectedType,
-                "expected a given result type after type parameters",
-            );
+            self.report_issue(ParseIssue::Given(
+                GivenIssue::ExpectedResultTypeAfterTypeParameters {
+                    found: self.current().kind,
+                },
+            ));
             let tpt = self.error_type(self.zero_width_span(self.current().span.start()));
             let mut metadata = prefix.metadata;
             if !metadata
@@ -113,10 +114,11 @@ where
             if self.current_is_given_colon() {
                 self.advance();
             } else {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `:` after a named given signature",
-                );
+                self.report_issue(ParseIssue::Given(
+                    GivenIssue::ExpectedColonAfterNamedSignature {
+                        found: self.current().kind,
+                    },
+                ));
             }
         } else if self.current_is_using_parameter_clause() {
             self.parse_given_parameter_clauses(
@@ -226,10 +228,9 @@ where
                     },
                 );
             }
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `=` after a given type",
-            );
+            self.report_issue(ParseIssue::Given(GivenIssue::ExpectedEqualsAfterType {
+                found: self.current().kind,
+            }));
             let rhs = self.error_expr(self.current_span());
             return self.alloc_given_definition(
                 mark,
@@ -366,10 +367,11 @@ where
                     | TokenKind::Outdent
             ) && self.current_text().ok() == Some(":")
             {
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "expected a given parent after the separator",
-                );
+                self.report_issue(ParseIssue::Given(
+                    GivenIssue::ExpectedParentAfterSeparator {
+                        found: self.current().kind,
+                    },
+                ));
                 return (false, None);
             }
             parents.push(self.parse_given_parent(location));
@@ -530,10 +532,11 @@ where
             if !clause.is_empty() {
                 value_param_clauses.push(clause);
             } else if *num_lead_params > 0 {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected a context parameter after `()`",
-                );
+                self.report_issue(ParseIssue::Given(
+                    GivenIssue::ExpectedParameterAfterEmptyClause {
+                        found: self.current().kind,
+                    },
+                ));
                 let missing_type = self.error_type(self.zero_width_span(clause_mark.start()));
                 let parameter = self.alloc_synthetic_context_parameter(
                     clause_mark,
@@ -711,10 +714,9 @@ where
         if self.current_is_arrow() {
             self.advance();
         } else {
-            self.report(
-                ParseDiagnosticKind::ExpectedToken,
-                "expected `=>` in a given signature",
-            );
+            self.report_issue(ParseIssue::Given(GivenIssue::ExpectedArrowInSignature {
+                found: self.current().kind,
+            }));
         }
     }
 }
@@ -727,6 +729,7 @@ fn is_abstract_named_given_boundary(kind: TokenKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ParseDiagnosticKind;
     use crate::compilation_unit::tests::{parser_for, token};
     use dotty_core::{NameInterner, Punctuation, TextRange};
 
@@ -1057,11 +1060,19 @@ mod tests {
         };
         assert!(definition.rhs.is_some());
         assert_eq!(parser.diagnostics().len(), 1);
-        assert!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("expected `=`")
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Given(GivenIssue::ExpectedEqualsAfterType {
+                found: TokenKind::Punctuation(Punctuation::RightBracket),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(20, 21).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
         );
     }
 
@@ -2035,14 +2046,95 @@ mod tests {
         );
 
         let _ = parser.parse_statement(Location::Elsewhere);
-        assert!(!parser.diagnostics().is_empty());
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("expected `=` after a given type")
-        }));
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Given(GivenIssue::ExpectedEqualsAfterType {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(14, 14).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn reports_a_missing_result_type_after_given_type_parameters() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given [A] def next = value",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Punctuation(Punctuation::LeftBracket), 6, 7),
+                token(TokenKind::Identifier, 7, 8),
+                token(TokenKind::Punctuation(Punctuation::RightBracket), 8, 9),
+                token(TokenKind::Keyword(HardKeyword::Def), 10, 13),
+                token(TokenKind::Identifier, 14, 18),
+                token(TokenKind::Operator, 19, 20),
+                token(TokenKind::Identifier, 21, 26),
+                token(TokenKind::Eof, 26, 26),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_statement(Location::Elsewhere);
+
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Given(GivenIssue::ExpectedResultTypeAfterTypeParameters {
+                found: TokenKind::Keyword(HardKeyword::Def),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(10, 13).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
+        assert_eq!(parser.current().kind, TokenKind::Keyword(HardKeyword::Def));
+    }
+
+    #[test]
+    fn reports_a_missing_given_parent_after_a_comma() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "given A, :",
+            vec![
+                token(TokenKind::Keyword(HardKeyword::Given), 0, 5),
+                token(TokenKind::Identifier, 6, 7),
+                token(TokenKind::Punctuation(Punctuation::Comma), 7, 8),
+                token(TokenKind::Punctuation(Punctuation::Colon), 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let _ = parser.parse_given_definition(Location::Elsewhere);
+
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Given(GivenIssue::ExpectedParentAfterSeparator {
+                found: TokenKind::Punctuation(Punctuation::Colon),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(9, 10).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
     }
 
     #[test]
@@ -2162,7 +2254,21 @@ mod tests {
                 .range(),
             TextRange::new(11, 11).unwrap()
         );
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Given(GivenIssue::ExpectedParameterAfterEmptyClause {
+                found: TokenKind::Operator,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(14, 16).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
