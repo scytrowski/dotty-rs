@@ -1229,10 +1229,9 @@ where
                 break;
             }
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing an infix type",
-                );
+                self.report_issue(ParseIssue::Type(TypeIssue::InfixTypeNoProgress {
+                    found: self.current().kind,
+                }));
                 break;
             }
         }
@@ -1340,15 +1339,15 @@ where
         next_operator: Option<Name>,
     ) -> TreeId<Untyped> {
         if let (Some(stack_top), Some(next_operator)) = (operators.last(), next_operator) {
-            let stack_spelling = self.names.resolve(stack_top.operator.text()).to_owned();
-            let next_spelling = self.names.resolve(next_operator.text()).to_owned();
+            let stack_spelling = self.names.resolve(stack_top.operator.text());
+            let next_spelling = self.names.resolve(next_operator.text());
             if crate::infix::has_mixed_associativity(&stack_spelling, &next_spelling) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    format!(
-                        "mixed left- and right-associative type operators `{stack_spelling}` and `{next_spelling}`"
-                    ),
-                );
+                self.report_issue(ParseIssue::Type(
+                    TypeIssue::MixedAssociativityTypeOperators {
+                        left: stack_top.operator,
+                        right: next_operator,
+                    },
+                ));
             }
         }
 
@@ -1410,10 +1409,11 @@ where
                         self.observe_outdented_by_existing_outdent(indent_offset);
                     }
                 } else {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedToken,
-                        "expected an indented refinement body after `:`",
-                    );
+                    self.report_issue(ParseIssue::Type(
+                        TypeIssue::ExpectedIndentedRefinementBody {
+                            found: self.current().kind,
+                        },
+                    ));
                 }
             }
         }
@@ -1487,10 +1487,9 @@ where
                 break;
             }
             if !self.can_start_type_operand(self.current()) {
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "expected a type after `with`",
-                );
+                self.report_issue(ParseIssue::Type(TypeIssue::ExpectedTypeAfterLegacyWith {
+                    found: self.current().kind,
+                }));
                 break;
             }
             let operand_mark = self.mark();
@@ -1556,10 +1555,9 @@ where
             if self.can_start_capture_ref() {
                 captures.push(self.parse_capture_ref());
             } else {
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "expected a capture reference",
-                );
+                self.report_issue(ParseIssue::Type(TypeIssue::ExpectedCaptureReference {
+                    found: self.current().kind,
+                }));
                 if self.current().kind != TokenKind::Eof
                     && self.current().kind != TokenKind::Punctuation(Punctuation::RightBrace)
                 {
@@ -1569,10 +1567,11 @@ where
 
             if self.accept(TokenKind::Punctuation(Punctuation::Comma)) {
                 if self.current().kind == TokenKind::Punctuation(Punctuation::RightBrace) {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedType,
-                        "expected a capture reference after `,`",
-                    );
+                    self.report_issue(ParseIssue::Type(
+                        TypeIssue::ExpectedCaptureReferenceAfterComma {
+                            found: self.current().kind,
+                        },
+                    ));
                     self.advance();
                     break;
                 }
@@ -1580,10 +1579,9 @@ where
             }
 
             if !self.accept(TokenKind::Punctuation(Punctuation::RightBrace)) {
-                self.report(
-                    ParseDiagnosticKind::ExpectedToken,
-                    "expected `,` or `}` after a capture reference",
-                );
+                self.report_issue(ParseIssue::Type(TypeIssue::ExpectedCaptureSetSeparator {
+                    found: self.current().kind,
+                }));
                 while !matches!(
                     self.current().kind,
                     TokenKind::Punctuation(Punctuation::Comma | Punctuation::RightBrace)
@@ -1628,10 +1626,11 @@ where
         {
             self.advance();
             let Some((name, backquoted)) = self.current_selector_name() else {
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "expected a capture reference after `.`",
-                );
+                self.report_issue(ParseIssue::Type(
+                    TypeIssue::ExpectedCaptureReferenceMember {
+                        found: self.current().kind,
+                    },
+                ));
                 break;
             };
             self.advance();
@@ -1646,10 +1645,9 @@ where
         }
 
         if self.is_capture_read_only_suffix() {
-            self.report(
-                ParseDiagnosticKind::UnsupportedSyntax,
-                "the `.rd` capture suffix is not supported yet",
-            );
+            self.report_issue(ParseIssue::Type(
+                TypeIssue::ReadOnlyCaptureSuffixUnsupported,
+            ));
             self.advance();
             self.advance();
         }
@@ -1677,10 +1675,9 @@ where
             let filter = match self.parse_qualified_reference(ReferenceNamespace::Type) {
                 Ok(filter) => filter,
                 Err(_) => {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedType,
-                        "expected a qualified type in capture filter",
-                    );
+                    self.report_issue(ParseIssue::Type(TypeIssue::ExpectedCaptureFilterType {
+                        found: self.current().kind,
+                    }));
                     self.error_type(self.current_span())
                 }
             };
@@ -1713,10 +1710,9 @@ where
             {
                 self.parse_this_or_super_reference(mark)
                     .unwrap_or_else(|_| {
-                        self.report(
-                            ParseDiagnosticKind::ExpectedType,
-                            "expected a capture reference",
-                        );
+                        self.report_issue(ParseIssue::Type(TypeIssue::InvalidCaptureReference {
+                            found: self.current().kind,
+                        }));
                         self.error_type(self.current_span())
                     })
             }
@@ -1724,10 +1720,9 @@ where
                 let backquoted = self.current().kind == TokenKind::BackquotedIdentifier;
                 let name = self.intern_current_term_name();
                 let Ok(name) = name else {
-                    self.report(
-                        ParseDiagnosticKind::ExpectedType,
-                        "expected a capture reference",
-                    );
+                    self.report_issue(ParseIssue::Type(TypeIssue::InvalidCaptureReference {
+                        found: self.current().kind,
+                    }));
                     return self.error_type(self.current_span());
                 };
                 self.advance();
@@ -1740,10 +1735,9 @@ where
                 )
             }
             _ => {
-                self.report(
-                    ParseDiagnosticKind::ExpectedType,
-                    "expected a capture reference",
-                );
+                self.report_issue(ParseIssue::Type(TypeIssue::InvalidCaptureReference {
+                    found: self.current().kind,
+                }));
                 self.error_type(self.current_span())
             }
         }
@@ -1923,10 +1917,9 @@ where
             }
 
             if !self.cursor.progressed_since(checkpoint) {
-                self.report(
-                    ParseDiagnosticKind::UnexpectedToken,
-                    "parser made no progress while parsing a type refinement",
-                );
+                self.report_issue(ParseIssue::Type(TypeIssue::RefinementNoProgress {
+                    found: self.current().kind,
+                }));
                 let recovery_checkpoint = self.cursor.checkpoint();
                 self.advance();
                 if !self.cursor.progressed_since(recovery_checkpoint) {
@@ -1954,24 +1947,25 @@ where
             )
             | TokenKind::CaseClass
             | TokenKind::CaseObject => {
-                self.report(
-                    ParseDiagnosticKind::UnsupportedSyntax,
-                    "class-like definitions are not allowed in a type refinement",
-                );
+                self.report_issue(ParseIssue::Type(
+                    TypeIssue::ClassLikeRefinementMemberNotAllowed {
+                        found: self.current().kind,
+                    },
+                ));
                 return None;
             }
             _ if self.starts_definition_prefix() => {
-                self.report(
-                    ParseDiagnosticKind::UnsupportedSyntax,
-                    "modifiers and annotations are not allowed in a type refinement",
-                );
+                self.report_issue(ParseIssue::Type(
+                    TypeIssue::ModifiedRefinementMemberNotAllowed {
+                        found: self.current().kind,
+                    },
+                ));
                 return None;
             }
             _ => {
-                self.report(
-                    ParseDiagnosticKind::UnsupportedSyntax,
-                    "expected a type, val, var, or def declaration in a type refinement",
-                );
+                self.report_issue(ParseIssue::Type(TypeIssue::UnsupportedRefinementMember {
+                    found: self.current().kind,
+                }));
                 return None;
             }
         };
@@ -2002,17 +1996,15 @@ where
             _ => (false, false),
         };
         if has_default_argument {
-            self.report_at(
-                ParseDiagnosticKind::UnsupportedSyntax,
+            self.report_issue_at(
                 self.span_from(mark),
-                "refinement methods cannot have default arguments",
+                ParseIssue::Type(TypeIssue::RefinementMethodDefaultArgumentNotAllowed),
             );
             false
         } else if has_rhs {
-            self.report_at(
-                ParseDiagnosticKind::UnsupportedSyntax,
+            self.report_issue_at(
                 self.span_from(mark),
-                "refinement val, var, and def declarations cannot have a right-hand side",
+                ParseIssue::Type(TypeIssue::RefinementMemberRightHandSideNotAllowed),
             );
             false
         } else {
@@ -3079,7 +3071,17 @@ mod tests {
             parser.ast().get(tree).kind,
             TreeKind::Annotated(_)
         ));
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Type(TypeIssue::ExpectedCaptureSetSeparator {
+                found: TokenKind::Eof,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(4, 4).unwrap()
+        );
     }
 
     #[test]
@@ -3093,7 +3095,27 @@ mod tests {
             parser.ast().get(tree).kind,
             TreeKind::Annotated(_)
         ));
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 2);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Type(TypeIssue::ExpectedCaptureReference {
+                found: TokenKind::Punctuation(Punctuation::Comma),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(3, 4).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[1].issue(),
+            &ParseIssue::Type(TypeIssue::ExpectedCaptureSetSeparator {
+                found: TokenKind::Identifier,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[1].span(),
+            TextRange::new(4, 5).unwrap()
+        );
     }
 
     #[test]
@@ -3235,7 +3257,13 @@ mod tests {
 
         let _ = parser.type_expr();
 
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(matches!(
+            parser.diagnostics()[0].issue(),
+            ParseIssue::Type(TypeIssue::ExpectedCaptureSetSeparator {
+                found: TokenKind::Punctuation(Punctuation::Dot),
+            })
+        ));
     }
 
     #[test]
@@ -3245,7 +3273,13 @@ mod tests {
 
         let _ = parser.type_expr();
 
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert!(matches!(
+            parser.diagnostics()[0].issue(),
+            ParseIssue::Type(TypeIssue::ExpectedCaptureSetSeparator {
+                found: TokenKind::Punctuation(Punctuation::Dot),
+            })
+        ));
     }
 
     #[test]
@@ -3255,11 +3289,18 @@ mod tests {
 
         let _ = parser.type_expr();
 
-        assert!(
-            parser
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| { diagnostic.kind() == ParseDiagnosticKind::UnsupportedSyntax })
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].kind(),
+            ParseDiagnosticKind::UnsupportedSyntax
+        );
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Type(TypeIssue::ReadOnlyCaptureSuffixUnsupported)
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(6, 7).unwrap()
         );
     }
 
@@ -3326,10 +3367,18 @@ mod tests {
             TreeKind::Annotated(_)
         ));
         assert!(parser.diagnostics().iter().all(|diagnostic| {
-            !diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("capture checking is not enabled")
+            !matches!(
+                diagnostic.issue(),
+                ParseIssue::Type(
+                    TypeIssue::ExpectedCaptureReference { .. }
+                        | TypeIssue::ExpectedCaptureReferenceAfterComma { .. }
+                        | TypeIssue::ExpectedCaptureSetSeparator { .. }
+                        | TypeIssue::ExpectedCaptureReferenceMember { .. }
+                        | TypeIssue::ReadOnlyCaptureSuffixUnsupported
+                        | TypeIssue::ExpectedCaptureFilterType { .. }
+                        | TypeIssue::InvalidCaptureReference { .. }
+                )
+            )
         }));
     }
 
@@ -9720,12 +9769,19 @@ mod tests {
         );
 
         parser.type_expr();
-        assert!(parser.diagnostics().iter().any(|diagnostic| {
-            diagnostic
-                .legacy_message()
-                .expect("legacy parser diagnostic")
-                .contains("mixed left- and right-associative")
-        }));
+        let diagnostic = parser
+            .diagnostics()
+            .first()
+            .expect("mixed associativity should be diagnosed");
+        assert_eq!(diagnostic.kind(), ParseDiagnosticKind::UnexpectedToken);
+        assert_eq!(diagnostic.span(), TextRange::new(6, 8).unwrap());
+        let ParseIssue::Type(TypeIssue::MixedAssociativityTypeOperators { left, right }) =
+            diagnostic.issue()
+        else {
+            panic!("expected typed mixed-associativity diagnostic");
+        };
+        assert_eq!(parser.names.resolve(left.text()), "+");
+        assert_eq!(parser.names.resolve(right.text()), "+:");
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
@@ -11690,10 +11746,12 @@ mod tests {
         assert_eq!(parser.names.resolve(following.name.as_name().text()), "Y");
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "refinement val, var, and def declarations cannot have a right-hand side"
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Type(TypeIssue::RefinementMemberRightHandSideNotAllowed)
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(4, 18).unwrap()
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
@@ -11730,10 +11788,12 @@ mod tests {
         assert!(refined.refinements.is_empty());
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "refinement methods cannot have default arguments"
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Type(TypeIssue::RefinementMethodDefaultArgumentNotAllowed)
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(4, 29).unwrap()
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
@@ -11772,10 +11832,12 @@ mod tests {
         assert_eq!(parser.names.resolve(following.name.as_name().text()), "Y");
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0]
-                .legacy_message()
-                .expect("legacy parser diagnostic"),
-            "refinement val, var, and def declarations cannot have a right-hand side"
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Type(TypeIssue::RefinementMemberRightHandSideNotAllowed)
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(4, 18).unwrap()
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }
@@ -11808,7 +11870,17 @@ mod tests {
             parser.ast().get(refined.refinements[0]).kind,
             TreeKind::TypeDef(_)
         ));
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Type(TypeIssue::ClassLikeRefinementMemberNotAllowed {
+                found: TokenKind::Keyword(HardKeyword::Class),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(4, 9).unwrap()
+        );
     }
 
     #[test]
@@ -11838,7 +11910,17 @@ mod tests {
             panic!("expected a refined type");
         };
         assert_eq!(refined.refinements.len(), 1);
-        assert!(!parser.diagnostics().is_empty());
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Type(TypeIssue::ModifiedRefinementMemberNotAllowed {
+                found: TokenKind::Keyword(HardKeyword::Private),
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(4, 11).unwrap()
+        );
     }
 
     #[test]
@@ -11875,8 +11957,14 @@ mod tests {
         assert_eq!(parser.names.resolve(following.name.as_name().text()), "Y");
         assert_eq!(parser.diagnostics().len(), 1);
         assert_eq!(
-            parser.diagnostics()[0].kind(),
-            ParseDiagnosticKind::UnsupportedSyntax
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Type(TypeIssue::ModifiedRefinementMemberNotAllowed {
+                found: TokenKind::Operator,
+            })
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            TextRange::new(4, 5).unwrap()
         );
         assert_eq!(parser.current().kind, TokenKind::Eof);
     }

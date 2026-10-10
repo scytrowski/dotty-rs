@@ -1,4 +1,6 @@
-use dotty_core::{Diagnostic, DiagnosticSeverity, SourceId, SourceSpan, TextRange, TokenKind};
+use dotty_core::{
+    Diagnostic, DiagnosticSeverity, Name, SourceId, SourceSpan, TextRange, TokenKind,
+};
 
 /// Parser-specific category for a recoverable diagnostic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +73,40 @@ pub enum TypeIssue {
         arrow: TypeFunctionArrow,
         found: TokenKind,
     },
+    /// An infix type reduction loop failed to advance its token source.
+    InfixTypeNoProgress { found: TokenKind },
+    /// Equal-precedence infix type operators use conflicting associativities.
+    MixedAssociativityTypeOperators { left: Name, right: Name },
+    /// A legacy `with` type operator has no following type operand.
+    ExpectedTypeAfterLegacyWith { found: TokenKind },
+    /// A colon-introduced refinement is missing its indentation region.
+    ExpectedIndentedRefinementBody { found: TokenKind },
+    /// A refinement-member loop failed to advance its token source.
+    RefinementNoProgress { found: TokenKind },
+    /// A class-like declaration is not allowed as a refinement member.
+    ClassLikeRefinementMemberNotAllowed { found: TokenKind },
+    /// A modifier or annotation is not allowed on a refinement member.
+    ModifiedRefinementMemberNotAllowed { found: TokenKind },
+    /// A refinement member has an unsupported declaration shape.
+    UnsupportedRefinementMember { found: TokenKind },
+    /// A refinement method parameter has a default argument.
+    RefinementMethodDefaultArgumentNotAllowed,
+    /// A refinement value or method has a right-hand side.
+    RefinementMemberRightHandSideNotAllowed,
+    /// A capture set contains a token that cannot start a capture reference.
+    ExpectedCaptureReference { found: TokenKind },
+    /// A capture-set comma is not followed by a capture reference.
+    ExpectedCaptureReferenceAfterComma { found: TokenKind },
+    /// A capture reference is followed by neither a comma nor `}`.
+    ExpectedCaptureSetSeparator { found: TokenKind },
+    /// A selected capture reference is missing its member name.
+    ExpectedCaptureReferenceMember { found: TokenKind },
+    /// The unsupported read-only `.rd` capture suffix was encountered.
+    ReadOnlyCaptureSuffixUnsupported,
+    /// A capture filter is missing its qualified type.
+    ExpectedCaptureFilterType { found: TokenKind },
+    /// A capture reference started where no simple reference is valid.
+    InvalidCaptureReference { found: TokenKind },
 }
 
 /// Function-arrow shape expected by a parsed function-type parameter clause.
@@ -120,7 +156,24 @@ impl TypeIssue {
             | Self::ExpectedNamedFunctionTypeCloseParen { .. }
             | Self::ExpectedNamedFunctionTypeParameter { .. }
             | Self::ExpectedNamedFunctionTypeParameterColon { .. }
-            | Self::ExpectedFunctionTypeArrow { .. } => ParseDiagnosticKind::ExpectedToken,
+            | Self::ExpectedFunctionTypeArrow { .. }
+            | Self::ExpectedIndentedRefinementBody { .. }
+            | Self::ExpectedCaptureSetSeparator { .. } => ParseDiagnosticKind::ExpectedToken,
+            Self::InfixTypeNoProgress { .. }
+            | Self::MixedAssociativityTypeOperators { .. }
+            | Self::RefinementNoProgress { .. } => ParseDiagnosticKind::UnexpectedToken,
+            Self::ExpectedTypeAfterLegacyWith { .. }
+            | Self::ExpectedCaptureReference { .. }
+            | Self::ExpectedCaptureReferenceAfterComma { .. }
+            | Self::ExpectedCaptureReferenceMember { .. }
+            | Self::ExpectedCaptureFilterType { .. }
+            | Self::InvalidCaptureReference { .. } => ParseDiagnosticKind::ExpectedType,
+            Self::ClassLikeRefinementMemberNotAllowed { .. }
+            | Self::ModifiedRefinementMemberNotAllowed { .. }
+            | Self::UnsupportedRefinementMember { .. }
+            | Self::RefinementMethodDefaultArgumentNotAllowed
+            | Self::RefinementMemberRightHandSideNotAllowed
+            | Self::ReadOnlyCaptureSuffixUnsupported => ParseDiagnosticKind::UnsupportedSyntax,
         }
     }
 
@@ -196,6 +249,45 @@ impl TypeIssue {
                     "parser.type.expected_pure_context_function_arrow"
                 }
             },
+            Self::InfixTypeNoProgress { .. } => "parser.type.infix_type_no_progress",
+            Self::MixedAssociativityTypeOperators { .. } => {
+                "parser.type.mixed_associativity_operators"
+            }
+            Self::ExpectedTypeAfterLegacyWith { .. } => {
+                "parser.type.expected_type_after_legacy_with"
+            }
+            Self::ExpectedIndentedRefinementBody { .. } => {
+                "parser.type.expected_indented_refinement_body"
+            }
+            Self::RefinementNoProgress { .. } => "parser.type.refinement_no_progress",
+            Self::ClassLikeRefinementMemberNotAllowed { .. } => {
+                "parser.type.class_like_refinement_member_not_allowed"
+            }
+            Self::ModifiedRefinementMemberNotAllowed { .. } => {
+                "parser.type.modified_refinement_member_not_allowed"
+            }
+            Self::UnsupportedRefinementMember { .. } => "parser.type.unsupported_refinement_member",
+            Self::RefinementMethodDefaultArgumentNotAllowed => {
+                "parser.type.refinement_method_default_argument_not_allowed"
+            }
+            Self::RefinementMemberRightHandSideNotAllowed => {
+                "parser.type.refinement_member_rhs_not_allowed"
+            }
+            Self::ExpectedCaptureReference { .. } => "parser.type.expected_capture_reference",
+            Self::ExpectedCaptureReferenceAfterComma { .. } => {
+                "parser.type.expected_capture_reference_after_comma"
+            }
+            Self::ExpectedCaptureSetSeparator { .. } => {
+                "parser.type.expected_capture_set_separator"
+            }
+            Self::ExpectedCaptureReferenceMember { .. } => {
+                "parser.type.expected_capture_reference_member"
+            }
+            Self::ReadOnlyCaptureSuffixUnsupported => {
+                "parser.type.read_only_capture_suffix_unsupported"
+            }
+            Self::ExpectedCaptureFilterType { .. } => "parser.type.expected_capture_filter_type",
+            Self::InvalidCaptureReference { .. } => "parser.type.invalid_capture_reference",
         }
     }
 }
