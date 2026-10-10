@@ -2621,8 +2621,12 @@ fn local_patdef_audit_records_typing_successes_with_file_counts() {
         .patdef_profile
         .typing_outcomes
         .iter()
-        .find(|(key, _)| key.starts_with("failure::LocalPatDefDeferred::lazy::lazy val"))
-        .expect("lazy PatDef should be counted in its focused deferral bucket");
+        .find(|(key, _)| {
+            key.starts_with(
+                "failure::LocalValueModifierDeferred::declaration semantics deferred::lazy val",
+            )
+        })
+        .expect("lazy PatDef should be counted in its local modifier deferral bucket");
     assert!(key.contains("binders=1"), "{key}");
     assert_eq!(outcome.count, 1);
     assert_eq!(
@@ -3971,6 +3975,11 @@ fn audit_source_inner(
                 TyperError::LocalBlockDeclarationDeferred {
                     tree_index,
                     kind: "val/var definition",
+                    ..
+                } => Some(*tree_index),
+                TyperError::LocalValueModifierDeferred {
+                    tree_index,
+                    classification: "declaration semantics deferred",
                     ..
                 } => Some(*tree_index),
                 _ => None,
@@ -6850,6 +6859,35 @@ fn classify_typer_error(
             bucket: format!("LocalBlockDeclarationDeferred::{kind}"),
             family: FailureFamily::LocalDeclarationDeferral,
         },
+        TyperError::LocalValueModifierDeferred {
+            tree_index,
+            modifiers,
+            classification,
+            ..
+        } => {
+            let node = arena
+                .iter()
+                .find(|(tree, _)| tree.index() == *tree_index)
+                .map(|(_, node)| &node.kind);
+            let bucket = if matches!(node, Some(TreeKind::PhaseSpecific(UntypedNode::PatDef(_)))) {
+                if modifiers.contains(&dotty_core::ast::Modifier::Lazy) {
+                    "LocalPatDefDeferred::lazy"
+                } else {
+                    "LocalPatDefDeferred::modifiers"
+                }
+            } else if *classification == "declaration semantics deferred" {
+                "LocalBlockDeclarationDeferred::val/var definition"
+            } else {
+                return FailureClassification {
+                    bucket: format!("LocalValueModifierDeferred::{classification}"),
+                    family: FailureFamily::LocalDeclarationDeferral,
+                };
+            };
+            FailureClassification {
+                bucket: bucket.to_owned(),
+                family: FailureFamily::LocalDeclarationDeferral,
+            }
+        }
         TyperError::LocalPatDefDeferred { kind, .. } => FailureClassification {
             bucket: format!("LocalPatDefDeferred::{kind}"),
             family: FailureFamily::LocalDeclarationDeferral,
@@ -7651,6 +7689,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::MalformedStablePatternTarget { .. } => "MalformedStablePatternTarget",
         TyperError::UnstablePatternValue { .. } => "UnstablePatternValue",
         TyperError::LocalBlockDeclarationDeferred { .. } => "LocalBlockDeclarationDeferred",
+        TyperError::LocalValueModifierDeferred { .. } => "LocalValueModifierDeferred",
         TyperError::LocalPatDefDeferred { .. } => "LocalPatDefDeferred",
         TyperError::InvalidInferredLocalValueType { .. } => "InvalidInferredLocalValueType",
         TyperError::LocalValueRightHandSideMissing { .. } => "LocalValueRightHandSideMissing",

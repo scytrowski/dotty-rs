@@ -1661,6 +1661,14 @@ pub enum TyperError {
         tree_index: u32,
         kind: &'static str,
     },
+    /// A local value modifier has no bounded symbol policy or its semantics
+    /// are intentionally deferred to a later typing increment.
+    LocalValueModifierDeferred {
+        source: SourceId,
+        tree_index: u32,
+        modifiers: Vec<dotty_core::ast::Modifier>,
+        classification: &'static str,
+    },
     /// An inferred local initializer widens to a type that cannot be a value info.
     InvalidInferredLocalValueType {
         source: SourceId,

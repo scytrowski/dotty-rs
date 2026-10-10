@@ -80,7 +80,7 @@ pub use source_semantics::{
 pub use store::{SemanticStore, StoreCheckpoint};
 pub use symbols::{
     OriginTable, Scope, ScopeArena, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks,
-    SymbolOrigin, SymbolTable, Visibility,
+    SymbolOrigin, SymbolTable, Visibility, source_modifier_flag,
 };
 pub use token::{
     HardKeyword, Punctuation, ScannerEvent, Token, TokenKind, TokenSource, TokenValue,

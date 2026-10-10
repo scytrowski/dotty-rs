@@ -731,6 +731,18 @@ non-value inferred infos return a focused error. Both typed explicit and
 inferred locals are entered with one stable symbol identity; a later failure in
 the block rolls back local symbols, source mappings, and typed nodes.
 
+Local value symbol flags use the shared `dotty-core::source_modifier_flag`
+mapping, with a bounded Typer policy for the source forms measured by #929.
+`var` preserves `MUTABLE`, and `final val` preserves `FINAL`; the supported
+PatDef path applies those flags to each exposed final binder while generated
+aggregate temporaries retain only `SYNTHETIC`. `given`, `implicit val`, `lazy
+val`, and `inline val` have represented symbol flags but remain deferred before
+symbol creation because their lookup, initialization, or expansion semantics
+belong to later increments. Unsupported modifiers, duplicate modifiers, and
+unsupported or inconsistent modifier sets return `LocalValueModifierDeferred`
+with the source tree and complete modifier set. This plumbing does not enable
+contextual search, lazy initialization, or inline expansion.
+
 ### Local-definition source audit v1 (historical)
 
 The first-generation audit scanned the pinned Scala 3.9.0 `library/src` and
@@ -841,9 +853,12 @@ explicit type, and final Typer failure bucket, with occurrence and file counts.
 The supported Scala 3.9 subset is strict inferred local `val`/`var` definitions
 with one source pattern and zero or more supported binders. Mutable final
 binders use ordinary local symbols flagged `MUTABLE` and work with the existing
-assignment path. Non-lazy zero-binder `var` patterns preserve the effect/check
+assignment path; `final` flags apply to exposed binders independently. Non-lazy
+zero-binder `var` patterns preserve the effect/check
 expression and introduce no symbol, matching the pinned `Desugar.makePatDef`
-contract. Lazy and explicitly typed forms use focused PatDef deferrals;
+contract. `lazy` and other unsupported modifier forms use the focused
+`LocalValueModifierDeferred` error; explicitly typed forms use focused PatDef
+deferrals;
 unsupported tuple, infix, extractor, or typed-pattern behavior keeps its
 downstream specific error. The complete lowering and identity contract is
 pinned in [`typer-patdef-lowering-3.9.0.md`](typer-patdef-lowering-3.9.0.md).

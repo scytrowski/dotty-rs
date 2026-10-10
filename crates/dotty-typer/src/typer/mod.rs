@@ -631,15 +631,15 @@ pub(in crate::typer) fn source_method_flags(modifiers: &[Modifier]) -> SymbolFla
         .iter()
         .fold(SymbolFlags::EMPTY, |flags, modifier| {
             let flag = match modifier {
-                Modifier::Abstract => SymbolFlags::ABSTRACT,
-                Modifier::Final => SymbolFlags::FINAL,
-                Modifier::Implicit => SymbolFlags::IMPLICIT,
-                Modifier::Given => SymbolFlags::GIVEN,
-                Modifier::Override => SymbolFlags::OVERRIDE,
-                Modifier::Inline => SymbolFlags::INLINE,
-                Modifier::Transparent => SymbolFlags::TRANSPARENT,
-                Modifier::Extension => SymbolFlags::EXTENSION,
-                Modifier::Erased => SymbolFlags::ERASED,
+                Modifier::Abstract
+                | Modifier::Final
+                | Modifier::Implicit
+                | Modifier::Given
+                | Modifier::Override
+                | Modifier::Inline
+                | Modifier::Transparent
+                | Modifier::Extension
+                | Modifier::Erased => dotty_core::source_modifier_flag(*modifier),
                 _ => SymbolFlags::EMPTY,
             };
             flags | flag
@@ -12357,6 +12357,130 @@ mod tests {
     }
 
     #[test]
+    fn final_local_value_preserves_its_source_flag() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = { final val local: Int = 1; local } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+            panic!("method body should be a source block");
+        };
+        let local_tree = block.stats[0];
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        typer.type_expression(rhs, context).unwrap();
+
+        let local = typer.local_symbol_at(source, local_tree).unwrap();
+        let flags = typer.store().symbols.get(local).flags;
+        assert!(flags.contains(SymbolFlags::FINAL));
+        assert!(!flags.contains(SymbolFlags::MUTABLE));
+    }
+
+    #[test]
+    fn implicit_local_value_keeps_semantics_deferred_with_modifier_identity() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Int = { implicit val local: Int = 1; 0 } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Block(block) = &parsed.ast.get(rhs).kind else {
+            panic!("method body should be a source block");
+        };
+        let local_tree = block.stats[0];
+        let TreeKind::ValDef(local_definition) = &parsed.ast.get(local_tree).kind else {
+            panic!(
+                "implicit local declaration should parse as ValDef: {:?}",
+                parsed.ast.get(local_tree).kind
+            );
+        };
+        assert_eq!(local_definition.metadata.modifiers, [Modifier::Implicit]);
+        let checkpoint = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let result = typer.type_expression(rhs, context);
+        assert!(
+            matches!(
+                &result,
+                Err(TyperError::LocalValueModifierDeferred {
+                    source: actual_source,
+                    tree_index,
+                    modifiers,
+                    classification: "declaration semantics deferred",
+                }) if *actual_source == source
+                    && *tree_index == local_tree.index()
+                    && modifiers == &[Modifier::Implicit]
+            ),
+            "{result:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert!(typer.local_symbols.is_empty());
+    }
+
+    #[test]
+    fn final_patdef_binder_preserves_final_flag() {
+        let source_text = "class MaybeInt { def isEmpty: Boolean = false; def get: Int = 1 }; object Extractor { def unapply(value: Any): MaybeInt = new MaybeInt }; class C { def use(input: Any): Int = { final val Extractor(value) = input; value } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let source_patdef = match &parsed.ast.get(rhs).kind {
+            TreeKind::Block(block) => block.stats[0],
+            _ => panic!("method body should be a block"),
+        };
+        let pattern_span = match &parsed.ast.get(source_patdef).kind {
+            TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) => parsed
+                .ast
+                .get(definition.patterns[0])
+                .position
+                .unwrap()
+                .span()
+                .range(),
+            _ => panic!("first statement should be a PatDef"),
+        };
+        let binder = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::Ident(ident) = &node.kind else {
+                    return None;
+                };
+                let position = node.position?.span().range();
+                (store.names.resolve(ident.name.text()) == "value"
+                    && pattern_span.start() <= position.start()
+                    && position.end() <= pattern_span.end())
+                .then_some(tree)
+            })
+            .expect("source pattern should retain its binder tree");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        typer.type_expression(rhs, context).unwrap();
+
+        let local = typer.local_symbol_at(source, binder).unwrap();
+        let flags = typer.store().symbols.get(local).flags;
+        assert!(flags.contains(SymbolFlags::FINAL));
+        assert!(!flags.contains(SymbolFlags::MUTABLE));
+    }
+
+    #[test]
     fn explicitly_typed_local_var_is_mutable_but_widens_to_its_declared_type() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def use: Int = { var local: Int = 1; local } }");
@@ -12449,6 +12573,75 @@ mod tests {
         for (modifier, expected) in cases {
             assert_eq!(source_method_flags(&[modifier]), expected, "{modifier:?}");
         }
+    }
+
+    #[test]
+    fn local_value_modifier_policy_preserves_profiled_symbol_flags() {
+        let cases = [
+            (vec![], SymbolFlags::EMPTY),
+            (vec![Modifier::Var], SymbolFlags::MUTABLE),
+            (vec![Modifier::Final], SymbolFlags::FINAL),
+            (
+                vec![Modifier::Given, Modifier::Final, Modifier::Lazy],
+                SymbolFlags::GIVEN | SymbolFlags::FINAL | SymbolFlags::LAZY,
+            ),
+            (vec![Modifier::Implicit], SymbolFlags::IMPLICIT),
+            (vec![Modifier::Lazy], SymbolFlags::LAZY),
+            (vec![Modifier::Inline], SymbolFlags::INLINE),
+        ];
+
+        for (modifiers, expected) in cases {
+            assert_eq!(
+                expression::blocks::local_value_symbol_flags(&modifiers),
+                Ok(expected),
+                "{modifiers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_value_modifier_policy_rejects_unmapped_and_inconsistent_sets() {
+        assert_eq!(
+            expression::blocks::local_value_symbol_flags(&[Modifier::Transparent]),
+            Err("unsupported source modifier")
+        );
+        assert_eq!(
+            expression::blocks::local_value_symbol_flags(&[Modifier::Var, Modifier::Final]),
+            Err("inconsistent source modifier set")
+        );
+        assert_eq!(
+            expression::blocks::local_value_symbol_flags(&[Modifier::Given, Modifier::Implicit]),
+            Err("inconsistent source modifier set")
+        );
+        assert_eq!(
+            expression::blocks::local_value_symbol_flags(&[Modifier::Lazy, Modifier::Lazy]),
+            Err("duplicate source modifier")
+        );
+    }
+
+    #[test]
+    fn local_value_feature_flags_remain_gated_until_their_semantics_are_typed() {
+        for modifier in [
+            Modifier::Given,
+            Modifier::Implicit,
+            Modifier::Lazy,
+            Modifier::Inline,
+        ] {
+            let flags = expression::blocks::local_value_symbol_flags(&[modifier]).unwrap();
+            assert!(
+                expression::blocks::local_value_semantics_deferred(flags),
+                "{modifier:?}"
+            );
+        }
+        assert!(!expression::blocks::local_value_semantics_deferred(
+            SymbolFlags::EMPTY
+        ));
+        assert!(!expression::blocks::local_value_semantics_deferred(
+            SymbolFlags::MUTABLE
+        ));
+        assert!(!expression::blocks::local_value_semantics_deferred(
+            SymbolFlags::FINAL
+        ));
     }
 
     #[test]
@@ -17455,7 +17648,7 @@ mod tests {
                 .any(|symbol| {
                     let synthetic = typer.store.symbols.get(*symbol);
                     synthetic.origin == SymbolOrigin::Synthetic
-                        && synthetic.flags.contains(SymbolFlags::SYNTHETIC)
+                        && synthetic.flags == SymbolFlags::SYNTHETIC
                         && synthetic.kind == SymbolKind::Local
                         && !typer.local_symbols.values().any(|local| local == symbol)
                 })
@@ -17687,10 +17880,22 @@ mod tests {
                 &packages,
             );
             let context = typer.expression_context_for(method).unwrap();
-            assert!(matches!(
-                typer.type_expression(rhs, context),
-                Err(TyperError::LocalPatDefDeferred { kind, .. }) if kind == expected_kind
-            ));
+            let error = typer.type_expression(rhs, context).unwrap_err();
+            if expected_kind == "lazy" {
+                assert!(matches!(
+                    error,
+                    TyperError::LocalValueModifierDeferred {
+                        modifiers,
+                        classification: "declaration semantics deferred",
+                        ..
+                    } if modifiers == [Modifier::Lazy]
+                ));
+            } else {
+                assert!(matches!(
+                    error,
+                    TyperError::LocalPatDefDeferred { kind, .. } if kind == expected_kind
+                ));
+            }
         }
     }
 
