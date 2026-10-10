@@ -123,9 +123,9 @@ pub enum ParameterIssue {
     /// A legacy `implicit` clause is not valid for this parameter owner.
     LegacyImplicitClauseNotAllowed { owner: ParamOwner },
     /// An `implicit` clause contains no parameter.
-    EmptyImplicitClause { found: TokenKind },
+    EmptyImplicitClause,
     /// A named `using` clause contains no parameter.
-    EmptyUsingClause { found: TokenKind },
+    EmptyUsingClause,
     /// A class enum-case parameter clause ended before its parameter.
     ExpectedParameterBeforeClauseEnd { found: TokenKind },
     /// Parsing a term parameter did not advance the token source.
@@ -185,8 +185,8 @@ impl ParameterIssue {
             Self::LegacyImplicitClauseNotAllowed { .. } => {
                 "parser.parameter.implicit_clause_not_allowed_for_owner"
             }
-            Self::EmptyImplicitClause { .. } => "parser.parameter.empty_implicit_clause",
-            Self::EmptyUsingClause { .. } => "parser.parameter.empty_using_clause",
+            Self::EmptyImplicitClause => "parser.parameter.empty_implicit_clause",
+            Self::EmptyUsingClause => "parser.parameter.empty_using_clause",
             Self::ExpectedParameterBeforeClauseEnd { .. } => {
                 "parser.parameter.expected_parameter_before_clause_end"
             }

@@ -139,9 +139,7 @@ where
             metadata.modifiers.push(Modifier::Implicit);
             self.advance();
             if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
-                self.report_issue(ParseIssue::Parameter(ParameterIssue::EmptyImplicitClause {
-                    found: self.current().kind,
-                }));
+                self.report_issue(ParseIssue::Parameter(ParameterIssue::EmptyImplicitClause));
                 return params;
             }
         }
@@ -157,9 +155,7 @@ where
                 );
             }
             if self.accept(TokenKind::Punctuation(Punctuation::RightParen)) {
-                self.report_issue(ParseIssue::Parameter(ParameterIssue::EmptyUsingClause {
-                    found: self.current().kind,
-                }));
+                self.report_issue(ParseIssue::Parameter(ParameterIssue::EmptyUsingClause));
                 return params;
             }
         }
@@ -765,6 +761,72 @@ mod tests {
 
         assert_eq!(clauses, vec![Vec::new()]);
         assert!(parser.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn diagnoses_an_empty_implicit_clause_without_moving_its_span_or_recovery() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(implicit)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Keyword(dotty_core::HardKeyword::Implicit), 1, 9),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 9, 10),
+                token(TokenKind::Eof, 10, 10),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses, vec![Vec::new()]);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Parameter(ParameterIssue::EmptyImplicitClause)
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(10, 10).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn diagnoses_an_empty_using_clause_without_moving_its_span_or_recovery() {
+        let mut names = NameInterner::new();
+        let mut parser = parser_for(
+            "(using)",
+            vec![
+                token(TokenKind::Punctuation(Punctuation::LeftParen), 0, 1),
+                token(TokenKind::Identifier, 1, 6),
+                token(TokenKind::Punctuation(Punctuation::RightParen), 6, 7),
+                token(TokenKind::Eof, 7, 7),
+            ],
+            &mut names,
+        );
+
+        let clauses = parser.parse_term_param_clauses(ParamOwner::Def);
+
+        assert_eq!(clauses, vec![Vec::new()]);
+        assert_eq!(parser.diagnostics().len(), 1);
+        assert_eq!(
+            parser.diagnostics()[0].issue(),
+            &ParseIssue::Parameter(ParameterIssue::EmptyUsingClause)
+        );
+        assert_eq!(
+            parser.diagnostics()[0].span(),
+            dotty_core::TextRange::new(7, 7).unwrap()
+        );
+        assert_eq!(
+            parser.diagnostics()[0].severity(),
+            dotty_core::DiagnosticSeverity::Error
+        );
+        assert_eq!(parser.current().kind, TokenKind::Eof);
     }
 
     #[test]
