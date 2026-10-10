@@ -231,6 +231,15 @@ struct FailureClassification {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct RootFailure {
+    range: TextRange,
+    failure: FailureClassification,
+    missing_type_tree: Option<u32>,
+    singleton_reference_tree: Option<u32>,
+    local_method_signature: Option<(u32, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Audit {
     files_attempted: usize,
     parser_failed_files: usize,
@@ -253,6 +262,7 @@ struct Audit {
     patdef_profile: PatDefProfile,
     missing_declared_type_profile: MissingDeclaredTypeProfile,
     local_method_first_blockers: BTreeMap<String, String>,
+    local_method_signature_profile: LocalMethodSignatureProfile,
     singleton_reference_profile: SingletonReferenceProfile,
     singleton_source_inventory: SingletonSourceInventory,
     source_function_method_outcomes: BTreeSet<String>,
@@ -290,6 +300,7 @@ impl Default for Audit {
             patdef_profile: PatDefProfile::default(),
             missing_declared_type_profile: MissingDeclaredTypeProfile::default(),
             local_method_first_blockers: BTreeMap::new(),
+            local_method_signature_profile: LocalMethodSignatureProfile::default(),
             singleton_reference_profile: SingletonReferenceProfile::default(),
             singleton_source_inventory: SingletonSourceInventory::default(),
             source_function_method_outcomes: BTreeSet::new(),
@@ -401,6 +412,65 @@ struct FailureBucket {
     examples: BTreeSet<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct LocalMethodSignatureFeatureBucket {
+    count: usize,
+    direct_methods: BTreeSet<String>,
+    inherited_methods: BTreeSet<String>,
+    files: BTreeSet<String>,
+    methods: BTreeSet<String>,
+    blocker_origins: BTreeSet<String>,
+    records: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct LocalMethodSignatureProfile {
+    total: usize,
+    features: BTreeMap<String, LocalMethodSignatureFeatureBucket>,
+}
+
+impl LocalMethodSignatureProfile {
+    fn record(
+        &mut self,
+        feature: String,
+        path: &str,
+        method: String,
+        blocker_origin: String,
+        direct: bool,
+        record: String,
+    ) {
+        let bucket = self.features.entry(feature).or_default();
+        if bucket.methods.insert(method.clone()) {
+            self.total += 1;
+            bucket.count += 1;
+        }
+        if direct {
+            bucket.direct_methods.insert(method);
+        } else {
+            bucket.inherited_methods.insert(method);
+        }
+        bucket.files.insert(path.to_owned());
+        bucket.blocker_origins.insert(blocker_origin);
+        bucket.records.insert(record);
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.total += other.total;
+        for (feature, other_bucket) in other.features {
+            let bucket = self.features.entry(feature).or_default();
+            bucket.count += other_bucket.count;
+            bucket.direct_methods.extend(other_bucket.direct_methods);
+            bucket
+                .inherited_methods
+                .extend(other_bucket.inherited_methods);
+            bucket.files.extend(other_bucket.files);
+            bucket.methods.extend(other_bucket.methods);
+            bucket.blocker_origins.extend(other_bucket.blocker_origins);
+            bucket.records.extend(other_bucket.records);
+        }
+    }
+}
+
 impl Audit {
     fn merge(&mut self, other: Self) {
         self.files_attempted += other.files_attempted;
@@ -436,6 +506,8 @@ impl Audit {
             .merge(other.missing_declared_type_profile);
         self.local_method_first_blockers
             .extend(other.local_method_first_blockers);
+        self.local_method_signature_profile
+            .merge(other.local_method_signature_profile);
         self.singleton_reference_profile
             .merge(other.singleton_reference_profile);
         self.singleton_source_inventory
@@ -779,6 +851,41 @@ fn pinned_scala39_local_definition_audit() {
         singleton_reference_failure_count,
         "every singleton-reference blocker must have a distinct profile row"
     );
+    let local_method_signature_failure_count = audit
+        .failures
+        .get("LocalMethodSignatureDeferred")
+        .map_or(0, |bucket| bucket.count);
+    assert_eq!(
+        audit.local_method_signature_profile.total, local_method_signature_failure_count,
+        "every LocalMethodSignatureDeferred first blocker must retain its exact payload and source shape"
+    );
+    assert_eq!(local_method_signature_failure_count, 14);
+    assert_eq!(audit.local_method_signature_profile.features.len(), 2);
+    let by_name_parameters = audit
+        .local_method_signature_profile
+        .features
+        .get("by-name parameters")
+        .expect("the pinned local-method profile should classify by-name parameters");
+    assert_eq!(by_name_parameters.count, 8);
+    assert_eq!(by_name_parameters.files.len(), 2);
+    assert_eq!(by_name_parameters.direct_methods.len(), 2);
+    assert_eq!(by_name_parameters.inherited_methods.len(), 6);
+    let parameter_modifiers = audit
+        .local_method_signature_profile
+        .features
+        .get("parameter modifiers")
+        .expect("the pinned local-method profile should classify parameter modifiers");
+    assert_eq!(parameter_modifiers.count, 6);
+    assert_eq!(parameter_modifiers.files.len(), 1);
+    assert_eq!(parameter_modifiers.direct_methods.len(), 1);
+    assert_eq!(parameter_modifiers.inherited_methods.len(), 5);
+    let local_method_signature_files = audit
+        .local_method_signature_profile
+        .features
+        .values()
+        .flat_map(|bucket| bucket.files.iter())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(local_method_signature_files.len(), 3);
     let singleton_projection_outcomes =
         singleton_projection_baseline_outcomes(&audit.local_method_first_blockers);
     let singleton_no_longer_first_blocked = singleton_projection_outcomes
@@ -1023,6 +1130,7 @@ fn pinned_scala39_local_definition_audit() {
     print_pinned_mutable_field_completion_outcomes(&root, classpath);
     print_pinned_immutable_field_method_outcomes(&audit.local_method_first_blockers);
     print_pinned_mutable_field_method_outcomes(&audit.local_method_first_blockers);
+    print_local_method_signature_profile(&audit.local_method_signature_profile);
     print_singleton_reference_profile(&audit.singleton_reference_profile);
     print_singleton_source_inventory(&audit.singleton_source_inventory);
     print_singleton_projection_baseline(&singleton_projection_outcomes);
@@ -1060,6 +1168,50 @@ fn print_singleton_reference_profile(profile: &SingletonReferenceProfile) {
     println!("  reference_shapes:");
     for shape in &profile.reference_shapes {
         println!("    {shape}");
+    }
+}
+
+fn print_local_method_signature_profile(profile: &LocalMethodSignatureProfile) {
+    println!("local_method_signature_profile:");
+    println!("  total_occurrences={}", profile.total);
+    println!("  distinct_files={}", {
+        profile
+            .features
+            .values()
+            .flat_map(|bucket| bucket.files.iter())
+            .collect::<BTreeSet<_>>()
+            .len()
+    });
+    let mut features = profile.features.iter().collect::<Vec<_>>();
+    features.sort_by(|(feature_a, a), (feature_b, b)| {
+        b.count.cmp(&a.count).then(feature_a.cmp(feature_b))
+    });
+    println!("  features:");
+    for (feature, bucket) in features {
+        println!(
+            "    {feature:?}: affected_local_methods={} files={} distinct_methods={} direct_origins={} inherited_methods={} blocker_origins={} representatives=[{}]",
+            bucket.count,
+            bucket.files.len(),
+            bucket.methods.len(),
+            bucket.direct_methods.len(),
+            bucket.inherited_methods.len(),
+            bucket.blocker_origins.len(),
+            bucket
+                .records
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+    }
+    println!("  records:");
+    for record in profile
+        .features
+        .values()
+        .flat_map(|bucket| bucket.records.iter())
+    {
+        println!("    {record}");
     }
 }
 
@@ -3459,7 +3611,21 @@ fn audit_source_inner(
                 TyperError::UnsupportedSingletonReference { tree_index, .. } => Some(*tree_index),
                 _ => None,
             };
-            root_failures.push((range, failure, missing_type_tree, singleton_reference_tree));
+            let local_method_signature = match &error {
+                TyperError::LocalMethodSignatureDeferred {
+                    tree_index,
+                    feature,
+                    ..
+                } => Some((*tree_index, (*feature).to_owned())),
+                _ => None,
+            };
+            root_failures.push(RootFailure {
+                range,
+                failure,
+                missing_type_tree,
+                singleton_reference_tree,
+                local_method_signature,
+            });
         }
     }
 
@@ -3535,23 +3701,32 @@ fn audit_source_inner(
                 .local_method_first_blockers
                 .insert(format!("{path}#tree={}", tree.index()), "typed".to_owned());
         } else {
-            let (kind, missing_type_tree, singleton_reference_tree) = root_failures
-                .iter()
-                .filter(|(parent, _, _, _)| {
-                    parent.start() <= range.start() && range.end() <= parent.end()
-                })
-                .min_by_key(|(parent, _, _, _)| parent.end().saturating_sub(parent.start()))
-                .map(|(_, failure, tree, singleton)| (failure.clone(), *tree, *singleton))
-                .unwrap_or_else(|| {
-                    (
-                        FailureClassification {
-                            bucket: "NoSuccessfulEnclosingMethodTyping".to_owned(),
-                            family: FailureFamily::Other,
-                        },
-                        None,
-                        None,
-                    )
-                });
+            let (kind, missing_type_tree, singleton_reference_tree, local_method_signature) =
+                root_failures
+                    .iter()
+                    .filter(|failure| {
+                        failure.range.start() <= range.start() && range.end() <= failure.range.end()
+                    })
+                    .min_by_key(|failure| failure.range.end().saturating_sub(failure.range.start()))
+                    .map(|failure| {
+                        (
+                            failure.failure.clone(),
+                            failure.missing_type_tree,
+                            failure.singleton_reference_tree,
+                            failure.local_method_signature.clone(),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        (
+                            FailureClassification {
+                                bucket: "NoSuccessfulEnclosingMethodTyping".to_owned(),
+                                family: FailureFamily::Other,
+                            },
+                            None,
+                            None,
+                            None,
+                        )
+                    });
             if kind.bucket == "UnsupportedSingletonReference" {
                 let detail = singleton_reference_tree
                     .and_then(|reference_tree| {
@@ -3572,6 +3747,51 @@ fn audit_source_inner(
             audit
                 .local_method_first_blockers
                 .insert(format!("{path}#tree={}", tree.index()), kind.bucket.clone());
+            if kind.bucket == "LocalMethodSignatureDeferred" {
+                let (origin_tree_index, feature) = local_method_signature.unwrap_or_else(|| {
+                    panic!(
+                        "missing exact local method signature blocker origin for {path}#tree={}",
+                        tree.index()
+                    )
+                });
+                let direct = origin_tree_index == tree.index();
+                let origin_name = parsed
+                    .ast
+                    .iter()
+                    .find(|(origin_tree, _)| origin_tree.index() == origin_tree_index)
+                    .and_then(|(_, origin_node)| match &origin_node.kind {
+                        TreeKind::DefDef(definition) => Some(
+                            typer
+                                .store()
+                                .names
+                                .resolve(definition.name.as_name().text()),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap_or("<unknown>");
+                let (method_key, mut record) = local_method_signature_record(
+                    &parsed.ast,
+                    &typer.store().names,
+                    text,
+                    path,
+                    tree,
+                    &feature,
+                )
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing local method source shape for {path}#tree={}",
+                        tree.index()
+                    )
+                });
+                let origin_key = format!("{path}#tree={origin_tree_index}:{origin_name}");
+                record.push_str(&format!(
+                    " blocker_origin={origin_key} attribution={}",
+                    if direct { "direct" } else { "inherited" }
+                ));
+                audit
+                    .local_method_signature_profile
+                    .record(feature, path, method_key, origin_key, direct, record);
+            }
             if kind.bucket == "MissingDeclaredType"
                 && let Some(tree_index) = missing_type_tree
             {
@@ -4634,7 +4854,7 @@ struct SourceFunctionMethodAudit<'a, 'typer> {
     source_text: &'a str,
     names: &'a dotty_core::names::NameInterner,
     methods: &'a [(dotty_core::TreeId<Untyped>, TextRange)],
-    root_failures: &'a [(TextRange, FailureClassification, Option<u32>, Option<u32>)],
+    root_failures: &'a [RootFailure],
     typer: &'a SourceTyper<'typer>,
 }
 
@@ -4831,12 +5051,13 @@ fn collect_source_function_method_outcomes(
             audit
                 .root_failures
                 .iter()
-                .filter(|(parent, _, _, _)| {
-                    parent.start() <= method_range.start() && method_range.end() <= parent.end()
+                .filter(|failure| {
+                    failure.range.start() <= method_range.start()
+                        && method_range.end() <= failure.range.end()
                 })
-                .min_by_key(|(parent, _, _, _)| parent.len())
-                .map_or("NoSuccessfulEnclosingMethodTyping", |(_, failure, _, _)| {
-                    failure.bucket.as_str()
+                .min_by_key(|failure| failure.range.len())
+                .map_or("NoSuccessfulEnclosingMethodTyping", |failure| {
+                    failure.failure.bucket.as_str()
                 })
         };
         records.insert(format!(
@@ -5159,6 +5380,190 @@ fn collect_singleton_source_inventory(
     inventory
 }
 
+fn local_method_signature_record(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::names::NameInterner,
+    source_text: &str,
+    path: &str,
+    method_tree: dotty_core::TreeId<Untyped>,
+    feature: &str,
+) -> Option<(String, String)> {
+    let node = arena.try_get(method_tree)?;
+    let TreeKind::DefDef(definition) = &node.kind else {
+        return None;
+    };
+    let position = node.position?;
+    let range = position.span().range();
+    let start = range.start() as usize;
+    let end = range.end() as usize;
+    let line = source_text
+        .get(..start)?
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1;
+    let method_name = names.resolve(definition.name.as_name().text());
+    let method_key = format!("{path}#tree={}", method_tree.index());
+    let type_parameter_clauses = definition
+        .source_param_clause_order
+        .as_ref()
+        .map(|clauses| {
+            clauses
+                .iter()
+                .filter(|clause| {
+                    matches!(clause, dotty_core::ast::DefParamClauseOrder::TypeParams(_))
+                })
+                .count()
+        })
+        .unwrap_or(usize::from(!definition.type_params.is_empty()));
+    let mut parameter_names = Vec::new();
+    let mut parameter_modifiers = BTreeSet::new();
+    let mut by_name_parameter = false;
+    let mut clause_kinds = Vec::new();
+    for clause in &definition.value_param_clauses {
+        let mut clause_kind = BTreeSet::new();
+        for parameter_tree in clause {
+            let Some(TreeKind::ValDef(parameter)) =
+                arena.try_get(*parameter_tree).map(|node| &node.kind)
+            else {
+                continue;
+            };
+            parameter_names.push(*parameter.name.as_name());
+            for modifier in &parameter.metadata.modifiers {
+                if *modifier != dotty_core::ast::Modifier::Param {
+                    parameter_modifiers.insert(format!("{modifier:?}"));
+                }
+                match modifier {
+                    dotty_core::ast::Modifier::Given => {
+                        clause_kind.insert("contextual");
+                    }
+                    dotty_core::ast::Modifier::Implicit => {
+                        clause_kind.insert("implicit");
+                    }
+                    _ => {}
+                }
+            }
+            if matches!(
+                arena.try_get(parameter.tpt).map(|node| &node.kind),
+                Some(TreeKind::ByNameTypeTree(_))
+            ) {
+                by_name_parameter = true;
+            }
+        }
+        clause_kinds.push(match clause_kind.len() {
+            0 if clause.is_empty() => "empty",
+            0 => "plain",
+            1 => *clause_kind.first().unwrap(),
+            _ => "mixed",
+        });
+    }
+    let is_extension = is_extension_method_tree(arena, method_tree.index());
+    if is_extension {
+        for (_, extension_node) in arena.iter() {
+            let TreeKind::PhaseSpecific(UntypedNode::ExtensionMethods(extension)) =
+                &extension_node.kind
+            else {
+                continue;
+            };
+            if !extension.methods.contains(&method_tree) {
+                continue;
+            }
+            for receiver in extension.param_clauses.iter().flatten() {
+                if let Some(TreeKind::ValDef(parameter)) =
+                    arena.try_get(*receiver).map(|node| &node.kind)
+                {
+                    parameter_names.push(*parameter.name.as_name());
+                }
+            }
+        }
+    }
+    let result_depends_on_parameter =
+        local_result_depends_on_parameters(arena, definition.tpt, &parameter_names);
+    let result_kind = if matches!(
+        arena.try_get(definition.tpt).map(|node| &node.kind),
+        Some(TreeKind::TypeTree(_))
+    ) {
+        "inferred"
+    } else {
+        "explicit"
+    };
+    let record = format!(
+        "{path}:line={line} span={start}..{end} tree={} method={method_name} feature={feature:?} type_parameter_clauses={type_parameter_clauses} value_parameter_clauses={} clause_kinds=[{}] parameter_modifiers=[{}] by_name_parameter={by_name_parameter} result_depends_on_parameter={result_depends_on_parameter} extension={is_extension} result={result_kind}",
+        method_tree.index(),
+        definition.value_param_clauses.len(),
+        clause_kinds.join(","),
+        parameter_modifiers
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    Some((method_key, record))
+}
+
+fn local_result_depends_on_parameters(
+    arena: &dotty_core::AstArena<Untyped>,
+    result_tree: dotty_core::TreeId<Untyped>,
+    parameter_names: &[dotty_core::Name],
+) -> bool {
+    let mut pending = vec![result_tree];
+    let mut visited = HashSet::new();
+    while let Some(tree) = pending.pop() {
+        if !visited.insert(tree) {
+            continue;
+        }
+        let Some(node) = arena.try_get(tree) else {
+            continue;
+        };
+        match &node.kind {
+            TreeKind::SingletonTypeTree(singleton) => {
+                if local_parameter_path(arena, singleton.reference, parameter_names) {
+                    return true;
+                }
+            }
+            TreeKind::Select(selection) => {
+                if local_parameter_path(arena, selection.qualifier, parameter_names) {
+                    return true;
+                }
+            }
+            TreeKind::AppliedTypeTree(applied) => {
+                pending.push(applied.tpt);
+                pending.extend(applied.args.iter().copied());
+            }
+            TreeKind::ByNameTypeTree(by_name) => pending.push(by_name.result),
+            TreeKind::RefinedTypeTree(refined) => {
+                pending.push(refined.tpt);
+                pending.extend(refined.refinements.iter().copied());
+            }
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => pending.push(parens.inner),
+            _ => {}
+        }
+    }
+    false
+}
+
+fn local_parameter_path(
+    arena: &dotty_core::AstArena<Untyped>,
+    mut tree: dotty_core::TreeId<Untyped>,
+    parameter_names: &[dotty_core::Name],
+) -> bool {
+    let mut visited = HashSet::new();
+    loop {
+        if !visited.insert(tree) {
+            return false;
+        }
+        let Some(node) = arena.try_get(tree) else {
+            return false;
+        };
+        match &node.kind {
+            TreeKind::Ident(ident) => return parameter_names.contains(&ident.name),
+            TreeKind::Select(selection) => tree = selection.qualifier,
+            TreeKind::SingletonTypeTree(singleton) => tree = singleton.reference,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => tree = parens.inner,
+            _ => return false,
+        }
+    }
+}
+
 #[test]
 fn singleton_profile_shapes_are_distinct_and_deterministically_ordered() {
     let source_text = "class Inner { val field: Int = 0 }; class C { val truth: true = true; val numeric: 1 = 1; val stable: Int = 1; val alias: stable.type = stable; val inner: Inner = new Inner; val selected: inner.field.type = inner.field }";
@@ -5279,6 +5684,113 @@ fn singleton_source_inventory_counts_reference_categories_and_files() {
     assert_eq!(first.reference_shapes.get("This"), Some(&1));
     assert_eq!(first.reference_shapes.get("Select"), Some(&1));
     assert_eq!(first.reference_shapes.get("Other(TypeTree)"), Some(&1));
+}
+
+#[test]
+fn local_method_signature_profile_classifies_feature_fixtures() {
+    let by_name_source =
+        "class C { def outer: Int = { def byName(value: => Int): Int = value; 0 } }";
+    let by_name = audit_source_inner(by_name_source, "ByName.scala", None);
+    let repeated_by_name = audit_source_inner(by_name_source, "ByName.scala", None);
+    assert_eq!(
+        by_name.local_method_signature_profile, repeated_by_name.local_method_signature_profile,
+        "local method signature profile should be deterministic across repeated audits"
+    );
+    let by_name_feature = by_name
+        .local_method_signature_profile
+        .features
+        .get("by-name parameters")
+        .expect("by-name parameter fixture should retain its exact feature payload");
+    assert_eq!(by_name_feature.count, 1);
+    assert!(by_name_feature.records.iter().any(|record| {
+        record.contains("method=byName")
+            && record.contains("by_name_parameter=true")
+            && record.contains("result=explicit")
+            && record.contains("attribution=direct")
+    }));
+
+    let dependent = audit_source_inner(
+        "class C { def outer: Int = { def dependent(value: Int): value.type = value; 0 } }",
+        "DependentResult.scala",
+        None,
+    );
+    let dependent_feature = dependent
+        .local_method_signature_profile
+        .features
+        .get("dependent result types")
+        .expect("dependent result fixture should be distinct from by-name parameters");
+    assert_eq!(dependent_feature.count, 1);
+    assert!(
+        dependent_feature
+            .records
+            .iter()
+            .any(|record| record.contains("result_depends_on_parameter=true"))
+    );
+
+    let modifier = audit_source_inner(
+        "class C { def outer: Int = { def modified(inline value: Int): Int = value; 0 } }",
+        "ParameterModifier.scala",
+        None,
+    );
+    let modifier_feature = modifier
+        .local_method_signature_profile
+        .features
+        .get("parameter modifiers")
+        .expect("inline parameter fixture should preserve the modifier boundary");
+    assert_eq!(modifier_feature.count, 1);
+    assert!(modifier_feature.records.iter().any(|record| {
+        record.contains("parameter_modifiers=[Inline]") && record.contains("attribution=direct")
+    }));
+
+    let supported = audit_source_inner(
+        "class C { def outer: Int = { def supported(value: Int): Int = value; supported(1) } }",
+        "SupportedLocalMethod.scala",
+        None,
+    );
+    assert!(supported.local_method_signature_profile.features.is_empty());
+
+    let extension_source = "class C { def outer: Int = { extension (receiver: Int) { def generic[A]: Int = receiver }; 0 } }";
+    let extension_source_id = SourceId::from_index(0);
+    let mut extension_store = SemanticStore::new();
+    let extension_parsed = parse_compilation_unit(
+        SourceText::new(extension_source).unwrap(),
+        extension_source_id,
+        ContextualScanner::new(extension_source).unwrap(),
+        &mut extension_store.names,
+    );
+    let extension_method = extension_parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            matches!(&node.kind, TreeKind::DefDef(definition)
+                if extension_store.names.resolve(definition.name.as_name().text()) == "generic")
+            .then_some(tree)
+        })
+        .expect("extension method fixture should parse");
+    assert!(is_extension_method_tree(
+        &extension_parsed.ast,
+        extension_method.index()
+    ));
+    let extension_classification = local_method_signature_classification(
+        &extension_parsed.ast,
+        extension_method.index(),
+        "extension type parameters",
+    );
+    assert_eq!(
+        extension_classification.bucket,
+        "LocalExtensionSignatureDeferred::extension type parameters"
+    );
+
+    let by_name_call = audit_source_inner(
+        "class C { def accept(value: => Int): Int = value; def outer: Int = { def call: Int = accept(1); call } }",
+        "ByNameCall.scala",
+        None,
+    );
+    assert!(
+        by_name_call
+            .failures
+            .contains_key("ByNameApplicationParameterDeferred")
+    );
 }
 
 #[derive(Debug)]
@@ -5498,10 +6010,7 @@ fn classify_typer_error(
             tree_index,
             feature,
             ..
-        } if is_extension_method_tree(arena, *tree_index) => FailureClassification {
-            bucket: format!("LocalExtensionSignatureDeferred::{feature}"),
-            family: FailureFamily::TypeRelationInferenceCompletion,
-        },
+        } => local_method_signature_classification(arena, *tree_index, feature),
         TyperError::TypeNameNotFound { tree_index, .. }
             if is_extension_receiver_tree(arena, *tree_index) =>
         {
@@ -5595,6 +6104,22 @@ fn classify_typer_error(
                 family,
             }
         }
+    }
+}
+
+fn local_method_signature_classification(
+    arena: &dotty_core::AstArena<Untyped>,
+    tree_index: u32,
+    feature: &str,
+) -> FailureClassification {
+    let bucket = if is_extension_method_tree(arena, tree_index) {
+        format!("LocalExtensionSignatureDeferred::{feature}")
+    } else {
+        "LocalMethodSignatureDeferred".to_owned()
+    };
+    FailureClassification {
+        bucket,
+        family: FailureFamily::TypeRelationInferenceCompletion,
     }
 }
 
