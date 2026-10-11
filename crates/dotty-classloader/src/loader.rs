@@ -465,6 +465,26 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
     }
 
+    fn cached_dependency_context(
+        &self,
+        error: &ClassLoadError,
+    ) -> Option<(Option<ClassOrigin>, Option<ClassFormat>)> {
+        let ClassLoadError::DependencyFailure {
+            dependency, source, ..
+        } = error
+        else {
+            return None;
+        };
+
+        self.cached_dependency_context(source)
+            .or_else(|| match self.repository.get(dependency) {
+                Some(ClassEntry::Failed(_, failure)) => {
+                    Some((failure.origin.clone(), failure.format))
+                }
+                _ => None,
+            })
+    }
+
     fn load_class_with_inheritance_ancestry(
         &mut self,
         name: &BinaryName,
@@ -624,14 +644,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 .take()
                 .filter(|(alias_name, _, _)| Some(alias_name) == cause_name)
                 .map(|(_, origin, format)| (Some(origin), Some(format)));
-            let dependency_context = cause_name
-                .and_then(|cause_name| self.repository.get(cause_name))
-                .and_then(|entry| match entry {
-                    ClassEntry::Failed(_, failure) => {
-                        Some((failure.origin.clone(), failure.format))
-                    }
-                    _ => None,
-                });
+            let dependency_context = self.cached_dependency_context(&error);
             let (origin, format) = alias_context.or(dependency_context).unwrap_or({
                 if failure_is_for_another_name {
                     (None, None)
@@ -2740,6 +2753,20 @@ mod tests {
     }
 
     struct ResourceClassPath(HashMap<BinaryName, (Vec<u8>, ClassFormat, ClassOrigin)>);
+
+    struct CountingResourceClassPath {
+        resources: HashMap<BinaryName, (Vec<u8>, ClassFormat, ClassOrigin)>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ClassPathEntry for CountingResourceClassPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(self.resources.get(name).map(|(bytes, format, origin)| {
+                ClassResource::new(bytes.clone(), *format, origin.clone())
+            }))
+        }
+    }
 
     impl ClassPathEntry for ResourceClassPath {
         fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
@@ -5765,6 +5792,73 @@ mod tests {
             Some(ClassOrigin::Directory(PathBuf::from("/alias")))
         );
         assert_eq!(failure.format, Some(ClassFormat::Tasty));
+    }
+
+    #[test]
+    fn nested_dependency_alias_failure_preserves_cached_provenance_without_io() {
+        let resources = HashMap::from([
+            (
+                BinaryName::from_internal("Owner"),
+                (
+                    synthetic_class("Owner", Some("Source")),
+                    ClassFormat::Class,
+                    ClassOrigin::Directory(PathBuf::from("/owner")),
+                ),
+            ),
+            (
+                BinaryName::from_internal("Source"),
+                (
+                    dotty_tasty_fixture_bytes("scala3-library/scala/io/Source.tasty"),
+                    ClassFormat::Tasty,
+                    ClassOrigin::Directory(PathBuf::from("/source")),
+                ),
+            ),
+            (
+                BinaryName::from_internal("scala/package"),
+                (
+                    b"malformed package object TASTy".to_vec(),
+                    ClassFormat::Tasty,
+                    ClassOrigin::Directory(PathBuf::from("/alias")),
+                ),
+            ),
+        ]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let class_path = CountingResourceClassPath {
+            resources,
+            calls: Arc::clone(&calls),
+        };
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+
+        let failure = loader
+            .load_class_detailed(&BinaryName::from_internal("Owner"))
+            .expect_err("the nested malformed alias resource must fail");
+        assert!(matches!(
+            failure.error,
+            ClassLoadError::DependencyFailure { .. }
+        ));
+        assert!(matches!(
+            failure.root_cause(),
+            ClassLoadError::InvalidTastyFile(name, _) if name.as_internal() == "scala/package"
+        ));
+        assert_eq!(
+            failure.origin,
+            Some(ClassOrigin::Directory(PathBuf::from("/alias")))
+        );
+        assert_eq!(failure.format, Some(ClassFormat::Tasty));
+
+        let calls_after_initial_failure = calls.load(Ordering::Relaxed);
+        for name in ["Owner", "Source"] {
+            let cached = loader
+                .load_class_detailed(&BinaryName::from_internal(name))
+                .expect_err("cached failures must retain the alias provenance");
+            assert_eq!(
+                cached.origin,
+                Some(ClassOrigin::Directory(PathBuf::from("/alias")))
+            );
+            assert_eq!(cached.format, Some(ClassFormat::Tasty));
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), calls_after_initial_failure);
     }
 
     #[test]
