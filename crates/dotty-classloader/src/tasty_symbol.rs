@@ -899,6 +899,17 @@ fn resolve_reference_name_at_depth(
     if depth >= MAX_REFERENCE_DEPTH {
         return ReferenceResolution::Unresolved;
     }
+    if let RawTree::Leaf(term) = tree
+        && matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG)
+    {
+        let Some(reference) = term.ast_ref() else {
+            return ReferenceResolution::Unresolved;
+        };
+        let Some(shared) = decode_shared_tree(file, reference.address) else {
+            return ReferenceResolution::Unresolved;
+        };
+        return resolve_reference_name_at_depth(file, &shared, current_package, depth + 1);
+    }
     let Ok(structured) = tree.decode_structured() else {
         return ReferenceResolution::NotAReference;
     };
@@ -1583,6 +1594,18 @@ mod tests {
                 .join(relative_path),
         )
         .unwrap_or_else(|error| panic!("fixture {relative_path} should exist: {error}"))
+    }
+
+    #[test]
+    fn resolves_a_shared_function1_superclass_to_object() {
+        let bytes = fixture_bytes("scala3-library/scala/Function1.tasty");
+        let decoded = decode(&bytes, &BinaryName::from_internal("scala/Function1"))
+            .expect("the shared AnyRef superclass in Function1 should resolve");
+
+        assert_eq!(
+            decoded.super_class,
+            BinaryName::from_internal("java/lang/Object")
+        );
     }
 
     #[test]

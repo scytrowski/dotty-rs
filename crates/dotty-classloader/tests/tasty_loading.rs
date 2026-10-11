@@ -254,6 +254,31 @@ fn loads_published_scala39_with_filter_and_its_map_member() {
 }
 
 #[test]
+fn loads_scala39_function1_with_a_shared_anyref_parent() {
+    let mut store = SemanticStore::new();
+    let synthetic_jdk = TemporaryDirectory::new("published-scala39-function1");
+    write_synthetic_object_class(synthetic_jdk.path());
+    let class_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(published_scala39_library_dir())),
+        Box::new(DirectoryClassPath::new(synthetic_jdk.path().clone())),
+    ]);
+    let mut loader = ClassLoader::new(class_path, &mut store);
+
+    let function1 = loader
+        .load_class(&BinaryName::from_internal("scala/Function1"))
+        .expect("Function1 should resolve its shared AnyRef parent to java/lang/Object");
+    drop(loader);
+
+    let parents = &class_info(&store, function1).parents;
+    assert_eq!(parents.len(), 1);
+    let parent = store.types.get(parents[0]).reference_symbol().unwrap();
+    assert_eq!(
+        store.names.resolve(store.symbols.get(parent).name.text()),
+        "Object"
+    );
+}
+
+#[test]
 fn enters_a_tasty_class_into_its_package_scope() {
     let mut store = SemanticStore::new();
     let (mut loader, _synthetic_jdk) =
