@@ -235,6 +235,48 @@ mod tests {
     }
 
     #[test]
+    fn nested_dependency_failures_preserve_rc_identity_and_error_sources() {
+        use std::error::Error;
+
+        let leaf = ClassLoadError::InvalidClassFile(
+            BinaryName::from_internal("missing/Leaf"),
+            ClassFileError::Read(dotty_classfile::reader::ReadError::UnexpectedEof {
+                offset: 7,
+                needed: 2,
+                remaining: 0,
+            }),
+        );
+        let inner = Rc::new(ClassLoadError::DependencyFailure {
+            owner: BinaryName::from_internal("middle/Owner"),
+            dependency: BinaryName::from_internal("missing/Leaf"),
+            source: Rc::new(leaf),
+        });
+        let retained = Rc::clone(&inner);
+        let outer = ClassLoadError::DependencyFailure {
+            owner: BinaryName::from_internal("root/Owner"),
+            dependency: BinaryName::from_internal("middle/Owner"),
+            source: inner,
+        };
+
+        let first = outer.source().expect("outer error retains its cause");
+        assert_eq!(
+            first as *const dyn Error as *const (),
+            retained.as_ref() as *const ClassLoadError as *const ()
+        );
+        let second = first.source().expect("nested wrapper retains its cause");
+        let leaf = second
+            .downcast_ref::<ClassLoadError>()
+            .expect("the nested cause remains a typed class load error");
+        assert!(
+            matches!(leaf, ClassLoadError::InvalidClassFile(name, _) if name.as_internal() == "missing/Leaf")
+        );
+        assert!(
+            second.source().is_some(),
+            "class file parse cause is exposed"
+        );
+    }
+
+    #[test]
     fn malformed_reference_displays_the_pool_error() {
         use dotty_classfile::constant_pool::ConstantPoolIndex;
 
