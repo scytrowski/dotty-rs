@@ -6272,7 +6272,7 @@ mod tests {
 
     #[test]
     fn forwards_mixed_typed_and_legacy_raw_diagnostics_in_source_order() {
-        let scanner = ContextualScanner::new("\0\"\\q\"").expect("source scans");
+        let scanner = ContextualScanner::new("<root\0").expect("source scans");
 
         assert_eq!(scanner.diagnostics().len(), 2);
         assert_eq!(
@@ -6281,7 +6281,7 @@ mod tests {
         );
         assert_eq!(
             scanner.diagnostics()[0].span(),
-            TextRange::new(0, 1).unwrap()
+            TextRange::new(5, 6).unwrap()
         );
         assert_eq!(
             scanner.diagnostics()[0].severity(),
@@ -6289,11 +6289,11 @@ mod tests {
         );
         assert_eq!(
             scanner.diagnostics()[1].legacy_message(),
-            Some("invalid escape character")
+            Some("unterminated XML tag")
         );
         assert_eq!(
             scanner.diagnostics()[1].span(),
-            TextRange::new(1, 4).unwrap()
+            TextRange::new(6, 6).unwrap()
         );
         assert_eq!(
             scanner.diagnostics()[1].severity(),

@@ -6,7 +6,10 @@ use dotty_core::source::{SourceText, SourceTextError, TextRange, TextRangeError}
 use crate::identifier::{is_identifier_part, is_identifier_start, is_operator_character};
 use crate::xml::XmlState;
 use crate::{Cursor, CursorError, HardKeyword, Punctuation, RawItem, RawToken, RawTokenKind};
-use crate::{LexerDiagnostic, LexerIssue};
+use crate::{
+    EscapeIssue, InterpolationIssue, LexerDiagnostic, LexerIssue, LiteralIssue,
+    NonIntegerLiteralKind, NumericComponent, NumericIssue,
+};
 use crate::{Trivia, TriviaKind};
 
 #[derive(Debug, Clone)]
@@ -265,7 +268,10 @@ impl<'source> RawLexer<'source> {
             let start = self.cursor.position();
             self.modes.clear();
             self.modes.push(LexMode::Normal);
-            self.report_legacy(start, "unterminated interpolation expression")?;
+            self.report_issue(
+                start,
+                LexerIssue::Interpolation(InterpolationIssue::UnterminatedExpression),
+            )?;
             return Ok(Some(RawItem::Token(RawToken {
                 kind: RawTokenKind::Error,
                 span: self.span(start)?,
@@ -344,7 +350,12 @@ impl<'source> RawLexer<'source> {
             if self.cursor.is_eof() {
                 let start = state.part_start;
                 let _ = self.modes.pop();
-                self.report_legacy(start, "unclosed interpolated string literal")?;
+                self.report_issue(
+                    start,
+                    LexerIssue::Interpolation(InterpolationIssue::UnclosedString {
+                        multiline: state.multiline,
+                    }),
+                )?;
                 return Ok(Some(RawItem::Token(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
@@ -357,7 +368,12 @@ impl<'source> RawLexer<'source> {
             }) {
                 let start = state.part_start;
                 let _ = self.modes.pop();
-                self.report_legacy(start, "unclosed interpolated string literal")?;
+                self.report_issue(
+                    start,
+                    LexerIssue::Interpolation(InterpolationIssue::UnclosedString {
+                        multiline: state.multiline,
+                    }),
+                )?;
                 return Ok(Some(RawItem::Token(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
@@ -420,9 +436,11 @@ impl<'source> RawLexer<'source> {
                             return self
                                 .recover_interpolated_string(state.part_start, state.multiline);
                         }
-                        self.report_legacy(
+                        self.report_issue(
                             state.part_start,
-                            "invalid string interpolation splice",
+                            LexerIssue::Interpolation(InterpolationIssue::InvalidSplice {
+                                following_character: self.cursor.peek(),
+                            }),
                         )?;
                         return self.recover_interpolated_string(state.part_start, state.multiline);
                     }
@@ -446,7 +464,10 @@ impl<'source> RawLexer<'source> {
         loop {
             if self.cursor.is_eof() {
                 let _ = self.modes.pop();
-                self.report_legacy(start, "unclosed interpolated string literal")?;
+                self.report_issue(
+                    start,
+                    LexerIssue::Interpolation(InterpolationIssue::UnclosedString { multiline }),
+                )?;
                 return Ok(Some(RawItem::Token(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
@@ -475,7 +496,10 @@ impl<'source> RawLexer<'source> {
                 is_substitute(character) || (!multiline && is_literal_line_terminator(character))
             }) {
                 let _ = self.modes.pop();
-                self.report_legacy(start, "unclosed interpolated string literal")?;
+                self.report_issue(
+                    start,
+                    LexerIssue::Interpolation(InterpolationIssue::UnclosedString { multiline }),
+                )?;
                 return Ok(Some(RawItem::Token(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
@@ -494,7 +518,10 @@ impl<'source> RawLexer<'source> {
         let start = self.cursor.position();
         if !self.cursor.peek().is_some_and(is_identifier_start) {
             let _ = self.modes.pop();
-            self.report_legacy(start, "interpolation identifier expected after `$`")?;
+            self.report_issue(
+                start,
+                LexerIssue::Interpolation(InterpolationIssue::IdentifierExpectedAfterDollar),
+            )?;
             return Ok(Some(RawItem::Token(RawToken {
                 kind: RawTokenKind::Error,
                 span: self.span(start)?,
@@ -818,7 +845,7 @@ impl<'source> RawLexer<'source> {
         if self.cursor.peek() == Some('.') {
             let _ = self.cursor.bump();
             kind = RawTokenKind::DecimalLiteral;
-            self.scan_decimal_digits(start, "fractional part")?;
+            self.scan_decimal_digits(start, NumericComponent::FractionalPart)?;
         } else {
             if self.cursor.peek() == Some('0')
                 && matches!(self.cursor.peek_nth(1), Some('x' | 'X' | 'b' | 'B'))
@@ -848,7 +875,7 @@ impl<'source> RawLexer<'source> {
             {
                 let _ = self.cursor.bump();
                 kind = RawTokenKind::DecimalLiteral;
-                self.scan_decimal_digits(start, "fractional part")?;
+                self.scan_decimal_digits(start, NumericComponent::FractionalPart)?;
             }
 
             if base == 10 && matches!(self.cursor.peek(), Some('e' | 'E')) {
@@ -862,9 +889,14 @@ impl<'source> RawLexer<'source> {
                     .peek()
                     .is_some_and(|character| character.is_ascii_digit())
                 {
-                    self.report_legacy(start, "exponent must contain at least one digit")?;
+                    self.report_issue(
+                        start,
+                        LexerIssue::Numeric(NumericIssue::MissingDigits {
+                            component: NumericComponent::Exponent,
+                        }),
+                    )?;
                 } else {
-                    self.scan_decimal_digits(start, "exponent")?;
+                    self.scan_decimal_digits(start, NumericComponent::Exponent)?;
                 }
             }
         }
@@ -883,7 +915,15 @@ impl<'source> RawLexer<'source> {
                 kind = RawTokenKind::DoubleLiteral;
             }
             Some('l' | 'L') => {
-                self.report_legacy(start, "long suffix is only valid on an integer literal")?;
+                let literal_kind = match kind {
+                    RawTokenKind::DecimalLiteral => NonIntegerLiteralKind::Decimal,
+                    RawTokenKind::ExponentLiteral => NonIntegerLiteralKind::Exponent,
+                    _ => NonIntegerLiteralKind::Other,
+                };
+                self.report_issue(
+                    start,
+                    LexerIssue::Numeric(NumericIssue::LongSuffixOnNonInteger { literal_kind }),
+                )?;
                 kind = RawTokenKind::Error;
                 invalid_suffix = true;
             }
@@ -899,7 +939,7 @@ impl<'source> RawLexer<'source> {
             && !invalid_non_decimal_digit
             && !invalid_suffix
         {
-            self.report_legacy(start, "invalid literal number")?;
+            self.report_issue(start, LexerIssue::Numeric(NumericIssue::InvalidNumber))?;
         }
 
         Ok(RawToken {
@@ -919,7 +959,10 @@ impl<'source> RawLexer<'source> {
                 let _ = self.cursor.bump();
             } else if character == '_' {
                 if !saw_digit || trailing_separator {
-                    self.report_legacy(start, "invalid numeric separator")?;
+                    self.report_issue(
+                        start,
+                        LexerIssue::Numeric(NumericIssue::MisplacedSeparator),
+                    )?;
                 }
                 trailing_separator = true;
                 let _ = self.cursor.bump();
@@ -929,22 +972,36 @@ impl<'source> RawLexer<'source> {
         }
 
         if trailing_separator {
-            self.report_legacy(start, "numeric literal must not end with a separator")?;
+            self.report_issue(start, LexerIssue::Numeric(NumericIssue::TrailingSeparator))?;
         }
         let invalid_non_decimal_digit = base != 10
             && self.cursor.peek().is_some_and(|character| {
                 character.is_ascii_alphanumeric() && !(saw_digit && matches!(character, 'l' | 'L'))
             });
         if invalid_non_decimal_digit {
-            self.report_legacy(start, "invalid digit in non-decimal literal")?;
+            if let Some(digit) = self.cursor.peek() {
+                self.report_issue(
+                    start,
+                    LexerIssue::Numeric(NumericIssue::InvalidDigitForBase { digit, base }),
+                )?;
+            }
         } else if !saw_digit {
-            self.report_legacy(start, "numeric literal must contain a digit")?;
+            self.report_issue(
+                start,
+                LexerIssue::Numeric(NumericIssue::MissingDigits {
+                    component: NumericComponent::BasePrefix { base },
+                }),
+            )?;
         }
 
         Ok(())
     }
 
-    fn scan_decimal_digits(&mut self, start: u32, component: &str) -> Result<(), RawLexerError> {
+    fn scan_decimal_digits(
+        &mut self,
+        start: u32,
+        component: NumericComponent,
+    ) -> Result<(), RawLexerError> {
         let mut saw_digit = false;
         let mut trailing_separator = false;
 
@@ -955,7 +1012,10 @@ impl<'source> RawLexer<'source> {
                 let _ = self.cursor.bump();
             } else if character == '_' {
                 if !saw_digit || trailing_separator {
-                    self.report_legacy(start, "invalid numeric separator")?;
+                    self.report_issue(
+                        start,
+                        LexerIssue::Numeric(NumericIssue::MisplacedSeparator),
+                    )?;
                 }
                 trailing_separator = true;
                 let _ = self.cursor.bump();
@@ -965,10 +1025,13 @@ impl<'source> RawLexer<'source> {
         }
 
         if trailing_separator {
-            self.report_legacy(start, "numeric literal must not end with a separator")?;
+            self.report_issue(start, LexerIssue::Numeric(NumericIssue::TrailingSeparator))?;
         }
         if !saw_digit {
-            self.report_legacy(start, format!("{component} must contain a digit"))?;
+            self.report_issue(
+                start,
+                LexerIssue::Numeric(NumericIssue::MissingDigits { component }),
+            )?;
         }
 
         Ok(())
@@ -980,7 +1043,10 @@ impl<'source> RawLexer<'source> {
 
         match self.cursor.peek() {
             None | Some('\n' | '\r' | '\u{001a}') => {
-                self.report_legacy(start, "unterminated character literal")?;
+                self.report_issue(
+                    start,
+                    LexerIssue::Literal(LiteralIssue::UnterminatedCharacter),
+                )?;
                 return Ok(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
@@ -988,7 +1054,7 @@ impl<'source> RawLexer<'source> {
             }
             Some('\'') => {
                 let _ = self.cursor.bump();
-                self.report_legacy(start, "empty character literal")?;
+                self.report_issue(start, LexerIssue::Literal(LiteralIssue::EmptyCharacter))?;
                 return Ok(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
@@ -1000,9 +1066,11 @@ impl<'source> RawLexer<'source> {
             Some(character) => {
                 let _ = self.cursor.bump();
                 if character.len_utf16() != 1 {
-                    self.report_legacy(
+                    self.report_issue(
                         start,
-                        "character literal must contain one UTF-16 code unit",
+                        LexerIssue::Literal(LiteralIssue::CharacterOutsideUtf16CodeUnit {
+                            character,
+                        }),
                     )?;
                     valid = false;
                 }
@@ -1015,7 +1083,7 @@ impl<'source> RawLexer<'source> {
             && !self.cursor.peek().is_some_and(is_literal_line_terminator)
         {
             valid = false;
-            self.report_legacy(start, "character literal contains more than one character")?;
+            self.report_issue(start, LexerIssue::Literal(LiteralIssue::MultipleCharacters))?;
             while let Some(character) = self.cursor.peek() {
                 let _ = self.cursor.bump();
                 if character == '\'' || is_literal_line_terminator(character) {
@@ -1024,7 +1092,10 @@ impl<'source> RawLexer<'source> {
             }
         } else if !self.cursor.is_eof() {
             valid = false;
-            self.report_legacy(start, "unterminated character literal")?;
+            self.report_issue(
+                start,
+                LexerIssue::Literal(LiteralIssue::UnterminatedCharacter),
+            )?;
         }
 
         Ok(RawToken {
@@ -1058,7 +1129,10 @@ impl<'source> RawLexer<'source> {
                     });
                 }
                 Some('\n' | '\r' | '\u{001a}') => {
-                    self.report_legacy(start, "unclosed string literal")?;
+                    self.report_issue(
+                        start,
+                        LexerIssue::Literal(LiteralIssue::UnclosedString { multiline: false }),
+                    )?;
                     return Ok(RawToken {
                         kind: RawTokenKind::Error,
                         span: self.span(start)?,
@@ -1071,7 +1145,10 @@ impl<'source> RawLexer<'source> {
                     let _ = self.cursor.bump();
                 }
                 None => {
-                    self.report_legacy(start, "unclosed string literal")?;
+                    self.report_issue(
+                        start,
+                        LexerIssue::Literal(LiteralIssue::UnclosedString { multiline: false }),
+                    )?;
                     return Ok(RawToken {
                         kind: RawTokenKind::Error,
                         span: self.span(start)?,
@@ -1094,14 +1171,20 @@ impl<'source> RawLexer<'source> {
                 });
             }
             if self.cursor.peek().is_some_and(is_substitute) {
-                self.report_legacy(start, "unclosed multi-line string literal")?;
+                self.report_issue(
+                    start,
+                    LexerIssue::Literal(LiteralIssue::UnclosedString { multiline: true }),
+                )?;
                 return Ok(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
                 });
             }
             if self.cursor.bump().is_none() {
-                self.report_legacy(start, "unclosed multi-line string literal")?;
+                self.report_issue(
+                    start,
+                    LexerIssue::Literal(LiteralIssue::UnclosedString { multiline: true }),
+                )?;
                 return Ok(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
@@ -1125,13 +1208,16 @@ impl<'source> RawLexer<'source> {
             }
             Some('u' | 'U') => self.scan_unicode_escape(start)?,
             Some('0'..='7') => self.scan_octal_escape(start)?,
-            Some(_) => {
+            Some(character) => {
                 let _ = self.cursor.bump();
-                self.report_legacy(start, "invalid escape character")?;
+                self.report_issue(
+                    start,
+                    LexerIssue::Escape(EscapeIssue::InvalidEscapeCharacter { character }),
+                )?;
                 false
             }
             None => {
-                self.report_legacy(start, "unterminated escape sequence")?;
+                self.report_issue(start, LexerIssue::Escape(EscapeIssue::UnterminatedEscape))?;
                 false
             }
         };
@@ -1149,12 +1235,20 @@ impl<'source> RawLexer<'source> {
                 Some(character) if character.is_ascii_hexdigit() => {
                     let _ = self.cursor.bump();
                 }
-                Some(_) => {
-                    self.report_legacy(start, "invalid character in Unicode escape sequence")?;
+                Some(character) => {
+                    self.report_issue(
+                        start,
+                        LexerIssue::Escape(EscapeIssue::InvalidUnicodeEscapeCharacter {
+                            character,
+                        }),
+                    )?;
                     return Ok(false);
                 }
                 None => {
-                    self.report_legacy(start, "incomplete Unicode escape sequence")?;
+                    self.report_issue(
+                        start,
+                        LexerIssue::Escape(EscapeIssue::IncompleteUnicodeEscape),
+                    )?;
                     return Ok(false);
                 }
             }
@@ -1164,19 +1258,19 @@ impl<'source> RawLexer<'source> {
     }
 
     fn scan_octal_escape(&mut self, start: u32) -> Result<bool, RawLexerError> {
+        let mut digits = String::new();
         let mut count = 0;
-        while count < 3
-            && self
-                .cursor
-                .peek()
-                .is_some_and(|character| ('0'..='7').contains(&character))
-        {
+        while count < 3 {
+            let Some(character @ '0'..='7') = self.cursor.peek() else {
+                break;
+            };
+            digits.push(character);
             let _ = self.cursor.bump();
             count += 1;
         }
-        self.report_legacy(
+        self.report_issue(
             start,
-            "octal escape literals are unsupported; use a Unicode escape",
+            LexerIssue::Escape(EscapeIssue::UnsupportedOctalEscape { digits }),
         )?;
         Ok(true)
     }
@@ -2395,7 +2489,10 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(diagnostics[0].span(), TextRange::new(0, 2).unwrap());
-        assert!(diagnostics[0].legacy_text().contains("unclosed string"));
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Literal(LiteralIssue::UnclosedString { multiline: false })
+        );
         assert_eq!(diagnostics[1].span(), TextRange::new(2, 3).unwrap());
     }
 
@@ -2414,7 +2511,10 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(diagnostics[0].span(), TextRange::new(0, 4).unwrap());
-        assert!(diagnostics[0].legacy_text().contains("unclosed multi-line"));
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Literal(LiteralIssue::UnclosedString { multiline: true })
+        );
         assert_eq!(diagnostics[1].span(), TextRange::new(4, 5).unwrap());
     }
 
@@ -2696,6 +2796,48 @@ mod tests {
             })
         )));
         assert_eq!(diagnostics.len(), 3);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.issue())
+                .collect::<Vec<_>>(),
+            vec![
+                &LexerIssue::Numeric(NumericIssue::TrailingSeparator),
+                &LexerIssue::Numeric(NumericIssue::MisplacedSeparator),
+                &LexerIssue::Numeric(NumericIssue::TrailingSeparator),
+            ]
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.span())
+                .collect::<Vec<_>>(),
+            vec![
+                TextRange::new(0, 2).unwrap(),
+                TextRange::new(3, 5).unwrap(),
+                TextRange::new(8, 12).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_an_invalid_numeric_identifier_suffix_as_a_typed_issue() {
+        let (items, diagnostics) = scan("123abc");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::IntegerLiteral, 0, 3),
+                token(RawTokenKind::Identifier, 3, 6),
+                token(RawTokenKind::Eof, 6, 6),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].span(), TextRange::new(0, 3).unwrap());
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Numeric(NumericIssue::InvalidNumber)
+        );
     }
 
     #[test]
@@ -2716,7 +2858,13 @@ mod tests {
             diagnostics[0].span(),
             TextRange::new(0, 3).expect("valid range")
         );
-        assert!(diagnostics[0].legacy_text().contains("exponent"));
+        assert_eq!(diagnostics[0].severity(), DiagnosticSeverity::Error);
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Numeric(NumericIssue::MissingDigits {
+                component: NumericComponent::Exponent,
+            })
+        );
     }
 
     #[test]
@@ -2733,10 +2881,33 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 2);
-        assert!(
+        assert_eq!(
             diagnostics
                 .iter()
-                .all(|diagnostic| { diagnostic.legacy_text().contains("digit") })
+                .map(|diagnostic| diagnostic.issue())
+                .collect::<Vec<_>>(),
+            vec![
+                &LexerIssue::Numeric(NumericIssue::MissingDigits {
+                    component: NumericComponent::BasePrefix { base: 16 },
+                }),
+                &LexerIssue::Numeric(NumericIssue::MissingDigits {
+                    component: NumericComponent::BasePrefix { base: 2 },
+                }),
+            ]
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.span())
+                .collect::<Vec<_>>(),
+            vec![TextRange::new(0, 2).unwrap(), TextRange::new(3, 5).unwrap(),]
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.severity())
+                .collect::<Vec<_>>(),
+            vec![DiagnosticSeverity::Error; 2]
         );
     }
 
@@ -2756,10 +2927,35 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 2);
-        assert!(
+        assert_eq!(
             diagnostics
                 .iter()
-                .all(|diagnostic| { diagnostic.legacy_text().contains("invalid digit") })
+                .map(|diagnostic| diagnostic.issue())
+                .collect::<Vec<_>>(),
+            vec![
+                &LexerIssue::Numeric(NumericIssue::InvalidDigitForBase {
+                    digit: 'g',
+                    base: 16,
+                }),
+                &LexerIssue::Numeric(NumericIssue::InvalidDigitForBase {
+                    digit: '2',
+                    base: 2,
+                }),
+            ]
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.span())
+                .collect::<Vec<_>>(),
+            vec![TextRange::new(0, 2).unwrap(), TextRange::new(4, 6).unwrap(),]
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.severity())
+                .collect::<Vec<_>>(),
+            vec![DiagnosticSeverity::Error; 2]
         );
     }
 
@@ -2841,7 +3037,13 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].legacy_text().contains("long suffix"));
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Numeric(NumericIssue::LongSuffixOnNonInteger {
+                literal_kind: NonIntegerLiteralKind::Decimal,
+            })
+        );
+        assert_eq!(diagnostics[0].span(), TextRange::new(0, 3).unwrap());
     }
 
     #[test]
@@ -2857,7 +3059,13 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].legacy_text().contains("long suffix"));
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Numeric(NumericIssue::LongSuffixOnNonInteger {
+                literal_kind: NonIntegerLiteralKind::Exponent,
+            })
+        );
+        assert_eq!(diagnostics[0].span(), TextRange::new(0, 3).unwrap());
     }
 
     #[test]
@@ -3074,10 +3282,9 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].span(), TextRange::new(5, 6).unwrap());
-        assert!(
-            diagnostics[0]
-                .legacy_text()
-                .contains("unterminated character")
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Literal(LiteralIssue::UnterminatedCharacter)
         );
     }
 
@@ -3117,10 +3324,9 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].span(), TextRange::new(5, 6).unwrap());
-        assert!(
-            diagnostics[0]
-                .legacy_text()
-                .contains("unterminated character")
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Literal(LiteralIssue::UnterminatedCharacter)
         );
     }
 
@@ -3141,10 +3347,9 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].span(), TextRange::new(1, 2).unwrap());
-        assert!(
-            diagnostics[0]
-                .legacy_text()
-                .contains("unterminated character")
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Literal(LiteralIssue::UnterminatedCharacter)
         );
     }
 
@@ -3165,10 +3370,9 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].span(), TextRange::new(5, 6).unwrap());
-        assert!(
-            diagnostics[0]
-                .legacy_text()
-                .contains("unterminated character")
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Literal(LiteralIssue::UnterminatedCharacter)
         );
     }
 
@@ -4154,6 +4358,17 @@ mod tests {
 
         assert_eq!(error_count, 3);
         assert_eq!(diagnostics.len(), 3);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.issue())
+                .collect::<Vec<_>>(),
+            vec![
+                &LexerIssue::Literal(LiteralIssue::EmptyCharacter),
+                &LexerIssue::Escape(EscapeIssue::InvalidEscapeCharacter { character: 'q' }),
+                &LexerIssue::Literal(LiteralIssue::UnterminatedCharacter),
+            ]
+        );
     }
 
     #[test]
@@ -4169,7 +4384,10 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].legacy_text().contains("UTF-16 code unit"));
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Literal(LiteralIssue::CharacterOutsideUtf16CodeUnit { character: '𐐀' })
+        );
     }
 
     #[test]
@@ -4185,10 +4403,9 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(
-            diagnostics[0]
-                .legacy_text()
-                .contains("more than one character")
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Literal(LiteralIssue::MultipleCharacters)
         );
     }
 
@@ -4294,6 +4511,23 @@ mod tests {
 
         assert_eq!(error_count, 1);
         assert_eq!(diagnostics.len(), 2);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.issue())
+                .collect::<Vec<_>>(),
+            vec![
+                &LexerIssue::Escape(EscapeIssue::InvalidEscapeCharacter { character: 'q' }),
+                &LexerIssue::Literal(LiteralIssue::UnclosedString { multiline: false }),
+            ]
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.severity())
+                .collect::<Vec<_>>(),
+            vec![DiagnosticSeverity::Error; 2]
+        );
     }
 
     #[test]
@@ -4309,7 +4543,72 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].legacy_text().contains("Unicode escape"));
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Escape(EscapeIssue::InvalidUnicodeEscapeCharacter { character: '"' })
+        );
+        assert_eq!(diagnostics[0].span(), TextRange::new(0, 5).unwrap());
+        assert_eq!(diagnostics[0].severity(), DiagnosticSeverity::Error);
+    }
+
+    #[test]
+    fn reports_incomplete_unicode_escape_at_eof_before_string_recovery() {
+        let source = "\"\\u12";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Error, 0, source.len() as u32),
+                token(RawTokenKind::Eof, source.len() as u32, source.len() as u32),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.issue())
+                .collect::<Vec<_>>(),
+            vec![
+                &LexerIssue::Escape(EscapeIssue::IncompleteUnicodeEscape),
+                &LexerIssue::Literal(LiteralIssue::UnclosedString { multiline: false }),
+            ]
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.span())
+                .collect::<Vec<_>>(),
+            vec![
+                TextRange::new(0, source.len() as u32).unwrap(),
+                TextRange::new(0, source.len() as u32).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_a_trailing_backslash_as_unterminated_before_string_recovery() {
+        let source = "\"tail\\";
+        let (items, diagnostics) = scan(source);
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Error, 0, source.len() as u32),
+                token(RawTokenKind::Eof, source.len() as u32, source.len() as u32),
+            ]
+        );
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.issue())
+                .collect::<Vec<_>>(),
+            vec![
+                &LexerIssue::Escape(EscapeIssue::UnterminatedEscape),
+                &LexerIssue::Literal(LiteralIssue::UnclosedString { multiline: false }),
+            ]
+        );
     }
 
     #[test]
@@ -4325,7 +4624,10 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].legacy_text().contains("escape"));
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Escape(EscapeIssue::InvalidEscapeCharacter { character: '\n' })
+        );
     }
 
     #[test]
@@ -4340,7 +4642,14 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].legacy_text().contains("octal escape"));
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Escape(EscapeIssue::UnsupportedOctalEscape {
+                digits: "101".to_owned(),
+            })
+        );
+        assert_eq!(diagnostics[0].span(), TextRange::new(0, 5).unwrap());
+        assert_eq!(diagnostics[0].severity(), DiagnosticSeverity::Error);
     }
 
     #[test]
@@ -4355,7 +4664,14 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].legacy_text().contains("octal escape"));
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Escape(EscapeIssue::UnsupportedOctalEscape {
+                digits: "101".to_owned(),
+            })
+        );
+        assert_eq!(diagnostics[0].span(), TextRange::new(0, 5).unwrap());
+        assert_eq!(diagnostics[0].severity(), DiagnosticSeverity::Error);
     }
 
     #[test]
@@ -4405,7 +4721,11 @@ mod tests {
         let (_, diagnostics) = scan(r#"s"\d+""#);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].legacy_text(), "invalid escape character");
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Escape(EscapeIssue::InvalidEscapeCharacter { character: 'd' })
+        );
+        assert_eq!(diagnostics[0].span(), TextRange::new(1, 4).unwrap());
     }
 
     #[test]
@@ -4616,11 +4936,14 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(
-            diagnostics[0]
-                .legacy_text()
-                .contains("interpolation splice")
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Interpolation(InterpolationIssue::InvalidSplice {
+                following_character: Some(' '),
+            })
         );
+        assert_eq!(diagnostics[0].span(), TextRange::new(1, 3).unwrap());
+        assert_eq!(diagnostics[0].severity(), DiagnosticSeverity::Error);
     }
 
     #[test]
@@ -4636,11 +4959,14 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(
-            diagnostics[0]
-                .legacy_text()
-                .contains("interpolation splice")
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Interpolation(InterpolationIssue::InvalidSplice {
+                following_character: Some('1'),
+            })
         );
+        assert_eq!(diagnostics[0].span(), TextRange::new(1, 3).unwrap());
+        assert_eq!(diagnostics[0].severity(), DiagnosticSeverity::Error);
     }
 
     #[test]
@@ -4656,7 +4982,12 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].legacy_text().contains("unclosed"));
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Interpolation(InterpolationIssue::UnclosedString { multiline: false })
+        );
+        assert_eq!(diagnostics[0].span(), TextRange::new(1, 4).unwrap());
+        assert_eq!(diagnostics[0].severity(), DiagnosticSeverity::Error);
     }
 
     #[test]
@@ -4794,6 +5125,10 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].span(), TextRange::new(7, 7).unwrap());
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::Interpolation(InterpolationIssue::UnterminatedExpression)
+        );
     }
 
     #[test]
