@@ -19,7 +19,9 @@ use dotty_tasty::tasty::{
     TERMREFPKG_TAG, TYPEBOUNDSTPT_TAG, TYPEDEF_TAG, TYPEPARAM_TAG, TYPEREFDIRECT_TAG,
     TYPEREFPKG_TAG, TastyFile, VALDEF_TAG,
 };
-use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
+use dotty_tasty_unpickler::tasty_unpickler::{
+    TastyUnpickler, UnpickleError, UnpickleErrorCategory,
+};
 
 const NAMES: [&str; 30] = [
     "ASTs", "p", "Holder", "v", "f", "a", "X", "Y", "Z", "T", "Alias", "P", "Q", "HK", "U", "FB",
@@ -777,13 +779,18 @@ fn a_lambda_whose_body_fails_undoes_the_completed_parameters_and_can_be_retried(
 
     let types = unpickler.index().type_count();
     let result = unpickler.complete_symbol(unit.at("bad"));
+    let error = result
+        .as_ref()
+        .expect_err("MATCHtpt is not projected by this unpickler");
     assert!(
         matches!(
-            result,
-            Err(UnpickleError::UnsupportedTypeTree { tag: MATCHTPT, .. })
+            error,
+            UnpickleError::UnsupportedTypeTree { tag: MATCHTPT, .. }
         ),
-        "{result:?}"
+        "{error:?}"
     );
+    assert_eq!(error.code(), "unpickler.unsupported_type_tree");
+    assert_eq!(error.category(), UnpickleErrorCategory::UnsupportedFeature);
     // `B1` was completed before the body was projected, and is `Missing` again.
     assert_eq!(
         unpickler.symbol_state_at(unit.at("bad.B1")).unwrap().1,

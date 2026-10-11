@@ -18,7 +18,8 @@ supported.
 
 The baseline was unpacked from the Git archive of `2cd57c1b9` into a clean
 temporary directory. The two focused crate suites passed on both revisions.
-All five ignored, feature-gated corpus reports passed on both revisions. After
+All five ignored corpus reports passed on both revisions, including the
+feature-gated symbol-annotation report. After
 normalizing the temporary workspace path and excluding harness timing and
 filter counts, their report lines were identical. The test-only additions
 change the number of unit tests, as expected; corpus outcomes did not change.
@@ -51,7 +52,7 @@ wire/class data or the checked-in Scala/JVM fixtures named by the tests.
 | Malformed local binder reference | `InvalidBinderReference`; rejected | Same variant; `unpickler.invalid_binder_reference`, `MalformedInput` | `binders::a_parameter_type_naming_no_node_is_an_invalid_binder_reference` |
 | Invalid recursive shared reference | `InvalidReferenceTarget`; rejected | Same variant and address pair; `unpickler.invalid_reference_target`, `Conditional` because this payload also represents bounded cycle/depth cases | `recursive::a_rec_this_naming_no_node_is_an_invalid_reference` |
 | Missing external member | `UnresolvedMember`; returned after one explicit owner-space lookup | Same variant; `unpickler.unresolved_member`, `ResolutionFailure`; no prefix retry | `in_reference::a_resolver_that_does_not_know_the_declaration_leaves_it_unresolved_without_a_prefix_retry` |
-| Unsupported but readable TASTy shape/tag | `UnsupportedType`/unsupported AST variant; rejected instead of silently lowered | Same unsupported failure family, with a stable code and `UnsupportedFeature` classification | `annotated`, `recursive`, and `error::nested_decode_causes_keep_malformed_and_unsupported_categories_distinct` |
+| Unsupported but readable TASTy shape/tag | `UnsupportedTypeTree`/unsupported AST variant; rejected instead of silently lowered | `unpickler.unsupported_type_tree` or `unpickler.ast`, `UnsupportedFeature`; malformed AST tags remain `MalformedInput` | `lambda_tpt::a_lambda_whose_body_fails_undoes_the_completed_parameters_and_can_be_retried` and `error::nested_decode_causes_keep_malformed_and_unsupported_categories_distinct` |
 | Failed unpickler operation followed by retry | Failed transaction leaves no newly indexed trace; retry behavior is unchanged | Same rollback and retry; code/category queries do not dereference IDs invalidated by rollback | `in_reference::a_failure_after_both_children_decoded_leaves_no_trace_and_a_retry_works`, `lambda_tpt::a_malformed_lambda_fails_the_whole_enter_and_leaves_the_store_untouched`, and `error::classification_and_codes_do_not_dereference_rolled_back_ids` |
 | Malformed class bytes from a directory | `InvalidClassFile`; rejected | Same variant; `classloader.invalid_class_file`, `MalformedArtifact`, directory origin and `Class` format | `directory_class_path::detailed_load_failure_retains_directory_resource_provenance` |
 | Malformed class bytes from a JAR or JMOD | `InvalidClassFile`; rejected | Same variant; stable code/category and selected JAR/JMOD origin and `Class` format | `loader::detailed_failure_in_a_jar_retains_the_jar_origin` and `loader::detailed_failure_from_a_jmod_retains_the_jmod_origin` |
