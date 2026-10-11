@@ -4514,6 +4514,39 @@ fn diagnostic_aware_naming_keeps_recovered_and_enum_owner_failures_internal() {
 }
 
 #[test]
+fn diagnostic_aware_naming_keeps_malformed_root_internal_and_rolls_back() {
+    let (mut parsed, source, mut store) = parsed_source("class C", 321);
+    let malformed_root_kind = {
+        let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+            panic!("parser should return a package root");
+        };
+        parsed.ast.get(package.stats[0]).kind.clone()
+    };
+    parsed.ast.get_mut(parsed.root).kind = malformed_root_kind;
+    let checkpoint = store.checkpoint();
+    let mut packages = Packages::new();
+
+    let error = name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "MalformedRoot.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect_err("a malformed compilation-unit root is an internal contract failure");
+
+    assert_eq!(
+        error,
+        NamerError::RootIsNotPackage {
+            tree_index: parsed.root.index(),
+        }
+    );
+    assert_eq!(store.checkpoint(), checkpoint);
+    assert!(packages.is_empty());
+}
+
+#[test]
 fn valid_enum_case_parameter_visibility_exposes_an_unresolved_boundary() {
     let source_text = "enum Color { case Red(private[Color] val value: Int) }";
     let (parsed, source, mut store) = parsed_source(source_text, 316);

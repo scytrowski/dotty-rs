@@ -2764,14 +2764,14 @@ impl Namer<'_> {
         }
     }
 
-    /// Avoid classifying owner-resolution failures under synthetic scopes.
+    /// Avoid classifying owner-resolution failures under non-source scopes.
     /// In particular, enum case parameters are owned below a synthetic
     /// companion module class whose source enum boundary is not represented in
     /// the current semantic owner chain.
     fn has_only_source_owned_visibility_boundaries(&self, mut owner: Option<SymbolId>) -> bool {
         while let Some(symbol) = owner {
             let info = self.store.symbols.get(symbol);
-            if info.origin == SymbolOrigin::Synthetic {
+            if !matches!(info.origin, SymbolOrigin::Source(_)) {
                 return false;
             }
             owner = info.owner;
