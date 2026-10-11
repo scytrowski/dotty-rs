@@ -1306,17 +1306,18 @@ the Scala 3.9 impure function identities. In capture-checking mode, ordinary
 `=>` and contextual `?=>` arrows carry `Impure` metadata and normalize through
 `scala.ImpureFunctionN` / `scala.ImpureContextFunctionN` aliases, whose bodies
 are retaining-cap annotated applications of `FunctionN` / `ContextFunctionN`.
-The current audit's 13 observations are 3 distinct one-argument ordinary
+The pre-#949 audit's 13 observations are 3 distinct one-argument ordinary
 `ImpureFunction1` source trees in 2 files. The identity API resolves or
-materializes these canonical aliases, while source `FunctionWithMods`
-projection remains unsupported. The reference pins the exact alias representation,
+materializes these canonical aliases. The reference pins the exact alias representation,
 the generic-alias normalization prerequisite, and the boundaries around
 erased and capture-set function types: [impure function identity reference](../crates/dotty-typer/tests/fixtures/function-class-identities/ImpureFunctionTypeIdentities.oracle.md).
-The identity layer now models contextuality and purity as separate dimensions.
+The identity layer models contextuality and purity as separate dimensions.
 Its family constructor resolves pure `FunctionN` / `ContextFunctionN` classes
 and validates or materializes impure `TypeAlias` identities with the pinned
-`TypeLambda` and `RetainsCap` body. Source projection of impure function trees
-remains out of scope here.
+`TypeLambda` and `RetainsCap` body. Issue #949 adds source projection for the
+exact capture-checking `Impure` ordinary and `Given, Impure` contextual forms;
+the alias is preserved in the source type and opened by normalization on
+demand.
 
 ## Applied generic alias normalization (#948)
 
@@ -1334,9 +1335,8 @@ Non-alias applied types keep their arguments unchanged. Lookup normalization
 also opens applied aliases before member/class inspection, so existing
 normalization consumers observe the instantiated target without adding
 function-name special cases. This lets the impure function aliases above
-normalize to their annotated `FunctionN` / `ContextFunctionN` applications;
-source `FunctionWithMods` projection is still a separate increment. The
-nominal subtype relation keeps the `RetainsCap` annotation and returns
+normalize to their annotated `FunctionN` / `ContextFunctionN` applications.
+The nominal subtype relation keeps the `RetainsCap` annotation and returns
 `UnsupportedType` until capture-set semantics are modeled. Other annotations
 remain transparent to relation normalization and retain the existing typing
 behavior.
@@ -1346,20 +1346,24 @@ behavior.
 The source type projector maps ordinary `() => R`, `A => R`, and multi-parameter
 function types to `Applied(scala.FunctionN, [parameters..., result])`. It
 recurses through nested parameter and result types and reuses the source type
-cache and transaction journal. The accepted `FunctionWithMods` subset is a
-plain contextual function marked only with `Given`, projected through the
-distinct `scala.ContextFunctionN` identity. Erased parameters, capture-specific
-forms, and other modifier combinations remain explicit unsupported type-tree
-errors. This does not add contextual argument search or contextual function
-expression typing.
+cache and transaction journal. `FunctionWithMods` accepts only the exact
+modifier vectors `[Given]`, `[Impure]`, and `[Given, Impure]`, projecting them
+through `ContextFunctionN`, `ImpureFunctionN`, and `ImpureContextFunctionN`
+respectively. The impure forms preserve their canonical `TypeAlias` in the
+projected type; generic alias normalization opens its `RetainsCap` body on
+demand. Erased parameters, capture-set result forms, visibility or annotation
+modifiers, and all other modifier combinations remain explicit unsupported
+type-tree errors. This does not add contextual argument search or contextual
+function expression typing.
 
 The pinned Scala 3.9 local-definition audit after #829 was run twice with
 byte-identical output. `UnsupportedTypeTree::Function` moved from 12
-occurrences in 8 files at the #825 baseline to zero. The bucket
-`UnsupportedTypeTree::FunctionWithMods` remains at 13 occurrences in 2 files;
-the bounded `Given` form is supported, while the remaining modifier-bearing
-cases stay deferred. This measures first-blocker movement, not full source
-semantic parity. The audit used the pinned source revision
+occurrences in 8 files at the #825 baseline to zero. The pre-#949 bucket
+`UnsupportedTypeTree::FunctionWithMods` had 13 occurrences in 2 files; #949
+adds support for the exact ordinary and contextual impure forms while keeping
+erasure, capture-set results, and unsupported modifier combinations deferred.
+The #949 corpus rerun is not recorded here. These counts measure first-blocker
+movement, not full source semantic parity. The audit used the pinned source revision
 `777528f19a58e794c9954a42f433373472ec57f8` and JDK 21.
 See the [pinned function-type reference and typed-tree fixture](../crates/dotty-typer/tests/fixtures/function-type-projection/FunctionTypeProjection.oracle.md).
 

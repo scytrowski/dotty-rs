@@ -3915,6 +3915,7 @@ mod tests {
     fn capture_checked_impure_function_types_preserve_canonical_aliases() {
         let source_text = concat!(
             "class A; class B; class C; ",
+            "type ImpureZero = () => A; ",
             "type ImpureOne = A => B; ",
             "type ImpureMany = (A, B) => C; ",
             "type ContextualImpureOne = A ?=> B; ",
@@ -3926,6 +3927,14 @@ mod tests {
             parse_capture_checked_and_name(source_text);
         enter_capture_checked_function_classes(&mut store, &mut packages, 0..=2);
         let aliases = [
+            (
+                "ImpureZero",
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Ordinary,
+                    SourceFunctionPurity::Impure,
+                ),
+                0,
+            ),
             (
                 "ImpureOne",
                 SourceFunctionFamily::new(
@@ -4038,6 +4047,45 @@ mod tests {
                 Type::Applied { .. }
             ));
         }
+
+        for (outer_name, inner_name, inner_arg) in [
+            ("NestedContext", "ImpureOne", 0),
+            ("NestedResult", "ContextualImpureOne", 1),
+        ] {
+            let outer = aliases
+                .iter()
+                .position(|(name, _, _)| *name == outer_name)
+                .unwrap();
+            let inner = aliases
+                .iter()
+                .position(|(name, _, _)| *name == inner_name)
+                .unwrap();
+            let (_, outer_tree, outer_context) = trees[outer];
+            let (_, inner_tree, _) = trees[inner];
+            let expected_inner_alias = typer
+                .source_impure_function_alias(
+                    aliases[inner].1,
+                    aliases[inner].2,
+                    inner_tree.index(),
+                )
+                .unwrap();
+            let outer_ty = typer.type_of_tpt(outer_tree, outer_context).unwrap();
+            let Type::Applied { args, .. } = typer.store().types.get(outer_ty) else {
+                panic!("{outer_name} should project to an applied type");
+            };
+            let nested_ty = args[inner_arg];
+            let Type::Applied { tycon, .. } = typer.store().types.get(nested_ty) else {
+                panic!("nested function in {outer_name} should be applied");
+            };
+            assert!(
+                matches!(
+                    typer.store().types.get(*tycon),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }
+                        if *symbol == expected_inner_alias
+                ),
+                "{outer_name} should retain the {inner_name} alias family"
+            );
+        }
     }
 
     #[test]
@@ -4078,12 +4126,14 @@ mod tests {
         let (mut parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class A; class B; type Erased = A ?=> B");
         let rhs = type_alias_rhs(&parsed, &store, &index, source, "Erased");
-        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
-            &mut parsed.ast.get_mut(rhs).kind
-        else {
-            panic!("contextual type should retain FunctionWithMods");
-        };
-        function.erased_params[0] = true;
+        {
+            let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+                &mut parsed.ast.get_mut(rhs).kind
+            else {
+                panic!("contextual type should retain FunctionWithMods");
+            };
+            function.erased_params[0] = true;
+        }
         let alias = type_alias_symbol(&parsed, &store, &index, source, "Erased");
         let context = index.declaration_context_of(alias).unwrap();
         let mut typer = SourceTyper::new(
@@ -4102,6 +4152,58 @@ mod tests {
                 ..
             })
         ));
+
+        drop(typer);
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &mut parsed.ast.get_mut(rhs).kind
+        else {
+            panic!("contextual type should retain FunctionWithMods");
+        };
+        function.erased_params.clear();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.type_of_tpt(rhs, context),
+            Err(TyperError::UnsupportedTypeTree {
+                tree_kind: "malformed function type erasure metadata",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn failed_impure_function_projection_rolls_back_materialized_aliases() {
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_capture_checked_and_name("class B; type Broken = Missing => B");
+        enter_capture_checked_function_classes(&mut store, &mut packages, [0, 1]);
+        let rhs = type_alias_rhs(&parsed, &store, &index, source, "Broken");
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Broken");
+        let context = index.declaration_context_of(alias).unwrap();
+        let checkpoint = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for _ in 0..2 {
+            assert!(matches!(
+                typer.type_of_tpt(rhs, context),
+                Err(TyperError::TypeNameNotFound { name, .. })
+                    if typer.store().names.resolve(name.text()) == "Missing"
+            ));
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert_eq!(typer.source_type_index().type_at(source, rhs), None);
+        }
     }
 
     #[test]
