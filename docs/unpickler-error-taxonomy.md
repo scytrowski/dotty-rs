@@ -50,9 +50,9 @@ is the proposed contract.
 | `UnsupportedTermTree` | `UnsupportedFeature`; term tree has no implemented `tpe` projection | `term_type::type_of_term` | `unpickler.unsupported_term_tree` |
 | `MissingClassScope` | `InternalInvariant`; pass 1 promises a scope for every entered template | `class::complete_class` | `unpickler.missing_class_scope` |
 | `UnsupportedParentTree` | `UnsupportedFeature`; parent wrapper tag is not interpreted | `class::type_of_parent_in` | `unpickler.unsupported_parent_tree` |
-| `MalformedParentTree` | `MalformedInput`; parent wrapper/call shape violates the expected tree form | `class::type_of_parent_in` | `unpickler.malformed_parent_tree` |
+| `MalformedParentTree` | `MalformedInput` for invalid wrapper/call shape; the nesting-limit reason is `UnsupportedFeature` unless the nested structure is independently shown to be cyclic/invalid | `class::type_of_parent_in` | `unpickler.malformed_parent_tree` |
 | `InvalidSelfTypeTree` | `MalformedInput`; `SELFDEF` does not have its required shape | `class::type_of_self_def` | `unpickler.invalid_self_type_tree` |
-| `MalformedDefinition` | `MalformedInput`, except the explicitly unsupported nested opaque-parameter-lambda case, which is `UnsupportedFeature` | `class::complete_class`, `method::defdef_header`, `opaque::{complete_opaque_alias,ensure_alias_graph_acyclic,unwrap_lambda_tpt}` | `unpickler.malformed_definition` |
+| `MalformedDefinition` | `MalformedInput` for shape mismatch; nested opaque-parameter lambdas and alias-graph recursion-limit cases are `UnsupportedFeature` unless the graph is independently shown cyclic | `class::complete_class`, `method::defdef_header`, `opaque::{complete_opaque_alias,ensure_alias_graph_acyclic,unwrap_lambda_tpt}` | `unpickler.malformed_definition` |
 | `UnsupportedMethodParameterSemantics` | `UnsupportedFeature`; a valid parameter modifier cannot be represented in adapted method info | `method::guard_parameter_modifiers` | `unpickler.unsupported_method_parameter_semantics` |
 | `ConstructorOwnerNotClassLike` | `MalformedInput` for a constructor under a non-class-like owner; impossible owner-state can indicate an index invariant | `constructor::constructor_owner` | `unpickler.constructor_owner_not_class_like` |
 | `MalformedOwnerClassInfo` | `InternalInvariant`; a completed class owner does not hold its canonical `ClassInfo` | `constructor::constructor_owner`, `opaque::apply_pending_opaque_aliases` | `unpickler.malformed_owner_class_info` |
@@ -70,7 +70,7 @@ is the proposed contract.
 | `InvalidSingletonTypeTree` | `MalformedInput` if the tree claims a non-singleton type; unsupported legal singleton forms need a distinct future variant if evidence arises | `type_tree::type_of_tpt` | `unpickler.invalid_singleton_type_tree` |
 | `MissingEnteredSymbol` | `InternalInvariant` for an entered local definition omitted from the index; cross-unit or local unentered targets use `MissingReferencedSymbol` instead | `completion`, `method`, `refinement`, `symbol_annotations`, `type_tree`, `opaque` | `unpickler.missing_entered_symbol` |
 | `UnsupportedSymbolCompletion` | `Deferred`; symbol kind belongs to a later completion milestone | `completion::complete_in` | `unpickler.unsupported_symbol_completion` |
-| `UnsupportedAnnotationCompletion` | `Deferred`; this completion operation only indexes a defined set of declaration kinds | `symbol_annotations::complete_annotations_in` | `unpickler.unsupported_annotation_completion` |
+| `UnsupportedAnnotationCompletion` | `UnsupportedFeature`; this API does not support annotation completion for kinds without an indexed annotation tail | `symbol_annotations::complete_annotations_in` | `unpickler.unsupported_annotation_completion` |
 | `OpaqueAliasOwnerNotClassLike` | `MalformedInput` when the entered owner has an impossible kind; confirm against source fixture before treating foreign/unresolved owners as malformed | `opaque::complete_opaque_alias` | `unpickler.opaque_alias_owner_not_class_like` |
 | `OpaqueAliasOwnerNotEntered` | `ResolutionFailure` if owner belongs to another unit; `InternalInvariant` if a same-unit owner should already have been entered | `opaque::complete_opaque_alias` | `unpickler.opaque_alias_owner_not_entered` |
 | `OpaqueAliasCycle` | `MalformedInput`; alias graph/owner refinement would be cyclic | `opaque::{ensure_alias_graph_acyclic,insert_owner_alias}` | `unpickler.opaque_alias_cycle` |
@@ -84,7 +84,7 @@ is the proposed contract.
 | `UnresolvedMember` | `ResolutionFailure`; `Ok(None)` is not proof the member does not exist outside the current resolver/session | `types::resolved_named`, `opaque` | `unpickler.unresolved_member` |
 | `AmbiguousMember` | `ResolutionFailure`; lookup has multiple valid candidates and no selector | `types::resolved_named` | `unpickler.ambiguous_member` |
 | `UnsupportedSignedReference` | `UnsupportedFeature`; member selection by signature is not implemented | `types::resolved_named`, `refined::decode_refined_type` | `unpickler.unsupported_signed_reference` |
-| `MalformedType` | `MalformedInput`; child shape, type form, or indexed references violate a local decoding contract | `discovery`, `enter`, `types`, `binders`, `recursive`, `refined`, `refinement`, `term_type`, `annotated`, `symbol_annotations`, `reachability` | `unpickler.malformed_type` |
+| `MalformedType` | `MalformedInput` for invalid child/type/reference shape; recursion-limit and owner-space designator cases are ambiguous or unsupported (see below), not proof of corrupt bytes | `discovery`, `enter`, `types`, `binders`, `recursive`, `refined`, `refinement`, `term_type`, `annotated`, `symbol_annotations`, `reachability` | `unpickler.malformed_type` |
 | `UnsupportedAnnotationTree` | `UnsupportedFeature`; annotation tree is retained in TASTy but not projected | `type_tree::type_of_tpt`, `annotated::decode_annotation_payload` | `unpickler.unsupported_annotation_tree` |
 | `InvalidCompactAnnotationType` | `MalformedInput` if the compact form violates its type contract; a binder/pending reference may be `Deferred` pending decoding | `types`, `annotated::decode_annotation_payload` | `unpickler.invalid_compact_annotation_type` |
 | `UnsupportedAnnotationConstructor` | `UnsupportedFeature`; constructor spine/class form is outside the annotation projection | `annotated::{decode_constructor_annotation,constructor_spine,annotation_class_type}` | `unpickler.unsupported_annotation_constructor` |
@@ -108,7 +108,7 @@ is the proposed contract.
 | Nested source | Variants/causes | Classification notes and location |
 | --- | --- | --- |
 | `TastyFileError` | `Tasty(TastyFileError)` via `From<TastyFileError>` | See `crates/dotty-tasty/src/file.rs`. Header version/magic, invalid references, missing/duplicate sections and section payload errors have different meanings. Preserve the nested variant; some version failures are unsupported format, not malformed content. File errors use file/section-relative offsets or name references, not Scala source spans. |
-| `AstError` | `Ast(AstError)` via `From<AstError>` | See `crates/dotty-tasty/src/ast.rs`. `InvalidTag`, bad references/counts and read errors are malformed; `UnsupportedCategory`, `UnsupportedRelocation`, and unsupported tags may instead be unsupported valid input. Offsets are AST payload byte offsets; `address` is an AST coordinate. |
+| `AstError` | `Ast(AstError)` via `From<AstError>` | See `crates/dotty-tasty/src/ast.rs`. `InvalidTag`, bad references/counts and read errors are malformed; `UnsupportedCategory`, `UnsupportedRelocation`, and recursion/resource limits may instead mean valid input beyond current support. Offsets are AST payload byte offsets; `address` is an AST coordinate. |
 | `ResolutionError` | `ResolverFailure { address, error }` | See `crates/dotty-core/src/resolution.rs`. `Ambiguous` is resolution ambiguity; `Malformed { reason }` is inconsistent resolver state (`InternalInvariant` for a trusted resolver, otherwise a resolver failure with untrusted cause). `Ok(None)` remains `UnresolvedMember`/`UnresolvedPackage`, not this variant. |
 | `TypeRebindError` | `CloseOverThis`, `ParameterAbstraction`, `RebindFailed` | See `crates/dotty-core/src/types/rebind.rs`. Carries exact type/symbol IDs, arity, or graph condition. Invalid/unfilled/cyclic/deep graphs are malformed input only if all referenced IDs came from the artifact; otherwise invariant. A caught error is returned after enclosing operation rollback. |
 
@@ -144,7 +144,7 @@ literal producer values found under `crates/dotty-tasty-unpickler/src/`.
 | `MalformedRefinedTypeTree` | `a refinement stat is not a supported member definition` | `refinement::type_of_refined_tpt` | This is actually `UnsupportedFeature`; use `RefinedTreeReason::UnsupportedMemberStat` only if the variant remains a mixed family, otherwise split it in a later issue. |
 | `MalformedType` | `a match type has a bound and a scrutinee` | `types::decode_type` | `TypeReason::MatchTypeShape` |
 | `MalformedType` | `the node's children do not match its shape` | `types::decode_children` | `TypeReason::ChildShapeMismatch` |
-| `MalformedType` | `an owner-space reference resolved to a name designator` | `types::resolved_declaration` | `TypeReason::OwnerSpaceNameDesignator` |
+| `MalformedType` | `an owner-space reference resolved to a name designator` | `types::resolved_declaration` | `TypeReason::OwnerSpaceNameDesignator`; likely `UnsupportedFeature` or `ResolutionFailure`, since a structural name designator does not establish malformed input |
 | `MalformedType` | `a refined type has a parent and a refinement` | `refined::decode_refined_type` | `TypeReason::RefinedTypeShape` |
 | `MalformedType` | `not a direct or symbol reference` | `discovery::reference_target` | `TypeReason::InvalidReferenceTargetShape` |
 | `MalformedType` | `the binder's children disagree with its parameters` | `binders::decode_methodic` | `TypeReason::BinderChildMismatch` |
@@ -158,14 +158,14 @@ literal producer values found under `crates/dotty-tasty-unpickler/src/`.
 | `MalformedType` | `a named argument has one value` | `annotated::annotation_argument` | `TypeReason::NamedArgumentArity` |
 | `MalformedType` | `an annotation argument literal is not a constant` | `annotated::annotation_argument` | `TypeReason::AnnotationLiteralNotConstant` |
 | `MalformedType` | `a recursive type has exactly one child` | `recursive::decode_rec_type` | `TypeReason::RecursiveTypeArity` |
-| `MalformedType` | `a parent tree nests too deeply` | `enter::enter_parent_lambdas` | `TypeReason::ParentTreeDepthLimit` |
+| `MalformedType` | `a parent tree nests too deeply` | `enter::enter_parent_lambdas` | `TypeReason::ParentTreeDepthLimit`; `UnsupportedFeature` for an input exceeding the implementation's depth limit, absent evidence of a cycle |
 | `MalformedType` | `a lambda type tree has type parameters and a body` | `enter::enter_lambda_tpt` | `TypeReason::LambdaTreeShape` |
 | `MalformedType` | `a lambda type tree parameter is not a type parameter` | `enter::enter_lambda_tpt` | `TypeReason::LambdaParameterKind` |
 | `MalformedType` | `a refined type tree has a parent` | `enter::enter_refined_tpt` | `TypeReason::RefinedTreeUnexpectedParent` |
 
-The `MalformedDefinition`, `MalformedRefinedTypeTree`, and `MalformedType`
-families currently mix malformed structure, unsupported valid constructs, and
-resource-limit conditions. A typed-reason migration should preserve the
+The `MalformedDefinition`, `MalformedParentTree`, `MalformedRefinedTypeTree`,
+and `MalformedType` families currently mix malformed structure, unsupported
+valid constructs, and resource-limit conditions. A typed-reason migration should preserve the
 distinction in category; it should not infer category from reason enum alone
 unless the family is first split. The `MalformedRefinedTypeTree` unsupported
 member case and nested opaque parameter lambdas are direct candidates for a
