@@ -4362,6 +4362,127 @@ fn parsed_non_enclosing_visibility_qualifier_remains_a_typed_namer_error() {
 }
 
 #[test]
+fn valid_enum_case_parameter_visibility_exposes_an_unresolved_boundary() {
+    let source_text = "enum Color { case Red(private[Color] val value: Int) }";
+    let (parsed, source, mut store) = parsed_source(source_text, 316);
+    let checkpoint = store.checkpoint();
+    let mut packages = Packages::new();
+
+    let error = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Color.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect_err("the enum case parameter boundary is not resolved yet");
+
+    assert!(
+        matches!(
+            error,
+            NamerError::InvalidVisibilityQualifier {
+                position: Some(_),
+                protected: false,
+                qualifier,
+                ..
+            } if store.names.resolve(qualifier.text()) == "Color"
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(store.checkpoint(), checkpoint);
+}
+
+#[test]
+fn recovered_unresolved_visibility_qualifier_remains_a_namer_error() {
+    let source_text = "class Outer { private[Missing] val hidden = }";
+    let source = SourceId::from_index(314);
+    let mut store = SemanticStore::new();
+    let scanner = dotty_lexer::ContextualScanner::new(source_text).expect("source should lex");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(
+        !parsed.diagnostics.is_empty(),
+        "the missing initializer should exercise parser recovery"
+    );
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser recovery should preserve a package root");
+    };
+    let TreeKind::TypeDef(outer) = &parsed.ast.get(package.stats[0]).kind else {
+        panic!("parser recovery should preserve Outer");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(outer.rhs).kind else {
+        panic!("parser recovery should preserve the class template");
+    };
+    let member_tree = template.body[0];
+    let qualifier = *dotty_core::TermName::new(store.names.intern("Missing")).as_name();
+    let checkpoint = store.checkpoint();
+    let mut packages = Packages::new();
+
+    assert_eq!(
+        name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "RecoveredVisibility.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap_err(),
+        NamerError::InvalidVisibilityQualifier {
+            tree_index: member_tree.index(),
+            position: parsed.ast.get(member_tree).position,
+            qualifier,
+            protected: false,
+        }
+    );
+    assert_eq!(store.checkpoint(), checkpoint);
+}
+
+#[test]
+fn scala_valid_singleton_given_type_has_an_explicit_unsupported_name_error() {
+    let source_text = "object Service { object Token }; given Service.Token.type = Service.Token";
+    let (parsed, source, mut store) = parsed_source(source_text, 315);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a PackageDef");
+    };
+    let given_tree = *package
+        .stats
+        .last()
+        .expect("given should be a top-level stat");
+    let checkpoint = store.checkpoint();
+    let mut packages = Packages::new();
+
+    let error = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "SingletonGiven.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect_err("singleton given type naming is not implemented yet");
+
+    assert!(
+        matches!(
+            error,
+            NamerError::UnsupportedGivenNameShape {
+                tree_index,
+                position: Some(_),
+                unsupported_kind: "SingletonTypeTree",
+                ..
+            } if tree_index == given_tree.index()
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(store.checkpoint(), checkpoint);
+}
+
+#[test]
 fn parsed_top_level_extension_methods_are_entered_in_the_source_wrapper() {
     use dotty_core::SymbolKind;
     use dotty_lexer::ContextualScanner;
