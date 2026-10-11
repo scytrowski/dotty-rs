@@ -325,9 +325,9 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         }
     }
 
-    fn normalize(&self, ty: TypeId) -> Result<TypeId, TypeRelationError> {
+    fn normalize(&mut self, ty: TypeId) -> Result<TypeId, TypeRelationError> {
         TypeNormalizer::new(self.typer.store)
-            .normalize_for_lookup(ty)
+            .normalize_for_relation(ty)
             .map_err(TypeRelationError::Normalization)
     }
 
@@ -351,7 +351,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         )
     }
 
-    fn class_view(&self, ty: TypeId) -> Result<ClassView, TypeRelationError> {
+    fn class_view(&mut self, ty: TypeId) -> Result<ClassView, TypeRelationError> {
         let ty = self.normalize(ty)?;
         let (tycon, args, applied) = match self.type_at(ty)? {
             Type::Applied { tycon, args } => (*tycon, args.clone(), true),
@@ -580,7 +580,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
     }
 
     fn validate_supported(
-        &self,
+        &mut self,
         found: TypeId,
         expected: TypeId,
         depth: usize,

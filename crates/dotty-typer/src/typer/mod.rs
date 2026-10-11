@@ -24998,6 +24998,8 @@ mod tests {
             assert_eq!(typer.type_expression(rhs, context).unwrap(), typed);
             assert_eq!(typer.typed_ast().iter().count(), typed_count);
             if method == "literal" {
+                let annotated_result = typer.typed_ast().get(typed).ty;
+                assert!(typer.is_subtype(annotated_result, definitions.int).unwrap());
                 assert_eq!(
                     typer
                         .type_expression_expected(rhs, context, definitions.int)

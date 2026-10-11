@@ -361,7 +361,7 @@ struct PendingClass {
 }
 
 pub(in crate::typer) fn class_symbol_for_type(
-    store: &SemanticStore,
+    store: &mut SemanticStore,
     ty: TypeId,
     is_parent: bool,
 ) -> Result<SymbolId, MemberLookupError> {
@@ -383,7 +383,7 @@ pub(in crate::typer) fn class_symbol_for_type(
             return Err(MemberLookupError::TooDeep);
         }
         visited.push(current);
-        let Some(ty_node) = store.types.try_get(current) else {
+        let Some(ty_node) = store.types.try_get(current).cloned() else {
             return Err(MemberLookupError::TypeNormalization(
                 if store.types.contains(current) {
                     TypeNormalizeError::UnfilledType { ty: current }
@@ -394,20 +394,14 @@ pub(in crate::typer) fn class_symbol_for_type(
         };
         match ty_node {
             Type::ThisType { class } => {
-                return validate_class_symbol(store, *class, ty, is_parent);
+                return validate_class_symbol(store, class, ty, is_parent);
             }
             Type::TypeRef {
                 target: TypeRefTarget::Symbol(symbol),
                 ..
-            } => return validate_class_symbol(store, *symbol, ty, is_parent),
+            } => return validate_class_symbol(store, symbol, ty, is_parent),
             Type::Applied { tycon, .. } => {
-                // Keep the application intact while extracting its class
-                // owner. In particular, do not open an applied type alias
-                // after dropping the arguments needed for substitution.
-                TypeNormalizer::new(store)
-                    .dealias_top(current)
-                    .map_err(MemberLookupError::TypeNormalization)?;
-                current = *tycon;
+                current = tycon;
                 let dealiased = TypeNormalizer::new(store)
                     .normalize_for_lookup(current)
                     .map_err(MemberLookupError::TypeNormalization)?;
@@ -513,7 +507,7 @@ mod tests {
     use super::*;
     use dotty_core::SourceSemanticIndex;
     use dotty_core::ast::Untyped;
-    use dotty_core::types::{Annotation, ClassInfo};
+    use dotty_core::types::{Annotation, ClassInfo, TypeLambda, TypeParam};
     use dotty_core::{
         AstArena, Definitions, Name, Namespace, Packages, SemanticStore, SourceId, Symbol,
         SymbolFlags, SymbolLinks, SymbolOrigin, Visibility,
@@ -645,6 +639,76 @@ mod tests {
                 inheritance_depth: 0,
             }]
         );
+    }
+
+    #[test]
+    fn member_lookup_opens_an_applied_generic_alias_before_class_inspection() {
+        let mut w = World::new();
+        let class = w.class("BoxClass");
+        let scope = w.scope(class);
+        let field = w.symbol(
+            "value",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Missing,
+        );
+        let name = w.store.symbols.get(field).name;
+        w.store.scopes.get_mut(scope).enter(name, field);
+        w.publish_class(class, scope, Vec::new());
+
+        let lambda_reserved = w.store.types.reserve();
+        let lambda_id = lambda_reserved.id();
+        let argument = w.store.types.alloc(Type::NoType);
+        let bounds = w.store.types.alloc(Type::Bounds {
+            low: w.definitions.nothing_type,
+            high: w.definitions.any_type,
+        });
+        let parameter = TypeParam {
+            name: dotty_core::TypeName::new(w.store.names.intern("A")),
+            bounds,
+            declared_variance: None,
+        };
+        let parameter_ref = w.store.types.alloc(Type::ParamRef {
+            binder: lambda_id,
+            index: 0,
+        });
+        let class_ref = w.class_ref(class);
+        let alias_body = w.store.types.alloc(Type::Applied {
+            tycon: class_ref,
+            args: vec![parameter_ref],
+        });
+        let lambda = w.store.types.fill(
+            lambda_reserved,
+            Type::TypeLambda(TypeLambda {
+                params: vec![parameter],
+                result: alias_body,
+            }),
+        );
+        let alias_info = w.store.types.alloc(Type::AliasingBounds { alias: lambda });
+        let alias = w.symbol(
+            "Box",
+            Namespace::Type,
+            SymbolKind::TypeAlias,
+            SymbolInfo::Complete(alias_info),
+        );
+        let alias_ref = w.class_ref(alias);
+        let receiver = w.store.types.alloc(Type::Applied {
+            tycon: alias_ref,
+            args: vec![argument],
+        });
+
+        let candidates = w.lookup(receiver, name).unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].symbol, field);
+        assert_eq!(candidates[0].declaring_class, class);
+        assert!(matches!(
+            w.store.types.get(candidates[0].receiver_view),
+            Type::Applied { tycon, args }
+                if matches!(w.store.types.get(*tycon),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(found), .. } if *found == class)
+                    && args == &[argument]
+        ));
     }
 
     #[test]
@@ -807,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    fn applied_alias_parent_is_not_opened_without_substitution() {
+    fn applied_non_generic_alias_parent_reports_an_arity_mismatch() {
         let mut w = World::new();
         let class = w.class("Base");
         let class_ref = w.class_ref(class);
@@ -832,7 +896,11 @@ mod tests {
         assert!(matches!(
             w.lookup(applied_alias, name),
             Err(MemberLookupError::TypeNormalization(
-                TypeNormalizeError::AliasRequiresSubstitution { symbol }
+                TypeNormalizeError::AliasArgumentArityMismatch {
+                    symbol,
+                    expected: 0,
+                    actual: 1,
+                }
             )) if symbol == alias
         ));
     }

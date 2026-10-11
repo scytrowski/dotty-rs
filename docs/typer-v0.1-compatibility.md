@@ -1315,8 +1315,31 @@ erased and capture-set function types: [impure function identity reference](../c
 The identity layer now models contextuality and purity as separate dimensions.
 Its family constructor resolves pure `FunctionN` / `ContextFunctionN` classes
 and validates or materializes impure `TypeAlias` identities with the pinned
-`TypeLambda` and `RetainsCap` body. This does not yet project impure source
-function trees or normalize applied generic aliases.
+`TypeLambda` and `RetainsCap` body. Source projection of impure function trees
+remains out of scope here.
+
+## Applied generic alias normalization (#948)
+
+`TypeNormalizer::dealias_top` opens an applied generic alias by substituting
+its exact type arguments into the alias `TypeLambda` using binder identity and
+parameter index. This is a structural operation, not type inference: it does
+not infer missing arguments or validate their declared bounds. It supports
+nested applied aliases, preserves nested binder identity, and reports arity
+mismatches, malformed alias bodies, alias cycles, and depth exhaustion with
+focused normalization errors. Failed instantiation rolls back its allocations.
+
+A bare generic alias reference still returns
+`AliasRequiresSubstitution`; it is never opened with free type parameters.
+Non-alias applied types keep their arguments unchanged. Lookup normalization
+also opens applied aliases before member/class inspection, so existing
+normalization consumers observe the instantiated target without adding
+function-name special cases. This lets the impure function aliases above
+normalize to their annotated `FunctionN` / `ContextFunctionN` applications;
+source `FunctionWithMods` projection is still a separate increment. The
+nominal subtype relation keeps the `RetainsCap` annotation and returns
+`UnsupportedType` until capture-set semantics are modeled. Other annotations
+remain transparent to relation normalization and retain the existing typing
+behavior.
 
 ## Source function type projection (#827)
 

@@ -273,7 +273,7 @@ impl SourceTyper<'_> {
         Ok(parameters)
     }
 
-    fn class_view(&self, ty: TypeId) -> Result<ClassView, TyperError> {
+    fn class_view(&mut self, ty: TypeId) -> Result<ClassView, TyperError> {
         let normalized = TypeNormalizer::new(self.store)
             .normalize_for_lookup(ty)
             .map_err(TyperError::TypeNormalization)?;

@@ -1789,6 +1789,90 @@ mod tests {
     }
 
     #[test]
+    fn applied_impure_function_aliases_normalize_to_their_function_families() {
+        let (arena, index, mut store, mut packages, definitions, scala) = setup();
+        let (annotation_package, annotation_name, annotation_class) =
+            add_retains_cap(&mut store, &mut packages, scala);
+        let resolver = resolver_with_function_classes(
+            &mut store,
+            scala,
+            annotation_package,
+            annotation_name,
+            annotation_class,
+            &[1],
+        );
+        let ordinary_name = Name::new(store.names.intern("Function1"), Namespace::Type);
+        let contextual_name = Name::new(store.names.intern("ContextFunction1"), Namespace::Type);
+        let ordinary = resolver.classes[&ordinary_name];
+        let contextual = resolver.classes[&contextual_name];
+        let mut typer = typer(&arena, &index, &mut store, &packages, definitions, resolver);
+        let arguments = [definitions.int, definitions.boolean];
+
+        for (kind, expected_class) in [
+            (SourceFunctionKind::Ordinary, ordinary),
+            (SourceFunctionKind::Contextual, contextual),
+        ] {
+            let alias = typer
+                .source_impure_function_alias(
+                    SourceFunctionFamily::new(kind, SourceFunctionPurity::Impure),
+                    1,
+                    53,
+                )
+                .unwrap();
+            let alias_prefix = typer.type_symbol_prefix(alias);
+            let alias_ref = typer.store.types.alloc(Type::TypeRef {
+                prefix: alias_prefix,
+                target: TypeRefTarget::Symbol(alias),
+            });
+            let applied = typer.store.types.alloc(Type::Applied {
+                tycon: alias_ref,
+                args: arguments.to_vec(),
+            });
+
+            let normalized = crate::types::TypeNormalizer::new(typer.store)
+                .dealias_top(applied)
+                .unwrap();
+
+            let Type::Annotated { underlying, .. } = typer.store.types.get(normalized) else {
+                panic!("impure function alias normalization keeps RetainsCap metadata")
+            };
+            let Type::Applied { tycon, args } = typer.store.types.get(*underlying) else {
+                panic!("impure alias body should be an applied function type")
+            };
+            assert!(matches!(
+                typer.store.types.get(*tycon),
+                Type::TypeRef { target: TypeRefTarget::Symbol(found), .. }
+                    if *found == expected_class
+            ));
+            assert_eq!(args, &arguments);
+            assert_eq!(
+                crate::typer::lookup::class_symbol_for_type(typer.store, applied, false).unwrap(),
+                expected_class
+            );
+
+            let pure_tycon = typer
+                .source_function_family_type_constructor(
+                    SourceFunctionFamily::new(kind, SourceFunctionPurity::Pure),
+                    1,
+                    54,
+                )
+                .unwrap();
+            let pure = typer.store.types.alloc(Type::Applied {
+                tycon: pure_tycon,
+                args: arguments.to_vec(),
+            });
+            assert!(matches!(
+                typer.is_subtype(applied, pure),
+                Err(crate::TypeRelationError::UnsupportedType { .. })
+            ));
+            assert!(matches!(
+                typer.is_subtype(pure, applied),
+                Err(crate::TypeRelationError::UnsupportedType { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn failed_outer_transaction_rolls_back_impure_alias_and_retry_is_canonical() {
         let (arena, index, mut store, mut packages, definitions, scala) = setup();
         let (annotation_package, annotation_name, annotation_class) =

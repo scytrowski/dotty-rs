@@ -1,12 +1,13 @@
-//! Bounded, read-only operations on the outermost semantic type.
+//! Bounded operations on the outermost semantic type.
 //!
-//! These helpers return existing `TypeId`s and never complete symbols or
-//! allocate semantic values. They intentionally do not perform substitution,
-//! subtyping, member lookup, or recursive normalization of child types.
+//! These helpers never complete symbols or perform subtyping/member lookup.
+//! Opening an applied generic alias allocates a binder-substituted result via
+//! `dotty-core`; failed normalization rolls back those allocations. Other
+//! child types are not recursively normalized.
 
 use std::fmt;
 
-use dotty_core::types::{Type, TypeRefTarget};
+use dotty_core::types::{Type, TypeRebindError, TypeRefTarget, instantiate_type_lambda};
 use dotty_core::{SemanticStore, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, TypeId};
 
 /// Maximum number of alias/proxy links followed by one normalization request.
@@ -34,6 +35,17 @@ pub enum TypeNormalizeError {
     OpaqueAlias { symbol: SymbolId },
     /// A type alias needs type-parameter substitution before it can be opened.
     AliasRequiresSubstitution { symbol: SymbolId },
+    /// An applied alias was supplied a different number of arguments than its binder requires.
+    AliasArgumentArityMismatch {
+        symbol: SymbolId,
+        expected: usize,
+        actual: usize,
+    },
+    /// Instantiating a structurally malformed alias failed in the shared rebinder.
+    AliasInstantiationFailed {
+        symbol: SymbolId,
+        error: TypeRebindError,
+    },
     /// An alias declaration has no complete semantic info.
     AliasInfoIncomplete {
         symbol: SymbolId,
@@ -68,30 +80,37 @@ impl fmt::Display for TypeNormalizeError {
 
 impl std::error::Error for TypeNormalizeError {}
 
-/// Read-only, bounded semantic type normalization over an existing store.
+/// Bounded semantic type normalization over an existing store.
 pub struct TypeNormalizer<'a> {
-    store: &'a SemanticStore,
+    store: &'a mut SemanticStore,
 }
 
 impl<'a> TypeNormalizer<'a> {
     /// Creates a normalizer over the supplied semantic store.
-    pub const fn new(store: &'a SemanticStore) -> Self {
+    pub const fn new(store: &'a mut SemanticStore) -> Self {
         Self { store }
     }
 
-    /// Opens a chain of simple, non-opaque type aliases at the top level.
+    /// Opens a chain of non-opaque type aliases at the top level.
     ///
     /// Name-target references, non-alias symbols, and non-alias type forms are
     /// returned unchanged. Alias declarations must already have complete
-    /// `AliasingBounds` info. Generic aliases are rejected because opening one
-    /// without substitution would return a semantically incorrect type.
-    pub fn dealias_top(&self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
-        self.dealias_top_with_budget(ty, MAX_TYPE_NORMALIZATION_DEPTH)
-            .map(|(ty, _)| ty)
+    /// `AliasingBounds` info. An unapplied generic alias is rejected, while an
+    /// applied alias is opened by substituting its exact argument list into
+    /// its `TypeLambda` binder.
+    pub fn dealias_top(&mut self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
+        let checkpoint = self.store.checkpoint();
+        match self.dealias_top_with_budget(ty, MAX_TYPE_NORMALIZATION_DEPTH) {
+            Ok((ty, _)) => Ok(ty),
+            Err(error) => {
+                self.store.rollback_to(checkpoint);
+                Err(error)
+            }
+        }
     }
 
     fn dealias_top_with_budget(
-        &self,
+        &mut self,
         ty: TypeId,
         budget: usize,
     ) -> Result<(TypeId, usize), TypeNormalizeError> {
@@ -99,33 +118,35 @@ impl<'a> TypeNormalizer<'a> {
         let mut visited = Vec::new();
 
         for links in 0..=budget {
-            let (symbol, next) = match self.type_at(current)? {
+            let (symbol, next) = match self.type_at(current)?.clone() {
                 Type::TypeRef {
                     target: TypeRefTarget::Symbol(symbol),
                     ..
                 } => {
-                    let Some(next) = self.alias_target(*symbol)? else {
+                    let Some(next) = self.alias_target(symbol)? else {
                         return Ok((current, links));
                     };
-                    (*symbol, next)
-                }
-                Type::Applied { tycon, .. } => {
-                    if let Some(symbol) = self.alias_symbol(*tycon)? {
-                        if !self.store.symbols.contains(symbol) {
-                            return Err(TypeNormalizeError::UnknownSymbol { symbol });
+                    if let Type::TypeLambda(lambda) = self.type_at(next)?.clone() {
+                        if !lambda.params.is_empty() {
+                            return Err(TypeNormalizeError::AliasRequiresSubstitution { symbol });
                         }
-                        if self
-                            .store
-                            .symbols
-                            .get(symbol)
-                            .flags
-                            .contains(SymbolFlags::OPAQUE)
-                        {
-                            return Err(TypeNormalizeError::OpaqueAlias { symbol });
-                        }
-                        return Err(TypeNormalizeError::AliasRequiresSubstitution { symbol });
+                        let instantiated =
+                            instantiate_type_lambda(self.store, next, &[]).map_err(|error| {
+                                TypeNormalizeError::AliasInstantiationFailed { symbol, error }
+                            })?;
+                        (symbol, instantiated.result)
+                    } else {
+                        (symbol, next)
                     }
-                    return Ok((current, links));
+                }
+                Type::Applied { tycon, args } => {
+                    let Some(symbol) = self.alias_symbol(tycon)? else {
+                        return Ok((current, links));
+                    };
+                    let Some(next) = self.alias_application_target(symbol, &args)? else {
+                        return Ok((current, links));
+                    };
+                    (symbol, next)
                 }
                 _ => return Ok((current, links)),
             };
@@ -193,10 +214,45 @@ impl<'a> TypeNormalizer<'a> {
 
     /// Dealiases and unwraps `Annotated` / `Flexible` at the outermost level.
     ///
-    /// The operation preserves `Applied` and all other type forms, and never
-    /// descends into their children. Alias links and wrappers share one depth
-    /// budget, and repeated outer nodes are reported as malformed cycles.
-    pub fn normalize_for_lookup(&self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
+    /// Non-alias `Applied` types and all other child types remain intact. An
+    /// applied alias is instantiated before returning. Alias links and
+    /// wrappers share one depth budget, and repeated outer nodes are reported
+    /// as malformed cycles.
+    pub fn normalize_for_lookup(&mut self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
+        self.normalize_outer(ty, false)
+    }
+
+    /// Dealiases and unwraps flexible types while preserving `RetainsCap`.
+    ///
+    /// Type relations use this form so they cannot silently erase semantic
+    /// distinctions carried by `scala.annotation.retainsCap`. Other
+    /// annotations keep the existing transparent normalization behavior.
+    /// Relations that do not model `RetainsCap` must reject the resulting
+    /// `Annotated` type explicitly.
+    pub fn normalize_for_relation(&mut self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
+        self.normalize_outer(ty, true)
+    }
+
+    fn normalize_outer(
+        &mut self,
+        ty: TypeId,
+        preserve_retains_cap: bool,
+    ) -> Result<TypeId, TypeNormalizeError> {
+        let checkpoint = self.store.checkpoint();
+        match self.normalize_outer_inner(ty, preserve_retains_cap) {
+            Ok(normalized) => Ok(normalized),
+            Err(error) => {
+                self.store.rollback_to(checkpoint);
+                Err(error)
+            }
+        }
+    }
+
+    fn normalize_outer_inner(
+        &mut self,
+        ty: TypeId,
+        preserve_retains_cap: bool,
+    ) -> Result<TypeId, TypeNormalizeError> {
         let mut current = ty;
         let mut visited = Vec::new();
         let mut depth = 0;
@@ -206,12 +262,7 @@ impl<'a> TypeNormalizer<'a> {
                 return Err(TypeNormalizeError::NormalizationCycle { ty: current });
             }
             visited.push(current);
-            let current_type = self.type_at(current)?;
-            // Applied aliases require substitution. Lookup normalization is
-            // intentionally shallow, so it preserves the entire application.
-            if matches!(current_type, Type::Applied { .. }) {
-                return Ok(current);
-            }
+            let current_type = self.type_at(current)?.clone();
             let (dealiased, links) = self.dealias_top_with_budget(
                 current,
                 MAX_TYPE_NORMALIZATION_DEPTH.saturating_sub(depth),
@@ -221,8 +272,17 @@ impl<'a> TypeNormalizer<'a> {
                 current = dealiased;
                 continue;
             }
+            if matches!(current_type, Type::Applied { .. }) {
+                return Ok(current);
+            }
             let underlying = match self.type_at(current)? {
-                Type::Annotated { underlying, .. } | Type::Flexible { underlying } => *underlying,
+                Type::Flexible { underlying } => *underlying,
+                Type::Annotated {
+                    underlying,
+                    annotation,
+                } if !preserve_retains_cap || !self.is_retains_cap_annotation(*annotation) => {
+                    *underlying
+                }
                 _ => return Ok(current),
             };
             if depth == MAX_TYPE_NORMALIZATION_DEPTH {
@@ -231,6 +291,51 @@ impl<'a> TypeNormalizer<'a> {
             depth += 1;
             current = underlying;
         }
+    }
+
+    fn is_retains_cap_annotation(&self, annotation: dotty_core::AnnotationId) -> bool {
+        let Some(annotation) = self.store.annotations.try_get(annotation) else {
+            return false;
+        };
+        let annotation_type = match self.store.types.try_get(annotation.ty) {
+            Some(Type::Applied { tycon, .. }) => *tycon,
+            Some(_) => annotation.ty,
+            None => return false,
+        };
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        }) = self.store.types.try_get(annotation_type)
+        else {
+            return false;
+        };
+        let mut symbol = *symbol;
+
+        let mut path = Vec::new();
+        let mut visited = Vec::new();
+        for _ in 0..MAX_TYPE_NORMALIZATION_DEPTH {
+            if !self.store.symbols.contains(symbol) || visited.contains(&symbol) {
+                return false;
+            }
+            visited.push(symbol);
+            let declaration = self.store.symbols.get(symbol);
+            let name = self.store.names.resolve(declaration.name.text());
+            let owner = declaration.owner;
+            if owner.is_some() || !name.is_empty() {
+                path.push(name);
+            }
+            let Some(owner) = owner else {
+                path.reverse();
+                return path == ["scala", "annotation", "retainsCap"];
+            };
+            if !self.store.symbols.contains(owner)
+                || self.store.symbols.get(owner).kind != SymbolKind::Package
+            {
+                return false;
+            }
+            symbol = owner;
+        }
+        false
     }
 
     fn alias_symbol(&self, ty: TypeId) -> Result<Option<SymbolId>, TypeNormalizeError> {
@@ -248,6 +353,37 @@ impl<'a> TypeNormalizer<'a> {
             matches!(self.store.symbols.get(*symbol).kind, SymbolKind::TypeAlias)
                 .then_some(*symbol),
         )
+    }
+
+    fn alias_application_target(
+        &mut self,
+        symbol: SymbolId,
+        arguments: &[TypeId],
+    ) -> Result<Option<TypeId>, TypeNormalizeError> {
+        let Some(target) = self.alias_target(symbol)? else {
+            return Ok(None);
+        };
+        let lambda_arity = match self.type_at(target)?.clone() {
+            Type::TypeLambda(lambda) => lambda.params.len(),
+            _ if arguments.is_empty() => return Ok(Some(target)),
+            _ => {
+                return Err(TypeNormalizeError::AliasArgumentArityMismatch {
+                    symbol,
+                    expected: 0,
+                    actual: arguments.len(),
+                });
+            }
+        };
+        if arguments.len() != lambda_arity {
+            return Err(TypeNormalizeError::AliasArgumentArityMismatch {
+                symbol,
+                expected: lambda_arity,
+                actual: arguments.len(),
+            });
+        }
+        instantiate_type_lambda(self.store, target, arguments)
+            .map(|instantiated| Some(instantiated.result))
+            .map_err(|error| TypeNormalizeError::AliasInstantiationFailed { symbol, error })
     }
 
     fn alias_target(&self, symbol: SymbolId) -> Result<Option<TypeId>, TypeNormalizeError> {
@@ -302,7 +438,7 @@ impl<'a> TypeNormalizer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dotty_core::types::{TermRefTarget, Type};
+    use dotty_core::types::{TermRefTarget, Type, TypeLambda, TypeParam};
     use dotty_core::{Name, Namespace, Symbol, SymbolFlags, SymbolLinks, SymbolOrigin, Visibility};
 
     struct World {
@@ -360,6 +496,65 @@ mod tests {
             let reference = self.type_ref(symbol);
             (symbol, reference)
         }
+
+        fn generic_alias(&mut self, text: &str, target: SymbolId) -> (SymbolId, TypeId) {
+            let reserved = self.store.types.reserve();
+            let binder = reserved.id();
+            let leaf = self.store.types.alloc(Type::NoType);
+            let bounds = self.store.types.alloc(Type::Bounds {
+                low: leaf,
+                high: leaf,
+            });
+            let parameter = TypeParam {
+                name: dotty_core::TypeName::new(self.store.names.intern("A")),
+                bounds,
+                declared_variance: None,
+            };
+            let param_ref = self.store.types.alloc(Type::ParamRef { binder, index: 0 });
+            let tycon = self.type_ref(target);
+            let body = self.store.types.alloc(Type::Applied {
+                tycon,
+                args: vec![param_ref],
+            });
+            let lambda = self.store.types.fill(
+                reserved,
+                Type::TypeLambda(TypeLambda {
+                    params: vec![parameter],
+                    result: body,
+                }),
+            );
+            let info = self
+                .store
+                .types
+                .alloc(Type::AliasingBounds { alias: lambda });
+            let symbol = self.symbol(
+                text,
+                SymbolKind::TypeAlias,
+                SymbolFlags::EMPTY,
+                SymbolInfo::Complete(info),
+            );
+            let reference = self.type_ref(symbol);
+            (symbol, reference)
+        }
+
+        fn generic_alias_lambda(&self, symbol: SymbolId) -> TypeId {
+            let SymbolInfo::Complete(info) = self.store.symbols.get(symbol).info else {
+                panic!("fixture alias should have complete info")
+            };
+            let Type::AliasingBounds { alias } = self.store.types.get(info) else {
+                panic!("fixture alias should use AliasingBounds")
+            };
+            *alias
+        }
+
+        fn set_generic_alias_result(&mut self, symbol: SymbolId, result: TypeId) {
+            let lambda_id = self.generic_alias_lambda(symbol);
+            let Type::TypeLambda(lambda) = self.store.types.get(lambda_id).clone() else {
+                panic!("fixture alias should use a TypeLambda")
+            };
+            *self.store.types.get_mut(lambda_id) =
+                Type::TypeLambda(TypeLambda { result, ..lambda });
+        }
     }
 
     #[test]
@@ -369,7 +564,7 @@ mod tests {
         let (_, reference) = w.alias("A", leaf, SymbolFlags::EMPTY);
         let marker = w.store.types.alloc(Type::NoType);
         assert_eq!(
-            TypeNormalizer::new(&w.store).dealias_top(reference),
+            TypeNormalizer::new(&mut w.store).dealias_top(reference),
             Ok(leaf)
         );
         let next = w.store.types.alloc(Type::NoType);
@@ -382,7 +577,10 @@ mod tests {
         let leaf = w.store.types.alloc(Type::NoType);
         let (_, inner) = w.alias("B", leaf, SymbolFlags::EMPTY);
         let (_, outer) = w.alias("A", inner, SymbolFlags::EMPTY);
-        assert_eq!(TypeNormalizer::new(&w.store).dealias_top(outer), Ok(leaf));
+        assert_eq!(
+            TypeNormalizer::new(&mut w.store).dealias_top(outer),
+            Ok(leaf)
+        );
     }
 
     #[test]
@@ -400,7 +598,7 @@ mod tests {
             prefix: w.prefix,
             target: TypeRefTarget::Name(name),
         });
-        let normalizer = TypeNormalizer::new(&w.store);
+        let mut normalizer = TypeNormalizer::new(&mut w.store);
         assert_eq!(normalizer.dealias_top(class_ref), Ok(class_ref));
         assert_eq!(normalizer.dealias_top(name_ref), Ok(name_ref));
     }
@@ -411,7 +609,7 @@ mod tests {
         let leaf = w.store.types.alloc(Type::NoType);
         let (symbol, reference) = w.alias("Opaque", leaf, SymbolFlags::OPAQUE);
         assert_eq!(
-            TypeNormalizer::new(&w.store).dealias_top(reference),
+            TypeNormalizer::new(&mut w.store).dealias_top(reference),
             Err(TypeNormalizeError::OpaqueAlias { symbol })
         );
     }
@@ -426,7 +624,7 @@ mod tests {
             let symbol = w.symbol("A", SymbolKind::TypeAlias, SymbolFlags::EMPTY, info);
             let reference = w.type_ref(symbol);
             assert_eq!(
-                TypeNormalizer::new(&w.store).dealias_top(reference),
+                TypeNormalizer::new(&mut w.store).dealias_top(reference),
                 Err(TypeNormalizeError::AliasInfoIncomplete { symbol, state })
             );
         }
@@ -447,25 +645,233 @@ mod tests {
         );
         let reference = w.type_ref(symbol);
         assert_eq!(
-            TypeNormalizer::new(&w.store).dealias_top(reference),
+            TypeNormalizer::new(&mut w.store).dealias_top(reference),
             Err(TypeNormalizeError::AliasInfoNotAliasingBounds { symbol, info })
         );
     }
 
     #[test]
-    fn rejects_applied_generic_aliases_without_substitution() {
+    fn normalizes_applied_generic_alias_but_keeps_bare_substitution_guard() {
         let mut w = World::new();
-        let leaf = w.store.types.alloc(Type::NoType);
-        let (symbol, reference) = w.alias("A", leaf, SymbolFlags::EMPTY);
+        let target = w.symbol(
+            "List",
+            SymbolKind::Class,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Missing,
+        );
+        let (symbol, reference) = w.generic_alias("Box", target);
         let argument = w.store.types.alloc(Type::NoType);
         let applied = w.store.types.alloc(Type::Applied {
             tycon: reference,
             args: vec![argument],
         });
+        let normalized = TypeNormalizer::new(&mut w.store)
+            .dealias_top(applied)
+            .unwrap();
+        let Type::Applied { tycon, args } = w.store.types.get(normalized) else {
+            panic!("generic alias should normalize to its target application")
+        };
+        assert!(matches!(
+            w.store.types.get(*tycon),
+            Type::TypeRef { target: TypeRefTarget::Symbol(found), .. } if *found == target
+        ));
+        assert_eq!(args, &[argument]);
         assert_eq!(
-            TypeNormalizer::new(&w.store).dealias_top(applied),
+            TypeNormalizer::new(&mut w.store).dealias_top(reference),
             Err(TypeNormalizeError::AliasRequiresSubstitution { symbol })
         );
+        for arguments in [vec![], vec![argument, argument]] {
+            let malformed = w.store.types.alloc(Type::Applied {
+                tycon: reference,
+                args: arguments.clone(),
+            });
+            let checkpoint = w.store.checkpoint();
+            assert_eq!(
+                TypeNormalizer::new(&mut w.store).dealias_top(malformed),
+                Err(TypeNormalizeError::AliasArgumentArityMismatch {
+                    symbol,
+                    expected: 1,
+                    actual: arguments.len(),
+                })
+            );
+            assert_eq!(w.store.checkpoint(), checkpoint);
+        }
+    }
+
+    #[test]
+    fn normalizes_a_nested_generic_alias_chain_by_binder_substitution() {
+        let mut w = World::new();
+        let target = w.symbol(
+            "List",
+            SymbolKind::Class,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Missing,
+        );
+        let (inner, _) = w.generic_alias("Inner", target);
+        let (_, outer_ref) = w.generic_alias("Outer", inner);
+        let argument = w.store.types.alloc(Type::NoType);
+        let applied = w.store.types.alloc(Type::Applied {
+            tycon: outer_ref,
+            args: vec![argument],
+        });
+
+        let normalized = TypeNormalizer::new(&mut w.store)
+            .normalize_for_lookup(applied)
+            .unwrap();
+
+        let Type::Applied { tycon, args } = w.store.types.get(normalized) else {
+            panic!("a generic target application should remain applied")
+        };
+        assert!(matches!(
+            w.store.types.get(*tycon),
+            Type::TypeRef { target: TypeRefTarget::Symbol(found), .. } if *found == target
+        ));
+        assert_eq!(args, &[argument]);
+
+        let normalized_again = TypeNormalizer::new(&mut w.store)
+            .normalize_for_lookup(applied)
+            .unwrap();
+        assert_eq!(
+            w.store.types.get(normalized),
+            w.store.types.get(normalized_again)
+        );
+    }
+
+    #[test]
+    fn reports_direct_and_mutual_applied_alias_cycles_without_leaking_allocations() {
+        let mut w = World::new();
+        let target = w.symbol(
+            "List",
+            SymbolKind::Class,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Missing,
+        );
+        let (direct, direct_ref) = w.generic_alias("Direct", target);
+        let direct_lambda = w.generic_alias_lambda(direct);
+        let direct_param = w.store.types.alloc(Type::ParamRef {
+            binder: direct_lambda,
+            index: 0,
+        });
+        let direct_body = w.store.types.alloc(Type::Applied {
+            tycon: direct_ref,
+            args: vec![direct_param],
+        });
+        w.set_generic_alias_result(direct, direct_body);
+        let argument = w.store.types.alloc(Type::NoType);
+        let direct_application = w.store.types.alloc(Type::Applied {
+            tycon: direct_ref,
+            args: vec![argument],
+        });
+        let checkpoint = w.store.checkpoint();
+        assert_eq!(
+            TypeNormalizer::new(&mut w.store).dealias_top(direct_application),
+            Err(TypeNormalizeError::AliasCycle { symbol: direct })
+        );
+        assert_eq!(w.store.checkpoint(), checkpoint);
+
+        let (first, first_ref) = w.generic_alias("First", target);
+        let (second, second_ref) = w.generic_alias("Second", target);
+        let first_lambda = w.generic_alias_lambda(first);
+        let second_lambda = w.generic_alias_lambda(second);
+        let first_arg = w.store.types.alloc(Type::ParamRef {
+            binder: first_lambda,
+            index: 0,
+        });
+        let second_arg = w.store.types.alloc(Type::ParamRef {
+            binder: second_lambda,
+            index: 0,
+        });
+        let first_body = w.store.types.alloc(Type::Applied {
+            tycon: second_ref,
+            args: vec![first_arg],
+        });
+        let second_body = w.store.types.alloc(Type::Applied {
+            tycon: first_ref,
+            args: vec![second_arg],
+        });
+        w.set_generic_alias_result(first, first_body);
+        w.set_generic_alias_result(second, second_body);
+        let cycle = w.store.types.alloc(Type::Applied {
+            tycon: first_ref,
+            args: vec![argument],
+        });
+        let checkpoint = w.store.checkpoint();
+        assert_eq!(
+            TypeNormalizer::new(&mut w.store).normalize_for_lookup(cycle),
+            Err(TypeNormalizeError::AliasCycle { symbol: first })
+        );
+        assert_eq!(w.store.checkpoint(), checkpoint);
+    }
+
+    #[test]
+    fn reports_malformed_applied_alias_binders_with_a_focused_error() {
+        let mut w = World::new();
+        let target = w.symbol(
+            "List",
+            SymbolKind::Class,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Missing,
+        );
+        let (symbol, reference) = w.generic_alias("Broken", target);
+        let lambda = w.generic_alias_lambda(symbol);
+        let bad_reference = w.store.types.alloc(Type::ParamRef {
+            binder: lambda,
+            index: 3,
+        });
+        w.set_generic_alias_result(symbol, bad_reference);
+        let argument = w.store.types.alloc(Type::NoType);
+        let applied = w.store.types.alloc(Type::Applied {
+            tycon: reference,
+            args: vec![argument],
+        });
+        let checkpoint = w.store.checkpoint();
+
+        assert_eq!(
+            TypeNormalizer::new(&mut w.store).dealias_top(applied),
+            Err(TypeNormalizeError::AliasInstantiationFailed {
+                symbol,
+                error: TypeRebindError::InvalidTypeLambdaParamRef {
+                    binder: lambda,
+                    index: 3,
+                    arity: 1,
+                },
+            })
+        );
+        assert_eq!(w.store.checkpoint(), checkpoint);
+    }
+
+    #[test]
+    fn rejects_unfilled_nodes_inside_an_applied_alias_and_rolls_back() {
+        let mut w = World::new();
+        let target = w.symbol(
+            "List",
+            SymbolKind::Class,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Missing,
+        );
+        let (symbol, reference) = w.generic_alias("Incomplete", target);
+        let lambda = w.generic_alias_lambda(symbol);
+        let unfilled = w.store.types.reserve().id();
+        w.set_generic_alias_result(symbol, unfilled);
+        let argument = w.store.types.alloc(Type::NoType);
+        let applied = w.store.types.alloc(Type::Applied {
+            tycon: reference,
+            args: vec![argument],
+        });
+        let checkpoint = w.store.checkpoint();
+
+        assert_eq!(
+            TypeNormalizer::new(&mut w.store).dealias_top(applied),
+            Err(TypeNormalizeError::AliasInstantiationFailed {
+                symbol,
+                error: TypeRebindError::UnfilledType { id: unfilled },
+            })
+        );
+        assert_eq!(w.store.checkpoint(), checkpoint);
+        assert!(matches!(
+            w.store.types.get(lambda),
+            Type::TypeLambda(TypeLambda { params, .. }) if params.len() == 1
+        ));
     }
 
     #[test]
@@ -481,7 +887,7 @@ mod tests {
         let reference = w.type_ref(symbol);
         *w.store.types.get_mut(info) = Type::AliasingBounds { alias: reference };
         assert_eq!(
-            TypeNormalizer::new(&w.store).dealias_top(reference),
+            TypeNormalizer::new(&mut w.store).dealias_top(reference),
             Err(TypeNormalizeError::AliasCycle { symbol })
         );
     }
@@ -498,7 +904,7 @@ mod tests {
             outer = reference;
         }
         assert_eq!(
-            TypeNormalizer::new(&w.store).dealias_top(outer),
+            TypeNormalizer::new(&mut w.store).dealias_top(outer),
             Err(TypeNormalizeError::TooDeep)
         );
     }
@@ -511,7 +917,10 @@ mod tests {
         for index in 0..MAX_TYPE_NORMALIZATION_DEPTH {
             current = w.alias(&format!("A{index}"), current, SymbolFlags::EMPTY).1;
         }
-        assert_eq!(TypeNormalizer::new(&w.store).dealias_top(current), Ok(leaf));
+        assert_eq!(
+            TypeNormalizer::new(&mut w.store).dealias_top(current),
+            Ok(leaf)
+        );
     }
 
     #[test]
@@ -519,7 +928,7 @@ mod tests {
         let mut w = World::new();
         let reserved = w.store.types.reserve();
         assert_eq!(
-            TypeNormalizer::new(&w.store).dealias_top(reserved.id()),
+            TypeNormalizer::new(&mut w.store).dealias_top(reserved.id()),
             Err(TypeNormalizeError::UnfilledType { ty: reserved.id() })
         );
     }
@@ -528,10 +937,10 @@ mod tests {
     fn reports_an_out_of_range_root_type_id() {
         let mut foreign_store = SemanticStore::new();
         let foreign_ty = foreign_store.types.alloc(Type::NoType);
-        let empty_store = SemanticStore::new();
+        let mut empty_store = SemanticStore::new();
 
         assert_eq!(
-            TypeNormalizer::new(&empty_store).dealias_top(foreign_ty),
+            TypeNormalizer::new(&mut empty_store).dealias_top(foreign_ty),
             Err(TypeNormalizeError::InvalidType { ty: foreign_ty })
         );
     }
@@ -548,7 +957,7 @@ mod tests {
         });
 
         assert_eq!(
-            TypeNormalizer::new(&w.store).normalize_for_lookup(flexible),
+            TypeNormalizer::new(&mut w.store).normalize_for_lookup(flexible),
             Err(TypeNormalizeError::InvalidType { ty: foreign_ty })
         );
     }
@@ -562,7 +971,7 @@ mod tests {
             target: TermRefTarget::Name(term),
         });
         assert_eq!(
-            TypeNormalizer::new(&w.store).dealias_top(reference),
+            TypeNormalizer::new(&mut w.store).dealias_top(reference),
             Ok(reference)
         );
     }
@@ -588,7 +997,7 @@ mod tests {
         let marker = w.store.types.alloc(Type::NoType);
 
         assert_eq!(
-            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            TypeNormalizer::new(&mut w.store).widen_term_ref(reference),
             Ok(info)
         );
         assert_eq!(
@@ -610,7 +1019,7 @@ mod tests {
         let reference = term_ref(&mut w, symbol);
 
         assert_eq!(
-            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            TypeNormalizer::new(&mut w.store).widen_term_ref(reference),
             Ok(info)
         );
     }
@@ -628,7 +1037,7 @@ mod tests {
         let reference = term_ref(&mut w, symbol);
 
         assert_eq!(
-            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            TypeNormalizer::new(&mut w.store).widen_term_ref(reference),
             Ok(info)
         );
     }
@@ -646,7 +1055,7 @@ mod tests {
         let reference = term_ref(&mut w, symbol);
 
         assert_eq!(
-            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            TypeNormalizer::new(&mut w.store).widen_term_ref(reference),
             Ok(info)
         );
     }
@@ -664,7 +1073,7 @@ mod tests {
         let reference = term_ref(&mut w, symbol);
 
         assert_eq!(
-            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            TypeNormalizer::new(&mut w.store).widen_term_ref(reference),
             Err(TypeNormalizeError::TermRefKindCannotBeWidened {
                 symbol,
                 kind: SymbolKind::Method
@@ -685,7 +1094,7 @@ mod tests {
         let reference = term_ref(&mut w, symbol);
 
         assert_eq!(
-            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            TypeNormalizer::new(&mut w.store).widen_term_ref(reference),
             Err(TypeNormalizeError::TermRefKindCannotBeWidened {
                 symbol,
                 kind: SymbolKind::Object
@@ -706,7 +1115,7 @@ mod tests {
         let reference = term_ref(&mut w, symbol);
 
         assert_eq!(
-            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            TypeNormalizer::new(&mut w.store).widen_term_ref(reference),
             Err(TypeNormalizeError::TermRefKindCannotBeWidened {
                 symbol,
                 kind: SymbolKind::Constructor
@@ -727,7 +1136,7 @@ mod tests {
         let reference = term_ref(&mut w, symbol);
 
         assert_eq!(
-            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            TypeNormalizer::new(&mut w.store).widen_term_ref(reference),
             Err(TypeNormalizeError::TermRefKindCannotBeWidened {
                 symbol,
                 kind: SymbolKind::Package
@@ -744,7 +1153,7 @@ mod tests {
             target: TermRefTarget::Name(name),
         });
         assert_eq!(
-            TypeNormalizer::new(&w.store).widen_term_ref(reference),
+            TypeNormalizer::new(&mut w.store).widen_term_ref(reference),
             Err(TypeNormalizeError::NameTargetCannotBeWidened { ty: reference })
         );
     }
@@ -761,7 +1170,7 @@ mod tests {
                 _ => unreachable!(),
             };
             assert_eq!(
-                TypeNormalizer::new(&w.store).widen_term_ref(reference),
+                TypeNormalizer::new(&mut w.store).widen_term_ref(reference),
                 Err(TypeNormalizeError::TermRefInfoIncomplete { symbol, state })
             );
             assert_eq!(*w.store.symbols.info(symbol), info);
@@ -773,7 +1182,7 @@ mod tests {
         let mut w = World::new();
         let ty = w.store.types.alloc(Type::NoType);
         assert_eq!(
-            TypeNormalizer::new(&w.store).widen_term_ref(ty),
+            TypeNormalizer::new(&mut w.store).widen_term_ref(ty),
             Err(TypeNormalizeError::NotTermRef { ty })
         );
     }
@@ -784,7 +1193,7 @@ mod tests {
         let leaf = w.store.types.alloc(Type::NoType);
         let flexible = w.store.types.alloc(Type::Flexible { underlying: leaf });
         assert_eq!(
-            TypeNormalizer::new(&w.store).normalize_for_lookup(flexible),
+            TypeNormalizer::new(&mut w.store).normalize_for_lookup(flexible),
             Ok(leaf)
         );
     }
@@ -802,7 +1211,7 @@ mod tests {
             annotation,
         });
         assert_eq!(
-            TypeNormalizer::new(&w.store).normalize_for_lookup(annotated),
+            TypeNormalizer::new(&mut w.store).normalize_for_lookup(annotated),
             Ok(leaf)
         );
     }
@@ -822,7 +1231,7 @@ mod tests {
             annotation,
         });
         assert_eq!(
-            TypeNormalizer::new(&w.store).normalize_for_lookup(annotated),
+            TypeNormalizer::new(&mut w.store).normalize_for_lookup(annotated),
             Ok(leaf)
         );
     }
@@ -830,23 +1239,28 @@ mod tests {
     #[test]
     fn lookup_normalization_preserves_applied_types_without_normalizing_children() {
         let mut w = World::new();
-        let leaf = w.store.types.alloc(Type::NoType);
-        let (symbol, alias) = w.alias("A", leaf, SymbolFlags::EMPTY);
+        let symbol = w.symbol(
+            "C",
+            SymbolKind::Class,
+            SymbolFlags::EMPTY,
+            SymbolInfo::Missing,
+        );
+        let tycon = w.type_ref(symbol);
         let arg = w.store.types.alloc(Type::TypeRef {
             prefix: w.prefix,
             target: TypeRefTarget::Symbol(symbol),
         });
         let applied = w.store.types.alloc(Type::Applied {
-            tycon: alias,
+            tycon,
             args: vec![arg],
         });
         assert_eq!(
-            TypeNormalizer::new(&w.store).normalize_for_lookup(applied),
+            TypeNormalizer::new(&mut w.store).normalize_for_lookup(applied),
             Ok(applied)
         );
         assert_eq!(
-            TypeNormalizer::new(&w.store).dealias_top(applied),
-            Err(TypeNormalizeError::AliasRequiresSubstitution { symbol })
+            TypeNormalizer::new(&mut w.store).dealias_top(applied),
+            Ok(applied)
         );
     }
 
@@ -861,7 +1275,7 @@ mod tests {
             },
         );
         assert_eq!(
-            TypeNormalizer::new(&w.store).normalize_for_lookup(reserved.id()),
+            TypeNormalizer::new(&mut w.store).normalize_for_lookup(reserved.id()),
             Err(TypeNormalizeError::NormalizationCycle { ty: reserved.id() })
         );
     }
@@ -876,7 +1290,7 @@ mod tests {
             });
         }
         assert_eq!(
-            TypeNormalizer::new(&w.store).normalize_for_lookup(current),
+            TypeNormalizer::new(&mut w.store).normalize_for_lookup(current),
             Err(TypeNormalizeError::TooDeep)
         );
     }

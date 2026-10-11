@@ -1129,6 +1129,13 @@ that operation, and it is format-agnostic: it knows nothing of AST addresses.
   differs from the arity, an unfilled slot, a cycle, or a graph deeper than 512.
   Nothing panics for a caller's semantic mismatch.
 
+`instantiate_type_lambda(store, source, arguments)` consumes a `TypeLambda`
+with exact positional arguments. It substitutes `ParamRef`s by binder id and
+index through both the result and parameter bounds, while nested binders keep
+their own identities. The original lambda is not modified; malformed graphs
+or arity mismatches return a `TypeRebindError`, and failed transformations
+roll back their allocations.
+
 **Abstracting parameter symbols.** The same traversal builds binders from
 *symbols*: `method_type_from_symbols(store, params, result, kind)`,
 `poly_type_from_symbols` and `type_lambda_from_symbols` (`MethodParamSpec` /
