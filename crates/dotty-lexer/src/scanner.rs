@@ -2197,6 +2197,7 @@ fn to_token_kind(kind: RawTokenKind, previous: Option<TokenKind>) -> TokenKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::XmlIssue;
 
     trait LegacyDiagnosticMessage {
         fn legacy_message(&self) -> Option<&str>;
@@ -2212,6 +2213,13 @@ mod tests {
                 LexerIssue::Legacy { message } => Some(message.as_str()),
                 _ => None,
             }
+        }
+    }
+
+    fn xml_issue(diagnostic: &LexerDiagnostic) -> &XmlIssue {
+        match diagnostic.issue() {
+            LexerIssue::Xml(issue) => issue,
+            other => panic!("expected XML diagnostic, got {other:?}"),
         }
     }
 
@@ -6271,7 +6279,7 @@ mod tests {
     }
 
     #[test]
-    fn forwards_mixed_typed_and_legacy_raw_diagnostics_in_source_order() {
+    fn forwards_mixed_raw_and_xml_diagnostics_in_source_order() {
         let scanner = ContextualScanner::new("<root\0").expect("source scans");
 
         assert_eq!(scanner.diagnostics().len(), 2);
@@ -6288,8 +6296,8 @@ mod tests {
             DiagnosticSeverity::Error
         );
         assert_eq!(
-            scanner.diagnostics()[1].legacy_message(),
-            Some("unterminated XML tag")
+            xml_issue(&scanner.diagnostics()[1]),
+            &XmlIssue::UnterminatedTag
         );
         assert_eq!(
             scanner.diagnostics()[1].span(),
@@ -6308,8 +6316,8 @@ mod tests {
 
         assert_eq!(scanner.diagnostics().len(), 1);
         assert_eq!(
-            scanner.diagnostics()[0].legacy_text(),
-            "unterminated XML tag"
+            xml_issue(&scanner.diagnostics()[0]),
+            &XmlIssue::UnterminatedTag
         );
         assert_eq!(
             scanner.diagnostics()[0].span(),
@@ -6323,8 +6331,8 @@ mod tests {
 
         assert_eq!(scanner.diagnostics().len(), 1);
         assert_eq!(
-            scanner.diagnostics()[0].legacy_text(),
-            "XML attribute value expected after `=`"
+            xml_issue(&scanner.diagnostics()[0]),
+            &XmlIssue::AttributeValueExpectedAfterEquals
         );
     }
 
@@ -6335,8 +6343,8 @@ mod tests {
 
         assert_eq!(scanner.diagnostics().len(), 1);
         assert_eq!(
-            scanner.diagnostics()[0].legacy_text(),
-            "XML attribute name expected"
+            xml_issue(&scanner.diagnostics()[0]),
+            &XmlIssue::AttributeNameExpected
         );
         assert_eq!(
             scanner.diagnostics()[0].span(),
@@ -6358,8 +6366,8 @@ mod tests {
 
         assert_eq!(scanner.diagnostics().len(), 1);
         assert_eq!(
-            scanner.diagnostics()[0].legacy_text(),
-            "XML attribute expression must be closed"
+            xml_issue(&scanner.diagnostics()[0]),
+            &XmlIssue::AttributeExpressionMustBeClosed
         );
         assert_eq!(
             scanner.diagnostics()[0].span(),
@@ -6375,8 +6383,8 @@ mod tests {
 
         assert_eq!(scanner.diagnostics().len(), 1);
         assert_eq!(
-            scanner.diagnostics()[0].legacy_text(),
-            "unterminated XML CDATA section"
+            xml_issue(&scanner.diagnostics()[0]),
+            &XmlIssue::UnterminatedCdata
         );
         assert!(
             scanner
@@ -6398,12 +6406,35 @@ mod tests {
 
         assert_eq!(scanner.diagnostics().len(), 1);
         assert_eq!(
-            scanner.diagnostics()[0].legacy_text(),
-            "XML closing tag cannot contain attributes"
+            xml_issue(&scanner.diagnostics()[0]),
+            &XmlIssue::ClosingTagCannotContainAttributes
         );
         assert_eq!(
             scanner.diagnostics()[0].span(),
             TextRange::new(13, 15).expect("valid range")
+        );
+    }
+
+    #[test]
+    fn forwards_mismatched_xml_tag_names_without_rendering_them() {
+        let source = "<outer></inner>";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+
+        assert_eq!(scanner.diagnostics().len(), 1);
+        assert_eq!(
+            scanner.diagnostics()[0].issue(),
+            &LexerIssue::Xml(XmlIssue::MismatchedClosingTag {
+                expected: "outer".to_owned(),
+                found: "inner".to_owned(),
+            })
+        );
+        assert_eq!(
+            scanner.diagnostics()[0].span(),
+            TextRange::new((source.len() - 1) as u32, source.len() as u32).unwrap()
+        );
+        assert_eq!(
+            scanner.diagnostics()[0].severity(),
+            DiagnosticSeverity::Error
         );
     }
 
