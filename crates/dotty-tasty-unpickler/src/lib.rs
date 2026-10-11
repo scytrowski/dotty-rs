@@ -41,7 +41,10 @@ mod unpickler;
 
 /// Semantic TASTy unpickling APIs.
 pub mod tasty_unpickler {
-    pub use crate::error::UnpickleError;
+    pub use crate::error::{
+        DefinitionReason, ParentTreeReason, RefinedTypeTreeReason, SelfTypeTreeReason, TypeReason,
+        UnpickleError, UnpickleErrorCategory,
+    };
     pub use crate::index::TastySemanticIndex;
     pub use crate::reachability::{IdentityNode, IdentityOutcome, identity_reachability};
     pub use crate::session::TastySession;

@@ -119,10 +119,14 @@ pub(crate) fn clauses_of(
             DefDefHeaderItem::Parameter(parameter) => {
                 let tag = parameter.tag();
                 let Some((param_at, node_tag)) = next.next() else {
-                    return Err(malformed("more header parameters than parameter nodes"));
+                    return Err(malformed(
+                        crate::error::DefinitionReason::HeaderParametersExceedNodes,
+                    ));
                 };
                 if *node_tag != tag {
-                    return Err(malformed("a header parameter disagrees with its node"));
+                    return Err(malformed(
+                        crate::error::DefinitionReason::HeaderParameterTagMismatch,
+                    ));
                 }
                 match (open, clauses.last_mut()) {
                     (Some(current), Some(Clause::Type(group) | Clause::Term(group)))
@@ -146,7 +150,9 @@ pub(crate) fn clauses_of(
         }
     }
     if next.next().is_some() {
-        return Err(malformed("more parameter nodes than header parameters"));
+        return Err(malformed(
+            crate::error::DefinitionReason::ParameterNodesExceedHeader,
+        ));
     }
     Ok(clauses)
 }
@@ -182,7 +188,7 @@ pub(crate) fn defdef_header<'a>(
     let Some(&(result_at, _)) = parameter_nodes.get(count) else {
         return Err(UnpickleError::MalformedDefinition {
             address: at,
-            reason: "a method has a result type after its parameters",
+            reason: crate::error::DefinitionReason::ResultTypePosition,
         });
     };
     let clauses = clauses_of(at, &body.header_items, &parameter_nodes[..count])?;

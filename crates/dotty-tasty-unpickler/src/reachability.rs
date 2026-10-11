@@ -99,7 +99,7 @@ pub struct IdentityNode {
     pub outcome: IdentityOutcome,
 }
 
-fn malformed(address: u32, reason: &'static str) -> UnpickleError {
+fn malformed(address: u32, reason: crate::error::TypeReason) -> UnpickleError {
     UnpickleError::MalformedType { address, reason }
 }
 
@@ -116,7 +116,10 @@ fn walk(
     reachable: &mut HashSet<u32>,
 ) -> Result<(), UnpickleError> {
     if depth > MAX_TREE_DEPTH {
-        return Err(malformed(tree, "a type tree nests too deeply"));
+        return Err(malformed(
+            tree,
+            crate::error::TypeReason::TypeTreeDepthLimit,
+        ));
     }
     let Some(tag) = ast.tag_at(tree) else {
         return Err(UnpickleError::InvalidReferenceTarget {
@@ -477,7 +480,10 @@ fn walk_parent(
     reachable: &mut HashSet<u32>,
 ) -> Result<(), UnpickleError> {
     if depth > MAX_TREE_DEPTH {
-        return Err(malformed(at, "a parent tree nests too deeply"));
+        return Err(malformed(
+            at,
+            crate::error::TypeReason::ParentTreeDepthLimit,
+        ));
     }
     let Ok(at) = ast.resolve_shared_term(at, at) else {
         return Ok(());

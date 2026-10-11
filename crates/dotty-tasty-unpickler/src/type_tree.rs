@@ -95,21 +95,27 @@ impl TastyUnpickler<'_, '_, '_> {
                     wire_name(self.file.names(), value)?;
                 }
                 let [embedded] = children[..] else {
-                    return Err(malformed(at, "an identifier type tree has one type"));
+                    return Err(malformed(
+                        at,
+                        crate::error::TypeReason::IdentifierTypeTreeArity,
+                    ));
                 };
                 self.type_at(ast, embedded, at, depth)?
             }
             EXPLICITTPT_TAG => {
                 ast.tree_at(at, from)?.decode_explicit_tpt()?;
                 let [child] = children[..] else {
-                    return Err(malformed(at, "an explicit type tree has one child"));
+                    return Err(malformed(
+                        at,
+                        crate::error::TypeReason::ExplicitTypeTreeArity,
+                    ));
                 };
                 self.type_of_tpt(ast, child, at, depth)?
             }
             BYNAMETPT_TAG => {
                 ast.tree_at(at, from)?.decode_by_name_tpt()?;
                 let [child] = children[..] else {
-                    return Err(malformed(at, "a by-name type tree has one child"));
+                    return Err(malformed(at, crate::error::TypeReason::ByNameTypeTreeArity));
                 };
                 let result = self.type_of_tpt(ast, child, at, depth)?;
                 self.store.types.alloc(Type::ByName { result })
@@ -117,7 +123,10 @@ impl TastyUnpickler<'_, '_, '_> {
             APPLIEDTPT_TAG => {
                 ast.node(at)?.decode_applied_type()?;
                 let [tycon, arguments @ ..] = &children[..] else {
-                    return Err(malformed(at, "an applied type tree has a constructor"));
+                    return Err(malformed(
+                        at,
+                        crate::error::TypeReason::AppliedTypeConstructorMissing,
+                    ));
                 };
                 let tycon = self.type_of_tpt(ast, *tycon, at, depth)?;
                 let mut args = Vec::with_capacity(arguments.len());
@@ -150,7 +159,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 let expected =
                     1 + usize::from(shape.high.is_some()) + usize::from(shape.alias.is_some());
                 if children.len() != expected {
-                    return Err(malformed(at, "the node's children do not match its shape"));
+                    return Err(malformed(at, crate::error::TypeReason::ChildShapeMismatch));
                 }
                 match children[..] {
                     [low] => {
@@ -170,10 +179,7 @@ impl TastyUnpickler<'_, '_, '_> {
                         self.type_of_tpt(ast, alias, at, depth)?
                     }
                     _ => {
-                        return Err(malformed(
-                            at,
-                            "a bounds type tree has one to three children",
-                        ));
+                        return Err(malformed(at, crate::error::TypeReason::BoundsTypeTreeArity));
                     }
                 }
             }
@@ -183,7 +189,10 @@ impl TastyUnpickler<'_, '_, '_> {
                 // `TYPEREF` makes.
                 let shape = ast.tree_at(at, from)?.decode_select()?;
                 let [qualifier] = children[..] else {
-                    return Err(malformed(at, "a type selection has one qualifier"));
+                    return Err(malformed(
+                        at,
+                        crate::error::TypeReason::TypeSelectionQualifierArity,
+                    ));
                 };
                 let qualifier = self.type_of_term(ast, qualifier, at, depth)?;
                 let selected =
@@ -196,7 +205,10 @@ impl TastyUnpickler<'_, '_, '_> {
                 // already is a singleton. The reference must be one.
                 ast.tree_at(at, from)?.decode_singleton_tpt()?;
                 let [reference] = children[..] else {
-                    return Err(malformed(at, "a singleton type tree has one reference"));
+                    return Err(malformed(
+                        at,
+                        crate::error::TypeReason::SingletonTreeReferenceArity,
+                    ));
                 };
                 let ty = self.type_of_term(ast, reference, at, depth)?;
                 if !is_singleton_type(self.store, ty) {
@@ -213,7 +225,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 let [base, annotation] = children[..] else {
                     return Err(malformed(
                         at,
-                        "an annotated type tree has a type tree and an annotation",
+                        crate::error::TypeReason::AnnotatedTypeTreeShape,
                     ));
                 };
                 let underlying = self.type_of_tpt(ast, base, at, depth)?;
@@ -278,10 +290,7 @@ impl TastyUnpickler<'_, '_, '_> {
             .split_last()
             .filter(|(_, params)| !params.is_empty())
         else {
-            return Err(malformed(
-                at,
-                "a lambda type tree has type parameters and a body",
-            ));
+            return Err(malformed(at, crate::error::TypeReason::LambdaTreeShape));
         };
 
         let mut specs = Vec::with_capacity(params.len());
@@ -342,6 +351,6 @@ fn children_of(ast: &AstView<'_>, at: u32) -> Vec<u32> {
         .collect()
 }
 
-fn malformed(address: u32, reason: &'static str) -> UnpickleError {
+fn malformed(address: u32, reason: crate::error::TypeReason) -> UnpickleError {
     UnpickleError::MalformedType { address, reason }
 }

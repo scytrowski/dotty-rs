@@ -6,6 +6,126 @@ use dotty_core::resolution::ResolutionError;
 use dotty_core::symbols::SymbolKind;
 use dotty_core::types::TypeRebindError;
 use dotty_tasty::tasty::{AstError, TastyFileError};
+use dotty_tasty::term::TermError;
+
+/// Structural reason a template parent could not be projected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentTreeReason {
+    /// Parent constructor wrappers exceeded the supported traversal bound.
+    NestingLimit,
+    /// The constructor call has no function child.
+    ConstructorHasFunction,
+    /// The parent constructor selection is not named `<init>`.
+    SelectsConstructor,
+    /// The parent constructor selection qualifier is not a `NEW` node.
+    SelectsNew,
+    /// `NEW` does not have exactly one type-tree child.
+    NewArity,
+}
+
+/// Structural reason a `SELFDEF` could not be projected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfTypeTreeReason {
+    /// The self definition does not have exactly one type-tree child.
+    TypeTreeArity,
+}
+
+/// Structural reason a definition could not be completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefinitionReason {
+    /// A class definition's first child is not its template.
+    ClassTemplatePosition,
+    /// The method result type is absent after the parameter nodes.
+    ResultTypePosition,
+    /// The encoded header contains more parameters than the AST nodes.
+    HeaderParametersExceedNodes,
+    /// An encoded header parameter's kind differs from its AST node.
+    HeaderParameterTagMismatch,
+    /// The AST contains more parameter nodes than the encoded header.
+    ParameterNodesExceedHeader,
+    /// An opaque alias does not have exactly one right-hand-side tree.
+    OpaqueAliasRhsArity,
+    /// Opaque bounds children disagree with their encoded shape.
+    OpaqueBoundsShape,
+    /// Opaque alias graph traversal exceeded its supported depth.
+    OpaqueAliasDepthLimit,
+    /// A type alias does not have exactly one right-hand-side tree.
+    TypeAliasRhsArity,
+    /// A generic opaque alias lambda does not have parameters and a body.
+    OpaqueLambdaShape,
+    /// Nested opaque alias parameter lambdas are not projected yet.
+    NestedOpaqueParameterLambdasUnsupported,
+}
+
+/// Structural reason a refined type tree could not be projected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefinedTypeTreeReason {
+    /// The refined tree is missing its parent type tree.
+    UnexpectedParent,
+    /// A refinement stat is outside the supported member-definition subset.
+    UnsupportedMemberStat,
+}
+
+/// Structural reason a type or type tree could not be projected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeReason {
+    MatchTypeShape,
+    ChildShapeMismatch,
+    OwnerSpaceNameDesignator,
+    RefinedTypeShape,
+    InvalidReferenceTargetShape,
+    BinderChildMismatch,
+    EmptyBinder,
+    InvalidVarianceMarker,
+    AnnotationTailShape,
+    AnnotationOfAnnotatedTypeIsNotNode,
+    AnnotationPayloadIsNotNode,
+    AnnotatedTypeShape,
+    IdentifierTypeTreeArity,
+    AnnotationApplyFunctionMissing,
+    AnnotationApplyArityMismatch,
+    AnnotationTypeApplyFunctionMissing,
+    AnnotationTypeApplyArityMismatch,
+    AnnotationSelectionShape,
+    AnnotationNewClassArity,
+    NamedArgumentArity,
+    AnnotationLiteralNotConstant,
+    RecursiveTypeArity,
+    ParentTreeDepthLimit,
+    TypeTreeDepthLimit,
+    LambdaTreeShape,
+    LambdaParameterKind,
+    RefinedTreeUnexpectedParent,
+    IdentifierTermTypeArity,
+    TermSelectionQualifierArity,
+    QualifiedThisQualifierArity,
+    QualifiedThisQualifierKind,
+    ExplicitTypeTreeArity,
+    ByNameTypeTreeArity,
+    AppliedTypeConstructorMissing,
+    BoundsTypeTreeArity,
+    TypeSelectionQualifierArity,
+    SingletonTreeReferenceArity,
+    AnnotatedTypeTreeShape,
+}
+
+/// Stable semantic category for an unpickling failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnpickleErrorCategory {
+    /// The artifact violates a structural or semantic contract.
+    MalformedInput,
+    /// The artifact is valid, but this semantic projection does not support it.
+    UnsupportedFeature,
+    /// A symbol or dependency could not be resolved in the available context.
+    ResolutionFailure,
+    /// The operation is waiting for another phase or pending semantic state.
+    Deferred,
+    /// A compiler-owned invariant or programming contract failed.
+    InternalInvariant,
+    /// The stored error payload does not retain enough evidence to choose one
+    /// category without consulting the source file, resolver or store state.
+    Conditional,
+}
 
 /// Why semantic unpickling of a TASTy file failed.
 ///
@@ -75,14 +195,23 @@ pub enum UnpickleError {
     UnsupportedParentTree { address: u32, tag: u8 },
     /// The template parent at `address` has the right wrapper but not the
     /// shape it requires (Milestone 5d1).
-    MalformedParentTree { address: u32, reason: &'static str },
+    MalformedParentTree {
+        address: u32,
+        reason: ParentTreeReason,
+    },
     /// The self definition at `address` does not have the shape
     /// `SELFDEF name type_tree` (Milestone 5d1).
-    InvalidSelfTypeTree { address: u32, reason: &'static str },
+    InvalidSelfTypeTree {
+        address: u32,
+        reason: SelfTypeTreeReason,
+    },
     /// The definition at `address` has a header that does not agree with its
     /// nodes (a parameter clause sequence that cannot be aligned with the
     /// parameter nodes, or a missing result type).
-    MalformedDefinition { address: u32, reason: &'static str },
+    MalformedDefinition {
+        address: u32,
+        reason: DefinitionReason,
+    },
     /// The method whose parameter is at `address` has a parameter modifier
     /// (`INLINE`, `TRACKED`, `INTO`: `tag`) whose upstream adaptation
     /// (`MethodType.fromSymbols`) `dotty-core` cannot represent. The method is
@@ -135,7 +264,10 @@ pub enum UnpickleError {
     /// agree with (its indexed children disagree with its wire shape), or a
     /// member's projected `Refined.info` reason `reason` describes (Milestone
     /// 5d2b).
-    MalformedRefinedTypeTree { address: u32, reason: &'static str },
+    MalformedRefinedTypeTree {
+        address: u32,
+        reason: RefinedTypeTreeReason,
+    },
     /// Two immediate stats of the `REFINEDtpt` at `address` declare the same
     /// `name` in the same namespace: Dotty rejects an overloaded refinement
     /// member, so the second declaration is refused rather than shadowing or
@@ -237,7 +369,7 @@ pub enum UnpickleError {
     UnsupportedSignedReference { address: u32, name: String },
     /// The compound type node at `address` has a shape the semantic model
     /// cannot express: its indexed children disagree with its wire shape.
-    MalformedType { address: u32, reason: &'static str },
+    MalformedType { address: u32, reason: TypeReason },
     /// The `ANNOTATEDtype` at `address` carries a full annotation tree, whose
     /// root node at `annotation_address` has tag `tag`. The annotated type is
     /// understood; the tree is not, and is never dropped to fit the compact
@@ -752,6 +884,532 @@ impl From<AstError> for UnpickleError {
     }
 }
 
+impl UnpickleError {
+    /// Returns a stable machine-readable code. Codes are explicit API values:
+    /// they never depend on formatted text, IDs, or TASTy addresses.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Tasty(_) => "unpickler.tasty",
+            Self::Ast(_) => "unpickler.ast",
+            Self::DuplicateDefinition { .. } => "unpickler.duplicate_definition",
+            Self::DuplicateScope { .. } => "unpickler.duplicate_scope",
+            Self::ConflictingCompanion { .. } => "unpickler.conflicting_companion",
+            Self::InvalidNameReference { .. } => "unpickler.invalid_name_reference",
+            Self::UnsupportedName { .. } => "unpickler.unsupported_name",
+            Self::UnsupportedQualifier { .. } => "unpickler.unsupported_qualifier",
+            Self::InvalidReferenceTarget { .. } => "unpickler.invalid_reference_target",
+            Self::InvalidQualifier { .. } => "unpickler.invalid_qualifier",
+            Self::UnsupportedPackagePath { .. } => "unpickler.unsupported_package_path",
+            Self::MissingDefinition { .. } => "unpickler.missing_definition",
+            Self::DuplicateType { .. } => "unpickler.duplicate_type",
+            Self::UnsupportedTypeTree { .. } => "unpickler.unsupported_type_tree",
+            Self::UnsupportedTermTree { .. } => "unpickler.unsupported_term_tree",
+            Self::MissingClassScope { .. } => "unpickler.missing_class_scope",
+            Self::UnsupportedParentTree { .. } => "unpickler.unsupported_parent_tree",
+            Self::MalformedParentTree { reason, .. } => reason.code(),
+            Self::InvalidSelfTypeTree { reason, .. } => reason.code(),
+            Self::MalformedDefinition { reason, .. } => reason.code(),
+            Self::UnsupportedMethodParameterSemantics { .. } => {
+                "unpickler.unsupported_method_parameter_semantics"
+            }
+            Self::ConstructorOwnerNotClassLike { .. } => {
+                "unpickler.constructor_owner_not_class_like"
+            }
+            Self::MalformedOwnerClassInfo { .. } => "unpickler.malformed_owner_class_info",
+            Self::SharedLambdaOwnerConflict { .. } => "unpickler.shared_lambda_owner_conflict",
+            Self::SharedRefinementOwnerConflict { .. } => {
+                "unpickler.shared_refinement_owner_conflict"
+            }
+            Self::UnsupportedRefinementStat { .. } => "unpickler.unsupported_refinement_stat",
+            Self::MissingRefinementClass { .. } => "unpickler.missing_refinement_class",
+            Self::InvalidRefinementClass { .. } => "unpickler.invalid_refinement_class",
+            Self::MissingRefinementScope { .. } => "unpickler.missing_refinement_scope",
+            Self::MalformedRefinedTypeTree { reason, .. } => reason.code(),
+            Self::UnsupportedRefinementOverload { .. } => {
+                "unpickler.unsupported_refinement_overload"
+            }
+            Self::CloseOverThis { .. } => "unpickler.close_over_this",
+            Self::ParameterAbstraction { .. } => "unpickler.parameter_abstraction",
+            Self::UnstableSelectQualifier { .. } => "unpickler.unstable_select_qualifier",
+            Self::InvalidSingletonTypeTree { .. } => "unpickler.invalid_singleton_type_tree",
+            Self::MissingEnteredSymbol { .. } => "unpickler.missing_entered_symbol",
+            Self::UnsupportedSymbolCompletion { .. } => "unpickler.unsupported_symbol_completion",
+            Self::UnsupportedAnnotationCompletion { .. } => {
+                "unpickler.unsupported_annotation_completion"
+            }
+            Self::OpaqueAliasOwnerNotClassLike { .. } => {
+                "unpickler.opaque_alias_owner_not_class_like"
+            }
+            Self::OpaqueAliasOwnerNotEntered { .. } => "unpickler.opaque_alias_owner_not_entered",
+            Self::OpaqueAliasCycle { .. } => "unpickler.opaque_alias_cycle",
+            Self::SymbolCompletionDeferred { .. } => "unpickler.symbol_completion_deferred",
+            Self::SymbolInfoError { .. } => "unpickler.symbol_info_error",
+            Self::InvalidCompletedBounds { .. } => "unpickler.invalid_completed_bounds",
+            Self::UnsupportedType { .. } => "unpickler.unsupported_type",
+            Self::MissingReferencedSymbol { .. } => "unpickler.missing_referenced_symbol",
+            Self::InvalidReferenceKind { .. } => "unpickler.invalid_reference_kind",
+            Self::UnresolvedPackage { .. } => "unpickler.unresolved_package",
+            Self::UnresolvedMember { .. } => "unpickler.unresolved_member",
+            Self::AmbiguousMember { .. } => "unpickler.ambiguous_member",
+            Self::UnsupportedSignedReference { .. } => "unpickler.unsupported_signed_reference",
+            Self::MalformedType { reason, .. } => reason.code(),
+            Self::UnsupportedAnnotationTree { .. } => "unpickler.unsupported_annotation_tree",
+            Self::InvalidCompactAnnotationType { .. } => {
+                "unpickler.invalid_compact_annotation_type"
+            }
+            Self::UnsupportedAnnotationConstructor { .. } => {
+                "unpickler.unsupported_annotation_constructor"
+            }
+            Self::UnsupportedAnnotationArgument { .. } => {
+                "unpickler.unsupported_annotation_argument"
+            }
+            Self::InvalidAnnotationType { .. } => "unpickler.invalid_annotation_type",
+            Self::BoundsVarianceTargetPending { .. } => "unpickler.bounds_variance_target_pending",
+            Self::BoundsVarianceArityMismatch { .. } => "unpickler.bounds_variance_arity_mismatch",
+            Self::RebindFailed { .. } => "unpickler.rebind_failed",
+            Self::InvalidMethodModifier { .. } => "unpickler.invalid_method_modifier",
+            Self::InvalidBinderReference { .. } => "unpickler.invalid_binder_reference",
+            Self::InvalidBinderKind { .. } => "unpickler.invalid_binder_kind",
+            Self::InvalidParameterIndex { .. } => "unpickler.invalid_parameter_index",
+            Self::InvalidTypeParameterBounds { .. } => "unpickler.invalid_type_parameter_bounds",
+            Self::UnsupportedResolutionPrefix { .. } => "unpickler.unsupported_resolution_prefix",
+            Self::UnsupportedResolutionSpace { .. } => "unpickler.unsupported_resolution_space",
+            Self::IllegalTypePrefix { .. } => "unpickler.illegal_type_prefix",
+            Self::ResolverFailure { .. } => "unpickler.resolver_failure",
+        }
+    }
+
+    /// Classifies the error without inspecting its rendered message. Cases
+    /// whose public payload omits the evidence needed for a definitive result
+    /// are explicitly returned as [`UnpickleErrorCategory::Conditional`].
+    pub fn category(&self) -> UnpickleErrorCategory {
+        use UnpickleErrorCategory as Category;
+        match self {
+            Self::Tasty(error) => tasty_category(error),
+            Self::Ast(error) => ast_category(error),
+            Self::DuplicateDefinition { .. }
+            | Self::DuplicateScope { .. }
+            | Self::ConflictingCompanion { .. }
+            | Self::DuplicateType { .. }
+            | Self::MissingClassScope { .. }
+            | Self::MalformedOwnerClassInfo { .. }
+            | Self::MissingRefinementClass { .. }
+            | Self::InvalidRefinementClass { .. }
+            | Self::MissingRefinementScope { .. }
+            | Self::MissingEnteredSymbol { .. }
+            | Self::SymbolInfoError { .. } => Category::InternalInvariant,
+            Self::CloseOverThis { error, .. }
+            | Self::ParameterAbstraction { error, .. }
+            | Self::RebindFailed { error, .. } => type_rebind_category(*error),
+            Self::InvalidNameReference { .. }
+            | Self::InvalidReferenceTarget { .. }
+            | Self::ConstructorOwnerNotClassLike { .. }
+            | Self::OpaqueAliasOwnerNotClassLike { .. }
+            | Self::OpaqueAliasOwnerNotEntered { .. }
+            | Self::UnsupportedType { .. }
+            | Self::InvalidCompactAnnotationType { .. }
+            | Self::InvalidAnnotationType { .. } => Category::Conditional,
+            Self::UnsupportedName { .. }
+            | Self::UnsupportedQualifier { .. }
+            | Self::UnsupportedPackagePath { .. }
+            | Self::UnsupportedTypeTree { .. }
+            | Self::UnsupportedTermTree { .. }
+            | Self::UnsupportedParentTree { .. }
+            | Self::UnsupportedMethodParameterSemantics { .. }
+            | Self::SharedLambdaOwnerConflict { .. }
+            | Self::SharedRefinementOwnerConflict { .. }
+            | Self::UnsupportedRefinementStat { .. }
+            | Self::UnsupportedRefinementOverload { .. }
+            | Self::UnstableSelectQualifier { .. }
+            | Self::UnsupportedAnnotationCompletion { .. }
+            | Self::UnsupportedSignedReference { .. }
+            | Self::UnsupportedAnnotationTree { .. }
+            | Self::UnsupportedAnnotationConstructor { .. }
+            | Self::UnsupportedAnnotationArgument { .. }
+            | Self::UnsupportedResolutionPrefix { .. }
+            | Self::UnsupportedResolutionSpace { .. }
+            | Self::IllegalTypePrefix { .. } => Category::UnsupportedFeature,
+            Self::MalformedParentTree { reason, .. } => reason.category(),
+            Self::InvalidSelfTypeTree { .. } => Category::MalformedInput,
+            Self::MalformedDefinition { reason, .. } => reason.category(),
+            Self::MalformedRefinedTypeTree { reason, .. } => reason.category(),
+            Self::MalformedType { reason, .. } => reason.category(),
+            Self::MissingDefinition { .. }
+            | Self::InvalidQualifier { .. }
+            | Self::InvalidSingletonTypeTree { .. }
+            | Self::InvalidCompletedBounds { .. }
+            | Self::InvalidReferenceKind { .. }
+            | Self::BoundsVarianceArityMismatch { .. }
+            | Self::InvalidMethodModifier { .. }
+            | Self::InvalidBinderReference { .. }
+            | Self::InvalidBinderKind { .. }
+            | Self::InvalidParameterIndex { .. }
+            | Self::InvalidTypeParameterBounds { .. } => Category::MalformedInput,
+            Self::UnresolvedPackage { .. }
+            | Self::UnresolvedMember { .. }
+            | Self::AmbiguousMember { .. }
+            | Self::ResolverFailure { .. }
+            | Self::MissingReferencedSymbol { .. } => Category::ResolutionFailure,
+            Self::UnsupportedSymbolCompletion { .. }
+            | Self::SymbolCompletionDeferred { .. }
+            | Self::BoundsVarianceTargetPending { .. } => Category::Deferred,
+            Self::OpaqueAliasCycle { .. } => Category::MalformedInput,
+        }
+    }
+}
+
+fn type_rebind_category(error: TypeRebindError) -> UnpickleErrorCategory {
+    match error {
+        TypeRebindError::TooDeep { .. } => UnpickleErrorCategory::UnsupportedFeature,
+        TypeRebindError::DuplicateParameterSymbol { .. }
+        | TypeRebindError::DuplicateSubstitutionSymbol { .. } => {
+            UnpickleErrorCategory::InternalInvariant
+        }
+        _ => UnpickleErrorCategory::Conditional,
+    }
+}
+
+impl ParentTreeReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NestingLimit => "a parent constructor call nests too deeply",
+            Self::ConstructorHasFunction => "a parent constructor call has a function",
+            Self::SelectsConstructor => "a parent constructor selection does not select <init>",
+            Self::SelectsNew => "a parent constructor selection is not on NEW",
+            Self::NewArity => "NEW has one type tree",
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::NestingLimit => "unpickler.malformed_parent_tree.nesting_limit",
+            Self::ConstructorHasFunction => {
+                "unpickler.malformed_parent_tree.constructor_has_function"
+            }
+            Self::SelectsConstructor => "unpickler.malformed_parent_tree.selects_constructor",
+            Self::SelectsNew => "unpickler.malformed_parent_tree.selects_new",
+            Self::NewArity => "unpickler.malformed_parent_tree.new_arity",
+        }
+    }
+
+    fn category(self) -> UnpickleErrorCategory {
+        match self {
+            Self::NestingLimit => UnpickleErrorCategory::UnsupportedFeature,
+            _ => UnpickleErrorCategory::MalformedInput,
+        }
+    }
+}
+
+impl fmt::Display for ParentTreeReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl SelfTypeTreeReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TypeTreeArity => "a self definition has one type tree",
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::TypeTreeArity => "unpickler.invalid_self_type_tree.type_tree_arity",
+        }
+    }
+}
+
+impl fmt::Display for SelfTypeTreeReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl DefinitionReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ClassTemplatePosition => "a class definition's first child is its template",
+            Self::ResultTypePosition => "a method has a result type after its parameters",
+            Self::HeaderParametersExceedNodes => "more header parameters than parameter nodes",
+            Self::HeaderParameterTagMismatch => "a header parameter disagrees with its node",
+            Self::ParameterNodesExceedHeader => "more parameter nodes than header parameters",
+            Self::OpaqueAliasRhsArity => "an opaque type alias has one right-hand-side tree",
+            Self::OpaqueBoundsShape => "opaque bounds children do not match their encoded shape",
+            Self::OpaqueAliasDepthLimit => {
+                "an opaque alias dependency graph exceeds the recursion limit"
+            }
+            Self::TypeAliasRhsArity => "a type alias has one right-hand-side tree",
+            Self::OpaqueLambdaShape => "a generic opaque alias lambda has parameters and a body",
+            Self::NestedOpaqueParameterLambdasUnsupported => {
+                "nested opaque alias parameter lambdas are unsupported"
+            }
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::ClassTemplatePosition => "unpickler.malformed_definition.class_template_position",
+            Self::ResultTypePosition => "unpickler.malformed_definition.result_type_position",
+            Self::HeaderParametersExceedNodes => {
+                "unpickler.malformed_definition.header_parameters_exceed_nodes"
+            }
+            Self::HeaderParameterTagMismatch => {
+                "unpickler.malformed_definition.header_parameter_tag_mismatch"
+            }
+            Self::ParameterNodesExceedHeader => {
+                "unpickler.malformed_definition.parameter_nodes_exceed_header"
+            }
+            Self::OpaqueAliasRhsArity => "unpickler.malformed_definition.opaque_alias_rhs_arity",
+            Self::OpaqueBoundsShape => "unpickler.malformed_definition.opaque_bounds_shape",
+            Self::OpaqueAliasDepthLimit => {
+                "unpickler.malformed_definition.opaque_alias_depth_limit"
+            }
+            Self::TypeAliasRhsArity => "unpickler.malformed_definition.type_alias_rhs_arity",
+            Self::OpaqueLambdaShape => "unpickler.malformed_definition.opaque_lambda_shape",
+            Self::NestedOpaqueParameterLambdasUnsupported => {
+                "unpickler.malformed_definition.nested_opaque_parameter_lambdas"
+            }
+        }
+    }
+
+    fn category(self) -> UnpickleErrorCategory {
+        match self {
+            Self::OpaqueAliasDepthLimit | Self::NestedOpaqueParameterLambdasUnsupported => {
+                UnpickleErrorCategory::UnsupportedFeature
+            }
+            _ => UnpickleErrorCategory::MalformedInput,
+        }
+    }
+}
+
+impl fmt::Display for DefinitionReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl RefinedTypeTreeReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::UnexpectedParent => "a refined type tree has a parent",
+            Self::UnsupportedMemberStat => "a refinement stat is not a supported member definition",
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::UnexpectedParent => "unpickler.malformed_refined_type_tree.unexpected_parent",
+            Self::UnsupportedMemberStat => {
+                "unpickler.malformed_refined_type_tree.unsupported_member_stat"
+            }
+        }
+    }
+
+    fn category(self) -> UnpickleErrorCategory {
+        match self {
+            Self::UnexpectedParent => UnpickleErrorCategory::MalformedInput,
+            Self::UnsupportedMemberStat => UnpickleErrorCategory::UnsupportedFeature,
+        }
+    }
+}
+
+impl fmt::Display for RefinedTypeTreeReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl TypeReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MatchTypeShape => "a match type has a bound and a scrutinee",
+            Self::ChildShapeMismatch => "the node's children do not match its shape",
+            Self::OwnerSpaceNameDesignator => {
+                "an owner-space reference resolved to a name designator"
+            }
+            Self::RefinedTypeShape => "a refined type has a parent and a refinement",
+            Self::InvalidReferenceTargetShape => "not a direct or symbol reference",
+            Self::BinderChildMismatch => "the binder's children disagree with its parameters",
+            Self::EmptyBinder => "the binder has no parameters",
+            Self::InvalidVarianceMarker => "a bounds tail holds a marker that is not a variance",
+            Self::AnnotationTailShape => {
+                "an ANNOTATION tail entry has a tycon and a full annotation"
+            }
+            Self::AnnotationOfAnnotatedTypeIsNotNode => {
+                "the annotation of an annotated type is not a node"
+            }
+            Self::AnnotationPayloadIsNotNode => "the annotation is not a node",
+            Self::AnnotatedTypeShape => "an annotated type has a parent and an annotation",
+            Self::IdentifierTypeTreeArity => "an identifier type tree has one type",
+            Self::AnnotationApplyFunctionMissing => "an application has a function",
+            Self::AnnotationApplyArityMismatch => {
+                "an application's arguments do not match its shape"
+            }
+            Self::AnnotationTypeApplyFunctionMissing => "a type application has a function",
+            Self::AnnotationTypeApplyArityMismatch => {
+                "a type application's arguments do not match its shape"
+            }
+            Self::AnnotationSelectionShape => "a selection has a qualifier and an owner",
+            Self::AnnotationNewClassArity => "a `new` has one class",
+            Self::NamedArgumentArity => "a named argument has one value",
+            Self::AnnotationLiteralNotConstant => {
+                "an annotation argument literal is not a constant"
+            }
+            Self::RecursiveTypeArity => "a recursive type has exactly one child",
+            Self::ParentTreeDepthLimit => "a parent tree nests too deeply",
+            Self::TypeTreeDepthLimit => "a type tree nests too deeply",
+            Self::LambdaTreeShape => "a lambda type tree has type parameters and a body",
+            Self::LambdaParameterKind => "a lambda type tree parameter is not a type parameter",
+            Self::RefinedTreeUnexpectedParent => "a refined type tree has a parent",
+            Self::IdentifierTermTypeArity => "an identifier has one type",
+            Self::TermSelectionQualifierArity => "a selection has one qualifier",
+            Self::QualifiedThisQualifierArity => "a qualified this has one qualifier",
+            Self::QualifiedThisQualifierKind => {
+                "the qualifier of a qualified this is not a type identifier"
+            }
+            Self::ExplicitTypeTreeArity => "an explicit type tree has one child",
+            Self::ByNameTypeTreeArity => "a by-name type tree has one child",
+            Self::AppliedTypeConstructorMissing => "an applied type tree has a constructor",
+            Self::BoundsTypeTreeArity => "a bounds type tree has one to three children",
+            Self::TypeSelectionQualifierArity => "a type selection has one qualifier",
+            Self::SingletonTreeReferenceArity => "a singleton type tree has one reference",
+            Self::AnnotatedTypeTreeShape => {
+                "an annotated type tree has a type tree and an annotation"
+            }
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::MatchTypeShape => "unpickler.malformed_type.match_type_shape",
+            Self::ChildShapeMismatch => "unpickler.malformed_type.child_shape_mismatch",
+            Self::OwnerSpaceNameDesignator => {
+                "unpickler.malformed_type.owner_space_name_designator"
+            }
+            Self::RefinedTypeShape => "unpickler.malformed_type.refined_type_shape",
+            Self::InvalidReferenceTargetShape => {
+                "unpickler.malformed_type.invalid_reference_target_shape"
+            }
+            Self::BinderChildMismatch => "unpickler.malformed_type.binder_child_mismatch",
+            Self::EmptyBinder => "unpickler.malformed_type.empty_binder",
+            Self::InvalidVarianceMarker => "unpickler.malformed_type.invalid_variance_marker",
+            Self::AnnotationTailShape => "unpickler.malformed_type.annotation_tail_shape",
+            Self::AnnotationOfAnnotatedTypeIsNotNode => {
+                "unpickler.malformed_type.annotation_of_annotated_type_is_not_node"
+            }
+            Self::AnnotationPayloadIsNotNode => {
+                "unpickler.malformed_type.annotation_payload_is_not_node"
+            }
+            Self::AnnotatedTypeShape => "unpickler.malformed_type.annotated_type_shape",
+            Self::IdentifierTypeTreeArity => "unpickler.malformed_type.identifier_type_tree_arity",
+            Self::AnnotationApplyFunctionMissing => {
+                "unpickler.malformed_type.annotation_apply_function_missing"
+            }
+            Self::AnnotationApplyArityMismatch => {
+                "unpickler.malformed_type.annotation_apply_arity_mismatch"
+            }
+            Self::AnnotationTypeApplyFunctionMissing => {
+                "unpickler.malformed_type.annotation_type_apply_function_missing"
+            }
+            Self::AnnotationTypeApplyArityMismatch => {
+                "unpickler.malformed_type.annotation_type_apply_arity_mismatch"
+            }
+            Self::AnnotationSelectionShape => "unpickler.malformed_type.annotation_selection_shape",
+            Self::AnnotationNewClassArity => "unpickler.malformed_type.annotation_new_class_arity",
+            Self::NamedArgumentArity => "unpickler.malformed_type.named_argument_arity",
+            Self::AnnotationLiteralNotConstant => {
+                "unpickler.malformed_type.annotation_literal_not_constant"
+            }
+            Self::RecursiveTypeArity => "unpickler.malformed_type.recursive_type_arity",
+            Self::ParentTreeDepthLimit => "unpickler.malformed_type.parent_tree_depth_limit",
+            Self::TypeTreeDepthLimit => "unpickler.malformed_type.type_tree_depth_limit",
+            Self::LambdaTreeShape => "unpickler.malformed_type.lambda_tree_shape",
+            Self::LambdaParameterKind => "unpickler.malformed_type.lambda_parameter_kind",
+            Self::RefinedTreeUnexpectedParent => {
+                "unpickler.malformed_type.refined_tree_unexpected_parent"
+            }
+            Self::IdentifierTermTypeArity => "unpickler.malformed_type.identifier_term_type_arity",
+            Self::TermSelectionQualifierArity => {
+                "unpickler.malformed_type.term_selection_qualifier_arity"
+            }
+            Self::QualifiedThisQualifierArity => {
+                "unpickler.malformed_type.qualified_this_qualifier_arity"
+            }
+            Self::QualifiedThisQualifierKind => {
+                "unpickler.malformed_type.qualified_this_qualifier_kind"
+            }
+            Self::ExplicitTypeTreeArity => "unpickler.malformed_type.explicit_type_tree_arity",
+            Self::ByNameTypeTreeArity => "unpickler.malformed_type.by_name_type_tree_arity",
+            Self::AppliedTypeConstructorMissing => {
+                "unpickler.malformed_type.applied_type_constructor_missing"
+            }
+            Self::BoundsTypeTreeArity => "unpickler.malformed_type.bounds_type_tree_arity",
+            Self::TypeSelectionQualifierArity => {
+                "unpickler.malformed_type.type_selection_qualifier_arity"
+            }
+            Self::SingletonTreeReferenceArity => {
+                "unpickler.malformed_type.singleton_tree_reference_arity"
+            }
+            Self::AnnotatedTypeTreeShape => "unpickler.malformed_type.annotated_type_tree_shape",
+        }
+    }
+
+    fn category(self) -> UnpickleErrorCategory {
+        match self {
+            Self::OwnerSpaceNameDesignator
+            | Self::ParentTreeDepthLimit
+            | Self::TypeTreeDepthLimit => UnpickleErrorCategory::UnsupportedFeature,
+            _ => UnpickleErrorCategory::MalformedInput,
+        }
+    }
+}
+
+impl fmt::Display for TypeReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+fn tasty_category(error: &TastyFileError) -> UnpickleErrorCategory {
+    use UnpickleErrorCategory::{MalformedInput, UnsupportedFeature};
+    match error {
+        TastyFileError::Header(
+            dotty_tasty::tasty::HeaderError::UnsupportedVersion { .. }
+            | dotty_tasty::tasty::HeaderError::IncompatibleVersion { .. },
+        ) => UnsupportedFeature,
+        TastyFileError::Asts(error) => ast_category(error),
+        _ => MalformedInput,
+    }
+}
+
+fn ast_category(error: &AstError) -> UnpickleErrorCategory {
+    use UnpickleErrorCategory::{InternalInvariant, MalformedInput, UnsupportedFeature};
+    match error {
+        AstError::UnsupportedCategory { .. }
+        | AstError::UnsupportedRelocation { .. }
+        | AstError::RecursionLimit { .. } => UnsupportedFeature,
+        AstError::RelocationDidNotConverge { .. } => InternalInvariant,
+        AstError::Term(error) => term_category(error),
+        AstError::Read(_)
+        | AstError::InvalidTag { .. }
+        | AstError::UnexpectedTag { .. }
+        | AstError::InvalidAstReference { .. }
+        | AstError::AstNodeCountMismatch { .. } => MalformedInput,
+    }
+}
+
+fn term_category(error: &TermError) -> UnpickleErrorCategory {
+    match error {
+        TermError::UnsupportedCategory { .. } | TermError::RecursionLimit { .. } => {
+            UnpickleErrorCategory::UnsupportedFeature
+        }
+        TermError::Read(_) | TermError::InvalidTag { .. } | TermError::InvalidConstant { .. } => {
+            UnpickleErrorCategory::MalformedInput
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,5 +1443,379 @@ mod tests {
         assert_eq!(error, UnpickleError::Ast(source));
         assert!(std::error::Error::source(&error).is_some());
         assert!(error.to_string().starts_with("invalid TASTy AST node"));
+    }
+
+    #[test]
+    fn nested_decode_causes_keep_malformed_and_unsupported_categories_distinct() {
+        let unsupported_version =
+            UnpickleError::Tasty(TastyFileError::Header(HeaderError::UnsupportedVersion {
+                major: 28,
+                minor: 10,
+                experimental: 0,
+            }));
+        assert_eq!(
+            unsupported_version.category(),
+            UnpickleErrorCategory::UnsupportedFeature
+        );
+        assert_eq!(unsupported_version.code(), "unpickler.tasty");
+
+        let unsupported_ast = UnpickleError::Ast(AstError::UnsupportedCategory {
+            tag: 255,
+            offset: 12,
+        });
+        assert_eq!(
+            unsupported_ast.category(),
+            UnpickleErrorCategory::UnsupportedFeature
+        );
+
+        let malformed_ast = UnpickleError::Ast(AstError::InvalidTag {
+            tag: 255,
+            offset: 12,
+        });
+        assert_eq!(
+            malformed_ast.category(),
+            UnpickleErrorCategory::MalformedInput
+        );
+
+        let nested_term_limit = UnpickleError::Tasty(TastyFileError::Asts(AstError::Term(
+            TermError::RecursionLimit {
+                offset: 12,
+                limit: 256,
+            },
+        )));
+        assert_eq!(
+            nested_term_limit.category(),
+            UnpickleErrorCategory::UnsupportedFeature
+        );
+        assert_eq!(
+            UnpickleError::Ast(AstError::Term(TermError::RecursionLimit {
+                offset: 12,
+                limit: 256,
+            }))
+            .category(),
+            nested_term_limit.category()
+        );
+    }
+
+    #[test]
+    fn nested_type_rebind_limits_and_invariants_keep_their_categories() {
+        let mut store = dotty_core::SemanticStore::new();
+        let type_id = store.types.alloc(dotty_core::Type::NoType);
+        let symbol = store.symbols.alloc(dotty_core::symbols::Symbol {
+            name: dotty_core::Name::new(
+                store.names.intern("parameter"),
+                dotty_core::Namespace::Term,
+            ),
+            owner: None,
+            kind: SymbolKind::Value,
+            flags: dotty_core::symbols::SymbolFlags::EMPTY,
+            visibility: dotty_core::symbols::Visibility::Public,
+            info: dotty_core::symbols::SymbolInfo::Missing,
+            origin: dotty_core::symbols::SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::symbols::SymbolLinks::default(),
+        });
+        let too_deep = TypeRebindError::TooDeep { id: type_id };
+        let duplicate_parameter = TypeRebindError::DuplicateParameterSymbol { symbol };
+
+        for error in [
+            UnpickleError::CloseOverThis {
+                address: 4,
+                error: too_deep,
+            },
+            UnpickleError::ParameterAbstraction {
+                address: 4,
+                error: too_deep,
+            },
+        ] {
+            assert_eq!(error.category(), UnpickleErrorCategory::UnsupportedFeature);
+        }
+
+        for error in [
+            UnpickleError::CloseOverThis {
+                address: 4,
+                error: duplicate_parameter,
+            },
+            UnpickleError::ParameterAbstraction {
+                address: 4,
+                error: duplicate_parameter,
+            },
+        ] {
+            assert_eq!(error.category(), UnpickleErrorCategory::InternalInvariant);
+        }
+    }
+
+    #[test]
+    fn typed_reason_families_have_distinct_stable_codes() {
+        let mut codes = std::collections::BTreeSet::new();
+        let mut add = |error: UnpickleError| {
+            let code = error.code();
+            assert!(code.starts_with("unpickler."));
+            assert!(codes.insert(code), "duplicate code {code}");
+        };
+
+        for reason in [
+            ParentTreeReason::NestingLimit,
+            ParentTreeReason::ConstructorHasFunction,
+            ParentTreeReason::SelectsConstructor,
+            ParentTreeReason::SelectsNew,
+            ParentTreeReason::NewArity,
+        ] {
+            add(UnpickleError::MalformedParentTree { address: 4, reason });
+        }
+        assert_eq!(
+            ParentTreeReason::SelectsConstructor.to_string(),
+            "a parent constructor selection does not select <init>"
+        );
+        assert_eq!(
+            ParentTreeReason::SelectsNew.to_string(),
+            "a parent constructor selection is not on NEW"
+        );
+        add(UnpickleError::InvalidSelfTypeTree {
+            address: 4,
+            reason: SelfTypeTreeReason::TypeTreeArity,
+        });
+        for reason in [
+            DefinitionReason::ClassTemplatePosition,
+            DefinitionReason::ResultTypePosition,
+            DefinitionReason::HeaderParametersExceedNodes,
+            DefinitionReason::HeaderParameterTagMismatch,
+            DefinitionReason::ParameterNodesExceedHeader,
+            DefinitionReason::OpaqueAliasRhsArity,
+            DefinitionReason::OpaqueBoundsShape,
+            DefinitionReason::OpaqueAliasDepthLimit,
+            DefinitionReason::TypeAliasRhsArity,
+            DefinitionReason::OpaqueLambdaShape,
+            DefinitionReason::NestedOpaqueParameterLambdasUnsupported,
+        ] {
+            add(UnpickleError::MalformedDefinition { address: 4, reason });
+        }
+        for reason in [
+            RefinedTypeTreeReason::UnexpectedParent,
+            RefinedTypeTreeReason::UnsupportedMemberStat,
+        ] {
+            add(UnpickleError::MalformedRefinedTypeTree { address: 4, reason });
+        }
+        for reason in [
+            TypeReason::MatchTypeShape,
+            TypeReason::ChildShapeMismatch,
+            TypeReason::OwnerSpaceNameDesignator,
+            TypeReason::RefinedTypeShape,
+            TypeReason::InvalidReferenceTargetShape,
+            TypeReason::BinderChildMismatch,
+            TypeReason::EmptyBinder,
+            TypeReason::InvalidVarianceMarker,
+            TypeReason::AnnotationTailShape,
+            TypeReason::AnnotationOfAnnotatedTypeIsNotNode,
+            TypeReason::AnnotationPayloadIsNotNode,
+            TypeReason::AnnotatedTypeShape,
+            TypeReason::IdentifierTypeTreeArity,
+            TypeReason::AnnotationApplyFunctionMissing,
+            TypeReason::AnnotationApplyArityMismatch,
+            TypeReason::AnnotationTypeApplyFunctionMissing,
+            TypeReason::AnnotationTypeApplyArityMismatch,
+            TypeReason::AnnotationSelectionShape,
+            TypeReason::AnnotationNewClassArity,
+            TypeReason::NamedArgumentArity,
+            TypeReason::AnnotationLiteralNotConstant,
+            TypeReason::RecursiveTypeArity,
+            TypeReason::ParentTreeDepthLimit,
+            TypeReason::TypeTreeDepthLimit,
+            TypeReason::LambdaTreeShape,
+            TypeReason::LambdaParameterKind,
+            TypeReason::RefinedTreeUnexpectedParent,
+            TypeReason::IdentifierTermTypeArity,
+            TypeReason::TermSelectionQualifierArity,
+            TypeReason::QualifiedThisQualifierArity,
+            TypeReason::QualifiedThisQualifierKind,
+            TypeReason::ExplicitTypeTreeArity,
+            TypeReason::ByNameTypeTreeArity,
+            TypeReason::AppliedTypeConstructorMissing,
+            TypeReason::BoundsTypeTreeArity,
+            TypeReason::TypeSelectionQualifierArity,
+            TypeReason::SingletonTreeReferenceArity,
+            TypeReason::AnnotatedTypeTreeShape,
+        ] {
+            add(UnpickleError::MalformedType { address: 4, reason });
+        }
+        assert_eq!(codes.len(), 57);
+    }
+
+    #[test]
+    fn categories_distinguish_malformed_unsupported_resolution_deferred_and_invariant() {
+        use UnpickleErrorCategory as Category;
+        let mut store = dotty_core::SemanticStore::new();
+        let prefix = store.types.alloc(dotty_core::types::Type::NoType);
+
+        assert_eq!(
+            UnpickleError::MalformedType {
+                address: 1,
+                reason: TypeReason::ChildShapeMismatch,
+            }
+            .category(),
+            Category::MalformedInput
+        );
+        assert_eq!(
+            UnpickleError::MalformedType {
+                address: 1,
+                reason: TypeReason::TypeTreeDepthLimit,
+            }
+            .category(),
+            Category::UnsupportedFeature
+        );
+        assert_eq!(
+            UnpickleError::UnresolvedMember {
+                address: 1,
+                prefix,
+                space: None,
+                name: "missing".to_owned(),
+                namespace: Namespace::Type,
+            }
+            .category(),
+            Category::ResolutionFailure
+        );
+        assert_eq!(
+            UnpickleError::UnsupportedSymbolCompletion {
+                address: 1,
+                kind: SymbolKind::Class,
+            }
+            .category(),
+            Category::Deferred
+        );
+        assert_eq!(
+            UnpickleError::DuplicateDefinition { address: 1 }.category(),
+            Category::InternalInvariant
+        );
+        assert_eq!(
+            UnpickleError::InvalidNameReference {
+                reference: u32::MAX
+            }
+            .category(),
+            Category::Conditional
+        );
+    }
+
+    #[test]
+    fn classification_and_codes_do_not_dereference_rolled_back_ids() {
+        let mut store = dotty_core::SemanticStore::new();
+        let checkpoint = store.checkpoint();
+        let invalidated_binder = store.types.alloc(dotty_core::types::Type::NoType);
+        store.rollback_to(checkpoint);
+        let error = UnpickleError::InvalidBinderKind {
+            from: 32,
+            binder: invalidated_binder,
+        };
+
+        assert_eq!(error.code(), "unpickler.invalid_binder_kind");
+        assert_eq!(error.category(), UnpickleErrorCategory::MalformedInput);
+    }
+
+    #[test]
+    fn typed_reasons_keep_the_audited_mixed_categories() {
+        use UnpickleErrorCategory::{MalformedInput, UnsupportedFeature};
+
+        assert_eq!(
+            UnpickleError::MalformedParentTree {
+                address: 1,
+                reason: ParentTreeReason::NestingLimit,
+            }
+            .category(),
+            UnsupportedFeature
+        );
+        assert_eq!(
+            UnpickleError::MalformedDefinition {
+                address: 1,
+                reason: DefinitionReason::OpaqueAliasDepthLimit,
+            }
+            .category(),
+            UnsupportedFeature
+        );
+        assert_eq!(
+            UnpickleError::MalformedDefinition {
+                address: 1,
+                reason: DefinitionReason::NestedOpaqueParameterLambdasUnsupported,
+            }
+            .category(),
+            UnsupportedFeature
+        );
+        assert_eq!(
+            UnpickleError::MalformedRefinedTypeTree {
+                address: 1,
+                reason: RefinedTypeTreeReason::UnsupportedMemberStat,
+            }
+            .category(),
+            UnsupportedFeature
+        );
+        assert_eq!(
+            UnpickleError::MalformedType {
+                address: 1,
+                reason: TypeReason::OwnerSpaceNameDesignator,
+            }
+            .category(),
+            UnsupportedFeature
+        );
+        assert_eq!(
+            UnpickleError::MalformedType {
+                address: 1,
+                reason: TypeReason::ParentTreeDepthLimit,
+            }
+            .category(),
+            UnsupportedFeature
+        );
+        assert_eq!(
+            UnpickleError::MalformedType {
+                address: 1,
+                reason: TypeReason::MatchTypeShape,
+            }
+            .category(),
+            MalformedInput
+        );
+    }
+
+    #[test]
+    fn typed_reasons_preserve_readable_display_text() {
+        let error = UnpickleError::MalformedType {
+            address: 19,
+            reason: TypeReason::QualifiedThisQualifierKind,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "the type at address 19 is malformed: the qualifier of a qualified this is not a type identifier"
+        );
+    }
+
+    #[test]
+    fn stable_codes_ignore_addresses_and_tags_while_errors_keep_their_payloads() {
+        let first = UnpickleError::UnsupportedTypeTree {
+            address: 17,
+            tag: 84,
+        };
+        let second = UnpickleError::UnsupportedTypeTree {
+            address: 99,
+            tag: 85,
+        };
+        assert_eq!(first.code(), "unpickler.unsupported_type_tree");
+        assert_eq!(first.code(), second.code());
+        assert_eq!(first.category(), UnpickleErrorCategory::UnsupportedFeature);
+        assert!(matches!(
+            first,
+            UnpickleError::UnsupportedTypeTree {
+                address: 17,
+                tag: 84
+            }
+        ));
+
+        let resolver_cause = dotty_core::ResolutionError::Ambiguous { candidates: 3 };
+        let error = UnpickleError::ResolverFailure {
+            address: 41,
+            error: resolver_cause.clone(),
+        };
+        assert_eq!(error.code(), "unpickler.resolver_failure");
+        assert_eq!(error.category(), UnpickleErrorCategory::ResolutionFailure);
+        assert!(
+            matches!(error, UnpickleError::ResolverFailure { address: 41, error } if error == resolver_cause)
+        );
     }
 }

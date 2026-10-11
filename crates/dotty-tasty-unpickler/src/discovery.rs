@@ -204,7 +204,7 @@ pub(crate) fn children_of(ast: &AstView<'_>, at: u32) -> Vec<u32> {
         .collect()
 }
 
-fn malformed(address: u32, reason: &'static str) -> UnpickleError {
+fn malformed(address: u32, reason: crate::error::TypeReason) -> UnpickleError {
     UnpickleError::MalformedType { address, reason }
 }
 
@@ -252,7 +252,10 @@ impl TastyUnpickler<'_, '_, '_> {
         depth: usize,
     ) -> Result<(), UnpickleError> {
         if depth > MAX_TREE_DEPTH {
-            return Err(malformed(tree, "a type tree nests too deeply"));
+            return Err(malformed(
+                tree,
+                crate::error::TypeReason::TypeTreeDepthLimit,
+            ));
         }
         let Some(tag) = ast.tag_at(tree) else {
             return Err(UnpickleError::InvalidReferenceTarget {
@@ -760,7 +763,7 @@ pub(crate) fn reference_target(ast: &AstView<'_>, at: u32) -> Result<u32, Unpick
     use dotty_tasty::tasty::{RawTree, TermValue};
     let malformed = || UnpickleError::MalformedType {
         address: at,
-        reason: "not a direct or symbol reference",
+        reason: crate::error::TypeReason::InvalidReferenceTargetShape,
     };
     let target = match ast.tree_at(at, at)? {
         RawTree::Leaf(term) => match term.value {

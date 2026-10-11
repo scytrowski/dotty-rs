@@ -76,7 +76,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let Some((parent, stats)) = children.split_first() else {
             return Err(UnpickleError::MalformedRefinedTypeTree {
                 address: at,
-                reason: "a refined type tree has a parent",
+                reason: crate::error::RefinedTypeTreeReason::UnexpectedParent,
             });
         };
 
@@ -94,7 +94,7 @@ impl TastyUnpickler<'_, '_, '_> {
             ) {
                 return Err(UnpickleError::MalformedRefinedTypeTree {
                     address: stat,
-                    reason: "a refinement stat is not a supported member definition",
+                    reason: crate::error::RefinedTypeTreeReason::UnsupportedMemberStat,
                 });
             }
             let Some(member) = self.index.symbol_at(stat) else {

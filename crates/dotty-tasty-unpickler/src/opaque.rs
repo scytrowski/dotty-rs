@@ -46,7 +46,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let [rhs_child] = ast.children(at) else {
             return Err(UnpickleError::MalformedDefinition {
                 address: at,
-                reason: "an opaque type alias has one right-hand-side tree",
+                reason: crate::error::DefinitionReason::OpaqueAliasRhsArity,
             });
         };
         let rhs_at = address(rhs_child.offset);
@@ -63,7 +63,7 @@ impl TastyUnpickler<'_, '_, '_> {
             {
                 return Err(UnpickleError::MalformedDefinition {
                     address: body_at,
-                    reason: "opaque bounds children do not match their encoded shape",
+                    reason: crate::error::DefinitionReason::OpaqueBoundsShape,
                 });
             }
             if shape.high.is_some() {
@@ -298,7 +298,7 @@ impl TastyUnpickler<'_, '_, '_> {
             if states.len() >= 512 {
                 return Err(UnpickleError::MalformedDefinition {
                     address: alias_address,
-                    reason: "an opaque alias dependency graph exceeds the recursion limit",
+                    reason: crate::error::DefinitionReason::OpaqueAliasDepthLimit,
                 });
             }
             states.insert(symbol, 1);
@@ -315,7 +315,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 let [rhs] = ast.children(definition) else {
                     return Err(UnpickleError::MalformedDefinition {
                         address: definition,
-                        reason: "a type alias has one right-hand-side tree",
+                        reason: crate::error::DefinitionReason::TypeAliasRhsArity,
                     });
                 };
                 self.type_of_tpt(ast, address(rhs.offset), definition, depth)?
@@ -421,13 +421,13 @@ impl TastyUnpickler<'_, '_, '_> {
             else {
                 return Err(UnpickleError::MalformedDefinition {
                     address: at,
-                    reason: "a generic opaque alias lambda has parameters and a body",
+                    reason: crate::error::DefinitionReason::OpaqueLambdaShape,
                 });
             };
             if !params.is_empty() {
                 return Err(UnpickleError::MalformedDefinition {
                     address: at,
-                    reason: "nested opaque alias parameter lambdas are unsupported",
+                    reason: crate::error::DefinitionReason::NestedOpaqueParameterLambdasUnsupported,
                 });
             }
             params.extend(type_params.iter().map(|param| address(param.offset)));

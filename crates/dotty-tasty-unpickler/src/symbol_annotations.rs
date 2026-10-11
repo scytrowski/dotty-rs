@@ -165,7 +165,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let [_tycon_at, full_annotation_at] = children[..] else {
             return Err(UnpickleError::MalformedType {
                 address: at,
-                reason: "an ANNOTATION tail entry has a tycon and a full annotation",
+                reason: crate::error::TypeReason::AnnotationTailShape,
             });
         };
         Ok(full_annotation_at)

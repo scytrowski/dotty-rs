@@ -89,7 +89,10 @@ impl TastyUnpickler<'_, '_, '_> {
                     wire_name(self.file.names(), value)?;
                 }
                 let [embedded] = children[..] else {
-                    return Err(malformed(at, "an identifier has one type"));
+                    return Err(malformed(
+                        at,
+                        crate::error::TypeReason::IdentifierTermTypeArity,
+                    ));
                 };
                 return self.type_at(ast, embedded, at, depth);
             }
@@ -100,7 +103,10 @@ impl TastyUnpickler<'_, '_, '_> {
                 // first overload.
                 let shape = ast.tree_at(at, from)?.decode_select()?;
                 let [qualifier] = children[..] else {
-                    return Err(malformed(at, "a selection has one qualifier"));
+                    return Err(malformed(
+                        at,
+                        crate::error::TypeReason::TermSelectionQualifierArity,
+                    ));
                 };
                 let qualifier = self.type_of_term(ast, qualifier, at, depth)?;
                 let selected =
@@ -125,12 +131,15 @@ impl TastyUnpickler<'_, '_, '_> {
         // names the class, as Dotty's `ThisType.raw(qual.tpe)`.
         ast.tree_at(at, from)?.decode_qual_this()?;
         let [qualifier] = children[..] else {
-            return Err(malformed(at, "a qualified this has one qualifier"));
+            return Err(malformed(
+                at,
+                crate::error::TypeReason::QualifiedThisQualifierArity,
+            ));
         };
         if ast.tag_at(qualifier) != Some(IDENTTPT_TAG) {
             return Err(malformed(
                 at,
-                "the qualifier of a qualified this is not a type identifier",
+                crate::error::TypeReason::QualifiedThisQualifierKind,
             ));
         }
         let qualifier_tree = ast.tree_at(qualifier, at)?;
@@ -138,7 +147,10 @@ impl TastyUnpickler<'_, '_, '_> {
             wire_name(self.file.names(), *value)?;
         }
         let RawTree::NatAst { child, .. } = &qualifier_tree else {
-            return Err(malformed(qualifier, "an identifier type tree has one type"));
+            return Err(malformed(
+                qualifier,
+                crate::error::TypeReason::IdentifierTypeTreeArity,
+            ));
         };
         let class = self.this_class(ast, child, depth)?;
         let ty = self.store.types.alloc(Type::ThisType { class });
@@ -166,6 +178,6 @@ pub(crate) fn is_type_tree_tag(tag: u8) -> bool {
     )
 }
 
-fn malformed(address: u32, reason: &'static str) -> UnpickleError {
+fn malformed(address: u32, reason: crate::error::TypeReason) -> UnpickleError {
     UnpickleError::MalformedType { address, reason }
 }
