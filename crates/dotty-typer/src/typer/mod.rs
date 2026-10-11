@@ -3917,6 +3917,7 @@ mod tests {
             "class A; class B; class C; ",
             "type ImpureZero = () => A; ",
             "type ImpureOne = A => B; ",
+            "type ImpureNamed = (x: A) => B; ",
             "type ImpureMany = (A, B) => C; ",
             "type ContextualImpureOne = A ?=> B; ",
             "type ContextualImpureMany = (x: A, y: B) ?=> C; ",
@@ -3937,6 +3938,14 @@ mod tests {
             ),
             (
                 "ImpureOne",
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Ordinary,
+                    SourceFunctionPurity::Impure,
+                ),
+                1,
+            ),
+            (
+                "ImpureNamed",
                 SourceFunctionFamily::new(
                     SourceFunctionKind::Ordinary,
                     SourceFunctionPurity::Impure,

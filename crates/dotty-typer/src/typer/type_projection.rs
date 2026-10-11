@@ -430,17 +430,14 @@ impl SourceTyper<'_> {
             self.source_function_family_type_constructor(family, params.len(), tree.index())?;
         let mut args = Vec::with_capacity(params.len() + 1);
         for param in params {
-            let param_type = if family.kind == SourceFunctionKind::Contextual {
-                self.arena
-                    .try_get(param)
-                    .and_then(|parameter| match &parameter.kind {
-                        TreeKind::ValDef(definition) => Some(definition.tpt),
-                        _ => None,
-                    })
-                    .unwrap_or(param)
-            } else {
-                param
-            };
+            let param_type = self
+                .arena
+                .try_get(param)
+                .and_then(|parameter| match &parameter.kind {
+                    TreeKind::ValDef(definition) => Some(definition.tpt),
+                    _ => None,
+                })
+                .unwrap_or(param);
             args.push(self.type_of_tpt_inner_journaled(param_type, context, info_journal)?);
         }
         args.push(self.type_of_tpt_inner_journaled(result, context, info_journal)?);
