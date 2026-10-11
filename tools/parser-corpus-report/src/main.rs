@@ -384,6 +384,7 @@ enum DiagnosticAwareOutcome {
     },
     Rejected {
         diagnostics: Vec<NamerDiagnosticRecord>,
+        transaction_residue: bool,
     },
     InternalError {
         kind: String,
@@ -1338,6 +1339,8 @@ fn run_diagnostic_namer(source: &str, source_file_name: &str) -> DiagnosticAware
                 .into_iter()
                 .map(namer_diagnostic_record)
                 .collect(),
+            transaction_residue: store.checkpoint() != store_checkpoint
+                || packages.mark() != package_mark,
         },
         Err(error) => DiagnosticAwareOutcome::InternalError {
             kind: namer_error_kind(&error),
@@ -2509,8 +2512,14 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
                             }
                         }
                     }
-                    DiagnosticAwareOutcome::Rejected { diagnostics } => {
+                    DiagnosticAwareOutcome::Rejected {
+                        diagnostics,
+                        transaction_residue,
+                    } => {
                         diagnostic_report.files_source_rejected += 1;
+                        if *transaction_residue {
+                            diagnostic_report.failed_calls_with_transaction_residue += 1;
+                        }
                         if matches!(outcome.status, Status::RecoverableDiagnostics) {
                             diagnostic_report.files_source_rejected_after_parser_recovery += 1;
                         }
@@ -3425,9 +3434,14 @@ mod tests {
             panic!("diagnostic mode should wrap the legacy Namer outcome");
         };
         assert!(matches!(*legacy, NamerOutcome::Error { .. }));
-        let DiagnosticAwareOutcome::Rejected { diagnostics } = outcome else {
+        let DiagnosticAwareOutcome::Rejected {
+            diagnostics,
+            transaction_residue,
+        } = outcome
+        else {
             panic!("confirmed invalid visibility should be a source rejection");
         };
+        assert!(!transaction_residue);
         assert_eq!(diagnostics.len(), 1);
         let diagnostic = &diagnostics[0];
         assert_eq!(diagnostic.code, "namer.visibility.invalid_qualifier");
@@ -3494,6 +3508,7 @@ mod tests {
                     }),
                     outcome: DiagnosticAwareOutcome::Rejected {
                         diagnostics: vec![diagnostic],
+                        transaction_residue: true,
                     },
                 }),
                 deferred_features: BTreeMap::new(),
@@ -3546,6 +3561,7 @@ mod tests {
             1
         );
         assert_eq!(diagnostic_report.files_namer_returned_internal_error, 1);
+        assert_eq!(diagnostic_report.failed_calls_with_transaction_residue, 1);
         assert_eq!(
             diagnostic_report.source_diagnostic_histogram["namer.visibility.invalid_qualifier"]
                 .error_count,
