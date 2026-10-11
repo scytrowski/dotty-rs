@@ -704,7 +704,7 @@ full-corpus audit does not report `RecursiveInferredMethodResult`; focused
 self- and mutual-recursion tests still pin its deterministic error and
 rollback behavior. The
 current Typer ranking and evidence-based next-slice recommendation are in the
-[corpus audit](typer-classpath-corpus-audit-3.9.0.md#recommended-next-typer-sprint).
+[corpus audit](typer-classpath-corpus-audit-3.9.0.md#933-hardening-result-and-next-sprint-recommendation).
 
 Ordinary repeated parameters use `Type::Repeated` in parameter symbol info and
 the shared method-signature builder's `varargs` marker; references to them in
@@ -778,6 +778,20 @@ references to later lazy declarations remain unsupported as described above.
 Unsupported modifiers, duplicate modifiers, and unsupported or inconsistent
 modifier sets return `LocalValueModifierDeferred` with the source tree and
 complete modifier set.
+
+#933 hardens these slices with a mixed block containing ordinary, implicit,
+lazy, and mutable locals. The regression checks declaration order, exact
+modifier flags, lexical references between declarations, assignment to only
+the mutable local, and that lazy typing adds no lowering trees. Contextual
+application remains unsupported. The audit retains all 21 #929 observations
+across 14 declarations and 8 files, including the remaining `inline val`
+deferral. The cohort has no `PatDef` observations, so none moved into a
+PatDef-specific blocker. None of the 3,297 corpus local methods fully type;
+16 cohort rows now stop at `ImportQualifierNotFound`, and the pinned resolver
+materializes no external member symbols. The next bounded semantic slice
+recommended from the refreshed profile is `UnsupportedTypeTree::FunctionWithMods`;
+the corpus audit compares it against anonymous classes, remaining local
+declarations, and the separate classpath resolution gate.
 
 ### Local-definition source audit v1 (historical)
 

@@ -17466,6 +17466,124 @@ mod tests {
     }
 
     #[test]
+    fn mixed_local_value_families_preserve_flags_order_and_reference_identity() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def use: Int = { val ordinary = 1; implicit val contextual = ordinary; lazy val later = contextual; var mutable = later; mutable = ordinary; mutable } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let TreeKind::Block(source_block) = &parsed.ast.get(rhs).kind else {
+            panic!("method body should contain a block")
+        };
+        assert_eq!(source_block.stats.len(), 5);
+        let source_locals = source_block.stats[..4].to_vec();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed_id = typer
+            .type_expression(rhs, context)
+            .expect("supported local value families should compose in one block");
+        let typed_node_count = typer.typed_ast().iter().count();
+        let local_symbol_count = typer.local_symbols.len();
+        let expression_scope_depth = typer.expression_scopes.len();
+        let repeated_typed_id = typer
+            .type_expression(rhs, context)
+            .expect("retyping the same mixed block should reuse its mapping");
+        assert_eq!(repeated_typed_id, typed_id);
+        assert_eq!(typer.typed_ast().iter().count(), typed_node_count);
+        assert_eq!(typer.local_symbols.len(), local_symbol_count);
+        assert_eq!(typer.expression_scopes.len(), expression_scope_depth);
+
+        let symbols = source_locals
+            .iter()
+            .map(|tree| typer.local_symbol_at(source, *tree).unwrap())
+            .collect::<Vec<_>>();
+        let [ordinary, contextual, lazy, mutable]: [SymbolId; 4] = symbols
+            .as_slice()
+            .try_into()
+            .expect("the block has four value declarations");
+        assert_eq!(
+            typer.store().symbols.get(ordinary).flags,
+            SymbolFlags::EMPTY
+        );
+        assert_eq!(
+            typer.store().symbols.get(contextual).flags,
+            SymbolFlags::IMPLICIT
+        );
+        assert_eq!(typer.store().symbols.get(lazy).flags, SymbolFlags::LAZY);
+        assert_eq!(
+            typer.store().symbols.get(mutable).flags,
+            SymbolFlags::MUTABLE
+        );
+        assert!(symbols.iter().all(|symbol| {
+            typer.store().symbols.get(*symbol).info == SymbolInfo::Complete(definitions.int)
+        }));
+
+        let TreeKind::Block(typed_block) = &typer.typed_ast().get(typed_id).kind else {
+            panic!("typed method body should remain a block")
+        };
+        assert_eq!(
+            typed_block.stats.len(),
+            5,
+            "lazy typing adds no lowering trees"
+        );
+        let initializer_symbol = |typed_definition: TreeId<Typed>| {
+            let TreeKind::ValDef(definition) = &typer.typed_ast().get(typed_definition).kind else {
+                panic!("local declaration should remain a ValDef")
+            };
+            let initializer = definition.rhs.expect("local value has an initializer");
+            match typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(initializer).ty)
+            {
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } => Some(*symbol),
+                _ => None,
+            }
+        };
+        assert_eq!(initializer_symbol(typed_block.stats[1]), Some(ordinary));
+        assert_eq!(initializer_symbol(typed_block.stats[2]), Some(contextual));
+        assert_eq!(initializer_symbol(typed_block.stats[3]), Some(lazy));
+
+        let TreeKind::Assign(assignment) = &typer.typed_ast().get(typed_block.stats[4]).kind else {
+            panic!("assignment should remain in declaration order")
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(assignment.lhs).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if symbol == &mutable
+        ));
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(assignment.rhs).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if symbol == &ordinary
+        ));
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_block.expr).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                if symbol == &mutable
+        ));
+    }
+
+    #[test]
     fn failed_inferred_local_rhs_rolls_back_binding_and_typed_nodes() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def use: Int = { val local = 1; missing } }");
