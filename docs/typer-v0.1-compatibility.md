@@ -908,9 +908,22 @@ resolution errors fall from 452 to 347, while external member requests move
 from 7,802 to 7,895 as resolution reaches further. One ordinary function-type
 row moves from `SymbolResolution` to the deeper `ImportQualifierNotFound`
 blocker; this is resolution movement, not a claim that the affected method now
-types successfully. Remaining classloader errors are dominated by 342
-unresolved Scala TASTy supertypes. The detailed report records these results
-and the still-blocked broader classpath gate.
+types successfully. At that #973 checkpoint, 342 unresolved Scala TASTy
+supertypes remained. #974 resolves the shared `scala/Function1` parent
+reference and reduces the remaining cohort to 212 errors across 26 classes and
+51 files; member-resolution errors fall from 347 to 217 while requests rise
+from 7,895 to 8,070 as resolution proceeds further. The detailed report
+records the fixed roots, newly exposed failures, and per-parent TASTy shape
+details, along with the still-blocked broader classpath gate.
+
+The source Typer consumes the classpath symbols produced by the classloader;
+it does not reproduce Scala's default imports while decoding a binary
+supertype. The TASTy decoder uses compiled package/owner references, including
+shared address targets, as the authority for a parent's binary name. If the
+compiled reference cannot establish that identity, class loading remains an
+explicit unresolved-supertype error rather than guessing from the source
+package. See the classloader section of the pinned audit for the Scala 3.9.0
+shape breakdown and residual cohort.
 
 The `local_patdefs` section profiles source `PatDef` shapes, binders, and
 typed outcomes inside named method bodies. Outcomes are grouped by
