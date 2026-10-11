@@ -10,7 +10,9 @@ use crate::repository::{ClassEntry, ClassRepository};
 use crate::session::LoadingSession;
 use crate::symbol::{ClassRef, ClassfileMetadata};
 use crate::tasty_symbol;
-use dotty_classfile::access_flags::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags};
+use dotty_classfile::access_flags::{
+    ACC_STATIC, ClassAccessFlags, FieldAccessFlags, MethodAccessFlags,
+};
 use dotty_classfile::attribute::{Annotation, Attribute, ElementValue};
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{
@@ -230,6 +232,11 @@ pub struct ClassLoader<'store, E> {
     /// one-per-classpath-root pattern) doesn't have it either; see
     /// [`LoadingSession`]'s doc comment.
     repository: ClassRepository,
+    /// Declaration scopes for classfile shells currently being loaded by
+    /// this loader. `SymbolInfo` is completed only after member dependencies
+    /// resolve, but nested signatures may need an enclosing class's already-
+    /// entered type parameters while that enclosing class is still loading.
+    in_progress_classes: HashMap<SymbolId, InProgressClass>,
     /// The canonical `TypeId`/`SymbolId` every JVM primitive and
     /// `Object`/`Any`/`Nothing` reference lowers against — see
     /// [`Definitions::bootstrap`]. `definitions.no_prefix` is this
@@ -248,26 +255,31 @@ pub struct ClassLoader<'store, E> {
 /// this — see `resolve_inner_classes`/`InnerClasses` for that.
 /// Resolves a `TypeVariable` (JVMS §4.7.9.1) while lowering a signature.
 ///
-/// A method-level type parameter of its own (`method_type_params`, `name ->`
-/// its already-allocated `Type::ParamRef` into the enclosing `Type::Poly`)
-/// shadows the declaring class's own type parameters (`declarations`, real
-/// `SymbolKind::TypeParameter` symbols looked up via ordinary
-/// `Scope::lookup` — see [`ClassLoader::enter_class_type_parameters`]).
-/// `method_type_params` is `None` while lowering a class's own type
-/// parameter bounds, or a field/non-generic-method signature, where there
-/// is no method-level binder in scope at all.
+/// Class scopes are ordered from the declaring class outwards. A method-level
+/// type parameter (`method_type_params`, `name ->` its already-allocated
+/// `Type::ParamRef` into the enclosing `Type::Poly`) shadows every class
+/// scope. Each class scope contains the real `SymbolKind::TypeParameter`
+/// symbols entered by [`ClassLoader::enter_class_type_parameters`].
 struct TypeVarEnv<'a> {
-    declarations: ScopeId,
+    class_scopes: Vec<ScopeId>,
     method_type_params: Option<&'a HashMap<String, TypeId>>,
 }
 
-impl TypeVarEnv<'_> {
-    fn class_only(declarations: ScopeId) -> Self {
-        Self {
-            declarations,
-            method_type_params: None,
-        }
-    }
+#[derive(Clone, Copy)]
+struct InProgressClass {
+    declarations: ScopeId,
+    captures_enclosing_type_parameters: bool,
+}
+
+fn metadata_captures_enclosing_type_parameters(
+    metadata: &ClassfileMetadata,
+    class: SymbolId,
+) -> bool {
+    metadata.inner_classes.iter().any(|entry| {
+        matches!(entry.inner_class, ClassRef::Resolved(symbol) if symbol == class)
+            && entry.outer_class.is_some()
+            && !entry.access_flags.contains(ACC_STATIC)
+    })
 }
 
 fn class_type_signature_binary_name(signature: &ClassTypeSignature) -> BinaryName {
@@ -325,6 +337,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             store,
             session,
             repository: ClassRepository::new(),
+            in_progress_classes: HashMap::new(),
             definitions,
         }
     }
@@ -475,6 +488,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 let still_loading_symbol = self.repository.get(name).and_then(ClassEntry::symbol);
                 if let Some(symbol) = still_loading_symbol {
                     self.store.symbols.get_mut(symbol).info = SymbolInfo::Error;
+                    self.in_progress_classes.remove(&symbol);
                 }
                 self.repository
                     .mark_failed(name.clone(), still_loading_symbol, error.clone());
@@ -773,7 +787,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         )?;
         let resolved_type = match &signature {
             Some(FieldSignature(reference)) => {
-                let env = TypeVarEnv::class_only(declarations);
+                let env = self.class_type_var_env(declarations, None);
                 self.lower_reference_type_signature(owner, &env, reference)?
             }
             None => self.lower_field_type(owner, field_type)?,
@@ -833,7 +847,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             entered.push((symbol, parameter));
         }
 
-        let env = TypeVarEnv::class_only(declarations);
+        let env = self.class_type_var_env(declarations, None);
         for (symbol, parameter) in entered {
             let high = match &parameter.class_bound {
                 Some(bound) => self.lower_reference_type_signature(owner, &env, bound)?,
@@ -868,12 +882,90 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         }
         let text = self.store.names.intern(name);
         let lookup_name = Name::new(text, Namespace::Type);
-        let symbol = self
+        let symbol = env
+            .class_scopes
+            .iter()
+            .find_map(|scope| self.store.scopes.get(*scope).lookup(&lookup_name))?;
+        Some(self.type_ref(symbol))
+    }
+
+    fn class_type_var_env<'a>(
+        &self,
+        declarations: ScopeId,
+        method_type_params: Option<&'a HashMap<String, TypeId>>,
+    ) -> TypeVarEnv<'a> {
+        let class_symbol = self
             .store
             .scopes
-            .get(env.declarations)
-            .lookup(&lookup_name)?;
-        Some(self.type_ref(symbol))
+            .get(declarations)
+            .owner
+            .expect("class declaration scopes have an owner");
+        let mut class_scopes = vec![declarations];
+        let mut captures_enclosing = self
+            .in_progress_classes
+            .get(&class_symbol)
+            .is_some_and(|class| class.captures_enclosing_type_parameters);
+        let mut enclosing = self.store.symbols.get(class_symbol).owner;
+
+        while captures_enclosing {
+            let Some(owner) = enclosing else {
+                break;
+            };
+            let Some((scope, owner_captures_enclosing)) = self.enclosing_class_type_scope(owner)
+            else {
+                break;
+            };
+            class_scopes.push(scope);
+            captures_enclosing = owner_captures_enclosing;
+            enclosing = self.store.symbols.get(owner).owner;
+        }
+
+        TypeVarEnv {
+            class_scopes,
+            method_type_params,
+        }
+    }
+
+    fn enclosing_class_type_scope(&self, class: SymbolId) -> Option<(ScopeId, bool)> {
+        if let Some(in_progress) = self.in_progress_classes.get(&class) {
+            return Some((
+                in_progress.declarations,
+                in_progress.captures_enclosing_type_parameters,
+            ));
+        }
+
+        let SymbolInfo::Complete(class_info) = self.store.symbols.get(class).info else {
+            return None;
+        };
+        let Type::ClassInfo(class_info) = self.store.types.get(class_info) else {
+            return None;
+        };
+        let captures_enclosing =
+            self.session.metadata.get(&class).is_some_and(|metadata| {
+                metadata_captures_enclosing_type_parameters(metadata, class)
+            });
+        Some((class_info.declarations, captures_enclosing))
+    }
+
+    fn classfile_captures_enclosing_type_parameters(
+        &self,
+        name: &BinaryName,
+        class_file: &ClassFile<'_>,
+    ) -> Result<bool, ClassLoadError> {
+        let self_entry = class_file
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                Attribute::InnerClasses(entries) => entries.iter().find(|entry| {
+                    self.resolve_name(name, class_file, entry.inner_class_info_index)
+                        .is_ok_and(|inner_class| inner_class == *name)
+                }),
+                _ => None,
+            });
+        Ok(self_entry.is_some_and(|entry| {
+            entry.outer_class_info_index.is_some()
+                && entry.inner_class_access_flags & ACC_STATIC == 0
+        }))
     }
 
     /// Walks an already-parsed [`TypeSignature`] (JVMS §4.7.9.1) into a
@@ -1283,6 +1375,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         if let Some(semantic_owner) = self.resolve_semantic_owner(name, &class_file)? {
             self.store.symbols.get_mut(class_symbol).owner = Some(semantic_owner);
         }
+        let captures_enclosing_type_parameters =
+            self.classfile_captures_enclosing_type_parameters(name, &class_file)?;
+        self.in_progress_classes.insert(
+            class_symbol,
+            InProgressClass {
+                declarations,
+                captures_enclosing_type_parameters,
+            },
+        );
 
         // Parsed and entered before super_class/interfaces/fields/methods so
         // that a supertype's own generic arguments and every member's
@@ -1433,6 +1534,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         );
 
         self.complete_class(class_symbol, declarations, super_class, interfaces);
+        self.in_progress_classes.remove(&class_symbol);
         Ok(class_symbol)
     }
 
@@ -1867,7 +1969,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let signature = aligned.filter(|signature| signature.type_parameters.is_empty());
 
         let last_index = descriptor.parameters.len().checked_sub(1);
-        let env = TypeVarEnv::class_only(declarations);
+        let env = self.class_type_var_env(declarations, None);
         let mut params = Vec::with_capacity(descriptor.parameters.len());
         for (index, parameter) in descriptor.parameters.iter().enumerate() {
             let ty = match signature.map(|signature| &signature.parameters[index]) {
@@ -1938,10 +2040,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             });
             method_type_params.insert(parameter.name.clone(), param_ref);
         }
-        let env = TypeVarEnv {
-            declarations,
-            method_type_params: Some(&method_type_params),
-        };
+        let env = self.class_type_var_env(declarations, Some(&method_type_params));
 
         let mut type_params = Vec::with_capacity(signature.type_parameters.len());
         for parameter in &signature.type_parameters {
@@ -3628,6 +3727,51 @@ mod tests {
             synthetic_class("java/lang/Comparable", None),
         );
         classes
+    }
+
+    fn enclosing_generics_classpath() -> HashMap<BinaryName, Vec<u8>> {
+        let mut classes = HashMap::new();
+        for (name, path) in [
+            ("enclosing_generics/Outer", "enclosing_generics/Outer.class"),
+            (
+                "enclosing_generics/Outer$Inner",
+                "enclosing_generics/Outer$Inner.class",
+            ),
+        ] {
+            classes.insert(BinaryName::from_internal(name), own_fixture_bytes(path));
+        }
+        classes.insert(
+            BinaryName::from_internal("java/lang/Object"),
+            synthetic_class("java/lang/Object", None),
+        );
+        classes
+    }
+
+    #[test]
+    fn nested_class_signature_resolves_enclosing_class_type_parameter() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(enclosing_generics_classpath()),
+            &mut store,
+        );
+        let inner = loader
+            .load_class(&BinaryName::from_internal("enclosing_generics/Outer$Inner"))
+            .expect("Outer$Inner should resolve its enclosing K parameter");
+        drop(loader);
+
+        let outer = store
+            .symbols
+            .get(inner)
+            .owner
+            .expect("Inner should have Outer as its semantic owner");
+        let outer_k = type_parameter_symbol(&mut store, outer, "K");
+        let value_type = member_type_id(&mut store, inner, "value");
+        assert_eq!(parent_symbol(&store, value_type), outer_k);
+        let get_type = member_type_id(&mut store, inner, "get");
+        let Type::Method(method) = store.types.get(get_type) else {
+            panic!("expected get to have a method type");
+        };
+        assert_eq!(parent_symbol(&store, method.result), outer_k);
     }
 
     /// `generic_sample/GenericSample.class`'s `items` field has a real
