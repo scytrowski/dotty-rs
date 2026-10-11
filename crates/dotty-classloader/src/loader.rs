@@ -262,6 +262,10 @@ pub struct ClassLoader<'store, E> {
     /// alias. Its error is returned through the requesting class's load,
     /// so keep its artifact context until that outer call records failure.
     alias_failure_context: Option<(BinaryName, ClassOrigin, ClassFormat)>,
+    /// Resource context for classes whose decoding is currently in progress.
+    /// Inheritance-cycle detection can fail a class before its own load
+    /// returns, so its selected resource must be available to that branch.
+    loading_context: HashMap<BinaryName, (ClassOrigin, ClassFormat)>,
     /// The canonical `TypeId`/`SymbolId` every JVM primitive and
     /// `Object`/`Any`/`Nothing` reference lowers against — see
     /// [`Definitions::bootstrap`]. `definitions.no_prefix` is this
@@ -379,6 +383,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             repository: ClassRepository::new(),
             in_progress_classes: HashMap::new(),
             alias_failure_context: None,
+            loading_context: HashMap::new(),
             definitions,
         }
     }
@@ -505,8 +510,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.store.symbols.get_mut(symbol).info = SymbolInfo::Error;
                 let failure = ClassLoadFailure {
                     error: error.clone(),
-                    origin: self.session.origins.get(&symbol).cloned(),
-                    format: None,
+                    origin: self
+                        .loading_context
+                        .get(name)
+                        .map(|(origin, _)| origin.clone())
+                        .or_else(|| self.session.origins.get(&symbol).cloned()),
+                    format: self.loading_context.get(name).map(|(_, format)| *format),
                 };
                 self.repository
                     .mark_failed(name.clone(), Some(symbol), failure);
@@ -589,6 +598,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let resource_origin = resource.origin().clone();
         let resource_format = resource.format();
+        self.loading_context
+            .insert(name.clone(), (resource_origin.clone(), resource_format));
         let result = match resource_format {
             ClassFormat::Class => self.load_uncached_class(
                 name,
@@ -603,6 +614,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 inheritance_ancestry,
             ),
         };
+        self.loading_context.remove(name);
         result.map_err(|error| {
             let cause_name = error_binary_name(error.root_cause());
             let failure_is_for_another_name =
@@ -5880,6 +5892,53 @@ mod tests {
         }
 
         assert!(contains_circular_inheritance(&error));
+    }
+
+    #[test]
+    fn circular_inheritance_retains_resource_context_in_cached_failures() {
+        let resources = [("A", "B", "/a"), ("B", "A", "/b")]
+            .into_iter()
+            .map(|(name, parent, path)| {
+                (
+                    BinaryName::from_internal(name),
+                    (
+                        synthetic_class(name, Some(parent)),
+                        ClassFormat::Class,
+                        ClassOrigin::Directory(PathBuf::from(path)),
+                    ),
+                )
+            })
+            .collect();
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(ResourceClassPath(resources), &mut store);
+
+        let failure = loader
+            .load_class_detailed(&BinaryName::from_internal("A"))
+            .expect_err("the synthetic superclass cycle must fail");
+        assert!(matches!(
+            failure.root_cause(),
+            ClassLoadError::CircularInheritance(name) if name.as_internal() == "A"
+        ));
+        assert_eq!(
+            failure.origin,
+            Some(ClassOrigin::Directory(PathBuf::from("/a")))
+        );
+        assert_eq!(failure.format, Some(ClassFormat::Class));
+
+        for name in ["A", "B"] {
+            let cached = loader
+                .load_class_detailed(&BinaryName::from_internal(name))
+                .expect_err("cycle participants must retain their cached failure");
+            assert!(matches!(
+                cached.root_cause(),
+                ClassLoadError::CircularInheritance(cause) if cause.as_internal() == "A"
+            ));
+            assert_eq!(
+                cached.origin,
+                Some(ClassOrigin::Directory(PathBuf::from("/a")))
+            );
+            assert_eq!(cached.format, Some(ClassFormat::Class));
+        }
     }
 
     #[test]
