@@ -69,9 +69,9 @@ when opened, the compiler's Scala package synthesizer reconstructs the alias
 info. The alias is not a library class-file artifact. This is distinct from
 representing an impure alias as a class symbol.
 
-## Current audit evidence
+## Frozen #946 cohort and current #950 audit
 
-The pinned corpus audit finds 13 first-blocker observations but only 3
+The pre-#949 pinned audit found 13 first-blocker observations but only 3
 distinct `FunctionWithMods` source trees, across 2 files. They are at
 `StringParsers.scala:185` (`Char => Boolean`) and
 `JavaCollectionWrappers.scala:399,510` (`Option[V] => Option[V]`). All three
@@ -85,9 +85,17 @@ member `updateWith`; both are sibling/inherited observations. In total, 1
 observation is direct and 12 are sibling/inherited. The outer first-failure
 methods are `checkFloatFormat` for the first tree and `updateWith` for the two
 wrappers.
-This confirms that the current 13 / 2 bucket is the capture-checking rewrite
-of otherwise ordinary `=>` function types, not a mixture of erased or pure
-function syntax.
+This froze the #946 cohort as the capture-checking rewrite of otherwise
+ordinary `=>` function types, not a mixture of erased or pure function syntax.
+The #950 audit retains all 13 observations individually, including method and
+function-tree identities, source shape, modifier and erasure data, and direct
+or inherited attribution. The current `FunctionWithMods` first-blocker count
+is 0 / 0. All 13 methods now reach `SymbolResolution`; none is fully typed.
+The source-type index contains no published function type after each enclosing
+method fails, because that method transaction rolls back. Focused projection
+tests separately confirm that supported source shapes select and preserve the
+canonical impure alias before normalization. See the
+[per-row current audit](../../../../../docs/typer-classpath-corpus-audit-3.9.0.md#946-950-impure-function-hardening-and-next-sprint).
 
 ## dotty-rs representation and reuse boundary
 

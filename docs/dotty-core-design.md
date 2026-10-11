@@ -1136,6 +1136,11 @@ their own identities. The original lambda is not modified; malformed graphs
 or arity mismatches return a `TypeRebindError`, and failed transformations
 roll back their allocations.
 
+The Typer's bounded top-level alias normalizer uses this primitive when an
+applied generic `TypeAlias` has a `TypeLambda` body. A bare generic alias still
+requires substitution; alias-chain cycle detection and the normalization fuel
+limit remain owned by the normalizer.
+
 **Abstracting parameter symbols.** The same traversal builds binders from
 *symbols*: `method_type_from_symbols(store, params, result, kind)`,
 `poly_type_from_symbols` and `type_lambda_from_symbols` (`MethodParamSpec` /
