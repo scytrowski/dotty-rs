@@ -206,13 +206,14 @@ impl XmlState {
     }
 
     fn finalize_tag_name(&mut self) {
-        let Some(pending) = self.pending_tag_name.take() else {
+        let Some(pending) = self.pending_tag_name else {
             return;
         };
         let Some(name) = self.current_tag_name.take() else {
             return;
         };
 
+        self.pending_tag_name = None;
         self.tag_name_separator = false;
         match pending {
             PendingTagName::Opening => {
