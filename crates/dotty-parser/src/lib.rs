@@ -39,13 +39,15 @@ mod types;
 pub use compilation_unit::{ParseResult, parse_compilation_unit, parse_expression_fragment};
 pub use context::{Location, ParamOwner, ParseContext, ParseKind, ParserFeatures};
 pub use cursor::{Cursor, CursorCheckpoint};
+#[cfg(test)]
+pub use diagnostics::ParseDiagnosticKind;
 pub use diagnostics::{
     CaseIssue, ClassDefinitionIssue, ContextualParameterClause, DeclarationIssue,
     ExpressionApplicationTarget, ExpressionIssue, ExtensionIssue, GivenIssue, ImportIssue,
     LayoutExpressionContext, LayoutIssue, ModifierIssue, PackageIssue, ParameterIssue,
-    ParameterMutability, ParseDiagnostic, ParseDiagnosticKind, ParseIssue, PatternIssue,
-    StatementIssue, StatementSequenceContext, TemplateIssue, TypeDefinitionIssue,
-    TypeFunctionArrow, TypeIssue, TypeParamIssue, ValueDefinitionKind,
+    ParameterMutability, ParseDiagnostic, ParseIssue, PatternIssue, StatementIssue,
+    StatementSequenceContext, TemplateIssue, TypeDefinitionIssue, TypeFunctionArrow, TypeIssue,
+    TypeParamIssue, ValueDefinitionKind,
 };
 pub use infix::{OpInfo, is_assignment_operator, is_right_associative, precedence};
 pub use names::KnownNames;

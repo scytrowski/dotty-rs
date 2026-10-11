@@ -6,7 +6,7 @@ use dotty_core::{
 use dotty_namer::{
     NamerError, SourceContextId, SourceDefinition, SourceSemanticIndex, name_compilation_unit,
 };
-use dotty_parser::{ParseDiagnosticKind, parse_compilation_unit};
+use dotty_parser::{DeclarationIssue, ParseIssue, parse_compilation_unit};
 
 struct NamedSource {
     parsed: dotty_parser::ParseResult,
@@ -1705,10 +1705,10 @@ fn assert_secondary_constructor_is_rejected(source_text: &str, source: SourceId)
     );
 
     assert!(
-        parsed
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.kind() == ParseDiagnosticKind::UnexpectedToken),
+        parsed.diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic.issue(),
+            ParseIssue::Declaration(DeclarationIssue::SecondaryConstructorOutsideTemplate)
+        )),
         "expected an unexpected-token diagnostic, got {:?}",
         parsed.diagnostics
     );

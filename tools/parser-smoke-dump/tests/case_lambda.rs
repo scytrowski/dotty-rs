@@ -138,10 +138,10 @@ fn recovers_from_an_invalid_indented_case_lambda_body() {
         result
             .diagnostics
             .iter()
-            .map(|diagnostic| (diagnostic.kind(), diagnostic.span()))
+            .map(|diagnostic| (diagnostic.issue().code(), diagnostic.span()))
             .collect::<Vec<_>>(),
         [(
-            dotty_parser::ParseDiagnosticKind::ExpectedExpression,
+            "parser.expression.expected_at_current_token",
             TextRange::new(64, 69).unwrap(),
         )],
         "diagnostics: {:?}",

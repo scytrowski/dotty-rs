@@ -9,8 +9,8 @@ use std::collections::HashSet;
 
 use crate::ParserFeatures;
 use crate::{
-    Cursor, KnownNames, Location, Mark, ParamOwner, ParseContext, ParseDiagnostic,
-    ParseDiagnosticKind, ParseIssue, ParseKind, RecoverySet,
+    Cursor, KnownNames, Location, Mark, ParamOwner, ParseContext, ParseDiagnostic, ParseIssue,
+    ParseKind, RecoverySet,
 };
 
 /// Stateful input and allocation context for the handwritten parser.
@@ -541,26 +541,6 @@ where
         false
     }
 
-    /// Adds a parser diagnostic at the current token.
-    ///
-    /// This is the transitional legacy-message bridge. New code should use
-    /// [`Self::report_issue`] so diagnostic data remains structured.
-    pub fn report(&mut self, kind: ParseDiagnosticKind, message: impl Into<String>) {
-        let span = self.current_span();
-        self.report_at(kind, span, message);
-    }
-
-    /// Adds a parser diagnostic at an explicitly selected source span.
-    pub(crate) fn report_at(
-        &mut self,
-        kind: ParseDiagnosticKind,
-        span: SourceSpan,
-        message: impl Into<String>,
-    ) {
-        self.diagnostics
-            .push(ParseDiagnostic::error(kind, span, message));
-    }
-
     /// Adds a structured parser diagnostic at the current token.
     pub fn report_issue(&mut self, issue: ParseIssue) {
         let span = self.current_span();
@@ -785,6 +765,7 @@ const fn is_zero_width_synthetic(kind: TokenKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ParseDiagnosticKind;
     use dotty_core::{Punctuation, TextRange, TokenKind, TokenValue};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -1348,7 +1329,6 @@ mod tests {
                 found: TokenKind::Identifier,
             }
         ));
-        assert_eq!(parser.diagnostics()[0].legacy_message(), None);
     }
 
     #[test]
@@ -1399,7 +1379,6 @@ mod tests {
         assert_eq!(diagnostic.kind(), ParseDiagnosticKind::ExpectedToken);
         assert_eq!(diagnostic.source(), SourceId::from_index(1));
         assert_eq!(diagnostic.span(), TextRange::new(0, 1).unwrap());
-        assert_eq!(diagnostic.legacy_message(), None);
         assert_eq!(diagnostic.issue().code(), "parser.expected_token");
         assert!(matches!(
             diagnostic.issue(),

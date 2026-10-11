@@ -1701,7 +1701,10 @@ mod tests {
             TreeKind::PhaseSpecific(UntypedNode::Error(_))
         ));
         assert!(result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.kind() == dotty_parser::ParseDiagnosticKind::ExpectedExpression
+            matches!(
+                diagnostic.issue(),
+                ParseIssue::Expression(ExpressionIssue::ExpectedForEnumeratorExpression { .. })
+            )
         }));
         assert!(matches!(
             result.ast.get(for_tree.body).kind,
@@ -2115,10 +2118,6 @@ mod tests {
 
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(
-            result.diagnostics[0].kind(),
-            dotty_parser::ParseDiagnosticKind::ExpectedToken
-        );
-        assert_eq!(
             result.diagnostics[0].issue(),
             &ParseIssue::Expression(ExpressionIssue::ExpectedLegacyLambdaArrow {
                 found: dotty_core::TokenKind::Identifier,
@@ -2341,10 +2340,6 @@ mod tests {
             &ParseIssue::Expression(ExpressionIssue::UnassignableAssignmentTarget {
                 found: dotty_core::TokenKind::Newline,
             })
-        );
-        assert_eq!(
-            diagnostic.kind(),
-            dotty_parser::ParseDiagnosticKind::UnexpectedToken
         );
         assert_eq!(diagnostic.span(), separator_span);
         let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
@@ -2582,10 +2577,6 @@ mod tests {
         assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
         let diagnostic = &result.diagnostics[0];
         assert_eq!(
-            diagnostic.kind(),
-            dotty_parser::ParseDiagnosticKind::UnexpectedToken
-        );
-        assert_eq!(
             diagnostic.issue(),
             &ParseIssue::Layout(LayoutIssue::MisalignedEndMarker)
         );
@@ -2810,8 +2801,8 @@ mod tests {
 
         assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
         assert_eq!(
-            result.diagnostics[0].kind(),
-            dotty_parser::ParseDiagnosticKind::UnexpectedToken
+            result.diagnostics[0].issue().code(),
+            "parser.layout.expected_block_separator"
         );
         let bad_token = SOURCE.find(')').expect("malformed token exists") as u32;
         assert_eq!(
@@ -2884,8 +2875,8 @@ mod tests {
 
         assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
         assert_eq!(
-            result.diagnostics[0].kind(),
-            dotty_parser::ParseDiagnosticKind::ExpectedToken
+            result.diagnostics[0].issue().code(),
+            "parser.case.expected_arrow"
         );
         let next_case = SOURCE.find("case B").unwrap() as u32;
         assert_eq!(
@@ -3031,7 +3022,10 @@ mod tests {
 
         assert!(
             result.diagnostics.iter().any(|diagnostic| {
-                diagnostic.kind() == dotty_parser::ParseDiagnosticKind::ExpectedExpression
+                matches!(
+                    diagnostic.issue(),
+                    ParseIssue::Expression(ExpressionIssue::ExpectedControlFlowBranch { .. })
+                )
             }),
             "{:?}",
             result.diagnostics
@@ -3130,7 +3124,10 @@ mod tests {
 
         assert!(
             result.diagnostics.iter().any(|diagnostic| {
-                diagnostic.kind() == dotty_parser::ParseDiagnosticKind::ExpectedExpression
+                matches!(
+                    diagnostic.issue(),
+                    ParseIssue::Expression(ExpressionIssue::ExpectedLambdaBody { .. })
+                )
             }),
             "{:?}",
             result.diagnostics
@@ -3417,8 +3414,8 @@ mod tests {
 
         assert_eq!(result.diagnostics.len(), 1);
         assert_eq!(
-            result.diagnostics[0].kind(),
-            dotty_parser::ParseDiagnosticKind::ExpectedExpression
+            result.diagnostics[0].issue().code(),
+            "parser.expression.missing_assignment_rhs"
         );
         let TreeKind::PackageDef(package) = &result.ast.get(result.root).kind else {
             panic!("expected the compilation-unit package");
@@ -3481,10 +3478,6 @@ mod tests {
             &ParseIssue::Expression(ExpressionIssue::ExpectedLambdaBody {
                 found: dotty_core::TokenKind::Punctuation(dotty_core::Punctuation::RightParen),
             })
-        );
-        assert_eq!(
-            diagnostic.kind(),
-            dotty_parser::ParseDiagnosticKind::ExpectedExpression
         );
         let closing_paren = source.find("\n)").unwrap() as u32 + 1;
         assert_eq!(
@@ -4020,10 +4013,6 @@ mod tests {
 
         assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
         let diagnostic = &result.diagnostics[0];
-        assert_eq!(
-            diagnostic.kind(),
-            dotty_parser::ParseDiagnosticKind::ExpectedToken
-        );
         assert_eq!(
             diagnostic.issue(),
             &dotty_parser::ParseIssue::Type(
