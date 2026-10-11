@@ -12,7 +12,9 @@ use dotty_core::symbols::{
 };
 use dotty_core::types::{Type, TypeLambda};
 use dotty_tasty::tasty::TastyFile;
-use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
+use dotty_tasty_unpickler::tasty_unpickler::{
+    TastyUnpickler, UnpickleError, UnpickleErrorCategory,
+};
 
 struct Session {
     store: SemanticStore,
@@ -91,10 +93,14 @@ fn decode(bytes: &[u8], at: u32) -> Result<TypeId, UnpickleError> {
 fn a_parameter_type_naming_no_node_is_an_invalid_binder_reference() {
     // Address 1 is the length byte of the wrapper, not the start of a node.
     let bytes = file_with(&param_type(1, 0));
+    let error = decode(&bytes, 4).expect_err("a length byte is not a binder node");
     assert_eq!(
-        decode(&bytes, 4),
-        Err(UnpickleError::InvalidBinderReference { from: 4, binder: 1 })
+        error,
+        UnpickleError::InvalidBinderReference { from: 4, binder: 1 }
     );
+    assert_eq!(error.code(), "unpickler.invalid_binder_reference");
+    assert_eq!(error.category(), UnpickleErrorCategory::MalformedInput);
+
     let far = file_with(&param_type(100, 0));
     assert_eq!(
         decode(&far, 4),

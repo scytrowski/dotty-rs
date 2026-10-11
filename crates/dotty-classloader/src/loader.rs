@@ -5042,6 +5042,41 @@ mod tests {
     }
 
     #[test]
+    fn detailed_failure_from_a_jmod_retains_the_jmod_origin() {
+        struct MalformedJmodClassPath(crate::jmod_class_path::JmodClassPath);
+
+        impl ClassPathEntry for MalformedJmodClassPath {
+            fn find_class(
+                &self,
+                name: &BinaryName,
+            ) -> Result<Option<ClassResource>, ClassPathError> {
+                Ok(self.0.find_class(name)?.map(|resource| {
+                    ClassResource::new(vec![0, 1, 2], resource.format(), resource.origin().clone())
+                }))
+            }
+        }
+
+        let jmod_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pool_sample_jmod/pool_sample.jmod");
+        let jmod = crate::jmod_class_path::JmodClassPath::new(jmod_path.clone())
+            .expect("checked-in JMOD fixture should be readable");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(MalformedJmodClassPath(jmod), &mut store);
+
+        let failure = loader
+            .load_class_detailed(&BinaryName::from_internal("pool/PoolSample"))
+            .expect_err("corrupted class bytes read from the JMOD must fail");
+
+        assert_eq!(failure.code(), "classloader.invalid_class_file");
+        assert_eq!(
+            failure.category(),
+            crate::error::ClassLoadCategory::MalformedArtifact
+        );
+        assert_eq!(failure.origin, Some(ClassOrigin::Jmod(jmod_path)));
+        assert_eq!(failure.format, Some(ClassFormat::Class));
+    }
+
+    #[test]
     #[ignore = "requires a JDK 21 home in DOTTY_JDK21_HOME"]
     fn jdk21_classspecializer_speciesdata_resolves_its_outer_k_parameter() {
         use crate::jdk_class_path::JdkClassPath;
