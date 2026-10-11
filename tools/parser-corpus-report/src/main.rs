@@ -10,11 +10,13 @@ use std::time::{Duration, Instant};
 
 use dotty_core::ast::{AstArena, Modifier, TreeKind, Untyped, UntypedNode};
 use dotty_core::{
-    HardKeyword, Packages, SemanticStore, SourceId, SourceSemanticIndex, SourceText, SymbolId,
-    SymbolKind, TokenKind,
+    DiagnosticSeverity, HardKeyword, Packages, SemanticStore, SourceId, SourceSemanticIndex,
+    SourceText, SymbolId, SymbolKind, TextRange, TokenKind,
 };
 use dotty_lexer::ContextualScanner;
-use dotty_namer::name_compilation_unit;
+use dotty_namer::{
+    NamingOutcome, SourceParseStatus, name_compilation_unit, name_compilation_unit_with_diagnostics,
+};
 use dotty_parser::parse_compilation_unit;
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +34,7 @@ struct Options {
     oracle_files: Option<usize>,
     oracle_failures: Option<usize>,
     namer: bool,
+    namer_diagnostics: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +57,7 @@ struct ReportMetadata<'a> {
     oracle_files: Option<usize>,
     oracle_failures: Option<usize>,
     collect_namer: bool,
+    collect_namer_diagnostics: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -219,6 +223,67 @@ struct NamerReport {
     invariant_failure_histogram: BTreeMap<String, FailureBucket>,
     enum_identity_audit: EnumIdentityAudit,
     export_handoff_audit: ExportHandoffAudit,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic_aware: Option<DiagnosticAwareNamerReport>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct DiagnosticAwareNamerReport {
+    files_namer_ran: usize,
+    files_namer_succeeded: usize,
+    files_namer_succeeded_with_diagnostics: usize,
+    files_source_rejected: usize,
+    files_source_rejected_after_parser_recovery: usize,
+    files_namer_returned_internal_error: usize,
+    files_with_invariant_failures: usize,
+    failed_calls_with_transaction_residue: usize,
+    source_diagnostic_histogram: BTreeMap<String, NamerDiagnosticBucket>,
+    internal_error_histogram: BTreeMap<String, NamerInternalErrorBucket>,
+    invariant_failure_histogram: BTreeMap<String, FailureBucket>,
+}
+
+#[derive(Debug, Serialize)]
+struct NamerDiagnosticBucket {
+    count: usize,
+    error_count: usize,
+    warning_count: usize,
+    note_count: usize,
+    examples: Vec<NamerDiagnosticExample>,
+}
+
+#[derive(Debug, Serialize)]
+struct NamerDiagnosticExample {
+    path: String,
+    diagnostic: NamerDiagnosticRecord,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct NamerDiagnosticRecord {
+    code: String,
+    severity: String,
+    source_id: u32,
+    span: NamerDiagnosticSpan,
+    issue: NamerDiagnosticIssueData,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct NamerDiagnosticSpan {
+    start: u32,
+    end: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum NamerDiagnosticIssueData {
+    InvalidVisibilityQualifier { access: String, qualifier: String },
+}
+
+#[derive(Debug, Serialize)]
+struct NamerInternalErrorBucket {
+    count: usize,
+    clean_parse_failures: usize,
+    recovered_parse_failures: usize,
+    examples: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -305,6 +370,33 @@ enum NamerOutcome {
         message: String,
         transaction_residue: bool,
     },
+    DiagnosticAware {
+        legacy: Box<NamerOutcome>,
+        outcome: DiagnosticAwareOutcome,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum DiagnosticAwareOutcome {
+    Named {
+        invariant_violations: Vec<String>,
+        diagnostics: Vec<NamerDiagnosticRecord>,
+    },
+    Rejected {
+        diagnostics: Vec<NamerDiagnosticRecord>,
+        transaction_residue: bool,
+    },
+    InternalError {
+        kind: String,
+        transaction_residue: bool,
+    },
+}
+
+fn legacy_namer_outcome(outcome: &NamerOutcome) -> &NamerOutcome {
+    match outcome {
+        NamerOutcome::DiagnosticAware { legacy, .. } => legacy_namer_outcome(legacy),
+        outcome => outcome,
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -355,6 +447,7 @@ fn main() {
         if let Err(error) = run_worker(
             arguments.get(1),
             arguments.iter().any(|arg| arg == "--namer"),
+            arguments.iter().any(|arg| arg == "--namer-diagnostics"),
         ) {
             eprintln!("worker failed: {error}");
             std::process::exit(2);
@@ -367,7 +460,7 @@ fn main() {
         Err(error) => {
             eprintln!("{error}");
             eprintln!(
-                "usage: dotty-parser-corpus-report [--source-set <name@version@revision@repository-url> --root <dir>...]... [--root <dir>...] [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--parser-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]"
+                "usage: dotty-parser-corpus-report [--source-set <name@version@revision@repository-url> --root <dir>...]... [--root <dir>...] [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--parser-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer] [--namer-diagnostics]"
             );
             std::process::exit(2);
         }
@@ -394,6 +487,7 @@ fn main() {
         &source_set_names,
         options.timeout,
         options.namer,
+        options.namer_diagnostics,
     );
     let report = build_report(
         &outcomes,
@@ -406,6 +500,7 @@ fn main() {
             oracle_files: options.oracle_files,
             oracle_failures: options.oracle_failures,
             collect_namer: options.namer,
+            collect_namer_diagnostics: options.namer_diagnostics,
         },
     );
 
@@ -442,6 +537,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
     let mut oracle_files = None;
     let mut oracle_failures = None;
     let mut namer = false;
+    let mut namer_diagnostics = false;
     let mut args = args.peekable();
 
     while let Some(argument) = args.next() {
@@ -529,9 +625,13 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
                 }
             }
             "--namer" => namer = true,
+            "--namer-diagnostics" => {
+                namer = true;
+                namer_diagnostics = true;
+            }
             "--help" | "-h" => {
                 return Err(
-                    "usage: dotty-parser-corpus-report [--source-set <name@version@revision@repository-url> --root <dir>...]... [--root <dir>...] [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--parser-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer]".to_owned(),
+                    "usage: dotty-parser-corpus-report [--source-set <name@version@revision@repository-url> --root <dir>...]... [--root <dir>...] [--output <file>] [--timeout-ms <n>] [--source-version <v>] [--source-revision <sha>] [--parser-revision <sha>] [--oracle-files <n>] [--oracle-failures <n>] [--namer] [--namer-diagnostics]".to_owned(),
                 );
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -574,6 +674,7 @@ fn parse_options(args: impl Iterator<Item = String>) -> Result<Options, String> 
         oracle_files,
         oracle_failures,
         namer,
+        namer_diagnostics,
     })
 }
 
@@ -727,6 +828,7 @@ fn parse_files(
     source_set_names: &[Option<String>],
     timeout: Duration,
     namer: bool,
+    namer_diagnostics: bool,
 ) -> Vec<FileOutcome> {
     if files.is_empty() {
         return Vec::new();
@@ -753,7 +855,7 @@ fn parse_files(
                 let Ok((index, path)) = job else {
                     break;
                 };
-                let mut outcome = parse_one(&path, &roots, timeout, namer);
+                let mut outcome = parse_one(&path, &roots, timeout, namer, namer_diagnostics);
                 outcome.source_set = source_set_names[index].clone();
                 if result_sender.send((index, outcome)).is_err() {
                     break;
@@ -778,7 +880,13 @@ fn parse_files(
     outcomes.into_iter().map(|(_, outcome)| outcome).collect()
 }
 
-fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration, namer: bool) -> FileOutcome {
+fn parse_one(
+    path: &Path,
+    roots: &[PathBuf],
+    timeout: Duration,
+    namer: bool,
+    namer_diagnostics: bool,
+) -> FileOutcome {
     let display_path = display_path(path, roots);
     let executable = match env::current_exe() {
         Ok(executable) => executable,
@@ -792,6 +900,9 @@ fn parse_one(path: &Path, roots: &[PathBuf], timeout: Duration, namer: bool) -> 
         .stderr(Stdio::null());
     if namer {
         command.arg("--namer");
+    }
+    if namer_diagnostics {
+        command.arg("--namer-diagnostics");
     }
 
     match run_command_with_timeout(command, timeout) {
@@ -873,7 +984,7 @@ struct WorkerResult {
     has_parser_capture_syntax: bool,
 }
 
-fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
+fn run_worker(path: Option<&String>, namer: bool, namer_diagnostics: bool) -> io::Result<()> {
     let path = path.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing path"))?;
     let source_file_name = Path::new(path)
         .file_name()
@@ -882,7 +993,12 @@ fn run_worker(path: Option<&String>, namer: bool) -> io::Result<()> {
     let result = match fs::read_to_string(path) {
         Ok(source) => {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                parse_source(&source, source_file_name, namer)
+                parse_source_with_modes(
+                    &source,
+                    source_file_name,
+                    namer || namer_diagnostics,
+                    namer_diagnostics,
+                )
             })) {
                 Ok(parsed) => WorkerResult {
                     status: parsed.status,
@@ -990,7 +1106,17 @@ struct ParsedSource {
     has_parser_capture_syntax: bool,
 }
 
+#[cfg(test)]
 fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> ParsedSource {
+    parse_source_with_modes(source, source_file_name, run_namer, false)
+}
+
+fn parse_source_with_modes(
+    source: &str,
+    source_file_name: &str,
+    run_namer: bool,
+    run_namer_diagnostics: bool,
+) -> ParsedSource {
     let scanner = match ContextualScanner::new(source) {
         Ok(scanner) => scanner,
         Err(error) => {
@@ -1072,7 +1198,7 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
         Status::RecoverableDiagnostics
     };
     let mut deferred_features = BTreeMap::new();
-    let namer = run_namer.then(|| {
+    let legacy_namer = (run_namer || run_namer_diagnostics).then(|| {
         let mut packages = Packages::new();
         let store_checkpoint = store.checkpoint();
         let package_mark = packages.mark();
@@ -1124,6 +1250,15 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
             }
         }
     });
+    let namer = if run_namer_diagnostics {
+        let diagnostic_aware = run_diagnostic_namer(source, source_file_name);
+        Some(NamerOutcome::DiagnosticAware {
+            legacy: Box::new(legacy_namer.expect("diagnostic mode enables legacy Namer metrics")),
+            outcome: diagnostic_aware,
+        })
+    } else {
+        legacy_namer
+    };
     ParsedSource {
         status,
         diagnostics,
@@ -1134,6 +1269,145 @@ fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> Parsed
         has_raw_caret_character: source.contains('^'),
         has_caret_operator_token,
         has_parser_capture_syntax,
+    }
+}
+
+fn run_diagnostic_namer(source: &str, source_file_name: &str) -> DiagnosticAwareOutcome {
+    let mut store = SemanticStore::new();
+    let scanner = match ContextualScanner::new(source) {
+        Ok(scanner) => scanner,
+        Err(_) => {
+            return DiagnosticAwareOutcome::InternalError {
+                kind: "ScannerFailureDuringDiagnosticPass".to_owned(),
+                transaction_residue: false,
+            };
+        }
+    };
+    let scanner_diagnostics = scanner.diagnostics().len();
+    let source_text = match SourceText::new(source) {
+        Ok(source_text) => source_text,
+        Err(_) => {
+            return DiagnosticAwareOutcome::InternalError {
+                kind: "SourceTextFailureDuringDiagnosticPass".to_owned(),
+                transaction_residue: false,
+            };
+        }
+    };
+    let parsed = parse_compilation_unit(
+        source_text,
+        SourceId::from_index(0),
+        scanner,
+        &mut store.names,
+    );
+    let parse_status = if parsed.diagnostics.is_empty() && scanner_diagnostics == 0 {
+        SourceParseStatus::Clean
+    } else {
+        SourceParseStatus::Recovered
+    };
+    let mut packages = Packages::new();
+    let store_checkpoint = store.checkpoint();
+    let package_mark = packages.mark();
+    match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        SourceId::from_index(0),
+        source_file_name,
+        parse_status,
+        &mut store,
+        &mut packages,
+    ) {
+        Ok(NamingOutcome::Named { index, diagnostics }) => {
+            let mut invariant_violations = index.validate(&store, &packages);
+            invariant_violations.extend(validate_namer_audit_invariants(
+                &parsed.ast,
+                SourceId::from_index(0),
+                &index,
+                &store,
+                source,
+                !parsed.diagnostics.is_empty(),
+            ));
+            DiagnosticAwareOutcome::Named {
+                invariant_violations,
+                diagnostics: diagnostics
+                    .into_iter()
+                    .map(namer_diagnostic_record)
+                    .collect(),
+            }
+        }
+        Ok(NamingOutcome::Rejected { diagnostics }) => DiagnosticAwareOutcome::Rejected {
+            diagnostics: diagnostics
+                .into_iter()
+                .map(namer_diagnostic_record)
+                .collect(),
+            transaction_residue: store.checkpoint() != store_checkpoint
+                || packages.mark() != package_mark,
+        },
+        Err(error) => DiagnosticAwareOutcome::InternalError {
+            kind: namer_error_kind(&error),
+            transaction_residue: store.checkpoint() != store_checkpoint
+                || packages.mark() != package_mark,
+        },
+    }
+}
+
+fn namer_diagnostic_record(diagnostic: dotty_namer::NamerDiagnostic) -> NamerDiagnosticRecord {
+    let severity = match diagnostic.severity() {
+        DiagnosticSeverity::Error => "error",
+        DiagnosticSeverity::Warning => "warning",
+        DiagnosticSeverity::Note => "note",
+    };
+    let range: TextRange = diagnostic.span();
+    let issue = match diagnostic.issue() {
+        dotty_namer::NamerIssue::InvalidVisibilityQualifier { access, qualifier } => {
+            NamerDiagnosticIssueData::InvalidVisibilityQualifier {
+                access: match access {
+                    dotty_namer::VisibilityAccess::Private => "private",
+                    dotty_namer::VisibilityAccess::Protected => "protected",
+                }
+                .to_owned(),
+                qualifier: qualifier.clone(),
+            }
+        }
+    };
+    NamerDiagnosticRecord {
+        code: diagnostic.code().to_owned(),
+        severity: severity.to_owned(),
+        source_id: diagnostic.source().index(),
+        span: NamerDiagnosticSpan {
+            start: range.start(),
+            end: range.end(),
+        },
+        issue,
+    }
+}
+
+fn record_namer_diagnostic(
+    report: &mut DiagnosticAwareNamerReport,
+    path: &str,
+    diagnostic: &NamerDiagnosticRecord,
+) {
+    let bucket = report
+        .source_diagnostic_histogram
+        .entry(diagnostic.code.clone())
+        .or_insert_with(|| NamerDiagnosticBucket {
+            count: 0,
+            error_count: 0,
+            warning_count: 0,
+            note_count: 0,
+            examples: Vec::new(),
+        });
+    bucket.count += 1;
+    match diagnostic.severity.as_str() {
+        "error" => bucket.error_count += 1,
+        "warning" => bucket.warning_count += 1,
+        "note" => bucket.note_count += 1,
+        _ => {}
+    }
+    if bucket.examples.len() < 5 {
+        bucket.examples.push(NamerDiagnosticExample {
+            path: path.to_owned(),
+            diagnostic: diagnostic.clone(),
+        });
     }
 }
 
@@ -1918,7 +2192,11 @@ fn root_label(root: &Path) -> String {
 
 fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Report {
     let mut report = Report {
-        schema_version: 8,
+        schema_version: if metadata.collect_namer_diagnostics {
+            9
+        } else {
+            8
+        },
         corpus_roots: metadata.roots.iter().map(|root| root_label(root)).collect(),
         source_version: metadata.source_version,
         source_revision: metadata.source_revision,
@@ -1946,7 +2224,12 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
         diagnostic_histogram: BTreeMap::new(),
         first_failure_histogram: BTreeMap::new(),
         capture_checking_cohorts: BTreeMap::new(),
-        namer: metadata.collect_namer.then(NamerReport::default),
+        namer: metadata.collect_namer.then(|| NamerReport {
+            diagnostic_aware: metadata
+                .collect_namer_diagnostics
+                .then(DiagnosticAwareNamerReport::default),
+            ..NamerReport::default()
+        }),
         deferred_features: metadata.collect_namer.then(|| {
             [
                 "case_class_synthetic_apis",
@@ -2066,8 +2349,9 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
                 bucket.files += 1;
                 bucket.occurrences += counts.occurrences;
                 bucket.materialized_occurrences += counts.materialized;
-                if matches!(&outcome.namer, Some(NamerOutcome::Success { .. }))
-                    && !name.starts_with("parser_blocked:")
+                if outcome.namer.as_ref().is_some_and(|namer| {
+                    matches!(legacy_namer_outcome(namer), NamerOutcome::Success { .. })
+                }) && !name.starts_with("parser_blocked:")
                     && !name.ends_with("_blocked_by_parser_recovery")
                 {
                     bucket.deferred_occurrences += counts.occurrences - counts.materialized;
@@ -2127,7 +2411,8 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
             // a later typed phase and must remain zero in this gate.
         }
         if let Some(namer) = &mut report.namer {
-            match &outcome.namer {
+            let legacy_outcome = outcome.namer.as_ref().map(legacy_namer_outcome);
+            match legacy_outcome {
                 None => namer.files_parse_prevented_naming += 1,
                 Some(NamerOutcome::Success {
                     invariant_violations,
@@ -2185,6 +2470,89 @@ fn build_report(outcomes: &[FileOutcome], metadata: ReportMetadata<'_>) -> Repor
                             path: outcome.path.clone(),
                             message: message.clone(),
                         });
+                    }
+                }
+                Some(NamerOutcome::DiagnosticAware { .. }) => {
+                    unreachable!("legacy_namer_outcome must unwrap diagnostic-aware results")
+                }
+            }
+            if let Some(NamerOutcome::DiagnosticAware {
+                outcome: diagnostic_outcome,
+                ..
+            }) = &outcome.namer
+                && let Some(diagnostic_report) = &mut namer.diagnostic_aware
+            {
+                diagnostic_report.files_namer_ran += 1;
+                match diagnostic_outcome {
+                    DiagnosticAwareOutcome::Named {
+                        invariant_violations,
+                        diagnostics,
+                    } => {
+                        diagnostic_report.files_namer_succeeded += 1;
+                        if !diagnostics.is_empty() {
+                            diagnostic_report.files_namer_succeeded_with_diagnostics += 1;
+                        }
+                        for diagnostic in diagnostics {
+                            record_namer_diagnostic(diagnostic_report, &outcome.path, diagnostic);
+                        }
+                        if !invariant_violations.is_empty() {
+                            diagnostic_report.files_with_invariant_failures += 1;
+                            for violation in invariant_violations {
+                                let entry = diagnostic_report
+                                    .invariant_failure_histogram
+                                    .entry(violation.clone())
+                                    .or_insert_with(|| FailureBucket {
+                                        count: 0,
+                                        examples: Vec::new(),
+                                    });
+                                entry.count += 1;
+                                if entry.examples.len() < 5 {
+                                    entry.examples.push(outcome.path.clone());
+                                }
+                            }
+                        }
+                    }
+                    DiagnosticAwareOutcome::Rejected {
+                        diagnostics,
+                        transaction_residue,
+                    } => {
+                        diagnostic_report.files_source_rejected += 1;
+                        if *transaction_residue {
+                            diagnostic_report.failed_calls_with_transaction_residue += 1;
+                        }
+                        if matches!(outcome.status, Status::RecoverableDiagnostics) {
+                            diagnostic_report.files_source_rejected_after_parser_recovery += 1;
+                        }
+                        for diagnostic in diagnostics {
+                            record_namer_diagnostic(diagnostic_report, &outcome.path, diagnostic);
+                        }
+                    }
+                    DiagnosticAwareOutcome::InternalError {
+                        kind,
+                        transaction_residue,
+                    } => {
+                        diagnostic_report.files_namer_returned_internal_error += 1;
+                        if *transaction_residue {
+                            diagnostic_report.failed_calls_with_transaction_residue += 1;
+                        }
+                        let entry = diagnostic_report
+                            .internal_error_histogram
+                            .entry(kind.clone())
+                            .or_insert_with(|| NamerInternalErrorBucket {
+                                count: 0,
+                                clean_parse_failures: 0,
+                                recovered_parse_failures: 0,
+                                examples: Vec::new(),
+                            });
+                        entry.count += 1;
+                        if matches!(outcome.status, Status::RecoverableDiagnostics) {
+                            entry.recovered_parse_failures += 1;
+                        } else if matches!(outcome.status, Status::Clean) {
+                            entry.clean_parse_failures += 1;
+                        }
+                        if entry.examples.len() < 5 {
+                            entry.examples.push(outcome.path.clone());
+                        }
                     }
                 }
             }
@@ -2404,6 +2772,43 @@ fn print_summary(report: &Report) {
             "  failed calls with transaction residue: {}",
             namer.failed_calls_with_transaction_residue
         );
+        if let Some(diagnostics) = &namer.diagnostic_aware {
+            println!(
+                "  diagnostic-aware Namer files: {}",
+                diagnostics.files_namer_ran
+            );
+            println!(
+                "    named: {} (with diagnostics: {})",
+                diagnostics.files_namer_succeeded,
+                diagnostics.files_namer_succeeded_with_diagnostics
+            );
+            println!(
+                "    source rejected: {} (after parser recovery: {})",
+                diagnostics.files_source_rejected,
+                diagnostics.files_source_rejected_after_parser_recovery
+            );
+            println!(
+                "    internal errors: {}",
+                diagnostics.files_namer_returned_internal_error
+            );
+            println!(
+                "    invariant failures: {} (transaction residue after failed calls: {})",
+                diagnostics.files_with_invariant_failures,
+                diagnostics.failed_calls_with_transaction_residue
+            );
+            for (code, bucket) in &diagnostics.source_diagnostic_histogram {
+                println!(
+                    "    source diagnostic {code}: {} ({} errors, {} warnings, {} notes)",
+                    bucket.count, bucket.error_count, bucket.warning_count, bucket.note_count
+                );
+            }
+            for (kind, bucket) in &diagnostics.internal_error_histogram {
+                println!(
+                    "    internal {kind}: {} ({} clean parse, {} recovered parse)",
+                    bucket.count, bucket.clean_parse_failures, bucket.recovered_parse_failures
+                );
+            }
+        }
         for (kind, bucket) in &namer.namer_error_histogram {
             println!(
                 "    {kind}: {} ({} clean parse, {} recovered parse)",
@@ -2481,6 +2886,7 @@ mod tests {
             oracle_files: None,
             oracle_failures: None,
             collect_namer,
+            collect_namer_diagnostics: false,
         }
     }
 
@@ -2805,6 +3211,25 @@ mod tests {
     }
 
     #[test]
+    fn namer_diagnostics_flag_enables_both_namer_modes() {
+        let root = unique_temp_dir("namer-diagnostics-option");
+        fs::create_dir_all(&root).expect("create temp root");
+        let options = parse_options(
+            [
+                "--root".to_owned(),
+                root.to_string_lossy().into_owned(),
+                "--namer-diagnostics".to_owned(),
+            ]
+            .into_iter(),
+        )
+        .expect("parse diagnostic-aware Namer arguments");
+
+        assert!(options.namer);
+        assert!(options.namer_diagnostics);
+        fs::remove_dir_all(root).expect("remove temp root");
+    }
+
+    #[test]
     fn source_set_report_keeps_provenance_and_aggregates_diagnostics() {
         let source_set = SourceSetOptions {
             name: "cats".to_owned(),
@@ -2875,6 +3300,7 @@ mod tests {
                 oracle_files: None,
                 oracle_failures: None,
                 collect_namer: false,
+                collect_namer_diagnostics: false,
             },
         );
 
@@ -2915,6 +3341,7 @@ mod tests {
                 oracle_files: Some(5),
                 oracle_failures: Some(0),
                 collect_namer: false,
+                collect_namer_diagnostics: false,
             },
         );
         report.files_attempted = 4;
@@ -2995,6 +3422,155 @@ mod tests {
 
         assert!(matches!(parsed.status, Status::RecoverableDiagnostics));
         assert!(parsed.namer.is_some());
+    }
+
+    #[test]
+    fn diagnostic_mode_keeps_legacy_metrics_and_reports_structural_source_rejection() {
+        let source = "class Outer { private[Sibling] val hidden = 1 }\nclass Sibling";
+        let parsed = parse_source_with_modes(source, "Visibility.scala", true, true);
+        assert!(matches!(parsed.status, Status::Clean));
+
+        let Some(NamerOutcome::DiagnosticAware { legacy, outcome }) = parsed.namer else {
+            panic!("diagnostic mode should wrap the legacy Namer outcome");
+        };
+        assert!(matches!(*legacy, NamerOutcome::Error { .. }));
+        let DiagnosticAwareOutcome::Rejected {
+            diagnostics,
+            transaction_residue,
+        } = outcome
+        else {
+            panic!("confirmed invalid visibility should be a source rejection");
+        };
+        assert!(!transaction_residue);
+        assert_eq!(diagnostics.len(), 1);
+        let diagnostic = &diagnostics[0];
+        assert_eq!(diagnostic.code, "namer.visibility.invalid_qualifier");
+        assert_eq!(diagnostic.severity, "error");
+        assert_eq!(diagnostic.source_id, 0);
+        assert_eq!(
+            diagnostic.span.start as usize,
+            source.find("private[Sibling]").unwrap()
+        );
+        assert!(diagnostic.span.end as usize <= source.len());
+        assert!(diagnostic.span.end > diagnostic.span.start);
+        assert!(matches!(
+            &diagnostic.issue,
+            NamerDiagnosticIssueData::InvalidVisibilityQualifier { access, qualifier }
+                if access == "private" && qualifier == "Sibling"
+        ));
+    }
+
+    #[test]
+    fn diagnostic_report_separates_named_rejected_and_internal_error_outcomes() {
+        let diagnostic = NamerDiagnosticRecord {
+            code: "namer.visibility.invalid_qualifier".to_owned(),
+            severity: "error".to_owned(),
+            source_id: 0,
+            span: NamerDiagnosticSpan { start: 10, end: 26 },
+            issue: NamerDiagnosticIssueData::InvalidVisibilityQualifier {
+                access: "private".to_owned(),
+                qualifier: "Sibling".to_owned(),
+            },
+        };
+        let outcomes = [
+            FileOutcome {
+                path: "clean.scala".to_owned(),
+                source_set: None,
+                status: Status::Clean,
+                diagnostics: vec![],
+                scanner_diagnostics: 0,
+                namer: Some(NamerOutcome::DiagnosticAware {
+                    legacy: Box::new(NamerOutcome::Success {
+                        invariant_violations: vec![],
+                    }),
+                    outcome: DiagnosticAwareOutcome::Named {
+                        invariant_violations: vec![],
+                        diagnostics: vec![],
+                    },
+                }),
+                deferred_features: BTreeMap::new(),
+                capture_checking_enabled: None,
+                has_raw_caret_character: false,
+                has_caret_operator_token: false,
+                has_parser_capture_syntax: false,
+            },
+            FileOutcome {
+                path: "rejected.scala".to_owned(),
+                source_set: None,
+                status: Status::RecoverableDiagnostics,
+                diagnostics: vec![],
+                scanner_diagnostics: 0,
+                namer: Some(NamerOutcome::DiagnosticAware {
+                    legacy: Box::new(NamerOutcome::Error {
+                        kind: "InvalidVisibilityQualifier".to_owned(),
+                        message: "legacy error text is not a classifier".to_owned(),
+                        transaction_residue: false,
+                    }),
+                    outcome: DiagnosticAwareOutcome::Rejected {
+                        diagnostics: vec![diagnostic],
+                        transaction_residue: true,
+                    },
+                }),
+                deferred_features: BTreeMap::new(),
+                capture_checking_enabled: None,
+                has_raw_caret_character: false,
+                has_caret_operator_token: false,
+                has_parser_capture_syntax: false,
+            },
+            FileOutcome {
+                path: "internal.scala".to_owned(),
+                source_set: None,
+                status: Status::Clean,
+                diagnostics: vec![],
+                scanner_diagnostics: 0,
+                namer: Some(NamerOutcome::DiagnosticAware {
+                    legacy: Box::new(NamerOutcome::Error {
+                        kind: "UnsupportedTree".to_owned(),
+                        message: "internal failure".to_owned(),
+                        transaction_residue: false,
+                    }),
+                    outcome: DiagnosticAwareOutcome::InternalError {
+                        kind: "UnsupportedTree".to_owned(),
+                        transaction_residue: false,
+                    },
+                }),
+                deferred_features: BTreeMap::new(),
+                capture_checking_enabled: None,
+                has_raw_caret_character: false,
+                has_caret_operator_token: false,
+                has_parser_capture_syntax: false,
+            },
+        ];
+        let report = build_report(
+            &outcomes,
+            ReportMetadata {
+                collect_namer: true,
+                collect_namer_diagnostics: true,
+                ..test_report_metadata(true)
+            },
+        );
+
+        assert_eq!(report.schema_version, 9);
+        assert_eq!(report.files_parsed_without_diagnostics, 2);
+        let diagnostic_report = report.namer.unwrap().diagnostic_aware.unwrap();
+        assert_eq!(diagnostic_report.files_namer_ran, 3);
+        assert_eq!(diagnostic_report.files_namer_succeeded, 1);
+        assert_eq!(diagnostic_report.files_source_rejected, 1);
+        assert_eq!(
+            diagnostic_report.files_source_rejected_after_parser_recovery,
+            1
+        );
+        assert_eq!(diagnostic_report.files_namer_returned_internal_error, 1);
+        assert_eq!(diagnostic_report.failed_calls_with_transaction_residue, 1);
+        assert_eq!(
+            diagnostic_report.source_diagnostic_histogram["namer.visibility.invalid_qualifier"]
+                .error_count,
+            1
+        );
+        assert_eq!(
+            diagnostic_report.internal_error_histogram["UnsupportedTree"].clean_parse_failures,
+            1
+        );
     }
 
     #[test]
@@ -3531,6 +4107,7 @@ mod tests {
                 oracle_files: Some(12),
                 oracle_failures: Some(1),
                 collect_namer: false,
+                collect_namer_diagnostics: false,
             },
         );
 
@@ -3557,6 +4134,7 @@ mod tests {
                 oracle_files: None,
                 oracle_failures: None,
                 collect_namer: false,
+                collect_namer_diagnostics: false,
             },
         );
 

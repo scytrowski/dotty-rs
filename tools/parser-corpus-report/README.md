@@ -71,6 +71,58 @@ forwarder synthesis remains a separate typed-phase metric. The reproducible
 Scala 3.9.0 Namer results and their classification are in
 [`namer-v0.1-compatibility.md`](../../docs/namer-v0.1-compatibility.md).
 
+Pass `--namer-diagnostics` to enable the legacy `--namer` report and an
+additional diagnostic-aware naming pass. The legacy counters and schema remain
+unchanged when this option is omitted; diagnostic mode uses report schema 9
+and adds `namer.diagnostic_aware`. Each source file is parsed and named in a
+fresh worker, with the legacy and diagnostic-aware Namer passes using separate
+semantic stores so their results do not affect each other.
+
+`namer.diagnostic_aware` separates files named successfully, source rejected,
+and internal Namer errors. Rejection after parser recovery is a subset of
+source rejection. Parser clean/recovered/hard-failure counts remain in the
+top-level parser fields; process failures, panics, and hangs also retain their
+existing independent counters. Internal Namer errors have a typed error-kind
+histogram split by clean and recovered parses. The report records invariant
+failures and failed calls that left semantic or package transaction residue.
+
+The source-diagnostic histogram is keyed by `NamerIssue::code()`, never by a
+rendered message. Each bucket contains severity totals and up to five examples.
+An example carries the relative source path and a structural diagnostic with
+the stable code, severity, worker-local `source_id`, UTF-8 byte range (`start`
+inclusive and `end` exclusive), and issue-specific payload. These fields let
+downstream consumers classify and locate diagnostics without parsing display
+text. A source rejection is not counted as a Namer success or an internal
+error. Existing legacy error metrics are still emitted alongside the new
+counts, so the same corpus run can compare both classifications.
+
+Recreate the checked-in Scala-only report directly from the pinned source
+checkout. This command does not prepare the other source sets used by the
+convenience runner:
+
+```text
+CARGO_TARGET_DIR=target cargo run --locked -p dotty-parser-corpus-report -- \
+  --root /tmp/scala3-3.9.0/library/src \
+  --root /tmp/scala3-3.9.0/compiler/src \
+  --source-version 3.9.0 \
+  --source-revision 777528f19a58e794c9954a42f433373472ec57f8 \
+  --parser-revision e4fe876e9f011025a7d5af14a1bbd5928f25238f \
+  --namer-diagnostics \
+  --output tools/parser-corpus-report/namer-diagnostics-v0.1-scala3-3.9.0.json
+```
+
+[`namer-diagnostics-v0.1-scala3-3.9.0.json`](namer-diagnostics-v0.1-scala3-3.9.0.json)
+records the diagnostic-aware run over the pinned Scala 3.9.0 `library/src` and
+`compiler/src` roots. All 1,236 files parsed cleanly and were named
+successfully; the report contains no source rejections, internal Namer errors,
+invariant failures, or transaction residue. Running the same roots with
+`--namer` and with `--namer-diagnostics` produced identical parser and legacy
+Namer sections (schema 8 versus schema 9); the new diagnostic-aware counters
+reported 1,236 successes and zero rejections/errors. The focused regression
+test `diagnostic_mode_keeps_legacy_metrics_and_reports_structural_source_rejection`
+also checks a source rejection's stable code, severity, source identity, byte
+range, and typed issue payload.
+
 The low-level binary also accepts repeated `--root` options for focused runs:
 
 ```text
