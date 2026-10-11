@@ -10,8 +10,9 @@ build_dir=$(mktemp -d)
 trap 'rm -rf "$build_dir"' EXIT
 
 javac --release 21 -g:none -d "$build_dir" "$fixture_dir/Outer.java"
-cp "$build_dir/enclosing_generics/Outer.class" "$fixture_dir/Outer.class"
-cp "$build_dir/enclosing_generics/Outer\$Inner.class" "$fixture_dir/Outer\$Inner.class"
+for class_file in "$build_dir/enclosing_generics/"*.class; do
+    cp "$class_file" "$fixture_dir/$(basename "$class_file")"
+done
 
 javap -classpath "$build_dir" -p -v 'enclosing_generics.Outer$Inner' \
     | grep -A2 -E 'Signature:|InnerClasses:|EnclosingMethod:'

@@ -271,12 +271,9 @@ struct InProgressClass {
     captures_enclosing_type_parameters: bool,
 }
 
-fn metadata_captures_enclosing_type_parameters(
-    metadata: &ClassfileMetadata,
-    class: SymbolId,
-) -> bool {
+fn metadata_captures_enclosing_type_parameters(metadata: &ClassfileMetadata) -> bool {
     metadata.inner_classes.iter().any(|entry| {
-        matches!(entry.inner_class, ClassRef::Resolved(symbol) if symbol == class)
+        matches!(&entry.inner_class, ClassRef::Unresolved(name) if name == &metadata.binary_name)
             && entry.outer_class.is_some()
             && !entry.access_flags.contains(ACC_STATIC)
     })
@@ -940,10 +937,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let Type::ClassInfo(class_info) = self.store.types.get(class_info) else {
             return None;
         };
-        let captures_enclosing =
-            self.session.metadata.get(&class).is_some_and(|metadata| {
-                metadata_captures_enclosing_type_parameters(metadata, class)
-            });
+        let captures_enclosing = self
+            .session
+            .metadata
+            .get(&class)
+            .is_some_and(metadata_captures_enclosing_type_parameters);
         Some((class_info.declarations, captures_enclosing))
     }
 
@@ -3737,6 +3735,30 @@ mod tests {
                 "enclosing_generics/Outer$Inner",
                 "enclosing_generics/Outer$Inner.class",
             ),
+            (
+                "enclosing_generics/Outer$Shadow",
+                "enclosing_generics/Outer$Shadow.class",
+            ),
+            (
+                "enclosing_generics/Outer$MethodChild",
+                "enclosing_generics/Outer$MethodChild.class",
+            ),
+            (
+                "enclosing_generics/Outer$Middle",
+                "enclosing_generics/Outer$Middle.class",
+            ),
+            (
+                "enclosing_generics/Outer$Middle$Deep",
+                "enclosing_generics/Outer$Middle$Deep.class",
+            ),
+            (
+                "enclosing_generics/Outer$Middle$Deep$Leaf",
+                "enclosing_generics/Outer$Middle$Deep$Leaf.class",
+            ),
+            (
+                "enclosing_generics/Outer$Static",
+                "enclosing_generics/Outer$Static.class",
+            ),
         ] {
             classes.insert(BinaryName::from_internal(name), own_fixture_bytes(path));
         }
@@ -3772,6 +3794,134 @@ mod tests {
             panic!("expected get to have a method type");
         };
         assert_eq!(parent_symbol(&store, method.result), outer_k);
+    }
+
+    #[test]
+    fn nested_class_reuses_the_enclosing_type_parameter_when_outer_is_loaded() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(enclosing_generics_classpath()),
+            &mut store,
+        );
+        let outer = loader
+            .load_class(&BinaryName::from_internal("enclosing_generics/Outer"))
+            .expect("Outer should load first");
+        let inner = loader
+            .load_class(&BinaryName::from_internal("enclosing_generics/Outer$Inner"))
+            .expect("Inner should reuse the loaded Outer");
+        drop(loader);
+
+        assert_eq!(store.symbols.get(inner).owner, Some(outer));
+        let outer_k = type_parameter_symbol(&mut store, outer, "K");
+        let value_type = member_type_id(&mut store, inner, "value");
+        assert_eq!(parent_symbol(&store, value_type), outer_k);
+    }
+
+    #[test]
+    fn nested_class_type_parameter_shadows_the_enclosing_parameter() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(enclosing_generics_classpath()),
+            &mut store,
+        );
+        let shadow = loader
+            .load_class(&BinaryName::from_internal(
+                "enclosing_generics/Outer$Shadow",
+            ))
+            .expect("Outer$Shadow should load");
+        drop(loader);
+
+        let outer = store.symbols.get(shadow).owner.unwrap();
+        let outer_k = type_parameter_symbol(&mut store, outer, "K");
+        let shadow_k = type_parameter_symbol(&mut store, shadow, "K");
+        assert_ne!(outer_k, shadow_k);
+        let value_type = member_type_id(&mut store, shadow, "value");
+        assert_eq!(parent_symbol(&store, value_type), shadow_k);
+    }
+
+    #[test]
+    fn nested_class_signature_walks_multiple_enclosing_scopes() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(enclosing_generics_classpath()),
+            &mut store,
+        );
+        let leaf = loader
+            .load_class(&BinaryName::from_internal(
+                "enclosing_generics/Outer$Middle$Deep$Leaf",
+            ))
+            .expect("Leaf should load with parameters from each enclosing class");
+        drop(loader);
+
+        let deep = store.symbols.get(leaf).owner.unwrap();
+        let middle = store.symbols.get(deep).owner.unwrap();
+        let outer = store.symbols.get(middle).owner.unwrap();
+        let parameters = [
+            ("outer", type_parameter_symbol(&mut store, outer, "K")),
+            ("middle", type_parameter_symbol(&mut store, middle, "V")),
+            ("near", type_parameter_symbol(&mut store, deep, "W")),
+            ("own", type_parameter_symbol(&mut store, leaf, "X")),
+        ];
+        for (field, expected) in parameters {
+            let field_type = member_type_id(&mut store, leaf, field);
+            assert_eq!(parent_symbol(&store, field_type), expected, "field {field}");
+        }
+    }
+
+    #[test]
+    fn method_type_parameter_shadows_enclosing_class_parameter() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(enclosing_generics_classpath()),
+            &mut store,
+        );
+        let child = loader
+            .load_class(&BinaryName::from_internal(
+                "enclosing_generics/Outer$MethodChild",
+            ))
+            .expect("MethodChild should load");
+        drop(loader);
+
+        let method_type = member_type_id(&mut store, child, "echo");
+        let Type::Poly(poly) = store.types.get(method_type) else {
+            panic!("expected echo to declare a method type parameter");
+        };
+        assert_eq!(poly.params.len(), 1);
+        let Type::Method(method) = store.types.get(poly.result) else {
+            panic!("expected echo's polymorphic result to be a method");
+        };
+        let expected = Type::ParamRef {
+            binder: method_type,
+            index: 0,
+        };
+        assert_eq!(store.types.get(method.result), &expected);
+        assert_eq!(store.types.get(method.params[0].ty), &expected);
+    }
+
+    #[test]
+    fn static_nested_class_does_not_capture_an_outer_type_parameter() {
+        let mut classes = enclosing_generics_classpath();
+        let static_name = BinaryName::from_internal("enclosing_generics/Outer$Static");
+        let mut bytes = classes
+            .remove(&static_name)
+            .expect("Static fixture should exist");
+        let signature = bytes
+            .windows(3)
+            .position(|window| window == b"TU;")
+            .expect("Static.value should have a TU; Signature");
+        bytes[signature..signature + 3].copy_from_slice(b"TK;");
+        classes.insert(static_name.clone(), bytes);
+
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        let error = loader
+            .load_class(&static_name)
+            .expect_err("malformed static class must not capture Outer.K");
+        assert!(matches!(
+            error,
+            ClassLoadError::UnresolvedTypeVariable(ref owner, name)
+                if owner == &static_name && name == "K"
+        ));
     }
 
     /// `generic_sample/GenericSample.class`'s `items` field has a real
