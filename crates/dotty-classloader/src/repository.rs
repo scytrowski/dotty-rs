@@ -1,5 +1,5 @@
 use crate::binary_name::BinaryName;
-use crate::error::ClassLoadError;
+use crate::error::ClassLoadFailure;
 use dotty_core::SymbolId;
 use std::collections::HashMap;
 
@@ -20,17 +20,18 @@ use std::collections::HashMap;
 /// load completes — completion happens in the `SemanticStore` itself, via
 /// `SymbolInfo::Complete`, not by mutating anything this repository owns.
 ///
-/// `Failed` carries the same `SymbolId` too, when one was already
-/// allocated (i.e. the failure happened while this entry was `Loading` —
-/// a `NotFound`/`InvalidClassFile`/etc. failure that never reached
-/// `enter_class` has none). A caller can then still name the half-built
-/// `Symbol` a failed load left behind — see `ClassLoader::load_class`,
-/// which marks it `SymbolInfo::Error` right before recording this state.
+/// `Failed` retains the typed error and optional resource provenance, plus
+/// the same `SymbolId` when one was already allocated (i.e. the failure
+/// happened while this entry was `Loading` — a `NotFound`/
+/// `InvalidClassFile`/etc. failure that never reached `enter_class` has
+/// none). A caller can then still name the half-built `Symbol` a failed
+/// load left behind — see `ClassLoader::load_class`, which marks it
+/// `SymbolInfo::Error` right before recording this state.
 #[derive(Debug, Clone)]
 pub(crate) enum ClassEntry {
     Loading(SymbolId),
     Loaded(SymbolId),
-    Failed(Option<SymbolId>, ClassLoadError),
+    Failed(Option<SymbolId>, ClassLoadFailure),
 }
 
 impl ClassEntry {
@@ -77,7 +78,7 @@ impl ClassRepository {
         &mut self,
         name: BinaryName,
         symbol: Option<SymbolId>,
-        error: ClassLoadError,
+        error: ClassLoadFailure,
     ) {
         self.entries.insert(name, ClassEntry::Failed(symbol, error));
     }
@@ -86,6 +87,7 @@ impl ClassRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ClassLoadError;
     use dotty_core::{
         Name, Namespace, SemanticStore, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks,
         SymbolOrigin, Visibility,
@@ -151,11 +153,21 @@ mod tests {
     fn marks_and_reports_a_class_as_failed_and_caches_the_error() {
         let mut repository = ClassRepository::new();
         let name = BinaryName::from_internal("Failed");
-        repository.mark_failed(name.clone(), None, ClassLoadError::NotFound(name.clone()));
+        repository.mark_failed(
+            name.clone(),
+            None,
+            ClassLoadFailure {
+                error: ClassLoadError::NotFound(name.clone()),
+                origin: None,
+                format: None,
+            },
+        );
 
         match repository.get(&name) {
-            Some(ClassEntry::Failed(None, ClassLoadError::NotFound(missing))) => {
-                assert_eq!(missing, &name);
+            Some(ClassEntry::Failed(None, failure)) if matches!(&failure.error, ClassLoadError::NotFound(missing) if missing == &name) =>
+            {
+                assert_eq!(failure.origin, None);
+                assert_eq!(failure.format, None);
             }
             other => panic!("expected Failed(None, NotFound), got {other:?}"),
         }
@@ -172,11 +184,17 @@ mod tests {
         repository.mark_failed(
             name.clone(),
             Some(symbol),
-            ClassLoadError::CircularInheritance(name.clone()),
+            ClassLoadFailure {
+                error: ClassLoadError::CircularInheritance(name.clone()),
+                origin: None,
+                format: None,
+            },
         );
 
         match repository.get(&name) {
-            Some(ClassEntry::Failed(entry_symbol, ClassLoadError::CircularInheritance(_))) => {
+            Some(ClassEntry::Failed(entry_symbol, failure))
+                if matches!(failure.error, ClassLoadError::CircularInheritance(_)) =>
+            {
                 assert_eq!(*entry_symbol, Some(symbol));
             }
             other => panic!("expected Failed(Some, CircularInheritance), got {other:?}"),

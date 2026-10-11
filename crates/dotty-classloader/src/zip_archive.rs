@@ -121,6 +121,42 @@ impl fmt::Display for ZipError {
     }
 }
 
+impl ZipError {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::EndOfCentralDirectoryNotFound => "classpath.zip.unsupported_or_invalid_archive",
+            Self::InvalidCentralDirectoryHeader { .. } => {
+                "classpath.zip.invalid_central_directory_header"
+            }
+            Self::InvalidEntryName { .. } => "classpath.zip.invalid_entry_name",
+            Self::InvalidLocalFileHeader { .. } => "classpath.zip.invalid_local_file_header",
+            Self::UnsupportedCompressionMethod(_) => "classpath.zip.unsupported_compression",
+            Self::Inflate(_) => "classpath.zip.invalid_deflate_data",
+            Self::CrcMismatch { .. } => "classpath.zip.crc_mismatch",
+            Self::EntryTooLarge { .. } => "classpath.zip.entry_too_large",
+            Self::UncompressedSizeMismatch { .. } => "classpath.zip.size_mismatch",
+            Self::Read(_) => "classpath.zip.read_error",
+        }
+    }
+
+    pub(crate) fn category(&self) -> crate::error::ClassLoadCategory {
+        use crate::error::ClassLoadCategory as C;
+        match self {
+            Self::UnsupportedCompressionMethod(_) | Self::EntryTooLarge { .. } => {
+                C::UnsupportedFeatureOrVersion
+            }
+            Self::EndOfCentralDirectoryNotFound => C::Conditional,
+            Self::Read(_) => C::Conditional,
+            Self::InvalidCentralDirectoryHeader { .. }
+            | Self::InvalidEntryName { .. }
+            | Self::InvalidLocalFileHeader { .. }
+            | Self::Inflate(_)
+            | Self::CrcMismatch { .. }
+            | Self::UncompressedSizeMismatch { .. } => C::MalformedArtifact,
+        }
+    }
+}
+
 impl std::error::Error for ZipError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {

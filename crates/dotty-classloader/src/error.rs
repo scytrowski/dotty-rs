@@ -1,12 +1,25 @@
 use crate::binary_name::BinaryName;
 use crate::class_path::ClassPathError;
 use crate::tasty_symbol::TastyDecodeError;
+use dotty_classfile::attribute::AttributeError;
 use dotty_classfile::class_file::{ClassFileError, ClassFileVersion};
 use dotty_classfile::constant_pool::PoolRefError;
 use dotty_classfile::descriptor::ResolveDescriptorError;
 use dotty_classfile::signature::SignatureError;
 use std::fmt;
 use std::rc::Rc;
+
+/// Broad machine-readable class-loading failure category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassLoadCategory {
+    Missing,
+    MalformedArtifact,
+    UnsupportedFeatureOrVersion,
+    ResolutionOrDependency,
+    IoOrEnvironment,
+    InternalInvariant,
+    Conditional,
+}
 
 /// Why loading a class failed.
 ///
@@ -146,6 +159,132 @@ impl fmt::Display for ClassLoadError {
     }
 }
 
+impl ClassLoadError {
+    /// Stable identifier for this outer failure variant.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound(_) => "classloader.not_found",
+            Self::Io(_, _) => "classloader.classpath_error",
+            Self::InvalidClassFile(_, _) => "classloader.invalid_class_file",
+            Self::UnsupportedClassVersion(_, _) => "classloader.unsupported_class_version",
+            Self::MalformedReference(_, _) => "classloader.malformed_reference",
+            Self::MalformedDescriptor(_, _) => "classloader.malformed_descriptor",
+            Self::MalformedSignature(_, _) => "classloader.malformed_signature",
+            Self::NameMismatch { .. } => "classloader.name_mismatch",
+            Self::InvalidTastyFile(_, _) => "classloader.invalid_tasty_file",
+            Self::CircularInheritance(_) => "classloader.circular_inheritance",
+            Self::InheritanceDepthExceeded(_) => "classloader.inheritance_depth_exceeded",
+            Self::DependencyFailure { .. } => "classloader.dependency_failure",
+            Self::UnresolvedTypeVariable(_, _) => "classloader.unresolved_type_variable",
+        }
+    }
+
+    /// The deepest class-loading error in a dependency chain.
+    pub fn root_cause(&self) -> &Self {
+        let mut cause = self;
+        while let Self::DependencyFailure { source, .. } = cause {
+            cause = source;
+        }
+        cause
+    }
+
+    /// Stable identifier for the deepest class-loading cause.
+    pub fn root_cause_code(&self) -> &'static str {
+        match self.root_cause() {
+            Self::Io(_, source) => source.code(),
+            Self::InvalidTastyFile(_, source) => source.root_cause_code(),
+            cause => cause.code(),
+        }
+    }
+
+    /// Category derived from the retained typed cause, never `Display` text.
+    pub fn category(&self) -> ClassLoadCategory {
+        use ClassLoadCategory as C;
+        match self {
+            Self::DependencyFailure { .. } => C::ResolutionOrDependency,
+            error => error.root_cause_category(),
+        }
+    }
+
+    /// Category of the deepest class-loading cause, after unwrapping any
+    /// dependency wrappers.
+    pub fn root_cause_category(&self) -> ClassLoadCategory {
+        use ClassLoadCategory as C;
+        match self.root_cause() {
+            Self::NotFound(_) => C::Missing,
+            Self::Io(_, source) => source.category(),
+            Self::InvalidClassFile(
+                _,
+                ClassFileError::Attribute(AttributeError::TooDeeplyNestedAnnotation),
+            ) => C::UnsupportedFeatureOrVersion,
+            Self::InvalidClassFile(_, _) => C::MalformedArtifact,
+            Self::UnsupportedClassVersion(_, _) | Self::InheritanceDepthExceeded(_) => {
+                C::UnsupportedFeatureOrVersion
+            }
+            Self::MalformedReference(_, _)
+            | Self::MalformedDescriptor(_, _)
+            | Self::NameMismatch { .. }
+            | Self::CircularInheritance(_) => C::MalformedArtifact,
+            Self::MalformedSignature(
+                _,
+                dotty_classfile::signature::SignatureError::TooDeeplyNested { .. },
+            ) => C::UnsupportedFeatureOrVersion,
+            Self::MalformedSignature(_, _) => C::MalformedArtifact,
+            Self::InvalidTastyFile(_, source) => source.category(),
+            Self::DependencyFailure { .. } => C::ResolutionOrDependency,
+            Self::UnresolvedTypeVariable(_, _) => C::Conditional,
+        }
+    }
+}
+
+/// A class-loading failure together with the classpath resource that
+/// produced its deepest retained cause, when a resource was selected.
+///
+/// `load_class` keeps returning [`ClassLoadError`] for compatibility;
+/// [`crate::loader::ClassLoader::load_class_detailed`] opts into this
+/// additional context. Missing names and failures before a resource is
+/// selected have no fabricated origin or format.
+#[derive(Debug, Clone)]
+pub struct ClassLoadFailure {
+    pub error: ClassLoadError,
+    pub origin: Option<crate::class_path::ClassOrigin>,
+    pub format: Option<crate::class_path::ClassFormat>,
+}
+
+impl ClassLoadFailure {
+    pub fn code(&self) -> &'static str {
+        self.error.code()
+    }
+
+    pub fn category(&self) -> ClassLoadCategory {
+        self.error.category()
+    }
+
+    pub fn root_cause(&self) -> &ClassLoadError {
+        self.error.root_cause()
+    }
+
+    pub fn root_cause_code(&self) -> &'static str {
+        self.error.root_cause_code()
+    }
+
+    pub fn root_cause_category(&self) -> ClassLoadCategory {
+        self.error.root_cause_category()
+    }
+}
+
+impl fmt::Display for ClassLoadFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ClassLoadFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 impl std::error::Error for ClassLoadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -273,6 +412,211 @@ mod tests {
         assert!(
             second.source().is_some(),
             "class file parse cause is exposed"
+        );
+    }
+
+    #[test]
+    fn dependency_failure_keeps_outer_code_and_category_separate_from_root_cause() {
+        let root = ClassLoadError::NotFound(BinaryName::from_internal("missing/Parent"));
+        let error = ClassLoadError::DependencyFailure {
+            owner: BinaryName::from_internal("Child"),
+            dependency: BinaryName::from_internal("missing/Parent"),
+            source: Rc::new(root),
+        };
+
+        assert_eq!(error.code(), "classloader.dependency_failure");
+        assert_eq!(error.category(), ClassLoadCategory::ResolutionOrDependency);
+        assert_eq!(error.root_cause_code(), "classloader.not_found");
+        assert_eq!(error.root_cause_category(), ClassLoadCategory::Missing);
+        assert!(matches!(
+            error.root_cause(),
+            ClassLoadError::NotFound(name) if name.as_internal() == "missing/Parent"
+        ));
+    }
+
+    #[test]
+    fn nested_depth_limits_are_unsupported_while_bad_grammar_is_malformed() {
+        let name = BinaryName::from_internal("Deep");
+        let signature = ClassLoadError::MalformedSignature(
+            name.clone(),
+            SignatureError::TooDeeplyNested { offset: 2064 },
+        );
+        let invalid_signature = ClassLoadError::MalformedSignature(
+            name.clone(),
+            SignatureError::UnknownLeadChar {
+                offset: 0,
+                found: '?',
+            },
+        );
+        let annotation = ClassLoadError::InvalidClassFile(
+            name,
+            ClassFileError::Attribute(AttributeError::TooDeeplyNestedAnnotation),
+        );
+
+        assert_eq!(
+            signature.category(),
+            ClassLoadCategory::UnsupportedFeatureOrVersion
+        );
+        assert_eq!(
+            invalid_signature.category(),
+            ClassLoadCategory::MalformedArtifact
+        );
+        assert_eq!(
+            annotation.category(),
+            ClassLoadCategory::UnsupportedFeatureOrVersion
+        );
+    }
+
+    #[test]
+    fn outer_error_codes_are_stable_and_use_the_classloader_namespace() {
+        let error = ClassLoadError::UnsupportedClassVersion(
+            BinaryName::from_internal("Future"),
+            ClassFileVersion {
+                major: 71,
+                minor: 0,
+            },
+        );
+        assert_eq!(error.code(), "classloader.unsupported_class_version");
+        assert_eq!(error.root_cause_code(), error.code());
+    }
+
+    #[test]
+    fn every_classload_variant_has_an_explicit_stable_code() {
+        use dotty_classfile::constant_pool::ConstantPoolIndex;
+        use dotty_classfile::reader::ReadError;
+
+        let name = BinaryName::from_internal("A");
+        let index = ConstantPoolIndex(1);
+        let version = ClassFileVersion {
+            major: 70,
+            minor: 0,
+        };
+        let errors = vec![
+            ClassLoadError::NotFound(name.clone()),
+            ClassLoadError::Io(
+                name.clone(),
+                Rc::new(ClassPathError::new(std::io::Error::other("io"))),
+            ),
+            ClassLoadError::InvalidClassFile(
+                name.clone(),
+                ClassFileError::Read(ReadError::UnexpectedEof {
+                    offset: 0,
+                    needed: 1,
+                    remaining: 0,
+                }),
+            ),
+            ClassLoadError::UnsupportedClassVersion(name.clone(), version),
+            ClassLoadError::MalformedReference(name.clone(), PoolRefError::InvalidIndex { index }),
+            ClassLoadError::MalformedDescriptor(
+                name.clone(),
+                ResolveDescriptorError::NotUtf8 { index },
+            ),
+            ClassLoadError::MalformedSignature(
+                name.clone(),
+                SignatureError::UnexpectedEnd { offset: 0 },
+            ),
+            ClassLoadError::NameMismatch {
+                requested: name.clone(),
+                actual: BinaryName::from_internal("B"),
+            },
+            ClassLoadError::InvalidTastyFile(name.clone(), TastyDecodeError::MissingTypeDef),
+            ClassLoadError::CircularInheritance(name.clone()),
+            ClassLoadError::InheritanceDepthExceeded(name.clone()),
+            ClassLoadError::DependencyFailure {
+                owner: name.clone(),
+                dependency: BinaryName::from_internal("B"),
+                source: Rc::new(ClassLoadError::NotFound(BinaryName::from_internal("B"))),
+            },
+            ClassLoadError::UnresolvedTypeVariable(name, "T".to_owned()),
+        ];
+        let codes: Vec<_> = errors.iter().map(ClassLoadError::code).collect();
+        let categories: Vec<_> = errors.iter().map(ClassLoadError::category).collect();
+
+        assert_eq!(
+            codes,
+            [
+                "classloader.not_found",
+                "classloader.classpath_error",
+                "classloader.invalid_class_file",
+                "classloader.unsupported_class_version",
+                "classloader.malformed_reference",
+                "classloader.malformed_descriptor",
+                "classloader.malformed_signature",
+                "classloader.name_mismatch",
+                "classloader.invalid_tasty_file",
+                "classloader.circular_inheritance",
+                "classloader.inheritance_depth_exceeded",
+                "classloader.dependency_failure",
+                "classloader.unresolved_type_variable",
+            ]
+        );
+        assert_eq!(
+            categories,
+            [
+                ClassLoadCategory::Missing,
+                ClassLoadCategory::IoOrEnvironment,
+                ClassLoadCategory::MalformedArtifact,
+                ClassLoadCategory::UnsupportedFeatureOrVersion,
+                ClassLoadCategory::MalformedArtifact,
+                ClassLoadCategory::MalformedArtifact,
+                ClassLoadCategory::MalformedArtifact,
+                ClassLoadCategory::MalformedArtifact,
+                ClassLoadCategory::Conditional,
+                ClassLoadCategory::MalformedArtifact,
+                ClassLoadCategory::UnsupportedFeatureOrVersion,
+                ClassLoadCategory::ResolutionOrDependency,
+                ClassLoadCategory::Conditional,
+            ]
+        );
+    }
+
+    #[test]
+    fn typed_classpath_and_tasty_causes_keep_specific_root_classification() {
+        use dotty_tasty::{HeaderError, file::TastyFileError, tasty::AstError};
+
+        let classpath = ClassLoadError::Io(
+            BinaryName::from_internal("A"),
+            Rc::new(ClassPathError::new(std::io::Error::other("denied"))),
+        );
+        assert_eq!(classpath.code(), "classloader.classpath_error");
+        assert_eq!(classpath.root_cause_code(), "classpath.io");
+        assert_eq!(classpath.category(), ClassLoadCategory::IoOrEnvironment);
+
+        let invalid_archive = ClassLoadError::Io(
+            BinaryName::from_internal("A"),
+            Rc::new(ClassPathError::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bad archive magic",
+            ))),
+        );
+        assert_eq!(invalid_archive.root_cause_code(), "classpath.invalid_data");
+        assert_eq!(invalid_archive.category(), ClassLoadCategory::Conditional);
+
+        let tasty = ClassLoadError::InvalidTastyFile(
+            BinaryName::from_internal("A"),
+            TastyDecodeError::Parse(TastyFileError::Header(HeaderError::UnsupportedVersion {
+                major: 99,
+                minor: 0,
+                experimental: 0,
+            })),
+        );
+        assert_eq!(tasty.root_cause_code(), "tasty.unsupported_version");
+        assert_eq!(
+            tasty.category(),
+            ClassLoadCategory::UnsupportedFeatureOrVersion
+        );
+
+        let bounded_ast = ClassLoadError::InvalidTastyFile(
+            BinaryName::from_internal("A"),
+            TastyDecodeError::Ast(AstError::RecursionLimit {
+                offset: 17,
+                limit: 1024,
+            }),
+        );
+        assert_eq!(bounded_ast.root_cause_code(), "tasty.ast.recursion_limit");
+        assert_eq!(
+            bounded_ast.category(),
+            ClassLoadCategory::UnsupportedFeatureOrVersion
         );
     }
 

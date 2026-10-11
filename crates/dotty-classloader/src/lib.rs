@@ -39,7 +39,7 @@ pub mod classloader {
         ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource,
         CompositeClassPath, DirectoryClassPath,
     };
-    pub use crate::error::ClassLoadError;
+    pub use crate::error::{ClassLoadCategory, ClassLoadError, ClassLoadFailure};
     pub use crate::field_symbol::FieldSymbol;
     pub use crate::jar_class_path::JarClassPath;
     pub use crate::jdk_class_path::JdkClassPath;

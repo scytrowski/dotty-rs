@@ -1,4 +1,8 @@
-use dotty_classloader::classloader::{BinaryName, ClassFormat, ClassPathEntry, DirectoryClassPath};
+use dotty_classloader::classloader::{
+    BinaryName, ClassFormat, ClassLoadCategory, ClassLoader, ClassOrigin, ClassPathEntry,
+    DirectoryClassPath,
+};
+use dotty_core::SemanticStore;
 use std::fs;
 use std::path::PathBuf;
 
@@ -45,6 +49,26 @@ fn finds_a_class_file_present_under_the_root() {
 
     assert_eq!(resource.bytes(), pool_sample_bytes().as_slice());
     assert_eq!(resource.format(), ClassFormat::Class);
+}
+
+#[test]
+fn detailed_load_failure_retains_directory_resource_provenance() {
+    let root = TemporaryDirectory::new("directory-class-path-malformed-class");
+    fs::write(root.path().join("Broken.class"), [0x00, 0x01, 0x02]).unwrap();
+    let mut store = SemanticStore::new();
+    let mut loader = ClassLoader::new(DirectoryClassPath::new(root.path().clone()), &mut store);
+
+    let failure = loader
+        .load_class_detailed(&BinaryName::from_internal("Broken"))
+        .unwrap_err();
+
+    assert_eq!(failure.code(), "classloader.invalid_class_file");
+    assert_eq!(failure.category(), ClassLoadCategory::MalformedArtifact);
+    assert_eq!(
+        failure.origin,
+        Some(ClassOrigin::Directory(root.path().clone()))
+    );
+    assert_eq!(failure.format, Some(ClassFormat::Class));
 }
 
 fn animal_tasty_bytes() -> Vec<u8> {

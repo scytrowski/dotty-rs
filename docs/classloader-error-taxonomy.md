@@ -1,9 +1,8 @@
 # Classloader Error Taxonomy and Provenance Plan
 
-Status: audit and compatibility plan for issue #979. This document describes
-the current error model in `crates/dotty-classloader`; it does not change
-loading, classpath selection, or error behavior. The next implementation step
-is #980.
+Status: error and provenance audit from #979, with the additive API chosen for
+#980. This document describes the current error model and its compatibility
+constraints; it does not change loading or classpath selection.
 
 ## Scope and evidence
 
@@ -84,7 +83,7 @@ signature unchanged.
 
 | Internal source | Classification | Notes |
 | --- | --- | --- |
-| `Io(io::Error)` | `IoOrEnvironment` | Directory reads and JAR/JMOD construction use this for permission failures, truncated reads, a missing configured archive at construction time, and similar operating-system failures. JMOD bad magic is currently synthesized as `io::ErrorKind::InvalidData`, so archive-format and OS I/O errors share this branch. |
+| `Io(io::Error)` | `IoOrEnvironment`, or `Conditional` for `InvalidData` | Directory reads and JAR/JMOD construction use this for permission failures, truncated reads, a missing configured archive at construction time, and similar operating-system failures. JMOD bad magic is currently synthesized as `io::ErrorKind::InvalidData`, so that `ErrorKind` is classified as `Conditional` rather than assumed to be an environment failure. |
 | `Zip(ZipError)` | `Conditional` | Invalid headers, CRC/length mismatches, invalid DEFLATE data, and truncated reads indicate a malformed archive. `UnsupportedCompressionMethod`, ZIP64, and the 256 MiB entry limit can reject an otherwise valid archive as unsupported. `ZipError` does not retain the JAR entry name. |
 | `InvalidBinaryName(BinaryName)` | malformed reference / path input | Filesystem and archive entries reject unsafe names before probing. The name may have come from untrusted classfile bytes. `ClassLoadError::Io` currently wraps this as `Io`, which is too broad for a stable category. |
 
@@ -246,17 +245,41 @@ Current focused coverage includes:
 - JAR/JMOD lookup tests asserting `ClassResource::origin()`;
 - resolver tests that turn only `NotFound` into an unresolved `Ok(None)`.
 
-The current API cannot assert origin/format on a failed load; that is the
-specific provenance blind spot to cover in #980. Its tests should use small
-fixtures for malformed `.class`, malformed `.tasty`, unsupported class
-version, missing class, nested dependency failure, and a cached repeated
-failure; assert code/category, source identity, origin/format presence or
-absence, and no extra lookup when cached. Include fixtures whose signatures
-and annotation element values exceed the classfile decoder's depth limits:
-assert that the retained causes are `SignatureError::TooDeeplyNested` and
-`AttributeError::TooDeeplyNestedAnnotation` and classify them as
-`UnsupportedFeatureOrVersion`, while nearby malformed grammar/structure
-remains `MalformedArtifact`. Include archive/JMOD provenance where fixture
-support allows it, and verify that a failed dependency reports the dependency
-resource. Keep existing classpath-selection, `Display`, resolver, cache, and
-rollback behavior unchanged.
+The #980 `ClassLoader::load_class_detailed` API returns a `ClassLoadFailure`
+with the error plus optional origin/format. Tests use small fixtures for
+malformed `.class`, malformed `.tasty`, unsupported class version, missing
+class, nested dependency failure, and a cached repeated failure; assert
+code/category, source identity, origin/format presence or absence, and no
+extra lookup when cached. Signature and annotation depth-limit unit tests
+assert that `SignatureError::TooDeeplyNested` and
+`AttributeError::TooDeeplyNestedAnnotation` classify as
+`UnsupportedFeatureOrVersion`, while malformed grammar remains
+`MalformedArtifact`. Directory and JAR failure provenance, missing
+dependency context, and the dependency artifact's origin are covered
+directly. JMOD retains its existing success-side origin coverage. Existing
+classpath-selection, `Display`, resolver, cache, and rollback behavior stays
+unchanged.
+
+## #980 API decision
+
+`ClassLoadError::code()` is an exhaustive stable code for the outer
+`classloader.*` variant. `category()` describes that outer failure, so a
+`DependencyFailure` remains `ResolutionOrDependency`; `root_cause()` returns
+the deepest nested `ClassLoadError`, with separate root-cause code/category
+accessors. Classpath and TASTy errors expose their own stable codes and use
+retained typed causes for categories where available. No classification
+parses `Display` text.
+
+`ClassLoadFailure` is additive and returned by
+`ClassLoader::load_class_detailed`. Its `error` keeps the existing typed
+chain, while `origin` and `format` identify the selected artifact behind the
+deepest failure when known. The loader captures them from the original
+`ClassResource` and stores them with loader-local failed cache entries, so a
+retry through the same loader returns identical context without another
+classpath lookup. Dependency wrappers retain their outer code but carry the
+failing dependency's context. `NotFound` and lookup errors before selecting a
+resource have no fabricated provenance. Existing `load_class` and every
+`ClassLoadError` variant remain unchanged.
+
+No `SourceSpan` is attached: these failures arise from binary classpath
+artifacts, which have no source-file identity or source offsets to report.
