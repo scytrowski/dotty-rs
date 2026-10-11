@@ -5161,6 +5161,53 @@ mod tests {
     }
 
     #[test]
+    fn a_successful_load_after_an_independent_failure_is_unaffected() {
+        let resources = HashMap::from([
+            (
+                BinaryName::from_internal("Broken"),
+                (
+                    vec![0, 1, 2],
+                    ClassFormat::Class,
+                    ClassOrigin::Directory(PathBuf::from("/broken")),
+                ),
+            ),
+            (
+                BinaryName::from_internal("Good"),
+                (
+                    synthetic_class("Good", None),
+                    ClassFormat::Class,
+                    ClassOrigin::Directory(PathBuf::from("/good")),
+                ),
+            ),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(ResourceClassPath(resources), &mut store);
+
+        let failure = loader
+            .load_class_detailed(&BinaryName::from_internal("Broken"))
+            .expect_err("malformed bytes must fail independently");
+        assert_eq!(failure.code(), "classloader.invalid_class_file");
+        assert_eq!(
+            failure.origin,
+            Some(ClassOrigin::Directory(PathBuf::from("/broken")))
+        );
+
+        let good = loader
+            .load_class_detailed(&BinaryName::from_internal("Good"))
+            .expect("a separate valid class should still load");
+        assert!(matches!(
+            loader.repository.get(&BinaryName::from_internal("Broken")),
+            Some(ClassEntry::Failed(_, _))
+        ));
+        assert!(matches!(
+            loader.repository.get(&BinaryName::from_internal("Good")),
+            Some(ClassEntry::Loaded(symbol)) if *symbol == good
+        ));
+        drop(loader);
+        assert_eq!(symbol_name(&store, good), "Good");
+    }
+
+    #[test]
     fn detailed_cached_failure_preserves_resource_provenance_without_reprobing() {
         let calls = Arc::new(AtomicUsize::new(0));
         let name = BinaryName::from_internal("Broken");
