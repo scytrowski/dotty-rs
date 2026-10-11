@@ -1301,6 +1301,17 @@ The API does not by itself type function expressions or apply contextual
 arguments. See the
 [pinned Scala 3.9 identity reference and fixture](../crates/dotty-typer/tests/fixtures/function-class-identities/FunctionClassIdentities.oracle.md).
 
+Issue #946 profiled the remaining `FunctionWithMods` first blockers and pinned
+the Scala 3.9 impure function identities. In capture-checking mode, ordinary
+`=>` and contextual `?=>` arrows carry `Impure` metadata and normalize through
+`scala.ImpureFunctionN` / `scala.ImpureContextFunctionN` aliases, whose bodies
+are retaining-cap annotated applications of `FunctionN` / `ContextFunctionN`.
+The current audit's 13 observations are 3 distinct one-argument ordinary
+`ImpureFunction1` source trees in 2 files. The typer still leaves all such
+impure types unsupported. The reference pins the exact alias representation,
+the generic-alias normalization prerequisite, and the boundaries around
+erased and capture-set function types: [impure function identity reference](../crates/dotty-typer/tests/fixtures/function-class-identities/ImpureFunctionTypeIdentities.oracle.md).
+
 ## Source function type projection (#827)
 
 The source type projector maps ordinary `() => R`, `A => R`, and multi-parameter

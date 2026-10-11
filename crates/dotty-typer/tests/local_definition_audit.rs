@@ -1504,6 +1504,24 @@ fn pinned_scala39_local_definition_audit() {
             .function_with_mods_profile
             .observations
             .iter()
+            .map(|row| (row.path.as_str(), row.function_tree))
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3,
+        "13 first-blocker observations should point to three source function-type trees"
+    );
+    assert!(
+        audit
+            .function_with_mods_profile
+            .observations
+            .iter()
+            .all(|row| row.source_kind == "ordinary/impure")
+    );
+    assert_eq!(
+        audit
+            .function_with_mods_profile
+            .observations
+            .iter()
             .map(|row| row.path.as_str())
             .collect::<BTreeSet<_>>()
             .len(),
@@ -3884,7 +3902,8 @@ fn unsupported_type_tree_failures_keep_exact_source_shapes() {
 
 #[test]
 fn function_with_mods_profile_records_parser_shape_and_method_attribution() {
-    let source_text = "object C { def f(x: (y: Int) ?=> Int): Int = 1 }";
+    let source_text =
+        "object C { def f(x: (y: Int) ?=> Int): Int = 1; def g(x: Int ?=> Int): Int = 1 }";
     let mut store = SemanticStore::new();
     let source = SourceId::from_index(0);
     let scanner = ContextualScanner::new(source_text).unwrap();
@@ -3900,6 +3919,7 @@ fn function_with_mods_profile_records_parser_shape_and_method_attribution() {
         .iter()
         .find(|(_, node)| matches!(&node.kind, TreeKind::DefDef(def) if store.names.resolve(def.name.as_name().text()) == "f"))
         .expect("method f");
+    let method_range = parsed.ast.get(method_tree).position.unwrap().span().range();
     let (function_tree, _) = parsed
         .ast
         .iter()
@@ -3907,7 +3927,10 @@ fn function_with_mods_profile_records_parser_shape_and_method_attribution() {
             matches!(
                 &node.kind,
                 TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
-            )
+            ) && node.position.is_some_and(|position| {
+                let range = position.span().range();
+                method_range.start() <= range.start() && range.end() <= method_range.end()
+            })
         })
         .expect("contextual function type");
 
@@ -3932,6 +3955,43 @@ fn function_with_mods_profile_records_parser_shape_and_method_attribution() {
     assert_eq!(observation.modifiers, "Given");
     assert_eq!(observation.attribution, "direct");
     assert_eq!(observation.line, 1);
+
+    let (unnamed_method, _) = parsed
+        .ast
+        .iter()
+        .find(|(_, node)| matches!(&node.kind, TreeKind::DefDef(def) if store.names.resolve(def.name.as_name().text()) == "g"))
+        .expect("method g");
+    let unnamed_range = parsed
+        .ast
+        .get(unnamed_method)
+        .position
+        .unwrap()
+        .span()
+        .range();
+    let (unnamed_tree, _) = parsed
+        .ast
+        .iter()
+        .find(|(_, node)| {
+            matches!(
+                &node.kind,
+                TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+            ) && node.position.is_some_and(|position| {
+                let range = position.span().range();
+                unnamed_range.start() <= range.start() && range.end() <= unnamed_range.end()
+            })
+        })
+        .expect("unnamed contextual function type");
+    let unnamed = function_with_mods_observation(
+        &parsed.ast,
+        &store.names,
+        source_text,
+        "Fixture.scala",
+        unnamed_method,
+        unnamed_tree.index(),
+        unnamed_method.index(),
+    )
+    .expect("unnamed function observation");
+    assert!(unnamed.parameters.contains("unnamed:Int/Ident"));
 }
 
 #[test]
