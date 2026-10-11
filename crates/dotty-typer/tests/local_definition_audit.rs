@@ -3976,6 +3976,20 @@ fn function_with_mods_profile_records_parser_shape_and_method_attribution() {
     assert_eq!(observation.attribution, "direct");
     assert_eq!(observation.blocker_origin_method, "f");
     assert_eq!(observation.first_failure_method, "f");
+    assert_eq!(
+        format_blocker_identity(
+            &observation.blocker_origin_method,
+            observation.blocker_origin_tree
+        ),
+        format!("f#tree={}", observation.blocker_origin_tree)
+    );
+    assert_eq!(
+        format_blocker_identity(
+            &observation.first_failure_method,
+            observation.first_failure_tree
+        ),
+        format!("f#tree={}", observation.first_failure_tree)
+    );
     assert_eq!(observation.line, 1);
 
     let (unnamed_method, _) = parsed
@@ -5307,15 +5321,13 @@ fn print_function_with_mods_profile(profile: &FunctionWithModsProfile) {
     println!("  observations:");
     for row in &profile.observations {
         println!(
-            "    path={} method={}#tree={} function_tree={} blocker_origin={}#tree={} first_failure={}#tree={} attribution={} line={} span={} syntax={:?} params={} [{}] result={} kind={} modifiers=[{}] visibility={} annotations={} erased=[{}]",
+            "    path={} method={}#tree={} function_tree={} blocker_origin={} first_failure={} attribution={} line={} span={} syntax={:?} params={} [{}] result={} kind={} modifiers=[{}] visibility={} annotations={} erased=[{}]",
             row.path,
             row.method,
             row.method_tree,
             row.function_tree,
-            row.blocker_origin_tree,
-            row.blocker_origin_method,
-            row.first_failure_tree,
-            row.first_failure_method,
+            format_blocker_identity(&row.blocker_origin_method, row.blocker_origin_tree),
+            format_blocker_identity(&row.first_failure_method, row.first_failure_tree),
             row.attribution,
             row.line,
             row.span,
@@ -5330,6 +5342,10 @@ fn print_function_with_mods_profile(profile: &FunctionWithModsProfile) {
             row.erased_params
         );
     }
+}
+
+fn format_blocker_identity(method: &str, tree: u32) -> String {
+    format!("{method}#tree={tree}")
 }
 
 fn collect_match_readiness(
