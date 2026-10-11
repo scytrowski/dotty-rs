@@ -8,6 +8,7 @@ use dotty_classloader::classloader::{
 };
 use dotty_core::ast::{Match, Modifier, Tree, TreeKind, Untyped, UntypedNode, VisibilitySyntax};
 use dotty_core::ids::TreeId;
+use dotty_core::types::{Type, TypeRefTarget};
 use dotty_core::{
     Definitions, MemberRequest, Packages, ResolutionError, ResolverCheckpoint, SemanticStore,
     SourceId, SourceText, SymbolId, SymbolResolver, TextRange,
@@ -1760,7 +1761,8 @@ fn pinned_scala39_local_definition_audit() {
         assert_eq!(row.modifiers, "Impure", "{row:?}");
         assert_eq!(row.erased_params, "ordinary", "{row:?}");
         assert_eq!(row.arity, 1, "{row:?}");
-        assert_eq!(row.semantic_family, "unselected", "{row:?}");
+        assert!(row.projection_completed, "{row:?}");
+        assert_eq!(row.semantic_family, "ImpureFunction1", "{row:?}");
         assert_eq!(row.expected_semantic_family, "ImpureFunction1", "{row:?}");
         assert_eq!(row.first_blocker, "SymbolResolution", "{row:?}");
         assert!(!row.method_typed, "{row:?}");
@@ -5045,6 +5047,7 @@ fn audit_source_inner(
             metrics,
         }));
     }
+    let mut impure_projection_cache = BTreeMap::new();
     let mut root_failures = Vec::new();
     let mut method_ranges = root_methods
         .iter()
@@ -5252,9 +5255,10 @@ fn audit_source_inner(
                 ImpureFunctionBaselineAuditContext {
                     arena: &parsed.ast,
                     typer: &typer,
-                    source,
                     source_text: text,
                     path,
+                    classpath: probe_classpath.clone(),
+                    projection_cache: &mut impure_projection_cache,
                     method_tree: tree,
                     first_blocker: "typed",
                     method_typed: true,
@@ -5325,9 +5329,10 @@ fn audit_source_inner(
                 ImpureFunctionBaselineAuditContext {
                     arena: &parsed.ast,
                     typer: &typer,
-                    source,
                     source_text: text,
                     path,
+                    classpath: probe_classpath.clone(),
+                    projection_cache: &mut impure_projection_cache,
                     method_tree: tree,
                     first_blocker: &kind.bucket,
                     method_typed: false,
@@ -7183,27 +7188,29 @@ fn function_with_mods_observation(
     })
 }
 
-struct ImpureFunctionBaselineAuditContext<'a> {
-    arena: &'a dotty_core::AstArena<Untyped>,
-    typer: &'a SourceTyper<'a>,
-    source: SourceId,
-    source_text: &'a str,
-    path: &'a str,
+struct ImpureFunctionBaselineAuditContext<'ctx, 'store> {
+    arena: &'ctx dotty_core::AstArena<Untyped>,
+    typer: &'ctx SourceTyper<'store>,
+    source_text: &'ctx str,
+    path: &'ctx str,
+    classpath: Option<SharedClassPath>,
+    projection_cache: &'ctx mut BTreeMap<u32, Option<String>>,
     method_tree: TreeId<Untyped>,
-    first_blocker: &'a str,
+    first_blocker: &'ctx str,
     method_typed: bool,
 }
 
 fn record_impure_function_baseline_outcome(
     audit: &mut Audit,
-    context: ImpureFunctionBaselineAuditContext<'_>,
+    context: ImpureFunctionBaselineAuditContext<'_, '_>,
 ) {
     let ImpureFunctionBaselineAuditContext {
         arena,
         typer,
-        source,
         source_text,
         path,
+        classpath,
+        projection_cache,
         method_tree,
         first_blocker,
         method_typed,
@@ -7224,7 +7231,11 @@ fn record_impure_function_baseline_outcome(
             baseline.method_tree
         );
     };
-    let method_name = typer.store().names.resolve(method.name.as_name().text());
+    let method_name = typer
+        .store()
+        .names
+        .resolve(method.name.as_name().text())
+        .to_owned();
     assert_eq!(
         method_name, baseline.method,
         "pinned method identity changed"
@@ -7264,25 +7275,27 @@ fn record_impure_function_baseline_outcome(
     } else {
         format!("ImpureFunction{}", function.params.len())
     };
-    let projection_completed = typer
-        .source_type_index()
-        .type_at(source, function_tree)
-        .is_some();
+    // Probe the type tree independently after the enclosing method attempt.
+    // A failed method transaction rolls back its source-type cache, so reading
+    // that cache here would conflate projection with the later method failure.
+    let projection = projection_cache
+        .entry(function_tree.index())
+        .or_insert_with(|| {
+            isolated_impure_function_projection(source_text, path, function_tree.index(), classpath)
+        })
+        .clone();
+    let projection_completed = projection.is_some();
     audit
         .impure_function_baseline_outcomes
         .insert(ImpureFunctionBaselineOutcome {
             path: path.to_owned(),
             method_tree: baseline.method_tree,
-            method: method_name.to_owned(),
+            method: method_name,
             function_tree: baseline.function_tree,
             line,
             span: span_text,
             syntax: syntax.to_owned(),
-            semantic_family: if projection_completed {
-                semantic_family.clone()
-            } else {
-                "unselected".to_owned()
-            },
+            semantic_family: projection.unwrap_or_else(|| "unselected".to_owned()),
             expected_semantic_family: semantic_family,
             modifiers: source_modifier_list(&function.modifiers),
             erased_params: function
@@ -7298,6 +7311,95 @@ fn record_impure_function_baseline_outcome(
             first_blocker: first_blocker.to_owned(),
             method_typed,
         });
+}
+
+fn isolated_impure_function_projection(
+    source_text: &str,
+    path: &str,
+    function_tree_index: u32,
+    classpath: Option<SharedClassPath>,
+) -> Option<String> {
+    let source = SourceId::from_index(0);
+    let scanner = ContextualScanner::new(source_text).ok()?;
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).ok()?,
+        source,
+        scanner,
+        &mut store.names,
+    );
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        path,
+        &mut store,
+        &mut packages,
+    )
+    .ok()?;
+    let (function_tree, function_span) = parsed.ast.iter().find_map(|(tree, node)| {
+        if tree.index() != function_tree_index {
+            return None;
+        }
+        Some((tree, node.position?.span().range()))
+    })?;
+    let context = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            let span = node.position?.span().range();
+            if span.start() > function_span.start() || span.end() < function_span.end() {
+                return None;
+            }
+            let symbol = index.symbol_at(source, tree)?;
+            let context = index.declaration_context_of(symbol)?;
+            Some((span.end() - span.start(), context))
+        })
+        .min_by_key(|(span_len, _)| *span_len)?
+        .1;
+    let (typer_packages, resolver_packages) = if classpath.is_some() {
+        (Packages::new(), Some(packages))
+    } else {
+        (packages, None)
+    };
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    );
+    if let (Some(classpath), Some(packages)) = (classpath, resolver_packages) {
+        let resolver = ClasspathSymbolResolver::new(
+            classpath,
+            definitions,
+            LoadingSession::with_packages(packages),
+        );
+        typer = typer.with_resolver(Box::new(AuditResolver {
+            inner: resolver,
+            metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
+        }));
+    }
+    let projection = typer.type_of_tpt(function_tree, context).ok()?;
+    let Type::Applied { tycon, .. } = typer.store().types.get(projection) else {
+        return Some("unexpected_non_applied_type".to_owned());
+    };
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(symbol),
+        ..
+    } = typer.store().types.get(*tycon)
+    else {
+        return Some("unexpected_non_symbol_constructor".to_owned());
+    };
+    let constructor = typer
+        .store()
+        .names
+        .resolve(typer.store().symbols.get(*symbol).name.text())
+        .to_owned();
+    Some(constructor)
 }
 
 struct SourceFunctionMethodAudit<'a, 'typer> {
