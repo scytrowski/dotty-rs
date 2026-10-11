@@ -275,6 +275,8 @@ struct Audit {
     source_function_method_outcomes: BTreeSet<String>,
     source_function_outcomes: BTreeMap<String, FailureBucket>,
     function_with_mods_profile: FunctionWithModsProfile,
+    function_with_mods_inventory: FunctionWithModsInventory,
+    impure_function_baseline_outcomes: BTreeSet<ImpureFunctionBaselineOutcome>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -305,6 +307,206 @@ struct FunctionWithModsObservation {
 struct FunctionWithModsProfile {
     observations: BTreeSet<FunctionWithModsObservation>,
 }
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct FunctionWithModsInventory {
+    total: usize,
+    plain_function_trees: usize,
+    modifiers: BTreeMap<String, usize>,
+    source_kinds: BTreeMap<String, usize>,
+    source_kind_files: BTreeMap<String, BTreeSet<String>>,
+    plain_function_files: BTreeSet<String>,
+    erased: usize,
+    capture_result_adjacency: usize,
+    files: BTreeSet<String>,
+}
+
+impl FunctionWithModsInventory {
+    fn merge(&mut self, other: Self) {
+        self.total += other.total;
+        self.plain_function_trees += other.plain_function_trees;
+        self.erased += other.erased;
+        self.capture_result_adjacency += other.capture_result_adjacency;
+        self.files.extend(other.files);
+        self.plain_function_files.extend(other.plain_function_files);
+        merge_counts(&mut self.modifiers, other.modifiers);
+        merge_counts(&mut self.source_kinds, other.source_kinds);
+        for (kind, files) in other.source_kind_files {
+            self.source_kind_files
+                .entry(kind)
+                .or_default()
+                .extend(files);
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ImpureFunctionBaselineOutcome {
+    path: String,
+    method_tree: u32,
+    method: String,
+    function_tree: u32,
+    line: usize,
+    span: String,
+    syntax: String,
+    semantic_family: String,
+    expected_semantic_family: String,
+    modifiers: String,
+    erased_params: String,
+    arity: usize,
+    source_kind: String,
+    attribution: String,
+    projection_completed: bool,
+    first_blocker: String,
+    method_typed: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ImpureFunctionBaselineRow {
+    path: &'static str,
+    method_tree: u32,
+    method: &'static str,
+    function_tree: u32,
+    line: usize,
+    span: &'static str,
+    syntax: &'static str,
+    attribution: &'static str,
+}
+
+// Frozen from the #946 audit. Keep these identities independent of the current
+// first-blocker profile so moving a blocker cannot silently erase a row.
+const IMPURE_FUNCTION_BASELINE: &[ImpureFunctionBaselineRow] = &[
+    ImpureFunctionBaselineRow {
+        path: "library/src/scala/collection/StringParsers.scala",
+        method_tree: 750,
+        method: "rec",
+        function_tree: 724,
+        line: 185,
+        span: "5576..5591",
+        syntax: "Char => Boolean",
+        attribution: "sibling/inherited",
+    },
+    ImpureFunctionBaselineRow {
+        path: "library/src/scala/collection/StringParsers.scala",
+        method_tree: 755,
+        method: "forAllBetween",
+        function_tree: 724,
+        line: 185,
+        span: "5576..5591",
+        syntax: "Char => Boolean",
+        attribution: "direct",
+    },
+    ImpureFunctionBaselineRow {
+        path: "library/src/scala/collection/StringParsers.scala",
+        method_tree: 799,
+        method: "rec",
+        function_tree: 724,
+        line: 185,
+        span: "5576..5591",
+        syntax: "Char => Boolean",
+        attribution: "sibling/inherited",
+    },
+    ImpureFunctionBaselineRow {
+        path: "library/src/scala/collection/StringParsers.scala",
+        method_tree: 804,
+        method: "skipIndexWhile",
+        function_tree: 724,
+        line: 185,
+        span: "5576..5591",
+        syntax: "Char => Boolean",
+        attribution: "sibling/inherited",
+    },
+    ImpureFunctionBaselineRow {
+        path: "library/src/scala/collection/StringParsers.scala",
+        method_tree: 840,
+        method: "isHexDigit",
+        function_tree: 724,
+        line: 185,
+        span: "5576..5591",
+        syntax: "Char => Boolean",
+        attribution: "sibling/inherited",
+    },
+    ImpureFunctionBaselineRow {
+        path: "library/src/scala/collection/StringParsers.scala",
+        method_tree: 908,
+        method: "prefixOK",
+        function_tree: 724,
+        line: 185,
+        span: "5576..5591",
+        syntax: "Char => Boolean",
+        attribution: "sibling/inherited",
+    },
+    ImpureFunctionBaselineRow {
+        path: "library/src/scala/collection/StringParsers.scala",
+        method_tree: 957,
+        method: "postfixOK",
+        function_tree: 724,
+        line: 185,
+        span: "5576..5591",
+        syntax: "Char => Boolean",
+        attribution: "sibling/inherited",
+    },
+    ImpureFunctionBaselineRow {
+        path: "library/src/scala/collection/StringParsers.scala",
+        method_tree: 991,
+        method: "isHexFloatLiteral",
+        function_tree: 724,
+        line: 185,
+        span: "5576..5591",
+        syntax: "Char => Boolean",
+        attribution: "sibling/inherited",
+    },
+    ImpureFunctionBaselineRow {
+        path: "library/src/scala/collection/StringParsers.scala",
+        method_tree: 1007,
+        method: "isExp",
+        function_tree: 724,
+        line: 185,
+        span: "5576..5591",
+        syntax: "Char => Boolean",
+        attribution: "sibling/inherited",
+    },
+    ImpureFunctionBaselineRow {
+        path: "library/src/scala/collection/StringParsers.scala",
+        method_tree: 1058,
+        method: "expOK",
+        function_tree: 724,
+        line: 185,
+        span: "5576..5591",
+        syntax: "Char => Boolean",
+        attribution: "sibling/inherited",
+    },
+    ImpureFunctionBaselineRow {
+        path: "library/src/scala/collection/StringParsers.scala",
+        method_tree: 1175,
+        method: "isDecFloatLiteral",
+        function_tree: 724,
+        line: 185,
+        span: "5576..5591",
+        syntax: "Char => Boolean",
+        attribution: "sibling/inherited",
+    },
+    ImpureFunctionBaselineRow {
+        path: "library/src/scala/collection/convert/JavaCollectionWrappers.scala",
+        method_tree: 1973,
+        method: "remap",
+        function_tree: 1937,
+        line: 399,
+        span: "15034..15056",
+        syntax: "Option[V] => Option[V]",
+        attribution: "sibling/inherited",
+    },
+    ImpureFunctionBaselineRow {
+        path: "library/src/scala/collection/convert/JavaCollectionWrappers.scala",
+        method_tree: 2559,
+        method: "remap",
+        function_tree: 2523,
+        line: 510,
+        span: "19443..19465",
+        syntax: "Option[V] => Option[V]",
+        attribution: "sibling/inherited",
+    },
+];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct MissingDeclaredTypeProfile {
@@ -346,6 +548,8 @@ impl Default for Audit {
             source_function_method_outcomes: BTreeSet::new(),
             source_function_outcomes: BTreeMap::new(),
             function_with_mods_profile: FunctionWithModsProfile::default(),
+            function_with_mods_inventory: FunctionWithModsInventory::default(),
+            impure_function_baseline_outcomes: BTreeSet::new(),
         }
     }
 }
@@ -1217,6 +1421,10 @@ impl Audit {
         self.function_with_mods_profile
             .observations
             .extend(other.function_with_mods_profile.observations);
+        self.function_with_mods_inventory
+            .merge(other.function_with_mods_inventory);
+        self.impure_function_baseline_outcomes
+            .extend(other.impure_function_baseline_outcomes);
     }
 }
 
@@ -1500,29 +1708,66 @@ fn pinned_scala39_local_definition_audit() {
         "all ordinary function-type baseline methods should retain their resolver blocker"
     );
     assert_eq!(audit.source_function_method_outcomes.len(), 25);
-    assert_eq!(audit.function_with_mods_profile.observations.len(), 13);
+    assert_eq!(IMPURE_FUNCTION_BASELINE.len(), 13);
+    assert_eq!(
+        audit.impure_function_baseline_outcomes.len(),
+        13,
+        "every frozen #946 row must still be accounted for individually"
+    );
+    assert_eq!(
+        audit.function_with_mods_profile.observations.len(),
+        0,
+        "#949 should move the impure ordinary corpus cohort past FunctionWithMods"
+    );
+    assert!(
+        audit.function_with_mods_inventory.total
+            >= *audit.type_tree_forms.get("FunctionWithMods").unwrap_or(&0),
+        "the full structural census must include the declared-type inventory"
+    );
+    assert_eq!(
+        audit.function_with_mods_inventory.plain_function_trees,
+        *audit.type_tree_forms.get("Function").unwrap_or(&0),
+        "plain source function types must match the declared-type inventory"
+    );
     assert_eq!(
         audit
-            .function_with_mods_profile
-            .observations
+            .function_with_mods_inventory
+            .modifiers
+            .values()
+            .sum::<usize>(),
+        audit.function_with_mods_inventory.total
+    );
+    assert_eq!(
+        audit
+            .function_with_mods_inventory
+            .source_kinds
+            .values()
+            .sum::<usize>(),
+        audit.function_with_mods_inventory.total
+    );
+    assert_eq!(
+        audit
+            .impure_function_baseline_outcomes
             .iter()
             .map(|row| (row.path.as_str(), row.function_tree))
             .collect::<BTreeSet<_>>()
             .len(),
         3,
-        "13 first-blocker observations should point to three source function-type trees"
+        "the frozen cohort should retain three source function-type trees"
     );
-    assert!(
-        audit
-            .function_with_mods_profile
-            .observations
-            .iter()
-            .all(|row| row.source_kind == "ordinary/impure")
-    );
+    for row in &audit.impure_function_baseline_outcomes {
+        assert_eq!(row.source_kind, "ordinary/impure", "{row:?}");
+        assert_eq!(row.modifiers, "Impure", "{row:?}");
+        assert_eq!(row.erased_params, "ordinary", "{row:?}");
+        assert_eq!(row.arity, 1, "{row:?}");
+        assert_eq!(row.semantic_family, "unselected", "{row:?}");
+        assert_eq!(row.expected_semantic_family, "ImpureFunction1", "{row:?}");
+        assert_eq!(row.first_blocker, "SymbolResolution", "{row:?}");
+        assert!(!row.method_typed, "{row:?}");
+    }
     assert_eq!(
         audit
-            .function_with_mods_profile
-            .observations
+            .impure_function_baseline_outcomes
             .iter()
             .filter(|row| row.attribution == "direct")
             .count(),
@@ -1530,8 +1775,7 @@ fn pinned_scala39_local_definition_audit() {
     );
     assert_eq!(
         audit
-            .function_with_mods_profile
-            .observations
+            .impure_function_baseline_outcomes
             .iter()
             .filter(|row| row.attribution == "sibling/inherited")
             .count(),
@@ -1539,14 +1783,13 @@ fn pinned_scala39_local_definition_audit() {
     );
     assert_eq!(
         audit
-            .function_with_mods_profile
-            .observations
+            .impure_function_baseline_outcomes
             .iter()
             .map(|row| row.path.as_str())
             .collect::<BTreeSet<_>>()
             .len(),
         2,
-        "the pinned FunctionWithMods first blockers should remain in the two known files"
+        "the frozen impure-function cohort should remain in the two known files"
     );
 
     let missing_declared_type = audit
@@ -2118,6 +2361,8 @@ fn pinned_scala39_local_definition_audit() {
         println!("  method={record}");
     }
     print_function_with_mods_profile(&audit.function_with_mods_profile);
+    print_function_with_mods_inventory(&audit.function_with_mods_inventory);
+    print_impure_function_baseline_outcomes(&audit.impure_function_baseline_outcomes);
     print_missing_declared_type_profile(&audit.missing_declared_type_profile);
     print_ranked_gaps(&audit.failures);
     print_match_readiness(&audit.match_readiness);
@@ -4700,9 +4945,11 @@ fn audit_source_inner(
     audit.expression_forms = collect_expression_histogram(&parsed.ast);
     audit.singleton_source_inventory = collect_singleton_source_inventory(&parsed.ast, path);
     audit.prefix_operator_forms = collect_prefix_operator_histogram(&parsed.ast, &store.names);
-    let (type_tree_forms, type_tree_form_names, _type_tree_nodes) =
+    let (type_tree_forms, type_tree_form_names, type_tree_nodes) =
         collect_declared_type_tree_inventory(&parsed.ast, &store.names);
     audit.type_tree_forms = type_tree_forms;
+    audit.function_with_mods_inventory =
+        collect_function_with_mods_inventory(&parsed.ast, &type_tree_nodes, path);
     if !type_tree_form_names.is_empty() {
         for form in type_tree_form_names {
             audit
@@ -5000,6 +5247,19 @@ fn audit_source_inner(
                 },
                 "typed",
             );
+            record_impure_function_baseline_outcome(
+                &mut audit,
+                ImpureFunctionBaselineAuditContext {
+                    arena: &parsed.ast,
+                    typer: &typer,
+                    source,
+                    source_text: text,
+                    path,
+                    method_tree: tree,
+                    first_blocker: "typed",
+                    method_typed: true,
+                },
+            );
             if (path == "compiler/src/dotty/tools/dotc/core/SymUtils.scala"
                 || path == "compiler/src/dotty/tools/dotc/typer/Typer.scala")
                 && let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind
@@ -5060,6 +5320,19 @@ fn audit_source_inner(
                         None,
                     )
                 });
+            record_impure_function_baseline_outcome(
+                &mut audit,
+                ImpureFunctionBaselineAuditContext {
+                    arena: &parsed.ast,
+                    typer: &typer,
+                    source,
+                    source_text: text,
+                    path,
+                    method_tree: tree,
+                    first_blocker: &kind.bucket,
+                    method_typed: false,
+                },
+            );
             if kind.bucket == "UnsupportedTypeTree::FunctionWithMods"
                 && let (Some(blocker_tree), Some(origin_tree)) =
                     (unsupported_type_tree, blocker_method_tree)
@@ -5340,6 +5613,82 @@ fn print_function_with_mods_profile(profile: &FunctionWithModsProfile) {
             row.visibility,
             row.annotations,
             row.erased_params
+        );
+    }
+}
+
+fn print_function_with_mods_inventory(inventory: &FunctionWithModsInventory) {
+    println!("function_with_mods_structural_inventory:");
+    println!("  total={}", inventory.total);
+    println!(
+        "  plain_ordinary_function_trees={} files={}",
+        inventory.plain_function_trees,
+        inventory.plain_function_files.len()
+    );
+    println!("  files={}", inventory.files.len());
+    println!("  erased_parameters={}", inventory.erased);
+    println!(
+        "  captures_and_result_adjacency={}",
+        inventory.capture_result_adjacency
+    );
+    println!("  modifier_sets:");
+    for (modifiers, count) in &inventory.modifiers {
+        println!("    [{modifiers}]={count}");
+    }
+    println!("  source_kinds:");
+    for (kind, count) in &inventory.source_kinds {
+        let files = inventory
+            .source_kind_files
+            .get(kind)
+            .map_or(0, BTreeSet::len);
+        println!("    {kind}={count} files={files}");
+    }
+}
+
+fn print_impure_function_baseline_outcomes(rows: &BTreeSet<ImpureFunctionBaselineOutcome>) {
+    println!("impure_function_baseline_before_after:");
+    for row in rows {
+        let classification = if row.method_typed {
+            "fully typed"
+        } else if row.first_blocker == "UnsupportedTypeTree::FunctionWithMods" {
+            "residual FunctionWithMods-specific blocker"
+        } else if matches!(
+            row.first_blocker.as_str(),
+            "ImportQualifierNotFound"
+                | "TypeNameNotFound"
+                | "TermNameNotFound"
+                | "MemberNotFound"
+                | "MemberLookup"
+                | "SymbolResolution"
+        ) {
+            "resolution/classpath blocker"
+        } else {
+            "deeper Typer semantic blocker"
+        };
+        println!(
+            "  path={} method={}#tree={} function_tree={} line={} span={} syntax={:?} modifiers=[{}] erased=[{}] arity={} kind={} semantic_family={} expected_family={} attribution={} projection={} first_blocker={} method_typed={} classification={}",
+            row.path,
+            row.method,
+            row.method_tree,
+            row.function_tree,
+            row.line,
+            row.span,
+            row.syntax,
+            row.modifiers,
+            row.erased_params,
+            row.arity,
+            row.source_kind,
+            row.semantic_family,
+            row.expected_semantic_family,
+            row.attribution,
+            if row.projection_completed {
+                "completed"
+            } else {
+                "not_completed"
+            },
+            row.first_blocker,
+            row.method_typed,
+            classification
         );
     }
 }
@@ -6832,6 +7181,123 @@ fn function_with_mods_observation(
             "sibling/inherited".to_owned()
         },
     })
+}
+
+struct ImpureFunctionBaselineAuditContext<'a> {
+    arena: &'a dotty_core::AstArena<Untyped>,
+    typer: &'a SourceTyper<'a>,
+    source: SourceId,
+    source_text: &'a str,
+    path: &'a str,
+    method_tree: TreeId<Untyped>,
+    first_blocker: &'a str,
+    method_typed: bool,
+}
+
+fn record_impure_function_baseline_outcome(
+    audit: &mut Audit,
+    context: ImpureFunctionBaselineAuditContext<'_>,
+) {
+    let ImpureFunctionBaselineAuditContext {
+        arena,
+        typer,
+        source,
+        source_text,
+        path,
+        method_tree,
+        first_blocker,
+        method_typed,
+    } = context;
+    let Some(baseline) = IMPURE_FUNCTION_BASELINE
+        .iter()
+        .find(|row| row.path == path && row.method_tree == method_tree.index())
+    else {
+        return;
+    };
+    let (_, method_node) = arena
+        .iter()
+        .find(|(tree, _)| tree.index() == baseline.method_tree)
+        .expect("pinned impure-function method tree should remain in the corpus");
+    let TreeKind::DefDef(method) = &method_node.kind else {
+        panic!(
+            "pinned impure-function method identity changed at tree {}",
+            baseline.method_tree
+        );
+    };
+    let method_name = typer.store().names.resolve(method.name.as_name().text());
+    assert_eq!(
+        method_name, baseline.method,
+        "pinned method identity changed"
+    );
+    let (function_tree, function_node) = arena
+        .iter()
+        .find(|(tree, _)| tree.index() == baseline.function_tree)
+        .expect("pinned FunctionWithMods source tree should remain in the corpus");
+    let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) = &function_node.kind
+    else {
+        panic!("pinned function tree changed away from FunctionWithMods");
+    };
+    let position = function_node
+        .position
+        .expect("pinned function tree has a span");
+    let span = position.span().range();
+    let syntax = source_text
+        .get(span.start() as usize..span.end() as usize)
+        .expect("pinned function source span is valid");
+    let line = source_text[..span.start() as usize]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1;
+    let span_text = format!("{}..{}", span.start(), span.end());
+    assert_eq!(line, baseline.line, "pinned function line changed");
+    assert_eq!(span_text, baseline.span, "pinned function span changed");
+    assert_eq!(syntax, baseline.syntax, "pinned function syntax changed");
+    assert!(function.modifiers.modifiers.contains(&Modifier::Impure));
+    let source_kind = if function.modifiers.modifiers.contains(&Modifier::Given) {
+        "contextual/impure"
+    } else {
+        "ordinary/impure"
+    };
+    let semantic_family = if source_kind == "contextual/impure" {
+        format!("ImpureContextFunction{}", function.params.len())
+    } else {
+        format!("ImpureFunction{}", function.params.len())
+    };
+    let projection_completed = typer
+        .source_type_index()
+        .type_at(source, function_tree)
+        .is_some();
+    audit
+        .impure_function_baseline_outcomes
+        .insert(ImpureFunctionBaselineOutcome {
+            path: path.to_owned(),
+            method_tree: baseline.method_tree,
+            method: method_name.to_owned(),
+            function_tree: baseline.function_tree,
+            line,
+            span: span_text,
+            syntax: syntax.to_owned(),
+            semantic_family: if projection_completed {
+                semantic_family.clone()
+            } else {
+                "unselected".to_owned()
+            },
+            expected_semantic_family: semantic_family,
+            modifiers: source_modifier_list(&function.modifiers),
+            erased_params: function
+                .erased_params
+                .iter()
+                .map(|erased| if *erased { "erased" } else { "ordinary" })
+                .collect::<Vec<_>>()
+                .join(","),
+            arity: function.params.len(),
+            source_kind: source_kind.to_owned(),
+            attribution: baseline.attribution.to_owned(),
+            projection_completed,
+            first_blocker: first_blocker.to_owned(),
+            method_typed,
+        });
 }
 
 struct SourceFunctionMethodAudit<'a, 'typer> {
@@ -9254,6 +9720,61 @@ fn collect_declared_type_tree_histogram(
     names: &dotty_core::names::NameInterner,
 ) -> BTreeMap<String, usize> {
     collect_declared_type_tree_inventory(arena, names).0
+}
+
+fn collect_function_with_mods_inventory(
+    arena: &dotty_core::AstArena<Untyped>,
+    type_tree_nodes: &HashSet<TreeId<Untyped>>,
+    path: &str,
+) -> FunctionWithModsInventory {
+    let mut inventory = FunctionWithModsInventory::default();
+    for (tree, node) in arena.iter() {
+        if type_tree_nodes.contains(&tree)
+            && let TreeKind::PhaseSpecific(UntypedNode::Function(function)) = &node.kind
+        {
+            inventory.plain_function_trees += 1;
+            inventory.plain_function_files.insert(path.to_owned());
+            inventory.capture_result_adjacency += usize::from(matches!(
+                arena.try_get(function.body).map(|result| &result.kind),
+                Some(TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(_)))
+            ));
+        }
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) = &node.kind else {
+            continue;
+        };
+        inventory.total += 1;
+        inventory.files.insert(path.to_owned());
+        let modifiers = source_modifier_list(&function.modifiers);
+        *inventory.modifiers.entry(modifiers).or_default() += 1;
+        let source_kind = match (
+            function.modifiers.modifiers.contains(&Modifier::Given),
+            function.modifiers.modifiers.contains(&Modifier::Impure),
+        ) {
+            (false, false) => "ordinary/pure",
+            (false, true) => "ordinary/impure",
+            (true, false) => "contextual/pure",
+            (true, true) => "contextual/impure",
+        };
+        *inventory
+            .source_kinds
+            .entry(source_kind.to_owned())
+            .or_default() += 1;
+        inventory
+            .source_kind_files
+            .entry(source_kind.to_owned())
+            .or_default()
+            .insert(path.to_owned());
+        inventory.erased += function
+            .erased_params
+            .iter()
+            .filter(|erased| **erased)
+            .count();
+        inventory.capture_result_adjacency += usize::from(matches!(
+            arena.try_get(function.result).map(|result| &result.kind),
+            Some(TreeKind::PhaseSpecific(UntypedNode::CapturesAndResult(_)))
+        ));
+    }
+    inventory
 }
 
 fn collect_declared_type_tree_inventory(
