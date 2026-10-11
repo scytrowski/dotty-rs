@@ -697,6 +697,19 @@ mod tests {
     }
 
     #[test]
+    fn reports_a_missing_opening_tag_name_and_finishes_the_tag() {
+        let mut state = XmlState::default();
+        state.update_token(RawTokenKind::XmlStart, "<");
+
+        assert!(!state.update_token(RawTokenKind::Operator, ">"));
+
+        assert_eq!(state.take_error(), Some(XmlIssue::OpeningTagNameExpected));
+        assert!(!state.tag_open);
+        assert_eq!(state.pending_tag_name, None);
+        assert_eq!(state.depth, 1);
+    }
+
+    #[test]
     fn retains_the_actual_name_on_a_closing_tag_without_a_match() {
         let mut state = XmlState::default();
         state.update_token(RawTokenKind::XmlStart, "<");
