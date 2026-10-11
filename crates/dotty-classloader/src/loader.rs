@@ -1,7 +1,7 @@
 use crate::annotation::{AnnotationValue, SemanticAnnotation};
 use crate::binary_name::BinaryName;
 use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError};
-use crate::error::ClassLoadError;
+use crate::error::{ClassLoadError, ClassLoadFailure};
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
 use crate::nesting::{EnclosingMethodRef, InnerClassEntry};
@@ -292,6 +292,24 @@ fn class_type_signature_binary_name(signature: &ClassTypeSignature) -> BinaryNam
     }
 }
 
+fn error_binary_name(error: &ClassLoadError) -> Option<&BinaryName> {
+    match error {
+        ClassLoadError::NotFound(name)
+        | ClassLoadError::Io(name, _)
+        | ClassLoadError::InvalidClassFile(name, _)
+        | ClassLoadError::UnsupportedClassVersion(name, _)
+        | ClassLoadError::MalformedReference(name, _)
+        | ClassLoadError::MalformedDescriptor(name, _)
+        | ClassLoadError::MalformedSignature(name, _)
+        | ClassLoadError::InvalidTastyFile(name, _)
+        | ClassLoadError::CircularInheritance(name)
+        | ClassLoadError::InheritanceDepthExceeded(name)
+        | ClassLoadError::UnresolvedTypeVariable(name, _) => Some(name),
+        ClassLoadError::NameMismatch { requested, .. } => Some(requested),
+        ClassLoadError::DependencyFailure { source, .. } => error_binary_name(source),
+    }
+}
+
 impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// Convenience for the common case: one `ClassLoader` for the whole
     /// lifetime of `store`. Bootstraps its own [`Definitions`], which is
@@ -386,6 +404,27 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.load_class_with_inheritance_ancestry(name, &mut Vec::new())
     }
 
+    /// Loads a class like [`Self::load_class`], retaining the selected
+    /// classpath resource's origin and format on failure when known.
+    ///
+    /// This additive API leaves [`Self::load_class`] and its error type
+    /// unchanged. Dependency failures carry the deepest failing
+    /// dependency's context; absent classes and lookup errors have no
+    /// resource context.
+    pub fn load_class_detailed(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadFailure> {
+        match self.load_class_with_inheritance_ancestry(name, &mut Vec::new()) {
+            Ok(symbol) => Ok(symbol),
+            Err(error) => match self.repository.get(name) {
+                Some(ClassEntry::Failed(_, failure)) => Err(failure.clone()),
+                _ => Err(ClassLoadFailure {
+                    error,
+                    origin: None,
+                    format: None,
+                }),
+            },
+        }
+    }
+
     fn compiler_builtin_class(&self, name: &BinaryName) -> Option<SymbolId> {
         match name.as_internal() {
             "scala/Any" => Some(self.definitions.any_class),
@@ -419,7 +458,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         match self.repository.get(name).cloned() {
             Some(ClassEntry::Loaded(symbol)) => return Ok(symbol),
-            Some(ClassEntry::Failed(_, error)) => return Err(error),
+            Some(ClassEntry::Failed(_, failure)) => return Err(failure.error),
             Some(ClassEntry::Loading(symbol)) => {
                 if !inheritance_ancestry.contains(name) {
                     // A superclass may point back to a class which is
@@ -438,8 +477,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 // be left looking like a merely-not-yet-completed
                 // `SymbolInfo::Missing` once the repository says `Failed`.
                 self.store.symbols.get_mut(symbol).info = SymbolInfo::Error;
+                let failure = ClassLoadFailure {
+                    error: error.clone(),
+                    origin: self.session.origins.get(&symbol).cloned(),
+                    format: None,
+                };
                 self.repository
-                    .mark_failed(name.clone(), Some(symbol), error.clone());
+                    .mark_failed(name.clone(), Some(symbol), failure);
                 return Err(error);
             }
             None => {}
@@ -460,7 +504,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.session.cache_resolved(name.clone(), symbol);
                 Ok(symbol)
             }
-            Err(error) => {
+            Err(failure) => {
                 // `load_uncached` can fail after `enter_class` already
                 // allocated this class's `SymbolId` (e.g. a later
                 // `DependencyFailure` on its superclass) -- that `Symbol`
@@ -488,8 +532,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     self.in_progress_classes.remove(&symbol);
                 }
                 self.repository
-                    .mark_failed(name.clone(), still_loading_symbol, error.clone());
-                Err(error)
+                    .mark_failed(name.clone(), still_loading_symbol, failure.clone());
+                Err(failure.error)
             }
         }
     }
@@ -498,27 +542,66 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         &mut self,
         name: &BinaryName,
         inheritance_ancestry: &mut Vec<BinaryName>,
-    ) -> Result<SymbolId, ClassLoadError> {
-        let resource = self
-            .class_path
-            .find_class(name)
-            .map_err(|error| ClassLoadError::Io(name.clone(), Rc::new(error)))?
-            .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
+    ) -> Result<SymbolId, ClassLoadFailure> {
+        let resource = match self.class_path.find_class(name) {
+            Ok(Some(resource)) => resource,
+            Ok(None) => {
+                return Err(ClassLoadFailure {
+                    error: ClassLoadError::NotFound(name.clone()),
+                    origin: None,
+                    format: None,
+                });
+            }
+            Err(error) => {
+                return Err(ClassLoadFailure {
+                    error: ClassLoadError::Io(name.clone(), Rc::new(error)),
+                    origin: None,
+                    format: None,
+                });
+            }
+        };
 
-        match resource.format() {
+        let resource_origin = resource.origin().clone();
+        let resource_format = resource.format();
+        let result = match resource_format {
             ClassFormat::Class => self.load_uncached_class(
                 name,
                 resource.bytes(),
-                resource.origin().clone(),
+                resource_origin.clone(),
                 inheritance_ancestry,
             ),
             ClassFormat::Tasty => self.load_uncached_tasty(
                 name,
                 resource.bytes(),
-                resource.origin().clone(),
+                resource_origin.clone(),
                 inheritance_ancestry,
             ),
-        }
+        };
+        result.map_err(|error| {
+            let cause_name = error_binary_name(error.root_cause());
+            let failure_is_for_another_name =
+                cause_name.is_some_and(|cause_name| cause_name != name);
+            let dependency_context = cause_name
+                .and_then(|cause_name| self.repository.get(cause_name))
+                .and_then(|entry| match entry {
+                    ClassEntry::Failed(_, failure) => {
+                        Some((failure.origin.clone(), failure.format))
+                    }
+                    _ => None,
+                });
+            let (origin, format) = dependency_context.unwrap_or({
+                if failure_is_for_another_name {
+                    (None, None)
+                } else {
+                    (Some(resource_origin), Some(resource_format))
+                }
+            });
+            ClassLoadFailure {
+                error,
+                origin,
+                format,
+            }
+        })
     }
 
     /// Allocates a class's stable `SymbolId`, and its declarations scope,
@@ -2600,6 +2683,35 @@ mod tests {
                     bytes.clone(),
                     ClassFormat::Class,
                     ClassOrigin::Directory(PathBuf::from("<memory>")),
+                )
+            }))
+        }
+    }
+
+    struct CountingClassPath {
+        name: BinaryName,
+        bytes: Vec<u8>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    struct ResourceClassPath(HashMap<BinaryName, (Vec<u8>, ClassFormat, ClassOrigin)>);
+
+    impl ClassPathEntry for ResourceClassPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            Ok(self.0.get(name).map(|(bytes, format, origin)| {
+                ClassResource::new(bytes.clone(), *format, origin.clone())
+            }))
+        }
+    }
+
+    impl ClassPathEntry for CountingClassPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok((name == &self.name).then(|| {
+                ClassResource::new(
+                    self.bytes.clone(),
+                    ClassFormat::Class,
+                    ClassOrigin::Directory(PathBuf::from("/classes")),
                 )
             }))
         }
@@ -4907,6 +5019,148 @@ mod tests {
     }
 
     #[test]
+    fn detailed_missing_failure_has_no_fabricated_provenance() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+
+        let failure = loader
+            .load_class_detailed(&BinaryName::from_internal("Missing"))
+            .unwrap_err();
+
+        assert_eq!(failure.code(), "classloader.not_found");
+        assert_eq!(failure.category(), crate::error::ClassLoadCategory::Missing);
+        assert_eq!(failure.origin, None);
+        assert_eq!(failure.format, None);
+        assert!(matches!(failure.error, ClassLoadError::NotFound(_)));
+    }
+
+    #[test]
+    fn detailed_classpath_io_failure_has_no_resource_provenance() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(AlwaysErrors, &mut store);
+
+        let failure = loader
+            .load_class_detailed(&BinaryName::from_internal("Anything"))
+            .unwrap_err();
+
+        assert_eq!(failure.code(), "classloader.classpath_error");
+        assert_eq!(failure.root_cause_code(), "classpath.io");
+        assert_eq!(
+            failure.category(),
+            crate::error::ClassLoadCategory::IoOrEnvironment
+        );
+        assert_eq!(failure.origin, None);
+        assert_eq!(failure.format, None);
+    }
+
+    #[test]
+    fn detailed_cached_failure_preserves_resource_provenance_without_reprobing() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let name = BinaryName::from_internal("Broken");
+        let class_path = CountingClassPath {
+            name: name.clone(),
+            bytes: vec![0x00, 0x01, 0x02],
+            calls: Arc::clone(&calls),
+        };
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+
+        let first = loader.load_class_detailed(&name).unwrap_err();
+        let second = loader.load_class_detailed(&name).unwrap_err();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(first.code(), "classloader.invalid_class_file");
+        assert_eq!(
+            first.category(),
+            crate::error::ClassLoadCategory::MalformedArtifact
+        );
+        assert_eq!(
+            first.origin,
+            Some(ClassOrigin::Directory(PathBuf::from("/classes")))
+        );
+        assert_eq!(first.format, Some(ClassFormat::Class));
+        assert_eq!(second.code(), first.code());
+        assert_eq!(second.origin, first.origin);
+        assert_eq!(second.format, first.format);
+    }
+
+    #[test]
+    fn detailed_dependency_failure_reports_the_missing_dependency_without_owner_origin() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("PoolSample"),
+            fixture_bytes("pool_sample/PoolSample.class"),
+        );
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+
+        let failure = loader
+            .load_class_detailed(&BinaryName::from_internal("PoolSample"))
+            .unwrap_err();
+        let cached = loader
+            .load_class_detailed(&BinaryName::from_internal("PoolSample"))
+            .unwrap_err();
+
+        assert_eq!(failure.code(), "classloader.dependency_failure");
+        assert_eq!(
+            failure.category(),
+            crate::error::ClassLoadCategory::ResolutionOrDependency
+        );
+        assert_eq!(failure.root_cause_code(), "classloader.not_found");
+        assert_eq!(
+            failure.root_cause_category(),
+            crate::error::ClassLoadCategory::Missing
+        );
+        assert_eq!(failure.origin, None);
+        assert_eq!(failure.format, None);
+        match (&failure.error, &cached.error) {
+            (
+                ClassLoadError::DependencyFailure { source: first, .. },
+                ClassLoadError::DependencyFailure { source: second, .. },
+            ) => assert!(Rc::ptr_eq(first, second)),
+            other => panic!("expected cached dependency failures, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detailed_dependency_failure_reports_the_dependency_artifact_origin() {
+        let owner = BinaryName::from_internal("PoolSample");
+        let dependency = BinaryName::from_internal("java/lang/Object");
+        let resources = HashMap::from([
+            (
+                owner,
+                (
+                    fixture_bytes("pool_sample/PoolSample.class"),
+                    ClassFormat::Class,
+                    ClassOrigin::Directory(PathBuf::from("/owner")),
+                ),
+            ),
+            (
+                dependency,
+                (
+                    vec![0x00, 0x01, 0x02],
+                    ClassFormat::Class,
+                    ClassOrigin::Directory(PathBuf::from("/dependency")),
+                ),
+            ),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(ResourceClassPath(resources), &mut store);
+
+        let failure = loader
+            .load_class_detailed(&BinaryName::from_internal("PoolSample"))
+            .unwrap_err();
+
+        assert_eq!(failure.code(), "classloader.dependency_failure");
+        assert_eq!(failure.root_cause_code(), "classloader.invalid_class_file");
+        assert_eq!(
+            failure.origin,
+            Some(ClassOrigin::Directory(PathBuf::from("/dependency")))
+        );
+        assert_eq!(failure.format, Some(ClassFormat::Class));
+    }
+
+    #[test]
     fn a_cached_not_found_does_not_probe_the_same_classpath_twice() {
         let lookups = Arc::new(AtomicUsize::new(0));
         let mut store = SemanticStore::new();
@@ -4974,6 +5228,71 @@ mod tests {
             ClassLoadError::UnsupportedClassVersion(name, version)
                 if name.as_internal() == "FromTheFuture" && version.major == 71
         ));
+    }
+
+    #[test]
+    fn detailed_unsupported_version_retains_selected_class_resource() {
+        let name = BinaryName::from_internal("FromTheFuture");
+        let class_path = CountingClassPath {
+            name: name.clone(),
+            bytes: synthetic_future_version_class("FromTheFuture"),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+
+        let failure = loader.load_class_detailed(&name).unwrap_err();
+
+        assert_eq!(failure.code(), "classloader.unsupported_class_version");
+        assert_eq!(
+            failure.category(),
+            crate::error::ClassLoadCategory::UnsupportedFeatureOrVersion
+        );
+        assert!(failure.origin.is_some());
+        assert_eq!(failure.format, Some(ClassFormat::Class));
+    }
+
+    #[test]
+    fn detailed_failure_in_a_jar_retains_the_jar_origin() {
+        let mut jar_bytes = fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/pool_sample_jar/pool_sample_stored.jar"),
+        )
+        .expect("stored JAR fixture should exist");
+        let file_name_length = usize::from(u16::from_le_bytes([jar_bytes[26], jar_bytes[27]]));
+        let extra_length = usize::from(u16::from_le_bytes([jar_bytes[28], jar_bytes[29]]));
+        let data_start = 30 + file_name_length + extra_length;
+        let data_length = u32::from_le_bytes(jar_bytes[18..22].try_into().unwrap()) as usize;
+        let data_end = data_start + data_length;
+        jar_bytes[data_start] ^= 0xff;
+        let checksum = crate::crc32::checksum(&jar_bytes[data_start..data_end]);
+        jar_bytes[14..18].copy_from_slice(&checksum.to_le_bytes());
+        let central_header = jar_bytes
+            .windows(4)
+            .position(|window| window == [0x50, 0x4b, 0x01, 0x02])
+            .expect("fixture should have a central-directory entry");
+        jar_bytes[central_header + 16..central_header + 20]
+            .copy_from_slice(&checksum.to_le_bytes());
+
+        let jar_path = std::env::temp_dir().join(format!(
+            "dotty-classloader-malformed-resource-{}.jar",
+            std::process::id()
+        ));
+        fs::write(&jar_path, jar_bytes).expect("temporary JAR should be writable");
+        let jar_path_classpath = crate::jar_class_path::JarClassPath::new(&jar_path, 21)
+            .expect("modified JAR should still have a valid archive structure");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(jar_path_classpath, &mut store);
+
+        let failure = loader
+            .load_class_detailed(&BinaryName::from_internal("PoolSample"))
+            .unwrap_err();
+
+        assert_eq!(failure.code(), "classloader.invalid_class_file");
+        assert_eq!(failure.format, Some(ClassFormat::Class));
+        assert_eq!(failure.origin, Some(ClassOrigin::Jar(jar_path.clone())));
+        drop(loader);
+        fs::remove_file(jar_path).expect("temporary JAR should be removable");
     }
 
     #[test]
@@ -5062,6 +5381,30 @@ mod tests {
             error,
             ClassLoadError::InvalidTastyFile(name, _) if name.as_internal() == "Broken"
         ));
+    }
+
+    #[test]
+    fn detailed_tasty_failure_retains_the_selected_tasty_resource() {
+        let mut classes = HashMap::new();
+        classes.insert(BinaryName::from_internal("Broken"), vec![0x00, 0x01, 0x02]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryTastyClassPath(classes), &mut store);
+
+        let failure = loader
+            .load_class_detailed(&BinaryName::from_internal("Broken"))
+            .unwrap_err();
+
+        assert_eq!(failure.code(), "classloader.invalid_tasty_file");
+        assert_eq!(
+            failure.category(),
+            crate::error::ClassLoadCategory::MalformedArtifact
+        );
+        assert_eq!(failure.root_cause_code(), "tasty.invalid_header");
+        assert_eq!(failure.format, Some(ClassFormat::Tasty));
+        assert_eq!(
+            failure.origin,
+            Some(ClassOrigin::Directory(PathBuf::from("<memory>")))
+        );
     }
 
     #[test]
