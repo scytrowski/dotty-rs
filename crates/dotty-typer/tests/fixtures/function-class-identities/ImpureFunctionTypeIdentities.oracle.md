@@ -59,7 +59,7 @@ synthesized by the Scala package for the pinned compiler, rather than loaded
 from a Scala 3.9 class file. Function class symbols are synthesized at each
 nonnegative arity; the implementation-relevant class arities are 0 through
 22, with higher-arity runtime erasure using `scala.runtime.FunctionXXL`.
-The 13 current audit observations all have arity 1.
+The 13 observations in the pre-#949 audit all have arity 1.
 
 Before alias expansion, a semantic type can retain an applied reference to the
 `Impure*FunctionN` alias symbol. After expansion, it is an annotated applied
@@ -112,10 +112,13 @@ in the `scala` package. `source_function_family_type_constructor` returns a
 bodies use a bound `TypeLambda` with contravariant inputs, a covariant result,
 and the canonical `scala.annotation.retainsCap` annotation. Package scope and
 resolver transactions preserve one identity and remove it on rollback.
-`project_function_type` still projects only ordinary and `[Given]` non-erased
-trees; using the new identity API for source projection is later work.
-`ContextFunctionN` materialization remains the pure contextual class case and
-is not reused to represent an impure alias.
+`project_function_type` selects a family from the exact source modifier vector:
+ordinary `[Impure]` and contextual `[Given, Impure]` use the impure aliases;
+plain `[Given]` continues to use the pure contextual class. Nested source
+function trees select their family independently. The source type cache stores
+the applied alias reference, and `TypeNormalizer::dealias_top` opens its
+retaining-cap body when requested. `ContextFunctionN` remains the pure
+contextual class and is not reused to represent an impure alias.
 
 ## Generic alias normalization prerequisites
 
@@ -139,14 +142,16 @@ remain in `TypeNormalizer`; the helper should only instantiate one lambda.
 
 ## Shapes outside this audit slice
 
-The typer currently rejects every `erased_params=true` vector before alias
-selection. Pure arrows with capture sets are carried separately through
-`CapturesAndResult`; they are not impure aliases. The projector rejects
-function-type visibility, annotations, and modifier lists other than exactly
-`[Given]`; unsupported combinations stay typed deferrals. The current 13 rows
-contain none of those shapes. This issue records these boundaries and does not
-project impure aliases, normalize generic aliases, or type erased/capture-set
-function types.
+The typer rejects every `erased_params=true` vector before alias selection and
+rejects malformed erasure metadata. Pure arrows with capture sets are carried
+separately through `CapturesAndResult`; they are not impure aliases and remain
+unsupported by this projection. The projector rejects function-type
+visibility, annotations, and modifier lists other than exactly `[Given]`,
+`[Impure]`, or `[Given, Impure]`; unsupported combinations stay typed
+deferrals. The pre-#949 13 observations contain three distinct ordinary
+impure source trees; the projection regression test checks ordinary and
+contextual families, nesting, caching, alias preservation, and on-demand
+normalization. The full pinned corpus rerun is not recorded here.
 
 The parser regression tests for ordinary/contextual arrows, pure arrows,
 capture-set preservation, named and nested parameters, erased parameters, and

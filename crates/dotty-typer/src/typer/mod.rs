@@ -803,6 +803,45 @@ mod tests {
         (parsed, store, packages, definitions, index, source)
     }
 
+    fn parse_capture_checked_and_name(
+        text: &str,
+    ) -> (
+        dotty_parser::ParseResult,
+        SemanticStore,
+        Packages,
+        Definitions,
+        SourceSemanticIndex,
+        SourceId,
+    ) {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let source = SourceId::from_index(12);
+        let mut packages = Packages::new();
+        let scanner = ContextualScanner::new(text).unwrap();
+        let parsed = dotty_parser::Parser::new(
+            SourceText::new(text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        )
+        .with_features(dotty_parser::ParserFeatures {
+            capture_checking: true,
+            ..dotty_parser::ParserFeatures::default()
+        })
+        .source_compilation_unit();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let index = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "TyperCaptureChecking.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap();
+        (parsed, store, packages, definitions, index, source)
+    }
+
     fn publish_empty_class_info(store: &mut SemanticStore, class_type: TypeId, no_prefix: TypeId) {
         let Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(class),
@@ -1320,6 +1359,66 @@ mod tests {
             });
             store.scopes.get_mut(scope).enter(name, class);
         }
+    }
+
+    fn enter_capture_checked_function_classes(
+        store: &mut SemanticStore,
+        packages: &mut Packages,
+        arities: impl IntoIterator<Item = usize>,
+    ) {
+        let scala = packages
+            .enter(store, SymbolOrigin::Synthetic, &["scala"])
+            .last()
+            .expect("scala package")
+            .symbol;
+        let scala_scope = packages.scope_of(scala).expect("scala package scope");
+        for arity in arities {
+            for prefix in ["Function", "ContextFunction"] {
+                let name = Name::new(
+                    store.names.intern(&format!("{prefix}{arity}")),
+                    Namespace::Type,
+                );
+                let class = store.symbols.alloc(dotty_core::Symbol {
+                    name,
+                    owner: Some(scala),
+                    kind: SymbolKind::Trait,
+                    flags: SymbolFlags::EMPTY,
+                    visibility: Visibility::Public,
+                    info: SymbolInfo::Missing,
+                    origin: SymbolOrigin::Synthetic,
+                    annotations: Vec::new(),
+                    position: None,
+                    links: SymbolLinks::default(),
+                });
+                store.scopes.get_mut(scala_scope).enter(name, class);
+            }
+        }
+
+        let annotation_package = packages
+            .enter(store, SymbolOrigin::Synthetic, &["scala", "annotation"])
+            .last()
+            .expect("scala.annotation package")
+            .symbol;
+        let annotation_scope = packages
+            .scope_of(annotation_package)
+            .expect("scala.annotation package scope");
+        let annotation_name = Name::new(store.names.intern("retainsCap"), Namespace::Type);
+        let annotation_class = store.symbols.alloc(dotty_core::Symbol {
+            name: annotation_name,
+            owner: Some(annotation_package),
+            kind: SymbolKind::Trait,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        store
+            .scopes
+            .get_mut(annotation_scope)
+            .enter(annotation_name, annotation_class);
     }
 
     fn complete_builtin_annotation(name: &str) -> (TypeId, Definitions) {
@@ -3813,10 +3912,197 @@ mod tests {
     }
 
     #[test]
+    fn capture_checked_impure_function_types_preserve_canonical_aliases() {
+        let source_text = concat!(
+            "class A; class B; class C; ",
+            "type ImpureZero = () => A; ",
+            "type ImpureOne = A => B; ",
+            "type ImpureNamed = (x: A) => B; ",
+            "type ImpureMany = (A, B) => C; ",
+            "type ContextualImpureOne = A ?=> B; ",
+            "type ContextualImpureMany = (x: A, y: B) ?=> C; ",
+            "type NestedContext = (A => B) ?=> C; ",
+            "type NestedResult = A => (B ?=> C)",
+        );
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_capture_checked_and_name(source_text);
+        enter_capture_checked_function_classes(&mut store, &mut packages, 0..=2);
+        let aliases = [
+            (
+                "ImpureZero",
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Ordinary,
+                    SourceFunctionPurity::Impure,
+                ),
+                0,
+            ),
+            (
+                "ImpureOne",
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Ordinary,
+                    SourceFunctionPurity::Impure,
+                ),
+                1,
+            ),
+            (
+                "ImpureNamed",
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Ordinary,
+                    SourceFunctionPurity::Impure,
+                ),
+                1,
+            ),
+            (
+                "ImpureMany",
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Ordinary,
+                    SourceFunctionPurity::Impure,
+                ),
+                2,
+            ),
+            (
+                "ContextualImpureOne",
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Contextual,
+                    SourceFunctionPurity::Impure,
+                ),
+                1,
+            ),
+            (
+                "ContextualImpureMany",
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Contextual,
+                    SourceFunctionPurity::Impure,
+                ),
+                2,
+            ),
+            (
+                "NestedContext",
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Contextual,
+                    SourceFunctionPurity::Impure,
+                ),
+                1,
+            ),
+            (
+                "NestedResult",
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Ordinary,
+                    SourceFunctionPurity::Impure,
+                ),
+                1,
+            ),
+        ];
+        let trees = aliases.map(|(name, _, _)| {
+            let symbol = type_alias_symbol(&parsed, &store, &index, source, name);
+            (
+                name,
+                type_alias_rhs(&parsed, &store, &index, source, name),
+                index.declaration_context_of(symbol).unwrap(),
+            )
+        });
+        for ((name, _, arity), (_, tree, _)) in aliases.iter().zip(trees.iter()) {
+            let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+                &parsed.ast.get(*tree).kind
+            else {
+                panic!("{name} should preserve its capture-checking function form");
+            };
+            let expected_modifiers = if name.starts_with("Contextual") || *name == "NestedContext" {
+                vec![Modifier::Given, Modifier::Impure]
+            } else {
+                vec![Modifier::Impure]
+            };
+            assert_eq!(function.modifiers.modifiers, expected_modifiers, "{name}");
+            assert_eq!(function.erased_params, vec![false; *arity], "{name}");
+        }
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        for ((name, family, arity), (_, tree, context)) in aliases.iter().zip(trees) {
+            let projected = typer.type_of_tpt(tree, context).unwrap();
+            assert_eq!(
+                typer.source_type_index().type_at(source, tree),
+                Some(projected),
+                "{name} should be cached"
+            );
+            assert_eq!(typer.type_of_tpt(tree, context).unwrap(), projected);
+            let expected_alias = typer
+                .source_impure_function_alias(*family, *arity, tree.index())
+                .unwrap();
+            let Type::Applied { tycon, args } = typer.store().types.get(projected) else {
+                panic!("{name} should preserve an applied impure alias");
+            };
+            assert_eq!(args.len(), arity + 1, "{name}");
+            assert!(matches!(
+                typer.store().types.get(*tycon),
+                Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }
+                    if *symbol == expected_alias
+            ));
+
+            let normalized = crate::types::TypeNormalizer::new(typer.store)
+                .dealias_top(projected)
+                .unwrap();
+            let Type::Annotated { underlying, .. } = typer.store().types.get(normalized) else {
+                panic!("{name} should normalize through the alias's RetainsCap body");
+            };
+            assert!(matches!(
+                typer.store().types.get(*underlying),
+                Type::Applied { .. }
+            ));
+        }
+
+        for (outer_name, inner_name, inner_arg) in [
+            ("NestedContext", "ImpureOne", 0),
+            ("NestedResult", "ContextualImpureOne", 1),
+        ] {
+            let outer = aliases
+                .iter()
+                .position(|(name, _, _)| *name == outer_name)
+                .unwrap();
+            let inner = aliases
+                .iter()
+                .position(|(name, _, _)| *name == inner_name)
+                .unwrap();
+            let (_, outer_tree, outer_context) = trees[outer];
+            let (_, inner_tree, _) = trees[inner];
+            let expected_inner_alias = typer
+                .source_impure_function_alias(
+                    aliases[inner].1,
+                    aliases[inner].2,
+                    inner_tree.index(),
+                )
+                .unwrap();
+            let outer_ty = typer.type_of_tpt(outer_tree, outer_context).unwrap();
+            let Type::Applied { args, .. } = typer.store().types.get(outer_ty) else {
+                panic!("{outer_name} should project to an applied type");
+            };
+            let nested_ty = args[inner_arg];
+            let Type::Applied { tycon, .. } = typer.store().types.get(nested_ty) else {
+                panic!("nested function in {outer_name} should be applied");
+            };
+            assert!(
+                matches!(
+                    typer.store().types.get(*tycon),
+                    Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }
+                        if *symbol == expected_inner_alias
+                ),
+                "{outer_name} should retain the {inner_name} alias family"
+            );
+        }
+    }
+
+    #[test]
     fn source_function_type_modifiers_and_erasure_are_explicitly_deferred() {
-        for (modifier, expected_kind) in [
-            (Modifier::Impure, "unsupported function type modifiers"),
-            (Modifier::Erased, "unsupported function type modifiers"),
+        for modifiers in [
+            vec![Modifier::Given, Modifier::Inline],
+            vec![Modifier::Given, Modifier::Impure, Modifier::Inline],
+            vec![Modifier::Erased],
         ] {
             let (mut parsed, mut store, packages, definitions, index, source) =
                 parse_and_name("class A; class B; type Contextual = A ?=> B");
@@ -3826,7 +4112,7 @@ mod tests {
             else {
                 panic!("contextual type should retain FunctionWithMods");
             };
-            function.modifiers.modifiers = vec![modifier];
+            function.modifiers.modifiers = modifiers;
             let alias = type_alias_symbol(&parsed, &store, &index, source, "Contextual");
             let context = index.declaration_context_of(alias).unwrap();
             let mut typer = SourceTyper::new(
@@ -3841,7 +4127,7 @@ mod tests {
             assert!(matches!(
                 typer.type_of_tpt(rhs, context),
                 Err(TyperError::UnsupportedTypeTree { tree_kind, .. })
-                    if tree_kind == expected_kind
+                    if tree_kind == "unsupported function type modifiers"
             ));
             assert_eq!(typer.source_type_index().type_at(source, rhs), None);
         }
@@ -3849,12 +4135,14 @@ mod tests {
         let (mut parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class A; class B; type Erased = A ?=> B");
         let rhs = type_alias_rhs(&parsed, &store, &index, source, "Erased");
-        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
-            &mut parsed.ast.get_mut(rhs).kind
-        else {
-            panic!("contextual type should retain FunctionWithMods");
-        };
-        function.erased_params[0] = true;
+        {
+            let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+                &mut parsed.ast.get_mut(rhs).kind
+            else {
+                panic!("contextual type should retain FunctionWithMods");
+            };
+            function.erased_params[0] = true;
+        }
         let alias = type_alias_symbol(&parsed, &store, &index, source, "Erased");
         let context = index.declaration_context_of(alias).unwrap();
         let mut typer = SourceTyper::new(
@@ -3873,6 +4161,58 @@ mod tests {
                 ..
             })
         ));
+
+        drop(typer);
+        let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) =
+            &mut parsed.ast.get_mut(rhs).kind
+        else {
+            panic!("contextual type should retain FunctionWithMods");
+        };
+        function.erased_params.clear();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.type_of_tpt(rhs, context),
+            Err(TyperError::UnsupportedTypeTree {
+                tree_kind: "malformed function type erasure metadata",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn failed_impure_function_projection_rolls_back_materialized_aliases() {
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_capture_checked_and_name("class B; type Broken = Missing => B");
+        enter_capture_checked_function_classes(&mut store, &mut packages, [0, 1]);
+        let rhs = type_alias_rhs(&parsed, &store, &index, source, "Broken");
+        let alias = type_alias_symbol(&parsed, &store, &index, source, "Broken");
+        let context = index.declaration_context_of(alias).unwrap();
+        let checkpoint = store.checkpoint();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        for _ in 0..2 {
+            assert!(matches!(
+                typer.type_of_tpt(rhs, context),
+                Err(TyperError::TypeNameNotFound { name, .. })
+                    if typer.store().names.resolve(name.text()) == "Missing"
+            ));
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert_eq!(typer.source_type_index().type_at(source, rhs), None);
+        }
     }
 
     #[test]

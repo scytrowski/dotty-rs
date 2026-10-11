@@ -203,7 +203,7 @@ impl SourceTyper<'_> {
             TreeKind::PhaseSpecific(UntypedNode::Function(function)) => Some((
                 function.params.clone(),
                 function.body,
-                SourceFunctionKind::Ordinary,
+                SourceFunctionFamily::new(SourceFunctionKind::Ordinary, SourceFunctionPurity::Pure),
             )),
             TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) => {
                 if function.erased_params.len() != function.params.len() {
@@ -222,7 +222,6 @@ impl SourceTyper<'_> {
                 }
                 if function.modifiers.visibility.is_some()
                     || !function.modifiers.annotations.is_empty()
-                    || function.modifiers.modifiers.as_slice() != [Modifier::Given]
                 {
                     return Err(TyperError::UnsupportedTypeTree {
                         source: self.source,
@@ -230,11 +229,28 @@ impl SourceTyper<'_> {
                         tree_kind: "unsupported function type modifiers",
                     });
                 }
-                Some((
-                    function.params.clone(),
-                    function.result,
-                    SourceFunctionKind::Contextual,
-                ))
+                let family = match function.modifiers.modifiers.as_slice() {
+                    [Modifier::Given] => SourceFunctionFamily::new(
+                        SourceFunctionKind::Contextual,
+                        SourceFunctionPurity::Pure,
+                    ),
+                    [Modifier::Impure] => SourceFunctionFamily::new(
+                        SourceFunctionKind::Ordinary,
+                        SourceFunctionPurity::Impure,
+                    ),
+                    [Modifier::Given, Modifier::Impure] => SourceFunctionFamily::new(
+                        SourceFunctionKind::Contextual,
+                        SourceFunctionPurity::Impure,
+                    ),
+                    _ => {
+                        return Err(TyperError::UnsupportedTypeTree {
+                            source: self.source,
+                            tree_index: tree.index(),
+                            tree_kind: "unsupported function type modifiers",
+                        });
+                    }
+                };
+                Some((function.params.clone(), function.result, family))
             }
             _ => None,
         };
@@ -406,24 +422,22 @@ impl SourceTyper<'_> {
         tree: TreeId<Untyped>,
         params: Vec<TreeId<Untyped>>,
         result: TreeId<Untyped>,
-        kind: SourceFunctionKind,
+        family: SourceFunctionFamily,
         context: SourceContextId,
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<TypeId, TyperError> {
-        let tycon = self.source_function_type_constructor(kind, params.len(), tree.index())?;
+        let tycon =
+            self.source_function_family_type_constructor(family, params.len(), tree.index())?;
         let mut args = Vec::with_capacity(params.len() + 1);
         for param in params {
-            let param_type = if kind == SourceFunctionKind::Contextual {
-                self.arena
-                    .try_get(param)
-                    .and_then(|parameter| match &parameter.kind {
-                        TreeKind::ValDef(definition) => Some(definition.tpt),
-                        _ => None,
-                    })
-                    .unwrap_or(param)
-            } else {
-                param
-            };
+            let param_type = self
+                .arena
+                .try_get(param)
+                .and_then(|parameter| match &parameter.kind {
+                    TreeKind::ValDef(definition) => Some(definition.tpt),
+                    _ => None,
+                })
+                .unwrap_or(param);
             args.push(self.type_of_tpt_inner_journaled(param_type, context, info_journal)?);
         }
         args.push(self.type_of_tpt_inner_journaled(result, context, info_journal)?);

@@ -27,7 +27,21 @@ Projection therefore counts only parameter trees and recursively projects
 every input and result. Contextual identity is selected by the modifier rather
 than inferred from spelling or from a mock classpath symbol.
 
+With capture checking enabled, the same parser represents ordinary `=>` as
+`FunctionWithMods [Impure]` and contextual `?=>` as
+`FunctionWithMods [Given, Impure]`. The typer projects those exact shapes to
+`ImpureFunctionN` and `ImpureContextFunctionN` aliases, preserving the alias in
+the applied source type. The regression test
+`capture_checked_impure_function_types_preserve_canonical_aliases` exercises
+zero, one, and multiple parameters plus nested contextual/ordinary arrows;
+the alias identity and its retaining-cap expansion are pinned in the
+[impure identity reference](../function-class-identities/ImpureFunctionTypeIdentities.oracle.md).
+
+Erased inputs, visibility and annotations, other modifier combinations, and
+capture-set result trees remain unsupported. This projection does not imply
+that the nominal subtype relation models capture sets.
+
 Scala's pinned `Definitions.scala` synthesizes contextual function classes in
 the `scala` package, as documented for #826. This fixture does not define the
 wire/classpath representation for these classes. Erased parameters and other
-function modifiers remain explicit unsupported cases in this increment.
+unsupported function modifiers remain explicit unsupported cases in this increment.
