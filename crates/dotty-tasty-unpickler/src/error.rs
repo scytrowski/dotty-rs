@@ -1686,4 +1686,37 @@ mod tests {
             "the type at address 19 is malformed: the qualifier of a qualified this is not a type identifier"
         );
     }
+
+    #[test]
+    fn stable_codes_ignore_addresses_and_tags_while_errors_keep_their_payloads() {
+        let first = UnpickleError::UnsupportedTypeTree {
+            address: 17,
+            tag: 84,
+        };
+        let second = UnpickleError::UnsupportedTypeTree {
+            address: 99,
+            tag: 85,
+        };
+        assert_eq!(first.code(), "unpickler.unsupported_type_tree");
+        assert_eq!(first.code(), second.code());
+        assert_eq!(first.category(), UnpickleErrorCategory::UnsupportedFeature);
+        assert!(matches!(
+            first,
+            UnpickleError::UnsupportedTypeTree {
+                address: 17,
+                tag: 84
+            }
+        ));
+
+        let resolver_cause = dotty_core::ResolutionError::Ambiguous { candidates: 3 };
+        let error = UnpickleError::ResolverFailure {
+            address: 41,
+            error: resolver_cause.clone(),
+        };
+        assert_eq!(error.code(), "unpickler.resolver_failure");
+        assert_eq!(error.category(), UnpickleErrorCategory::ResolutionFailure);
+        assert!(
+            matches!(error, UnpickleError::ResolverFailure { address: 41, error } if error == resolver_cause)
+        );
+    }
 }
