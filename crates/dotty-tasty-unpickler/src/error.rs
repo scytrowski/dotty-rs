@@ -15,9 +15,9 @@ pub enum ParentTreeReason {
     NestingLimit,
     /// The constructor call has no function child.
     ConstructorHasFunction,
-    /// The constructor selection names `<init>` instead of its class.
+    /// The parent constructor selection is not named `<init>`.
     SelectsConstructor,
-    /// The constructor selection is applied to `NEW`.
+    /// The parent constructor selection qualifier is not a `NEW` node.
     SelectsNew,
     /// `NEW` does not have exactly one type-tree child.
     NewArity,
@@ -1074,8 +1074,8 @@ impl ParentTreeReason {
         match self {
             Self::NestingLimit => "a parent constructor call nests too deeply",
             Self::ConstructorHasFunction => "a parent constructor call has a function",
-            Self::SelectsConstructor => "a parent constructor selection selects <init>",
-            Self::SelectsNew => "a parent constructor selection is on NEW",
+            Self::SelectsConstructor => "a parent constructor selection does not select <init>",
+            Self::SelectsNew => "a parent constructor selection is not on NEW",
             Self::NewArity => "NEW has one type tree",
         }
     }
@@ -1564,6 +1564,14 @@ mod tests {
         ] {
             add(UnpickleError::MalformedParentTree { address: 4, reason });
         }
+        assert_eq!(
+            ParentTreeReason::SelectsConstructor.to_string(),
+            "a parent constructor selection does not select <init>"
+        );
+        assert_eq!(
+            ParentTreeReason::SelectsNew.to_string(),
+            "a parent constructor selection is not on NEW"
+        );
         add(UnpickleError::InvalidSelfTypeTree {
             address: 4,
             reason: SelfTypeTreeReason::TypeTreeArity,

@@ -133,8 +133,8 @@ finite reason enums deliberately have no `Other(String)` fallback.
 | --- | --- | --- | --- |
 | `MalformedParentTree` | `a parent constructor call nests too deeply` | `class::type_of_parent_in` | `ParentTreeReason::NestingLimit` (`unpickler.malformed_parent_tree.nesting_limit`) |
 | `MalformedParentTree` | `a parent constructor call has a function` | `class::type_of_parent_in` | `ParentTreeReason::ConstructorHasFunction` (`unpickler.malformed_parent_tree.constructor_has_function`) |
-| `MalformedParentTree` | `a parent constructor selection selects <init>` | `class::type_of_parent_in` | `ParentTreeReason::SelectsConstructor` (`unpickler.malformed_parent_tree.selects_constructor`) |
-| `MalformedParentTree` | `a parent constructor selection is on NEW` | `class::type_of_parent_in` | `ParentTreeReason::SelectsNew` (`unpickler.malformed_parent_tree.selects_new`) |
+| `MalformedParentTree` | `a parent constructor selection does not select <init>` | `class::type_of_parent_in` | `ParentTreeReason::SelectsConstructor` (`unpickler.malformed_parent_tree.selects_constructor`) |
+| `MalformedParentTree` | `a parent constructor selection is not on NEW` | `class::type_of_parent_in` | `ParentTreeReason::SelectsNew` (`unpickler.malformed_parent_tree.selects_new`) |
 | `MalformedParentTree` | `NEW has one type tree` | `class::type_of_parent_in` | `ParentTreeReason::NewArity` (`unpickler.malformed_parent_tree.new_arity`) |
 | `InvalidSelfTypeTree` | `a self definition has one type tree` | `class::type_of_self_def` | `SelfTypeTreeReason::TypeTreeArity` (`unpickler.invalid_self_type_tree.type_tree_arity`) |
 | `MalformedDefinition` | `a class definition's first child is its template` | `class::complete_class` | `DefinitionReason::ClassTemplatePosition` (`unpickler.malformed_definition.class_template_position`) |
