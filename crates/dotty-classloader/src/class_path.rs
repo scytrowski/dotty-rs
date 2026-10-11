@@ -105,6 +105,9 @@ impl ClassPathError {
     /// Stable identifier for the retained classpath failure kind.
     pub fn code(&self) -> &'static str {
         match &self.source {
+            ClassPathErrorSource::Io(error) if error.kind() == io::ErrorKind::InvalidData => {
+                "classpath.invalid_data"
+            }
             ClassPathErrorSource::Io(_) => "classpath.io",
             ClassPathErrorSource::Zip(error) => error.code(),
             ClassPathErrorSource::InvalidBinaryName(_) => "classpath.invalid_binary_name",
@@ -114,6 +117,9 @@ impl ClassPathError {
     /// Category derived from the retained classpath cause.
     pub fn category(&self) -> ClassLoadCategory {
         match &self.source {
+            ClassPathErrorSource::Io(error) if error.kind() == io::ErrorKind::InvalidData => {
+                ClassLoadCategory::Conditional
+            }
             ClassPathErrorSource::Io(_) => ClassLoadCategory::IoOrEnvironment,
             ClassPathErrorSource::Zip(error) => error.category(),
             ClassPathErrorSource::InvalidBinaryName(_) => ClassLoadCategory::MalformedArtifact,

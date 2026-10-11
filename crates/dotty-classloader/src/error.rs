@@ -582,6 +582,16 @@ mod tests {
         assert_eq!(classpath.root_cause_code(), "classpath.io");
         assert_eq!(classpath.category(), ClassLoadCategory::IoOrEnvironment);
 
+        let invalid_archive = ClassLoadError::Io(
+            BinaryName::from_internal("A"),
+            Rc::new(ClassPathError::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bad archive magic",
+            ))),
+        );
+        assert_eq!(invalid_archive.root_cause_code(), "classpath.invalid_data");
+        assert_eq!(invalid_archive.category(), ClassLoadCategory::Conditional);
+
         let tasty = ClassLoadError::InvalidTastyFile(
             BinaryName::from_internal("A"),
             TastyDecodeError::Parse(TastyFileError::Header(HeaderError::UnsupportedVersion {
