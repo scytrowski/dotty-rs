@@ -450,6 +450,7 @@ mod tests {
     use dotty_core::{ClassInfo, MemberSelector, Name, Namespace, Scope};
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn fixture_path(relative: &str) -> PathBuf {
@@ -556,6 +557,117 @@ mod tests {
         fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
             Ok(package == ["java", "lang"] || package == ["cycle"])
         }
+    }
+
+    struct EnclosingGenericRetryClassPath(Mutex<bool>);
+
+    impl ClassPathEntry for EnclosingGenericRetryClassPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            let bytes = match name.as_internal() {
+                "enclosing_generics/Outer" => {
+                    include_bytes!("../tests/fixtures/enclosing_generics/Outer.class").to_vec()
+                }
+                "enclosing_generics/Outer$Inner" => {
+                    include_bytes!("../tests/fixtures/enclosing_generics/Outer$Inner.class")
+                        .to_vec()
+                }
+                "enclosing_generics/Outer$Static" => {
+                    let mut bytes =
+                        include_bytes!("../tests/fixtures/enclosing_generics/Outer$Static.class")
+                            .to_vec();
+                    if *self.0.lock().expect("fixture state lock") {
+                        let signature = bytes
+                            .windows(3)
+                            .position(|window| window == b"TU;")
+                            .expect("Static.value should have a TU; Signature");
+                        bytes[signature..signature + 3].copy_from_slice(b"TK;");
+                    }
+                    bytes
+                }
+                "java/lang/Object" => test_class_stub("java/lang/Object", 0x0021),
+                _ => return Ok(None),
+            };
+            Ok(Some(ClassResource::new(
+                bytes,
+                ClassFormat::Class,
+                ClassOrigin::Directory(PathBuf::from("<enclosing-generics-fixture>")),
+            )))
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(package == ["enclosing_generics"] || package == ["java", "lang"])
+        }
+    }
+
+    #[test]
+    fn failed_nested_class_load_rolls_back_and_retries_with_stable_symbols() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let class_path = EnclosingGenericRetryClassPath(Mutex::new(true));
+        let mut resolver =
+            ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(&mut store, &["enclosing_generics"])
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let package_scope = resolver.session.packages.scope_of(package).unwrap();
+        let store_checkpoint = store.checkpoint();
+        let static_name = Name::new(store.names.intern("Outer$Static"), Namespace::Type);
+        let request = MemberRequest {
+            prefix: package_prefix,
+            name: static_name,
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+
+        let error = resolver
+            .resolve_member(&mut store, &request)
+            .expect_err("malformed static signature should fail after loading Outer and Inner");
+        assert!(matches!(
+            error,
+            ResolutionError::Malformed { reason }
+                if reason.contains("unresolved type variable K")
+        ));
+        assert_eq!(store.checkpoint(), store_checkpoint);
+        for class_name in ["Outer", "Outer$Inner", "Outer$Static"] {
+            assert!(
+                store
+                    .scopes
+                    .get(package_scope)
+                    .lookup_all(&Name::new(store.names.intern(class_name), Namespace::Type,))
+                    .is_empty(),
+                "failed transaction left {class_name} in the package scope"
+            );
+            assert!(
+                !resolver
+                    .session
+                    .resolved
+                    .contains_key(&BinaryName::from_internal(format!(
+                        "enclosing_generics/{class_name}"
+                    ),)),
+                "failed transaction left {class_name} in the positive cache"
+            );
+        }
+
+        *resolver.class_path.as_ref().unwrap().0.lock().unwrap() = false;
+        let static_class = resolver
+            .resolve_member(&mut store, &request)
+            .expect("retry should succeed after fixing the classfile bytes")
+            .expect("Outer$Static should resolve");
+        let again = resolver
+            .resolve_member(&mut store, &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(static_class, again);
+        assert!(
+            resolver
+                .session
+                .resolved
+                .contains_key(&BinaryName::from_internal("enclosing_generics/Outer"))
+        );
     }
 
     fn test_class_stub(binary_name: &str, access_flags: u16) -> Vec<u8> {

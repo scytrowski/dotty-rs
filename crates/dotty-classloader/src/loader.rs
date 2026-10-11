@@ -3818,6 +3818,29 @@ mod tests {
     }
 
     #[test]
+    fn nested_signature_reads_an_enclosing_scope_while_it_is_loading() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(enclosing_generics_classpath()),
+            &mut store,
+        );
+        let outer = loader
+            .load_class(&BinaryName::from_internal("enclosing_generics/Outer"))
+            .expect("Outer and its Inner member should load together");
+        let inner = loader
+            .load_class(&BinaryName::from_internal("enclosing_generics/Outer$Inner"))
+            .expect("the previously encountered Inner should be reused");
+        drop(loader);
+
+        let declared_inner = member_type_id(&mut store, outer, "inner");
+        assert_eq!(parent_symbol(&store, declared_inner), inner);
+        assert_eq!(store.symbols.get(inner).owner, Some(outer));
+        let outer_k = type_parameter_symbol(&mut store, outer, "K");
+        let value_type = member_type_id(&mut store, inner, "value");
+        assert_eq!(parent_symbol(&store, value_type), outer_k);
+    }
+
+    #[test]
     fn nested_class_type_parameter_shadows_the_enclosing_parameter() {
         let mut store = SemanticStore::new();
         let mut loader = ClassLoader::new(
@@ -3922,6 +3945,25 @@ mod tests {
             ClassLoadError::UnresolvedTypeVariable(ref owner, name)
                 if owner == &static_name && name == "K"
         ));
+    }
+
+    #[test]
+    fn static_nested_class_resolves_its_own_type_parameter() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(enclosing_generics_classpath()),
+            &mut store,
+        );
+        let static_class = loader
+            .load_class(&BinaryName::from_internal(
+                "enclosing_generics/Outer$Static",
+            ))
+            .expect("Static should resolve its declared U parameter");
+        drop(loader);
+
+        let static_u = type_parameter_symbol(&mut store, static_class, "U");
+        let value_type = member_type_id(&mut store, static_class, "value");
+        assert_eq!(parent_symbol(&store, value_type), static_u);
     }
 
     /// `generic_sample/GenericSample.class`'s `items` field has a real
@@ -4813,6 +4855,31 @@ mod tests {
             symbol_name(&store, parent_symbol(&store, info.parents[1])),
             "Runnable"
         );
+    }
+
+    #[test]
+    #[ignore = "requires a JDK 21 home in DOTTY_JDK21_HOME"]
+    fn jdk21_classspecializer_speciesdata_resolves_its_outer_k_parameter() {
+        use crate::jdk_class_path::JdkClassPath;
+
+        let java_home = std::env::var_os("DOTTY_JDK21_HOME")
+            .expect("set DOTTY_JDK21_HOME to a JDK 21 installation");
+        let jdk = JdkClassPath::new(PathBuf::from(java_home).join("jmods"))
+            .expect("JDK 21 jmods should be readable");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(jdk, &mut store);
+        let species = loader
+            .load_class(&BinaryName::from_internal(
+                "java/lang/invoke/ClassSpecializer$SpeciesData",
+            ))
+            .expect("SpeciesData should load with its enclosing K parameter");
+        drop(loader);
+
+        let specializer = store.symbols.get(species).owner.unwrap();
+        assert_eq!(symbol_name(&store, specializer), "ClassSpecializer");
+        let specializer_k = type_parameter_symbol(&mut store, specializer, "K");
+        let key_type = member_type_id(&mut store, species, "key");
+        assert_eq!(parent_symbol(&store, key_type), specializer_k);
     }
 
     #[test]

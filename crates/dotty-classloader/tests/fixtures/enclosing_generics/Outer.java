@@ -1,6 +1,8 @@
 package enclosing_generics;
 
 public class Outer<K> {
+    public Inner inner;
+
     public class Inner {
         public K value;
 

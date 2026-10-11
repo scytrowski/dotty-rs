@@ -2441,8 +2441,8 @@ fn pinned_scala39_local_definition_audit() {
             .source_function_outcomes
             .get("type::Function::SymbolResolution")
             .map(|bucket| bucket.count),
-        Some(12),
-        "all ordinary function-type baseline methods should retain their resolver blocker"
+        Some(11),
+        "enclosing generic resolution should move one ordinary function-type method past its resolver blocker"
     );
     assert_eq!(audit.source_function_method_outcomes.len(), 25);
     assert_eq!(IMPURE_FUNCTION_BASELINE.len(), 13);
@@ -3114,12 +3114,12 @@ fn pinned_scala39_local_definition_audit() {
         let metrics = resolver_metrics.borrow();
         assert_eq!(
             metrics.external_member_requests(),
-            7_802,
-            "the pinned #972 corpus baseline contains 7,802 external member requests"
+            7_895,
+            "the #973 corpus result includes additional requests after the resolved JDK type became reachable"
         );
         assert_eq!(
-            metrics.member_errors, 452,
-            "the pinned #972 corpus baseline contains 452 member resolution errors"
+            metrics.member_errors, 347,
+            "enclosing generic lookup reduces the pinned #972 baseline from 452 to 347 member resolution errors"
         );
         assert_eq!(
             metrics.member_request_shapes.values().sum::<usize>(),
