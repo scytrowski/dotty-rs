@@ -39,14 +39,27 @@ const MAX_INHERITANCE_DEPTH: usize = 256;
 #[derive(Debug)]
 enum TastyAliasResolutionError {
     ClassPath(BinaryName, ClassPathError),
-    InvalidTasty(BinaryName, tasty_symbol::TastyDecodeError),
+    InvalidTasty(
+        BinaryName,
+        tasty_symbol::TastyDecodeError,
+        ClassOrigin,
+        ClassFormat,
+    ),
 }
 
 impl TastyAliasResolutionError {
-    fn into_class_load_error(self) -> ClassLoadError {
+    fn into_class_load_error(
+        self,
+    ) -> (
+        ClassLoadError,
+        Option<(BinaryName, ClassOrigin, ClassFormat)>,
+    ) {
         match self {
-            Self::ClassPath(name, error) => ClassLoadError::Io(name, Rc::new(error)),
-            Self::InvalidTasty(name, error) => ClassLoadError::InvalidTastyFile(name, error),
+            Self::ClassPath(name, error) => (ClassLoadError::Io(name, Rc::new(error)), None),
+            Self::InvalidTasty(name, error, origin, format) => (
+                ClassLoadError::InvalidTastyFile(name.clone(), error),
+                Some((name, origin, format)),
+            ),
         }
     }
 }
@@ -164,10 +177,18 @@ fn resolve_tasty_alias_target<E: ClassPathEntry>(
             TastyAliasResolutionError::InvalidTasty(
                 package_name.clone(),
                 tasty_symbol::TastyDecodeError::Parse(error),
+                resource.origin().clone(),
+                resource.format(),
             )
         })?;
-    tasty_symbol::resolve_type_alias_target(&file, alias, owner.package_path())
-        .map_err(|error| TastyAliasResolutionError::InvalidTasty(package_name, error))
+    tasty_symbol::resolve_type_alias_target(&file, alias, owner.package_path()).map_err(|error| {
+        TastyAliasResolutionError::InvalidTasty(
+            package_name,
+            error,
+            resource.origin().clone(),
+            resource.format(),
+        )
+    })
 }
 
 fn validate_alias_candidate<E: ClassPathEntry>(
@@ -237,6 +258,10 @@ pub struct ClassLoader<'store, E> {
     /// resolve, but nested signatures may need an enclosing class's already-
     /// entered type parameters while that enclosing class is still loading.
     in_progress_classes: HashMap<SymbolId, InProgressClass>,
+    /// A package-object TASTy resource decoded while resolving a TASTy
+    /// alias. Its error is returned through the requesting class's load,
+    /// so keep its artifact context until that outer call records failure.
+    alias_failure_context: Option<(BinaryName, ClassOrigin, ClassFormat)>,
     /// The canonical `TypeId`/`SymbolId` every JVM primitive and
     /// `Object`/`Any`/`Nothing` reference lowers against — see
     /// [`Definitions::bootstrap`]. `definitions.no_prefix` is this
@@ -353,6 +378,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             session,
             repository: ClassRepository::new(),
             in_progress_classes: HashMap::new(),
+            alias_failure_context: None,
             definitions,
         }
     }
@@ -581,6 +607,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let cause_name = error_binary_name(error.root_cause());
             let failure_is_for_another_name =
                 cause_name.is_some_and(|cause_name| cause_name != name);
+            let alias_context = self
+                .alias_failure_context
+                .take()
+                .filter(|(alias_name, _, _)| Some(alias_name) == cause_name)
+                .map(|(_, origin, format)| (Some(origin), Some(format)));
             let dependency_context = cause_name
                 .and_then(|cause_name| self.repository.get(cause_name))
                 .and_then(|entry| match entry {
@@ -589,7 +620,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     }
                     _ => None,
                 });
-            let (origin, format) = dependency_context.unwrap_or({
+            let (origin, format) = alias_context.or(dependency_context).unwrap_or({
                 if failure_is_for_another_name {
                     (None, None)
                 } else {
@@ -1254,7 +1285,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             },
         );
         if let Some(error) = alias_error.into_inner() {
-            return Err(error.into_class_load_error());
+            let (error, context) = error.into_class_load_error();
+            self.alias_failure_context = context;
+            return Err(error);
         }
         let decoded =
             decoded.map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
@@ -5684,40 +5717,42 @@ mod tests {
 
     #[test]
     fn loading_source_reports_a_malformed_package_alias_tasty_file() {
-        let mut tasty = HashMap::new();
-        tasty.insert(
-            BinaryName::from_internal("Source"),
-            dotty_tasty_fixture_bytes("scala3-library/scala/io/Source.tasty"),
-        );
-        tasty.insert(
-            BinaryName::from_internal("scala/package"),
-            b"malformed package object TASTy".to_vec(),
-        );
-        let mut classes = HashMap::new();
-        for stub in [
-            "java/lang/Object",
-            "scala/collection/Iterator",
-            "java/io/Closeable",
-        ] {
-            classes.insert(BinaryName::from_internal(stub), synthetic_class(stub, None));
-        }
-        let class_path = CompositeClassPath::new(vec![
-            Box::new(InMemoryTastyClassPath(tasty)),
-            Box::new(InMemoryClassPath(classes)),
+        let resources = HashMap::from([
+            (
+                BinaryName::from_internal("Source"),
+                (
+                    dotty_tasty_fixture_bytes("scala3-library/scala/io/Source.tasty"),
+                    ClassFormat::Tasty,
+                    ClassOrigin::Directory(PathBuf::from("/owner")),
+                ),
+            ),
+            (
+                BinaryName::from_internal("scala/package"),
+                (
+                    b"malformed package object TASTy".to_vec(),
+                    ClassFormat::Tasty,
+                    ClassOrigin::Directory(PathBuf::from("/alias")),
+                ),
+            ),
         ]);
 
         let mut store = SemanticStore::new();
-        let mut loader = ClassLoader::new(class_path, &mut store);
-        let error = loader
-            .load_class(&BinaryName::from_internal("Source"))
+        let mut loader = ClassLoader::new(ResourceClassPath(resources), &mut store);
+        let failure = loader
+            .load_class_detailed(&BinaryName::from_internal("Source"))
             .expect_err("malformed package alias TASTy should be reported");
         assert!(matches!(
-            error,
+            failure.error,
             ClassLoadError::InvalidTastyFile(
                 ref name,
                 tasty_symbol::TastyDecodeError::Parse(_)
             ) if name.as_internal() == "scala/package"
         ));
+        assert_eq!(
+            failure.origin,
+            Some(ClassOrigin::Directory(PathBuf::from("/alias")))
+        );
+        assert_eq!(failure.format, Some(ClassFormat::Tasty));
     }
 
     #[test]
