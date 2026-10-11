@@ -4362,6 +4362,38 @@ fn parsed_non_enclosing_visibility_qualifier_remains_a_typed_namer_error() {
 }
 
 #[test]
+fn valid_enum_case_parameter_visibility_exposes_an_unresolved_boundary() {
+    let source_text = "enum Color { case Red(private[Color] val value: Int) }";
+    let (parsed, source, mut store) = parsed_source(source_text, 316);
+    let checkpoint = store.checkpoint();
+    let mut packages = Packages::new();
+
+    let error = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Color.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect_err("the enum case parameter boundary is not resolved yet");
+
+    assert!(
+        matches!(
+            error,
+            NamerError::InvalidVisibilityQualifier {
+                position: Some(_),
+                protected: false,
+                qualifier,
+                ..
+            } if store.names.resolve(qualifier.text()) == "Color"
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(store.checkpoint(), checkpoint);
+}
+
+#[test]
 fn recovered_unresolved_visibility_qualifier_remains_a_namer_error() {
     let source_text = "class Outer { private[Missing] val hidden = }";
     let source = SourceId::from_index(314);
