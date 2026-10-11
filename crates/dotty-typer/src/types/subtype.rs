@@ -327,7 +327,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
 
     fn normalize(&mut self, ty: TypeId) -> Result<TypeId, TypeRelationError> {
         TypeNormalizer::new(self.typer.store)
-            .normalize_for_lookup(ty)
+            .normalize_for_relation(ty)
             .map_err(TypeRelationError::Normalization)
     }
 

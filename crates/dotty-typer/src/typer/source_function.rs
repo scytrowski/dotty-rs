@@ -1845,6 +1845,26 @@ mod tests {
                     if *found == expected_class
             ));
             assert_eq!(args, &arguments);
+
+            let pure_tycon = typer
+                .source_function_family_type_constructor(
+                    SourceFunctionFamily::new(kind, SourceFunctionPurity::Pure),
+                    1,
+                    54,
+                )
+                .unwrap();
+            let pure = typer.store.types.alloc(Type::Applied {
+                tycon: pure_tycon,
+                args: arguments.to_vec(),
+            });
+            assert!(matches!(
+                typer.is_subtype(applied, pure),
+                Err(crate::TypeRelationError::UnsupportedType { .. })
+            ));
+            assert!(matches!(
+                typer.is_subtype(pure, applied),
+                Err(crate::TypeRelationError::UnsupportedType { .. })
+            ));
         }
     }
 

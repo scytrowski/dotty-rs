@@ -219,8 +219,26 @@ impl<'a> TypeNormalizer<'a> {
     /// wrappers share one depth budget, and repeated outer nodes are reported
     /// as malformed cycles.
     pub fn normalize_for_lookup(&mut self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
+        self.normalize_outer(ty, true)
+    }
+
+    /// Dealiases and unwraps flexible types while preserving annotations.
+    ///
+    /// Type relations use this form so they cannot silently erase semantic
+    /// distinctions carried by annotations such as `scala.annotation.retainsCap`.
+    /// Relations that do not model an annotation must reject the resulting
+    /// `Annotated` type explicitly.
+    pub fn normalize_for_relation(&mut self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
+        self.normalize_outer(ty, false)
+    }
+
+    fn normalize_outer(
+        &mut self,
+        ty: TypeId,
+        unwrap_annotations: bool,
+    ) -> Result<TypeId, TypeNormalizeError> {
         let checkpoint = self.store.checkpoint();
-        match self.normalize_for_lookup_inner(ty) {
+        match self.normalize_outer_inner(ty, unwrap_annotations) {
             Ok(normalized) => Ok(normalized),
             Err(error) => {
                 self.store.rollback_to(checkpoint);
@@ -229,7 +247,11 @@ impl<'a> TypeNormalizer<'a> {
         }
     }
 
-    fn normalize_for_lookup_inner(&mut self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
+    fn normalize_outer_inner(
+        &mut self,
+        ty: TypeId,
+        unwrap_annotations: bool,
+    ) -> Result<TypeId, TypeNormalizeError> {
         let mut current = ty;
         let mut visited = Vec::new();
         let mut depth = 0;
@@ -253,7 +275,8 @@ impl<'a> TypeNormalizer<'a> {
                 return Ok(current);
             }
             let underlying = match self.type_at(current)? {
-                Type::Annotated { underlying, .. } | Type::Flexible { underlying } => *underlying,
+                Type::Flexible { underlying } => *underlying,
+                Type::Annotated { underlying, .. } if unwrap_annotations => *underlying,
                 _ => return Ok(current),
             };
             if depth == MAX_TYPE_NORMALIZATION_DEPTH {
