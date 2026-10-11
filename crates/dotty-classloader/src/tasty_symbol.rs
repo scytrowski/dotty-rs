@@ -52,26 +52,6 @@ pub(crate) struct DecodedTastyClass {
     pub methods: Vec<DecodedTastyMethod>,
 }
 
-/// Stable detail for a TASTy parent whose binary identity could not be
-/// recovered. Audit tooling can use the raw tree to inspect wire shapes
-/// without guessing a binary name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnresolvedParentReference {
-    /// Zero-based position in the `Template` parent list.
-    pub parent_index: usize,
-    /// Coarse deterministic shape category.
-    pub shape: String,
-    /// Whether the parent contains a semantic reference tree.
-    pub has_semantic_reference: bool,
-    /// Whether that reference carries an explicit package/selection prefix.
-    pub has_reference_prefix: bool,
-    /// Name-table spellings visible in the raw parent tree.
-    pub visible_names: Vec<String>,
-    /// Debug rendering of the raw parent tree, including wire tags and
-    /// reference addresses.
-    pub raw_tree: String,
-}
-
 /// A `.tasty` class-level visibility modifier that `ClassAccessFlags`
 /// (`flags`) cannot represent: JVMS Table 4.1-A defines no
 /// `ACC_PRIVATE`/`ACC_PROTECTED` bit for a *top-level* class's own
@@ -177,7 +157,7 @@ pub enum TastyDecodeError {
     /// A declared `Template` parent (superclass or mixin interface) has no
     /// name this decoder can resolve — see `resolve_parent_name_with_bare`'s
     /// doc comment for exactly which shapes are and are not resolved.
-    UnresolvedSupertype(Box<UnresolvedParentReference>),
+    UnresolvedSupertype,
 }
 
 impl fmt::Display for TastyDecodeError {
@@ -189,16 +169,12 @@ impl fmt::Display for TastyDecodeError {
                 write!(formatter, "no matching TypeDef found in .tasty file")
             }
             Self::NoTemplateBody => write!(formatter, "TypeDef has no Template body"),
-            Self::UnresolvedSupertype(parent) => write!(
-                formatter,
-                "unresolved supertype reference at parent {}: shape={}, semantic_reference={}, reference_prefix={}, names={:?}, raw={}",
-                parent.parent_index,
-                parent.shape,
-                parent.has_semantic_reference,
-                parent.has_reference_prefix,
-                parent.visible_names,
-                parent.raw_tree
-            ),
+            Self::UnresolvedSupertype => {
+                write!(
+                    formatter,
+                    "a supertype reference could not be resolved to a name"
+                )
+            }
         }
     }
 }
@@ -208,7 +184,7 @@ impl std::error::Error for TastyDecodeError {
         match self {
             Self::Parse(source) => Some(source),
             Self::Ast(source) => Some(source),
-            Self::MissingTypeDef | Self::NoTemplateBody | Self::UnresolvedSupertype(_) => None,
+            Self::MissingTypeDef | Self::NoTemplateBody | Self::UnresolvedSupertype => None,
         }
     }
 }
@@ -221,7 +197,7 @@ impl TastyDecodeError {
             Self::Ast(_) => "tasty.ast_error",
             Self::MissingTypeDef => "tasty.missing_type_def",
             Self::NoTemplateBody => "tasty.no_template_body",
-            Self::UnresolvedSupertype(_) => "tasty.unresolved_supertype",
+            Self::UnresolvedSupertype => "tasty.unresolved_supertype",
         }
     }
 
@@ -257,7 +233,7 @@ impl TastyDecodeError {
                 ast_error_category(error)
             }
             Self::Parse(_) => ClassLoadCategory::MalformedArtifact,
-            Self::MissingTypeDef | Self::NoTemplateBody | Self::UnresolvedSupertype(_) => {
+            Self::MissingTypeDef | Self::NoTemplateBody | Self::UnresolvedSupertype => {
                 ClassLoadCategory::Conditional
             }
         }
@@ -415,9 +391,9 @@ fn decode_impl(
         return Err(TastyDecodeError::NoTemplateBody);
     };
 
-    let mut parents = template.parents.iter().enumerate();
+    let mut parents = template.parents.iter();
     let super_class = match parents.next() {
-        Some((parent_index, parent)) => {
+        Some(parent) => {
             let resolved = resolve_parent_name_with_alias(
                 &file,
                 parent,
@@ -425,21 +401,13 @@ fn decode_impl(
                 &mut resolve_alias,
                 &mut resolve_bare,
             );
-            match (resolved, strict_superclass) {
-                (Some(parent), _) => parent,
-                (None, false) => BinaryName::from_internal("java/lang/Object"),
-                (None, true) => {
-                    return Err(TastyDecodeError::UnresolvedSupertype(Box::new(
-                        unresolved_parent_reference(&file, parent, parent_index, package),
-                    )));
-                }
-            }
+            resolve_super_class(true, resolved, strict_superclass)?
         }
-        None => BinaryName::from_internal("java/lang/Object"),
+        None => resolve_super_class(false, None, strict_superclass)?,
     };
 
     let mut interfaces = Vec::new();
-    for (parent_index, parent) in parents {
+    for parent in parents {
         let resolution = resolve_parent_name_with_alias(
             &file,
             parent,
@@ -447,14 +415,7 @@ fn decode_impl(
             &mut resolve_alias,
             &mut resolve_bare,
         );
-        interfaces.push(resolution.ok_or_else(|| {
-            TastyDecodeError::UnresolvedSupertype(Box::new(unresolved_parent_reference(
-                &file,
-                parent,
-                parent_index,
-                package,
-            )))
-        })?);
+        interfaces.push(resolution.ok_or(TastyDecodeError::UnresolvedSupertype)?);
     }
 
     let mut fields = decode_constructor_accessor_fields(
@@ -477,219 +438,16 @@ fn decode_impl(
     })
 }
 
-fn unresolved_parent_reference(
-    file: &TastyFile<'_>,
-    parent: &RawTree<'_>,
-    parent_index: usize,
-    package: &str,
-) -> UnresolvedParentReference {
-    let visible_names = parent_visible_names(file, parent);
-    let has_semantic_reference = parent_has_semantic_reference(file, parent, package);
-    let has_reference_prefix = parent_has_reference_prefix(file, parent, package, 0);
-    let shape = match parent_reference_shape(file, parent).as_str() {
-        "other" if !visible_names.is_empty() && !has_semantic_reference => {
-            "bare-implicit-like".to_owned()
-        }
-        "other" if has_semantic_reference => "unsupported-prefix".to_owned(),
-        shape => shape.to_owned(),
-    };
-    UnresolvedParentReference {
-        parent_index,
-        shape,
-        has_semantic_reference,
-        has_reference_prefix,
-        visible_names,
-        raw_tree: parent_raw_shape(parent, 0),
-    }
-}
-
-fn parent_has_reference_prefix(
-    file: &TastyFile<'_>,
-    tree: &RawTree<'_>,
-    package: &str,
-    depth: usize,
-) -> bool {
-    const MAX_PARENT_PROFILE_DEPTH: usize = 256;
-    if depth >= MAX_PARENT_PROFILE_DEPTH {
-        return false;
-    }
-    match tree {
-        RawTree::Leaf(term) if matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG) => term
-            .ast_ref()
-            .and_then(|reference| decode_shared_tree(file, reference.address))
-            .is_some_and(|shared| parent_has_reference_prefix(file, &shared, package, depth + 1)),
-        RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } => {
-            parent_has_reference_prefix(file, child, package, depth + 1)
-        }
-        _ => match tree.decode_structured() {
-            Ok(StructuredTree::Reference(ReferenceNode {
-                tag: TERMREFPKG_TAG | TYPEREFPKG_TAG | TERMREF_TAG | TYPEREF_TAG,
-                ..
-            }))
-            | Ok(StructuredTree::Select(_)) => true,
-            Ok(StructuredTree::Length(StructuredNode::AppliedType(applied))) => {
-                parent_has_reference_prefix(file, &applied.tycon, package, depth + 1)
-            }
-            Ok(StructuredTree::Ident(ident)) => {
-                parent_has_reference_prefix(file, &ident.type_tree, package, depth + 1)
-            }
-            _ => {
-                matches!(
-                    resolve_reference_name_in_package(file, tree, Some(package)),
-                    ReferenceResolution::Resolved(_)
-                )
-            }
-        },
-    }
-}
-
-fn parent_raw_shape(tree: &RawTree<'_>, depth: usize) -> String {
-    const MAX_PARENT_PROFILE_DEPTH: usize = 64;
-    if depth >= MAX_PARENT_PROFILE_DEPTH {
-        return "DepthLimit".to_owned();
-    }
-    match tree {
-        RawTree::Leaf(term) => format!("Leaf(tag={})", term.tag),
-        RawTree::Ast { tag, child, .. } => {
-            format!(
-                "Ast(tag={tag}, child={})",
-                parent_raw_shape(child, depth + 1)
-            )
-        }
-        RawTree::NatAst { tag, child, .. } => format!(
-            "NatAst(tag={tag}, child={})",
-            parent_raw_shape(child, depth + 1)
-        ),
-        RawTree::LengthNode(node) => format!("LengthNode(tag={})", node.tag),
-    }
-}
-
-fn parent_visible_names(file: &TastyFile<'_>, tree: &RawTree<'_>) -> Vec<String> {
-    parent_visible_names_at_depth(file, tree, 0)
-}
-
-fn parent_visible_names_at_depth(
-    file: &TastyFile<'_>,
-    tree: &RawTree<'_>,
-    depth: usize,
-) -> Vec<String> {
-    const MAX_PARENT_PROFILE_DEPTH: usize = 256;
-    if depth >= MAX_PARENT_PROFILE_DEPTH {
-        return Vec::new();
-    }
-    let mut names = tree
-        .name_refs()
-        .into_iter()
-        .filter_map(|reference| wire_name(file, reference))
-        .collect::<Vec<_>>();
-    if let Ok(StructuredTree::Length(StructuredNode::AppliedType(applied))) =
-        tree.decode_structured()
-    {
-        names.extend(parent_visible_names_at_depth(
-            file,
-            &applied.tycon,
-            depth + 1,
-        ));
-    }
-    names.sort();
-    names.dedup();
-    names
-}
-
-fn parent_has_semantic_reference(file: &TastyFile<'_>, tree: &RawTree<'_>, package: &str) -> bool {
-    parent_has_semantic_reference_at_depth(file, tree, package, 0)
-}
-
-fn parent_has_semantic_reference_at_depth(
-    file: &TastyFile<'_>,
-    tree: &RawTree<'_>,
-    package: &str,
-    depth: usize,
-) -> bool {
-    const MAX_PARENT_PROFILE_DEPTH: usize = 256;
-    if depth >= MAX_PARENT_PROFILE_DEPTH {
-        return false;
-    }
-    if matches!(
-        resolve_reference_name_in_package(file, tree, Some(package)),
-        ReferenceResolution::Resolved(_) | ReferenceResolution::Unresolved
-    ) {
-        return true;
-    }
-    match tree {
-        RawTree::Leaf(term) if matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG) => term
-            .ast_ref()
-            .and_then(|reference| decode_shared_tree(file, reference.address))
-            .is_some_and(|shared| {
-                parent_has_semantic_reference_at_depth(file, &shared, package, depth + 1)
-            }),
-        RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } => {
-            parent_has_semantic_reference_at_depth(file, child, package, depth + 1)
-        }
-        _ => match tree.decode_structured() {
-            Ok(StructuredTree::Length(StructuredNode::AppliedType(applied))) => {
-                parent_has_semantic_reference_at_depth(file, &applied.tycon, package, depth + 1)
-            }
-            Ok(StructuredTree::Ident(ident)) => {
-                parent_has_semantic_reference_at_depth(file, &ident.type_tree, package, depth + 1)
-            }
-            Ok(StructuredTree::Select(selection)) => parent_has_semantic_reference_at_depth(
-                file,
-                &selection.qualifier,
-                package,
-                depth + 1,
-            ),
-            _ => false,
-        },
-    }
-}
-
-fn parent_reference_shape(file: &TastyFile<'_>, tree: &RawTree<'_>) -> String {
-    parent_reference_shape_at_depth(file, tree, 0)
-}
-
-fn parent_reference_shape_at_depth(
-    file: &TastyFile<'_>,
-    tree: &RawTree<'_>,
-    depth: usize,
-) -> String {
-    const MAX_PARENT_PROFILE_DEPTH: usize = 256;
-    if depth >= MAX_PARENT_PROFILE_DEPTH {
-        return "depth-limit".to_owned();
-    }
-    match tree.decode_structured() {
-        Ok(StructuredTree::Reference(reference)) => match reference.tag {
-            TERMREFPKG_TAG | TYPEREFPKG_TAG => "package-qualified".to_owned(),
-            TERMREFSYMBOL_TAG | TYPEREFSYMBOL_TAG => "direct-symbol".to_owned(),
-            TERMREF_TAG | TYPEREF_TAG => "qualified-reference".to_owned(),
-            _ => "reference".to_owned(),
-        },
-        Ok(StructuredTree::Select(_)) => "selected-qualified".to_owned(),
-        Ok(StructuredTree::Length(StructuredNode::AppliedType(_))) => "applied".to_owned(),
-        Ok(StructuredTree::Ident(ident)) => {
-            let inner = parent_reference_shape_at_depth(file, &ident.type_tree, depth + 1);
-            if inner == "other" {
-                "identifier-type-reference".to_owned()
-            } else {
-                inner
-            }
-        }
-        _ => match tree {
-            RawTree::Leaf(term) if matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG) => {
-                "shared".to_owned()
-            }
-            RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } => {
-                parent_reference_shape_at_depth(file, child, depth + 1)
-            }
-            _ if matches!(
-                resolve_reference_name(file, tree),
-                ReferenceResolution::Resolved(_)
-            ) =>
-            {
-                "qualified-reference".to_owned()
-            }
-            _ => "other".to_owned(),
-        },
+fn resolve_super_class(
+    explicit_parent: bool,
+    resolved: Option<BinaryName>,
+    strict: bool,
+) -> Result<BinaryName, TastyDecodeError> {
+    match (explicit_parent, resolved, strict) {
+        (false, _, _) => Ok(BinaryName::from_internal("java/lang/Object")),
+        (true, Some(parent), _) => Ok(parent),
+        (true, None, false) => Ok(BinaryName::from_internal("java/lang/Object")),
+        (true, None, true) => Err(TastyDecodeError::UnresolvedSupertype),
     }
 }
 
@@ -1229,17 +987,6 @@ fn resolve_reference_name_at_depth(
     if depth >= MAX_REFERENCE_DEPTH {
         return ReferenceResolution::Unresolved;
     }
-    if let RawTree::Leaf(term) = tree
-        && matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG)
-    {
-        let Some(reference) = term.ast_ref() else {
-            return ReferenceResolution::Unresolved;
-        };
-        let Some(shared) = decode_shared_tree(file, reference.address) else {
-            return ReferenceResolution::Unresolved;
-        };
-        return resolve_reference_name_at_depth(file, &shared, current_package, depth + 1);
-    }
     let Ok(structured) = tree.decode_structured() else {
         return ReferenceResolution::NotAReference;
     };
@@ -1520,10 +1267,11 @@ fn resolve_parent_name_in_package_with_bare_at_depth(
             }
             return Some(resolved);
         }
-        // A real semantic reference this decoder cannot fully qualify must
-        // not fall through to the package/implicit-import heuristic and come
-        // back out as a misleading same-package guess. The narrow package-
-        // object alias lookup already ran in `resolve_parent_name_with_alias`.
+        // A real reference this decoder cannot fully qualify (an
+        // implicit-import reference such as `scala.package$.Iterator`,
+        // see `ReferenceResolution`'s own doc comment) must not fall
+        // through to the heuristic below and come back out as a
+        // misleading same-package guess.
         ReferenceResolution::Unresolved => {
             let simple_name = unresolved_semantic_reference_name(file, parent)?;
             // Scala 3.9 represents AnyRef as the JVM Object superclass in
@@ -1535,7 +1283,7 @@ fn resolve_parent_name_in_package_with_bare_at_depth(
             ) {
                 return Some(BinaryName::from_internal("java/lang/Object"));
             }
-            return None;
+            return resolve_bare(package, &simple_name);
         }
         ReferenceResolution::NotAReference => {}
     }
@@ -1926,18 +1674,6 @@ mod tests {
     }
 
     #[test]
-    fn resolves_a_shared_function1_superclass_to_object() {
-        let bytes = fixture_bytes("scala3-library/scala/Function1.tasty");
-        let decoded = decode(&bytes, &BinaryName::from_internal("scala/Function1"))
-            .expect("the shared AnyRef superclass in Function1 should resolve");
-
-        assert_eq!(
-            decoded.super_class,
-            BinaryName::from_internal("java/lang/Object")
-        );
-    }
-
-    #[test]
     fn resolves_package_object_aliases_in_their_defining_package() {
         let bytes = fixture_bytes("scala3-library/scala/package.tasty");
         let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
@@ -2120,35 +1856,35 @@ mod tests {
     /// does not — it is `scala.package$.Iterator`, a reference through
     /// Scala's compiler-synthesized `package object scala` (a type-alias
     /// member, not a direct package-qualified class reference). The
-    /// structural decoder alone cannot resolve this alias. A deliberately
-    /// plausible same-package callback must not replace that semantic
-    /// reference with `scala/io/Iterator`; the classloader's classpath-aware
-    /// entry point instead follows the package-object alias and validates its
-    /// actual target.
+    /// structural decoder alone cannot resolve this alias, so this
+    /// decode-only entry point still reports `UnresolvedSupertype`; the
+    /// classloader's classpath-aware entry point follows the alias and
+    /// validates its target.
     #[test]
     fn decoding_fails_when_a_generic_mixins_tycon_is_an_unresolvable_implicit_import_reference() {
         let error = decode_with_resolvers(
             &fixture_bytes("scala3-library/scala/io/Source.tasty"),
-            &BinaryName::from_internal("scala/io/Source"),
+            &BinaryName::from_internal("Source"),
             |_, _| None,
-            |package, simple_name| {
-                Some(BinaryName::from_internal(format!(
-                    "{package}/{simple_name}"
-                )))
-            },
+            |_, _| None,
         )
         .unwrap_err();
 
+        assert!(matches!(error, TastyDecodeError::UnresolvedSupertype));
+    }
+
+    #[test]
+    fn an_unresolved_explicit_first_parent_is_not_replaced_with_object() {
         assert!(matches!(
-            error,
-            TastyDecodeError::UnresolvedSupertype(parent)
-                if parent.shape == "applied"
-                    && parent.parent_index == 1
-                    && parent.has_semantic_reference
-                    && !parent.has_reference_prefix
-                    && parent.visible_names.iter().any(|name| name == "Iterator")
-                    && !parent.raw_tree.is_empty()
+            resolve_super_class(true, None, true),
+            Err(TastyDecodeError::UnresolvedSupertype)
         ));
+        assert_eq!(
+            resolve_super_class(false, None, true)
+                .unwrap()
+                .as_internal(),
+            "java/lang/Object"
+        );
     }
 
     /// `scala3-library/scala/math/BigInt.tasty`'s real `BigInt` mixes in
@@ -2170,11 +1906,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(
-            error,
-            TastyDecodeError::UnresolvedSupertype(parent)
-                if parent.parent_index > 0 && !parent.raw_tree.is_empty()
-        ));
+        assert!(matches!(error, TastyDecodeError::UnresolvedSupertype));
     }
 
     /// `scala3-library/scala/math/Ordering.tasty`'s private nested
