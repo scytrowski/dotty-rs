@@ -10,7 +10,10 @@ mod trivia;
 mod xml;
 
 pub use cursor::{Cursor, CursorError};
-pub use diagnostics::{LexerDiagnostic, LexerIssue};
+pub use diagnostics::{
+    EscapeIssue, InterpolationIssue, LexerDiagnostic, LexerIssue, LiteralIssue,
+    NonIntegerLiteralKind, NumericComponent, NumericIssue,
+};
 pub use lexer::{RawLexer, RawLexerError};
 pub use raw_token::{HardKeyword, Punctuation, RawItem, RawToken, RawTokenKind};
 pub use scanner::ContextualScanner;
