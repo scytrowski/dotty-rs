@@ -14,6 +14,8 @@ use dotty_core::{
     TreeId, TreeKind, TypeName, Untyped, Visibility,
 };
 
+use crate::{NamerDiagnostic, NamerIssue, VisibilityAccess};
+
 /// Internal structural error encountered while indexing a source tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NamerError {
@@ -178,6 +180,28 @@ impl fmt::Display for NamerError {
 }
 
 impl Error for NamerError {}
+
+/// Result of naming through the opt-in diagnostic-aware entry point.
+///
+/// A rejected unit has source diagnostics but no semantic index. Structural
+/// and internal failures are returned separately as [`NamerError`].
+#[derive(Debug)]
+pub enum NamingOutcome {
+    /// Naming completed and produced a usable semantic index.
+    Named {
+        /// The completed semantic index.
+        index: SourceSemanticIndex,
+        /// Source diagnostics observed while naming. Currently empty on
+        /// success because unsupported source issues reject the unit.
+        diagnostics: Vec<NamerDiagnostic>,
+    },
+    /// A confirmed source error prevented creation of a usable index.
+    Rejected {
+        /// Source diagnostics retained after the naming transaction rolled
+        /// back.
+        diagnostics: Vec<NamerDiagnostic>,
+    },
+}
 
 impl From<SourceSemanticIndexError> for NamerError {
     fn from(error: SourceSemanticIndexError) -> Self {
@@ -553,9 +577,48 @@ pub fn name_compilation_unit(
     store: &mut SemanticStore,
     packages: &mut Packages,
 ) -> Result<SourceSemanticIndex, NamerError> {
+    run_name_compilation_unit(arena, root, source, source_file_name, store, packages)
+        .map(|(index, _)| index)
+        .map_err(|(error, _)| error)
+}
+
+/// Runs source naming and classifies verified source failures as diagnostics.
+///
+/// Unlike [`name_compilation_unit`], this opt-in API distinguishes a rejected
+/// source unit from internal structural failures. It never returns a partial
+/// index: source rejection and internal errors both roll back the naming
+/// transaction.
+pub fn name_compilation_unit_with_diagnostics(
+    arena: &AstArena<Untyped>,
+    root: TreeId<Untyped>,
+    source: SourceId,
+    source_file_name: &str,
+    store: &mut SemanticStore,
+    packages: &mut Packages,
+) -> Result<NamingOutcome, NamerError> {
+    match run_name_compilation_unit(arena, root, source, source_file_name, store, packages) {
+        Ok((index, diagnostics)) => Ok(NamingOutcome::Named { index, diagnostics }),
+        Err((_error, Some(diagnostic))) => Ok(NamingOutcome::Rejected {
+            diagnostics: vec![diagnostic],
+        }),
+        Err((error, None)) => Err(error),
+    }
+}
+
+fn run_name_compilation_unit(
+    arena: &AstArena<Untyped>,
+    root: TreeId<Untyped>,
+    source: SourceId,
+    source_file_name: &str,
+    store: &mut SemanticStore,
+    packages: &mut Packages,
+) -> Result<(SourceSemanticIndex, Vec<NamerDiagnostic>), (NamerError, Option<NamerDiagnostic>)> {
     let checkpoint = store.checkpoint();
     let package_mark = packages.mark();
-    let (result, scope_insertions, companion_links) = {
+    let source_diagnostics_allowed = !arena
+        .iter()
+        .any(|(_, tree)| matches!(tree.kind, TreeKind::PhaseSpecific(UntypedNode::Error(_))));
+    let (result, scope_insertions, companion_links, source_diagnostic) = {
         let mut namer = Namer {
             arena,
             source,
@@ -568,9 +631,16 @@ pub fn name_compilation_unit(
             companion_links: Vec::new(),
             package_private_boundary: None,
             source_package_wrappers: HashMap::new(),
+            source_diagnostics_allowed,
+            source_diagnostic: None,
         };
         let result = namer.index(root).map(|()| namer.index);
-        (result, namer.scope_insertions, namer.companion_links)
+        (
+            result,
+            namer.scope_insertions,
+            namer.companion_links,
+            namer.source_diagnostic,
+        )
     };
     match result {
         Ok(index) => {
@@ -578,7 +648,7 @@ pub fn name_compilation_unit(
                 store.symbols.get_mut(class).links.companion = Some(object);
                 store.symbols.get_mut(object).links.companion = Some(class);
             }
-            Ok(index)
+            Ok((index, Vec::new()))
         }
         Err(error) => {
             for (scope, symbol) in scope_insertions.into_iter().rev() {
@@ -586,7 +656,7 @@ pub fn name_compilation_unit(
             }
             packages.roll_back_to(store, package_mark);
             store.rollback_to(checkpoint);
-            Err(error)
+            Err((error, source_diagnostic))
         }
     }
 }
@@ -603,6 +673,8 @@ struct Namer<'a> {
     companion_links: Vec<(SymbolId, SymbolId)>,
     package_private_boundary: Option<(SymbolId, SymbolId)>,
     source_package_wrappers: HashMap<SymbolId, (SymbolId, ScopeId)>,
+    source_diagnostics_allowed: bool,
+    source_diagnostic: Option<NamerDiagnostic>,
 }
 
 impl Namer<'_> {
@@ -2615,7 +2687,7 @@ impl Namer<'_> {
     }
 
     fn source_visibility_for_owner(
-        &self,
+        &mut self,
         tree: TreeId<Untyped>,
         visibility: &Option<VisibilitySyntax>,
         owner: Option<SymbolId>,
@@ -2644,28 +2716,64 @@ impl Namer<'_> {
             }) => self
                 .resolve_visibility_boundary(owner, *qualifier)
                 .map(Visibility::PrivateWithin)
-                .ok_or_else(|| self.invalid_visibility_qualifier(tree, *qualifier, false)),
+                .ok_or_else(|| self.invalid_visibility_qualifier(tree, *qualifier, false, owner)),
             Some(VisibilitySyntax::Protected {
                 qualifier: Some(qualifier),
             }) => self
                 .resolve_visibility_boundary(owner, *qualifier)
                 .map(Visibility::ProtectedWithin)
-                .ok_or_else(|| self.invalid_visibility_qualifier(tree, *qualifier, true)),
+                .ok_or_else(|| self.invalid_visibility_qualifier(tree, *qualifier, true, owner)),
         }
     }
 
     fn invalid_visibility_qualifier(
-        &self,
+        &mut self,
         tree: TreeId<Untyped>,
         qualifier: dotty_core::Name,
         protected: bool,
+        owner: Option<SymbolId>,
     ) -> NamerError {
+        if self.source_diagnostics_allowed
+            && self.has_only_source_owned_visibility_boundaries(owner)
+            && let Some(span) = self
+                .arena
+                .get(tree)
+                .position
+                .filter(|span| span.source() == self.source)
+        {
+            self.source_diagnostic = Some(NamerDiagnostic::error(
+                span,
+                NamerIssue::InvalidVisibilityQualifier {
+                    access: if protected {
+                        VisibilityAccess::Protected
+                    } else {
+                        VisibilityAccess::Private
+                    },
+                    qualifier: self.store.names.resolve(qualifier.text()).to_owned(),
+                },
+            ));
+        }
         NamerError::InvalidVisibilityQualifier {
             tree_index: tree.index(),
             position: self.arena.get(tree).position,
             qualifier,
             protected,
         }
+    }
+
+    /// Avoid classifying owner-resolution failures under synthetic scopes.
+    /// In particular, enum case parameters are owned below a synthetic
+    /// companion module class whose source enum boundary is not represented in
+    /// the current semantic owner chain.
+    fn has_only_source_owned_visibility_boundaries(&self, mut owner: Option<SymbolId>) -> bool {
+        while let Some(symbol) = owner {
+            let info = self.store.symbols.get(symbol);
+            if info.origin == SymbolOrigin::Synthetic {
+                return false;
+            }
+            owner = info.owner;
+        }
+        true
     }
 
     /// Finds a qualified visibility boundary by walking semantic owners only.
@@ -2701,7 +2809,7 @@ impl Namer<'_> {
     }
 
     fn map_source_modifiers(
-        &self,
+        &mut self,
         tree: TreeId<Untyped>,
         metadata: &Modifiers,
         owner: SymbolId,
@@ -2717,7 +2825,7 @@ impl Namer<'_> {
     }
 
     fn source_symbol_spec(
-        &self,
+        &mut self,
         tree: TreeId<Untyped>,
         metadata: &Modifiers,
         owner: SymbolId,

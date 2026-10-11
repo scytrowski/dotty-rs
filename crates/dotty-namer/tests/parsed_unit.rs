@@ -4,7 +4,9 @@ use dotty_core::{
     Visibility,
 };
 use dotty_namer::{
-    NamerError, SourceContextId, SourceDefinition, SourceSemanticIndex, name_compilation_unit,
+    NamerDiagnostic, NamerError, NamerIssue, NamingOutcome, SourceContextId, SourceDefinition,
+    SourceSemanticIndex, VisibilityAccess, name_compilation_unit,
+    name_compilation_unit_with_diagnostics,
 };
 use dotty_parser::{DeclarationIssue, ParseIssue, parse_compilation_unit};
 
@@ -4359,6 +4361,156 @@ fn parsed_non_enclosing_visibility_qualifier_remains_a_typed_namer_error() {
             protected: false,
         }
     );
+}
+
+#[test]
+fn diagnostic_aware_naming_names_clean_source_without_diagnostics() {
+    let (parsed, source, mut store) = parsed_source("class Clean", 317);
+    let mut packages = Packages::new();
+
+    let NamingOutcome::Named { index, diagnostics } = name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Clean.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("clean source should be named") else {
+        panic!("clean source should not be rejected");
+    };
+
+    assert!(diagnostics.is_empty());
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    assert!(index.symbol_at(source, package.stats[0]).is_some());
+}
+
+#[test]
+fn diagnostic_aware_naming_rejects_confirmed_invalid_visibility_and_rolls_back() {
+    let source_text = "class Outer { private[Sibling] val hidden = 1 }\nclass Sibling";
+    let (parsed, source, mut store) = parsed_source(source_text, 318);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("parser should return a package root");
+    };
+    let TreeKind::TypeDef(outer) = &parsed.ast.get(package.stats[0]).kind else {
+        panic!("Outer should be a TypeDef");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(outer.rhs).kind else {
+        panic!("Outer should have a Template");
+    };
+    let declaration = template.body[0];
+    let expected_span = parsed.ast.get(declaration).position.unwrap();
+    let checkpoint = store.checkpoint();
+    let mut packages = Packages::new();
+
+    let outcome = name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "InvalidVisibility.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("a verified source error should be returned as a diagnostic outcome");
+
+    let NamingOutcome::Rejected { diagnostics } = outcome else {
+        panic!("invalid visibility source should be rejected");
+    };
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0],
+        NamerDiagnostic::error(
+            expected_span,
+            NamerIssue::InvalidVisibilityQualifier {
+                access: VisibilityAccess::Private,
+                qualifier: "Sibling".to_owned(),
+            }
+        )
+    );
+    assert_eq!(diagnostics[0].source(), source);
+    assert_eq!(diagnostics[0].span(), expected_span.span().range());
+    assert_eq!(
+        diagnostics[0].severity(),
+        dotty_core::DiagnosticSeverity::Error
+    );
+    assert_eq!(diagnostics[0].code(), "namer.visibility.invalid_qualifier");
+    assert_eq!(store.checkpoint(), checkpoint);
+    assert!(packages.is_empty());
+
+    let repeated = name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "InvalidVisibility.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("repeated diagnostic-aware naming should remain deterministic");
+    let NamingOutcome::Rejected {
+        diagnostics: repeated_diagnostics,
+    } = repeated
+    else {
+        panic!("repeated invalid visibility should still be rejected");
+    };
+    assert_eq!(repeated_diagnostics, diagnostics);
+    assert_eq!(store.checkpoint(), checkpoint);
+    assert!(packages.is_empty());
+}
+
+#[test]
+fn diagnostic_aware_naming_keeps_recovered_and_enum_owner_failures_internal() {
+    let recovered_text = "class Outer { private[Missing] val hidden = }";
+    let source = SourceId::from_index(319);
+    let mut store = SemanticStore::new();
+    let scanner = dotty_lexer::ContextualScanner::new(recovered_text).expect("source should lex");
+    let recovered = parse_compilation_unit(
+        SourceText::new(recovered_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    let mut packages = Packages::new();
+    assert!(recovered.diagnostics.len() > 0);
+    let checkpoint = store.checkpoint();
+    let error = name_compilation_unit_with_diagnostics(
+        &recovered.ast,
+        recovered.root,
+        source,
+        "RecoveredVisibility.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect_err("parser recovery must not be reported as a confirmed source issue");
+    assert!(matches!(
+        error,
+        NamerError::InvalidVisibilityQualifier { .. }
+    ));
+    assert_eq!(store.checkpoint(), checkpoint);
+    assert!(packages.is_empty());
+
+    let (enum_source, source, mut store) = parsed_source(
+        "enum Color { case Red(private[Color] val value: Int) }",
+        320,
+    );
+    let mut packages = Packages::new();
+    let checkpoint = store.checkpoint();
+    let error = name_compilation_unit_with_diagnostics(
+        &enum_source.ast,
+        enum_source.root,
+        source,
+        "Color.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect_err("the unresolved synthetic enum boundary is an internal naming limitation");
+    assert!(matches!(
+        error,
+        NamerError::InvalidVisibilityQualifier { .. }
+    ));
+    assert_eq!(store.checkpoint(), checkpoint);
+    assert!(packages.is_empty());
 }
 
 #[test]
