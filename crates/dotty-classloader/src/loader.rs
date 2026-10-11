@@ -2438,6 +2438,8 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// The class's `Type::ClassInfo`, read back through its `Symbol`'s
     /// `SymbolInfo::Complete` — the sole path to a class's parents/
@@ -2556,6 +2558,15 @@ mod tests {
     impl ClassPathEntry for AlwaysErrors {
         fn find_class(&self, _name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
             Err(ClassPathError::from(std::io::Error::other("boom")))
+        }
+    }
+
+    struct CountingMissingClassPath(Arc<AtomicUsize>);
+
+    impl ClassPathEntry for CountingMissingClassPath {
+        fn find_class(&self, _name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(None)
         }
     }
 
@@ -4532,6 +4543,24 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, ClassLoadError::NotFound(name) if name.as_internal() == "Missing"));
+    }
+
+    #[test]
+    fn a_cached_not_found_does_not_probe_the_same_classpath_twice() {
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let mut store = SemanticStore::new();
+        let mut loader =
+            ClassLoader::new(CountingMissingClassPath(Arc::clone(&lookups)), &mut store);
+        let name = BinaryName::from_internal("Missing");
+
+        for _ in 0..2 {
+            assert!(matches!(
+                loader.load_class(&name),
+                Err(ClassLoadError::NotFound(missing)) if missing == name
+            ));
+        }
+
+        assert_eq!(lookups.load(Ordering::Relaxed), 1);
     }
 
     #[test]
