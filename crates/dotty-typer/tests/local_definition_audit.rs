@@ -10,8 +10,8 @@ use dotty_core::ast::{Match, Modifier, Tree, TreeKind, Untyped, UntypedNode, Vis
 use dotty_core::ids::TreeId;
 use dotty_core::types::{Type, TypeRefTarget};
 use dotty_core::{
-    Definitions, MemberRequest, Packages, ResolutionError, ResolverCheckpoint, SemanticStore,
-    SourceId, SourceText, SymbolId, SymbolResolver, TextRange,
+    Definitions, MemberRequest, MemberSelector, MemberSpace, Namespace, Packages, ResolutionError,
+    ResolverCheckpoint, SemanticStore, SourceId, SourceText, SymbolId, SymbolResolver, TextRange,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamerError, name_compilation_unit};
@@ -23,6 +23,8 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ResolverMetrics {
+    current_file: String,
+    current_method: String,
     resolver_package_requests: usize,
     package_successes: usize,
     package_unresolved: usize,
@@ -39,6 +41,51 @@ struct ResolverMetrics {
     members: BTreeSet<String>,
     unresolved_member_names: BTreeMap<String, usize>,
     member_error_kinds: BTreeMap<String, usize>,
+    member_error_wrappers: BTreeMap<String, usize>,
+    member_error_distinct_targets: BTreeMap<String, BTreeSet<String>>,
+    member_error_files: BTreeMap<String, BTreeSet<String>>,
+    member_request_shapes: BTreeMap<String, usize>,
+    member_request_targets: BTreeMap<String, RequestTargetMetrics>,
+    member_requests_by_method: BTreeMap<String, BTreeMap<String, usize>>,
+    member_request_outcome_targets: BTreeMap<String, BTreeSet<String>>,
+    member_request_outcome_files: BTreeMap<String, BTreeSet<String>>,
+    member_error_roots: BTreeMap<String, usize>,
+    dependency_failure_chains: BTreeMap<String, usize>,
+    tasty_supertype_failures: BTreeMap<String, usize>,
+    incomplete_prefix_states: BTreeMap<String, usize>,
+    incomplete_prefix_binary_resources: BTreeMap<String, usize>,
+    unresolved_member_kinds: BTreeMap<String, usize>,
+    external_member_first_seen: usize,
+    external_member_session_reuse: usize,
+    seen_external_symbols: BTreeSet<String>,
+    package_term_type_class_resource: usize,
+    package_term_without_type_class_resource: usize,
+    package_classpath_probe_errors: usize,
+    package_term_type_class_targets: BTreeSet<String>,
+    package_term_companion_resource: usize,
+    package_term_companion_targets: BTreeSet<String>,
+    package_term_object_looking_targets: BTreeSet<String>,
+    package_type_class_resource: usize,
+    package_type_class_targets: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RequestTargetMetrics {
+    requests: usize,
+    family: String,
+    files: BTreeSet<String>,
+    owners: BTreeSet<String>,
+    names: BTreeSet<String>,
+    methods: BTreeSet<String>,
+    outcomes: BTreeMap<String, usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PrefixProfile {
+    shape: &'static str,
+    target_kind: &'static str,
+    identity: String,
+    symbol: Option<SymbolId>,
 }
 
 impl ResolverMetrics {
@@ -56,6 +103,7 @@ impl ResolverMetrics {
 struct AuditResolver<E: ClassPathEntry> {
     inner: ClasspathSymbolResolver<E>,
     metrics: Rc<RefCell<ResolverMetrics>>,
+    class_path_probe: Option<SharedClassPath>,
 }
 
 #[derive(Clone)]
@@ -94,9 +142,191 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &mut SemanticStore,
         request: &MemberRequest,
     ) -> Result<Option<SymbolId>, ResolutionError> {
+        let prefix = prefix_profile(store, request.prefix);
+        let name = store.names.resolve(request.name.text()).to_owned();
+        let namespace = match request.name.namespace() {
+            Namespace::Type => "type",
+            Namespace::Term => "term",
+        };
+        let space = request_space(store, &request.space);
+        let shape = format!(
+            "space={space}::prefix={}::target={}::namespace={namespace}::selector={}::site=not-exposed-by-SymbolResolver",
+            prefix.shape,
+            prefix.target_kind,
+            request_selector(&request.selector)
+        );
+        let target_key = format!(
+            "prefix={}::namespace={namespace}::name={name}::space={space}",
+            prefix.identity
+        );
+        if prefix.target_kind == "Package" {
+            if let Some(class_path) = &self.class_path_probe {
+                let internal = if prefix.identity.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}/{name}", prefix.identity.replace('.', "/"))
+                };
+                let binary =
+                    dotty_classloader::classloader::BinaryName::from_internal(internal.clone());
+                let mut metrics = self.metrics.borrow_mut();
+                match class_path.find_class(&binary) {
+                    Ok(Some(_)) => {
+                        if request.name.is_term() {
+                            metrics.package_term_type_class_resource += 1;
+                            metrics
+                                .package_term_type_class_targets
+                                .insert(target_key.clone());
+                        } else {
+                            metrics.package_type_class_resource += 1;
+                            metrics
+                                .package_type_class_targets
+                                .insert(target_key.clone());
+                        }
+                    }
+                    Ok(None) if request.name.is_term() => {
+                        metrics.package_term_without_type_class_resource += 1
+                    }
+                    Ok(None) => {}
+                    Err(_) => metrics.package_classpath_probe_errors += 1,
+                }
+                if request.name.is_term() && (name == "package" || name.ends_with('$')) {
+                    metrics
+                        .package_term_object_looking_targets
+                        .insert(target_key.clone());
+                }
+                if request.name.is_term() {
+                    let companion = dotty_classloader::classloader::BinaryName::from_internal(
+                        format!("{internal}$"),
+                    );
+                    match class_path.find_class(&companion) {
+                        Ok(Some(_)) => {
+                            metrics.package_term_companion_resource += 1;
+                            metrics
+                                .package_term_companion_targets
+                                .insert(target_key.clone());
+                        }
+                        Ok(None) => {}
+                        Err(_) => metrics.package_classpath_probe_errors += 1,
+                    }
+                }
+            }
+        }
+        if let Some(symbol) = prefix.symbol
+            && matches!(prefix.target_kind, "Class" | "Trait" | "ModuleClass")
+            && !matches!(
+                store.symbols.get(symbol).info,
+                dotty_core::SymbolInfo::Complete(_)
+            )
+        {
+            if let Some(class_path) = &self.class_path_probe {
+                let origin = match store.symbols.get(symbol).origin {
+                    dotty_core::SymbolOrigin::Source(_) => "source",
+                    dotty_core::SymbolOrigin::Classfile(_) => "classloader",
+                    dotty_core::SymbolOrigin::Tasty(_) => "TASTy",
+                    dotty_core::SymbolOrigin::Builtin => "builtin",
+                    dotty_core::SymbolOrigin::Synthetic => "synthetic",
+                };
+                let candidate = audit_binary_candidate(store, symbol);
+                let status = match candidate.as_deref() {
+                    Some(name) => match class_path.find_class(
+                        &dotty_classloader::classloader::BinaryName::from_internal(name),
+                    ) {
+                        Ok(Some(_)) => "resource-found",
+                        Ok(None) => "resource-absent",
+                        Err(_) => "probe-error",
+                    },
+                    None => "binary-name-unrecoverable",
+                };
+                let key = format!(
+                    "state={}::origin={origin}::candidate={}::status={status}",
+                    symbol_info_label(store.symbols.get(symbol).info),
+                    candidate.as_deref().unwrap_or("<none>")
+                );
+                *self
+                    .metrics
+                    .borrow_mut()
+                    .incomplete_prefix_binary_resources
+                    .entry(key)
+                    .or_default() += 1;
+            }
+        }
         let result = self.inner.resolve_member(store, request);
         let mut metrics = self.metrics.borrow_mut();
         metrics.resolver_member_requests += 1;
+        *metrics
+            .member_request_shapes
+            .entry(shape.clone())
+            .or_default() += 1;
+        let outcome = member_outcome(store, &result, request, &prefix);
+        let current_file = metrics.current_file.clone();
+        if let Ok(Some(symbol)) = &result {
+            let entry = store.symbols.get(*symbol);
+            if is_external_symbol(entry.origin) {
+                let identity = format!("{current_file}::{}", audit_symbol_path(store, *symbol));
+                if metrics.seen_external_symbols.insert(identity) {
+                    metrics.external_member_first_seen += 1;
+                } else {
+                    metrics.external_member_session_reuse += 1;
+                }
+            }
+        }
+        let method = metrics.current_method.clone();
+        {
+            let target = metrics
+                .member_request_targets
+                .entry(target_key.clone())
+                .or_default();
+            target.requests += 1;
+            target.family = shape.clone();
+            target.files.insert(current_file.clone());
+            target.owners.insert(prefix.identity.clone());
+            target.names.insert(name.clone());
+            target.methods.insert(method.clone());
+            *target.outcomes.entry(outcome.clone()).or_default() += 1;
+        }
+        *metrics
+            .member_requests_by_method
+            .entry(method)
+            .or_default()
+            .entry(format!("{target_key}::outcome={outcome}"))
+            .or_default() += 1;
+        metrics
+            .member_request_outcome_targets
+            .entry(format!("{shape}::outcome={outcome}"))
+            .or_default()
+            .insert(target_key.clone());
+        metrics
+            .member_request_outcome_files
+            .entry(format!("{shape}::outcome={outcome}"))
+            .or_default()
+            .insert(current_file.clone());
+        if let Some(symbol) = prefix.symbol {
+            let entry = store.symbols.get(symbol);
+            let state = match entry.info {
+                dotty_core::SymbolInfo::Missing => "Missing",
+                dotty_core::SymbolInfo::Error => "Error",
+                dotty_core::SymbolInfo::Deferred(_) => "Deferred",
+                dotty_core::SymbolInfo::Complete(_) => "Complete",
+            };
+            if state != "Complete"
+                && matches!(prefix.target_kind, "Class" | "Trait" | "ModuleClass")
+            {
+                let origin = match entry.origin {
+                    dotty_core::SymbolOrigin::Source(_) => "source",
+                    dotty_core::SymbolOrigin::Classfile(_) => "classloader",
+                    dotty_core::SymbolOrigin::Tasty(_) => "TASTy",
+                    dotty_core::SymbolOrigin::Builtin => "builtin",
+                    dotty_core::SymbolOrigin::Synthetic => "synthetic",
+                };
+                *metrics
+                    .incomplete_prefix_states
+                    .entry(format!(
+                        "state={state}::origin={origin}::binary={}",
+                        prefix.identity
+                    ))
+                    .or_default() += 1;
+            }
+        }
         match &result {
             Ok(Some(symbol)) => {
                 let path = audit_symbol_path(store, *symbol);
@@ -123,15 +353,65 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             }
             Ok(None) => {
                 metrics.member_unresolved += 1;
+                let kind = unresolved_member_kind(store, request, &prefix);
+                *metrics.unresolved_member_kinds.entry(kind).or_default() += 1;
                 let name = store.names.resolve(request.name.text()).to_owned();
                 *metrics.unresolved_member_names.entry(name).or_default() += 1;
             }
             Err(error) => {
                 metrics.member_errors += 1;
+                let (category, requested, root_cause) = normalized_error(error);
                 *metrics
                     .member_error_kinds
-                    .entry(format!("{error:?}"))
+                    .entry(category.clone())
                     .or_default() += 1;
+                metrics
+                    .member_error_distinct_targets
+                    .entry(category.clone())
+                    .or_default()
+                    .insert(requested.clone());
+                metrics
+                    .member_error_files
+                    .entry(category.clone())
+                    .or_default()
+                    .insert(current_file.clone());
+                *metrics
+                    .member_error_roots
+                    .entry(format!(
+                        "root_cause={category}::requested={requested}::root={root_cause}"
+                    ))
+                    .or_default() += 1;
+                if category == "InvalidTastyFile::UnresolvedSupertype" {
+                    let package = requested
+                        .rsplit_once('/')
+                        .map_or("<default-package>", |(package, _)| package);
+                    *metrics
+                        .tasty_supertype_failures
+                        .entry(format!(
+                            "requested={requested}::source_package={package}::parent_shape=not-exposed-by-ClassLoadError"
+                        ))
+                        .or_default() += 1;
+                }
+                if let ResolutionError::Malformed { reason } = error
+                    && reason
+                        .to_ascii_lowercase()
+                        .contains("failed to load because")
+                {
+                    *metrics
+                        .member_error_wrappers
+                        .entry("DependencyFailure".to_owned())
+                        .or_default() += 1;
+                    let classes = error_binary_names(reason);
+                    let distinct_dependencies =
+                        classes.iter().skip(1).collect::<BTreeSet<_>>().len();
+                    let depth = reason.matches(" failed to load because ").count();
+                    *metrics
+                        .dependency_failure_chains
+                        .entry(format!(
+                            "requested={requested}::root={root_cause}::root_cause={category}::depth={depth}::distinct_dependencies={distinct_dependencies}"
+                        ))
+                        .or_default() += 1;
+                }
             }
         }
         result
@@ -195,11 +475,302 @@ fn audit_symbol_path(store: &SemanticStore, symbol: SymbolId) -> String {
     parts.join(".")
 }
 
+fn symbol_info_label(info: dotty_core::SymbolInfo) -> &'static str {
+    match info {
+        dotty_core::SymbolInfo::Missing => "Missing",
+        dotty_core::SymbolInfo::Error => "Error",
+        dotty_core::SymbolInfo::Deferred(_) => "Deferred",
+        dotty_core::SymbolInfo::Complete(_) => "Complete",
+    }
+}
+
+fn audit_binary_candidate(store: &SemanticStore, symbol: SymbolId) -> Option<String> {
+    let mut chain = Vec::new();
+    let mut current = Some(symbol);
+    let mut visited = HashSet::new();
+    while let Some(current_symbol) = current {
+        if !visited.insert(current_symbol) || !store.symbols.contains(current_symbol) {
+            return None;
+        }
+        let entry = store.symbols.get(current_symbol);
+        chain.push((
+            store.names.resolve(entry.name.text()).to_owned(),
+            entry.kind,
+        ));
+        current = entry.owner;
+    }
+    chain.reverse();
+    let mut packages = Vec::new();
+    let mut classes = Vec::new();
+    for (name, kind) in chain {
+        if kind == dotty_core::SymbolKind::Package {
+            if classes.is_empty() && !name.is_empty() {
+                packages.push(name);
+            }
+        } else if matches!(
+            kind,
+            dotty_core::SymbolKind::Class
+                | dotty_core::SymbolKind::Trait
+                | dotty_core::SymbolKind::ModuleClass
+        ) {
+            classes.push(name);
+        }
+    }
+    let class = classes.join("$");
+    if class.is_empty() {
+        return None;
+    }
+    let package = packages.join("/");
+    Some(if package.is_empty() {
+        class
+    } else {
+        format!("{package}/{class}")
+    })
+}
+
 fn is_external_symbol(origin: dotty_core::SymbolOrigin) -> bool {
     matches!(
         origin,
         dotty_core::SymbolOrigin::Classfile(_) | dotty_core::SymbolOrigin::Tasty(_)
     )
+}
+
+fn prefix_profile(store: &SemanticStore, ty: dotty_core::ids::TypeId) -> PrefixProfile {
+    fn profile(
+        store: &SemanticStore,
+        ty: dotty_core::ids::TypeId,
+        applied: bool,
+        depth: u8,
+    ) -> PrefixProfile {
+        if depth >= 16 || !store.types.contains(ty) {
+            return PrefixProfile {
+                shape: "unsupported/other",
+                target_kind: "unsupported",
+                identity: "<unresolved-prefix>".to_owned(),
+                symbol: None,
+            };
+        }
+        match store.types.get(ty) {
+            Type::Applied { tycon, .. } => profile(store, *tycon, true, depth + 1),
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } => {
+                let entry = store.symbols.get(*symbol);
+                let (shape, target_kind) = match entry.kind {
+                    dotty_core::SymbolKind::Package => (
+                        if applied {
+                            "Applied"
+                        } else {
+                            "package TypeRef"
+                        },
+                        "Package",
+                    ),
+                    dotty_core::SymbolKind::Class => {
+                        (if applied { "Applied" } else { "class TypeRef" }, "Class")
+                    }
+                    dotty_core::SymbolKind::Trait => {
+                        (if applied { "Applied" } else { "trait TypeRef" }, "Trait")
+                    }
+                    dotty_core::SymbolKind::ModuleClass => (
+                        if applied {
+                            "Applied"
+                        } else {
+                            "module-class TypeRef"
+                        },
+                        "ModuleClass",
+                    ),
+                    _ => ("unsupported/other", "unsupported"),
+                };
+                PrefixProfile {
+                    shape,
+                    target_kind,
+                    identity: audit_symbol_path(store, *symbol),
+                    symbol: Some(*symbol),
+                }
+            }
+            Type::ThisType { class } => {
+                let entry = store.symbols.get(*class);
+                let target_kind = match entry.kind {
+                    dotty_core::SymbolKind::Package => "Package",
+                    dotty_core::SymbolKind::Class => "Class",
+                    dotty_core::SymbolKind::Trait => "Trait",
+                    dotty_core::SymbolKind::ModuleClass => "ModuleClass",
+                    _ => "unsupported",
+                };
+                PrefixProfile {
+                    shape: if applied { "Applied" } else { "ThisType" },
+                    target_kind,
+                    identity: audit_symbol_path(store, *class),
+                    symbol: Some(*class),
+                }
+            }
+            Type::TypeRef {
+                target: TypeRefTarget::Name(name),
+                ..
+            } => PrefixProfile {
+                shape: if applied {
+                    "Applied"
+                } else {
+                    "unsupported/other"
+                },
+                target_kind: "unsupported",
+                identity: format!(
+                    "<unresolved-type:{}>",
+                    store.names.resolve(name.as_name().text())
+                ),
+                symbol: None,
+            },
+            _ => PrefixProfile {
+                shape: "unsupported/other",
+                target_kind: "unsupported",
+                identity: "<unsupported-prefix>".to_owned(),
+                symbol: None,
+            },
+        }
+    }
+    profile(store, ty, false, 0)
+}
+
+fn request_selector(selector: &MemberSelector) -> &'static str {
+    match selector {
+        MemberSelector::Unique => "Unique",
+        _ => "other",
+    }
+}
+
+fn request_space(store: &SemanticStore, space: &MemberSpace) -> String {
+    match space {
+        MemberSpace::Prefix => "Prefix".to_owned(),
+        MemberSpace::Explicit(ty) => {
+            let prefix = prefix_profile(store, *ty);
+            format!("Explicit:{}:{}", prefix.target_kind, prefix.identity)
+        }
+        _ => "other".to_owned(),
+    }
+}
+
+fn normalized_error(error: &ResolutionError) -> (String, String, String) {
+    match error {
+        ResolutionError::Ambiguous { .. } => (
+            "ambiguous result".to_owned(),
+            "<resolver>".to_owned(),
+            "<resolver>".to_owned(),
+        ),
+        ResolutionError::Malformed { reason } => {
+            let lower = reason.to_ascii_lowercase();
+            let category = if lower.contains("unresolved type variable") {
+                "UnresolvedTypeVariable"
+            } else if lower.contains("unresolvedsupertype")
+                || lower.contains("unresolved supertype")
+                || lower.contains("supertype reference could not be resolved")
+            {
+                "InvalidTastyFile::UnresolvedSupertype"
+            } else if lower.contains("invalid .tasty file") {
+                "InvalidTastyFile"
+            } else if lower.starts_with("class not found:") {
+                "unresolved class"
+            } else if lower.contains("malformed class file")
+                || lower.contains("malformed signature")
+                || lower.contains("invalid class file")
+            {
+                "malformed classfile/signature"
+            } else if lower.contains("failed to load because") {
+                "dependency failure"
+            } else if lower.contains("circular inheritance") {
+                "circular inheritance"
+            } else if lower.contains("invalid declaration scope")
+                || lower.contains("invalid class info")
+                || lower.contains("prefix refers to unknown symbol")
+            {
+                "invalid prefix/owner/class info"
+            } else {
+                "other"
+            };
+            let classes = error_binary_names(reason);
+            let top = classes
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "<unknown>".to_owned());
+            let root = classes.last().cloned().unwrap_or_else(|| top.clone());
+            (category.to_owned(), top, root)
+        }
+        _ => (
+            "other".to_owned(),
+            "<resolver>".to_owned(),
+            "<resolver>".to_owned(),
+        ),
+    }
+}
+
+fn error_binary_names(reason: &str) -> Vec<String> {
+    reason
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '/' | '$' | '_' | '.')))
+        .filter(|part| part.contains('/') || part.starts_with("java.") || part.contains('$'))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn member_outcome(
+    store: &SemanticStore,
+    result: &Result<Option<SymbolId>, ResolutionError>,
+    request: &MemberRequest,
+    prefix: &PrefixProfile,
+) -> String {
+    match result {
+        Ok(Some(symbol))
+            if matches!(
+                store.symbols.get(*symbol).origin,
+                dotty_core::SymbolOrigin::Source(_)
+            ) =>
+        {
+            "source reuse".to_owned()
+        }
+        Ok(Some(symbol)) if is_external_symbol(store.symbols.get(*symbol).origin) => {
+            if matches!(
+                store.symbols.get(*symbol).kind,
+                dotty_core::SymbolKind::Class
+                    | dotty_core::SymbolKind::Trait
+                    | dotty_core::SymbolKind::Object
+                    | dotty_core::SymbolKind::ModuleClass
+            ) {
+                "external class success".to_owned()
+            } else {
+                "external non-class success".to_owned()
+            }
+        }
+        Ok(Some(_)) => "other success".to_owned(),
+        Ok(None) => unresolved_member_kind(store, request, prefix),
+        Err(_) => "error".to_owned(),
+    }
+}
+
+fn unresolved_member_kind(
+    store: &SemanticStore,
+    request: &MemberRequest,
+    prefix: &PrefixProfile,
+) -> String {
+    if prefix.target_kind == "Package" {
+        return if request.name.is_type() {
+            "package type member unresolved".to_owned()
+        } else {
+            "package term member unsupported".to_owned()
+        };
+    }
+    if let Some(symbol) = prefix.symbol {
+        if !matches!(
+            store.symbols.get(symbol).info,
+            dotty_core::SymbolInfo::Complete(_)
+        ) && matches!(prefix.target_kind, "Class" | "Trait" | "ModuleClass")
+        {
+            return "class member scope unavailable: incomplete class info".to_owned();
+        }
+    }
+    if prefix.target_kind == "unsupported" {
+        "unsupported prefix shape".to_owned()
+    } else {
+        "other resolver Ok(None)".to_owned()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -2382,6 +2953,37 @@ fn pinned_scala39_local_definition_audit() {
     print_ranked_gaps(&audit.failures);
     print_match_readiness(&audit.match_readiness);
     print_match_profile(&audit.match_profile);
+    {
+        let metrics = resolver_metrics.borrow();
+        assert_eq!(
+            metrics.external_member_requests(),
+            7_802,
+            "the pinned #972 corpus baseline contains 7,802 external member requests"
+        );
+        assert_eq!(
+            metrics.member_errors, 452,
+            "the pinned #972 corpus baseline contains 452 member resolution errors"
+        );
+        assert_eq!(
+            metrics.member_request_shapes.values().sum::<usize>(),
+            metrics.resolver_member_requests,
+            "every member request must have exactly one request-shape classification"
+        );
+        assert_eq!(
+            metrics
+                .member_request_targets
+                .values()
+                .map(|target| target.requests)
+                .sum::<usize>(),
+            metrics.resolver_member_requests,
+            "request volume must equal the sum of target request counts"
+        );
+        assert_eq!(
+            metrics.member_error_kinds.values().sum::<usize>(),
+            metrics.member_errors,
+            "every resolver error must have one normalized root category"
+        );
+    }
     print_resolver_metrics(&resolver_metrics.borrow());
     print_pinned_immutable_field_completion_outcomes(&root, classpath.clone());
     print_pinned_mutable_field_completion_outcomes(&root, classpath);
@@ -2865,6 +3467,7 @@ fn print_pinned_immutable_field_completion_outcomes(root: &Path, classpath: Shar
                 LoadingSession::with_packages(namer_packages),
             ),
             metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
+            class_path_probe: None,
         }));
         let outcome = match typer.complete_symbol(field) {
             Ok(_) => {
@@ -3029,6 +3632,7 @@ fn print_pinned_mutable_field_completion_outcomes(root: &Path, classpath: Shared
                 LoadingSession::with_packages(namer_packages),
             ),
             metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
+            class_path_probe: None,
         }));
         let outcome = match typer.complete_symbol(field) {
             Ok(inferred) => {
@@ -4742,11 +5346,12 @@ fn probe_supported_match_cases(
     );
     typer = typer.with_resolver(Box::new(AuditResolver {
         inner: ClasspathSymbolResolver::new(
-            classpath,
+            classpath.clone(),
             definitions,
             LoadingSession::with_packages(Packages::new()),
         ),
         metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
+        class_path_probe: Some(classpath),
     }));
 
     let mut successes = [
@@ -4935,6 +5540,9 @@ fn audit_source_inner(
     path: &str,
     classpath: Option<(SharedClassPath, Rc<RefCell<ResolverMetrics>>)>,
 ) -> Audit {
+    if let Some((_, metrics)) = &classpath {
+        metrics.borrow_mut().current_file = path.to_owned();
+    }
     let source = SourceId::from_index(0);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -5049,15 +5657,17 @@ fn audit_source_inner(
         definitions,
         &typer_packages,
     );
+    let request_metrics = classpath.as_ref().map(|(_, metrics)| Rc::clone(metrics));
     if let (Some((classpath, metrics)), Some(packages)) = (classpath, resolver_packages) {
         let resolver = ClasspathSymbolResolver::new(
-            classpath,
+            classpath.clone(),
             definitions,
             LoadingSession::with_packages(packages),
         );
         typer = typer.with_resolver(Box::new(AuditResolver {
             inner: resolver,
             metrics,
+            class_path_probe: Some(classpath),
         }));
     }
     let mut impure_projection_cache = BTreeMap::new();
@@ -5072,6 +5682,14 @@ fn audit_source_inner(
             .flatten()
     }));
     for (method, method_tree, rhs, range) in root_methods {
+        if let Some(metrics) = &request_metrics {
+            metrics.borrow_mut().current_method = format!(
+                "{}#tree={}::{}",
+                path,
+                method_tree.index(),
+                audit_symbol_path(typer.store(), method)
+            );
+        }
         let outcome = typer
             .expression_context_for(method)
             .and_then(|context| typer.type_expression(rhs, context));
@@ -6246,6 +6864,14 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     );
     println!("  external_member_successes={}", metrics.member_successes);
     println!(
+        "  external_member_first_seen_in_file_session={}",
+        metrics.external_member_first_seen
+    );
+    println!(
+        "  external_member_same_file_session_reuse={}",
+        metrics.external_member_session_reuse
+    );
+    println!(
         "  external_class_symbol_successes={}",
         metrics.class_symbol_successes
     );
@@ -6258,6 +6884,42 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     println!("  source_member_reuse={}", metrics.member_source_reuse);
     println!("  external_member_unresolved={}", metrics.member_unresolved);
     println!("  external_member_errors={}", metrics.member_errors);
+    println!(
+        "  package_term_requests_with_type_class_resource={}",
+        metrics.package_term_type_class_resource
+    );
+    println!(
+        "  package_term_distinct_targets_with_type_class_resource={}",
+        metrics.package_term_type_class_targets.len()
+    );
+    println!(
+        "  package_term_requests_without_type_class_resource={}",
+        metrics.package_term_without_type_class_resource
+    );
+    println!(
+        "  package_type_requests_with_class_resource={}",
+        metrics.package_type_class_resource
+    );
+    println!(
+        "  package_type_distinct_targets_with_class_resource={}",
+        metrics.package_type_class_targets.len()
+    );
+    println!(
+        "  package_classpath_probe_errors={}",
+        metrics.package_classpath_probe_errors
+    );
+    println!(
+        "  package_term_companion_object_resource_requests={}",
+        metrics.package_term_companion_resource
+    );
+    println!(
+        "  package_term_distinct_targets_with_companion_object_resource={}",
+        metrics.package_term_companion_targets.len()
+    );
+    println!(
+        "  package_object_or_dollar_looking_distinct_targets={}",
+        metrics.package_term_object_looking_targets.len()
+    );
     println!("  distinct_packages={}", metrics.packages.len());
     println!("  distinct_classes={}", metrics.classes.len());
     println!("  distinct_members={}", metrics.members.len());
@@ -6307,6 +6969,17 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     for (kind, count) in &metrics.member_error_kinds {
         println!("    {kind}={count}");
     }
+    println!("  member_error_distinct_targets:");
+    for (kind, targets) in &metrics.member_error_distinct_targets {
+        println!(
+            "    {kind}={}::files={}",
+            targets.len(),
+            metrics
+                .member_error_files
+                .get(kind)
+                .map_or(0, BTreeSet::len)
+        );
+    }
     println!("  most_requested_unresolved_member_names:");
     let mut unresolved = metrics.unresolved_member_names.iter().collect::<Vec<_>>();
     unresolved.sort_by(|(name_a, count_a), (name_b, count_b)| {
@@ -6314,6 +6987,113 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     });
     for (name, count) in unresolved.into_iter().take(20) {
         println!("    {name}={count}");
+    }
+    println!("  member_request_shapes:");
+    for (shape, count) in &metrics.member_request_shapes {
+        println!("    {shape}={count}");
+    }
+    println!("  member_request_outcomes:");
+    let mut outcomes = BTreeMap::<String, usize>::new();
+    for target in metrics.member_request_targets.values() {
+        for (outcome, count) in &target.outcomes {
+            *outcomes.entry(outcome.clone()).or_default() += count;
+        }
+    }
+    for (outcome, count) in outcomes {
+        println!("    {outcome}={count}");
+    }
+    println!("  member_request_outcome_distinct_targets:");
+    for (family, targets) in &metrics.member_request_outcome_targets {
+        println!(
+            "    {family}={}::files={}",
+            targets.len(),
+            metrics
+                .member_request_outcome_files
+                .get(family)
+                .map_or(0, BTreeSet::len)
+        );
+    }
+    println!("  unresolved_member_kinds:");
+    for (kind, count) in &metrics.unresolved_member_kinds {
+        println!("    {kind}={count}");
+    }
+    println!("  member_request_key_summary:");
+    let mut by_shape = BTreeMap::<
+        String,
+        (
+            usize,
+            BTreeSet<String>,
+            BTreeSet<String>,
+            BTreeSet<String>,
+            BTreeSet<String>,
+            BTreeMap<String, usize>,
+        ),
+    >::new();
+    for (key, target) in &metrics.member_request_targets {
+        let summary = by_shape.entry(target.family.clone()).or_default();
+        summary.0 += target.requests;
+        summary.1.insert(key.clone());
+        summary.2.extend(target.owners.iter().cloned());
+        summary.3.extend(target.names.iter().cloned());
+        summary.4.extend(target.files.iter().cloned());
+        for (outcome, count) in &target.outcomes {
+            *summary.5.entry(outcome.clone()).or_default() += count;
+        }
+    }
+    for (shape, summary) in by_shape {
+        let distinct = summary.1.len();
+        let repeat = if distinct == 0 {
+            0.0
+        } else {
+            summary.0 as f64 / distinct as f64
+        };
+        println!(
+            "    {shape}: requests={}, distinct_keys={distinct}, owners={}, names={}, files={}, repeated_hit_factor={repeat:.3}, outcomes={:?}",
+            summary.0,
+            summary.2.len(),
+            summary.3.len(),
+            summary.4.len(),
+            summary.5
+        );
+    }
+    println!("  member_requests_by_enclosing_method:");
+    for (method, requests) in &metrics.member_requests_by_method {
+        let volume = requests.values().sum::<usize>();
+        println!(
+            "    {method}: requests={volume}, distinct_request_outcomes={}",
+            requests.len()
+        );
+        for (key, count) in requests {
+            println!("      {key}={count}");
+        }
+    }
+    println!("  normalized_member_error_roots:");
+    for (key, count) in &metrics.member_error_roots {
+        println!("    {key}={count}");
+    }
+    println!("  member_error_wrappers:");
+    for (key, count) in &metrics.member_error_wrappers {
+        println!("    {key}={count}");
+    }
+    println!("  dependency_failure_chains:");
+    for (key, count) in &metrics.dependency_failure_chains {
+        println!("    {key}={count}");
+    }
+    println!("  tasty_unresolved_supertype_failures:");
+    for (key, count) in &metrics.tasty_supertype_failures {
+        println!("    {key}={count}");
+    }
+    println!("  incomplete_prefix_member_requests:");
+    println!(
+        "    distinct_incomplete_prefix_targets={}",
+        metrics.incomplete_prefix_states.len()
+    );
+    for (key, count) in &metrics.incomplete_prefix_states {
+        println!("    {key}={count}");
+    }
+    println!("  incomplete_prefix_classpath_binary_recovery:");
+    for (key, count) in &metrics.incomplete_prefix_binary_resources {
+        println!("    {key}={count}");
     }
 }
 
@@ -7410,6 +8190,7 @@ fn isolated_impure_function_projection(
         typer = typer.with_resolver(Box::new(AuditResolver {
             inner: resolver,
             metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
+            class_path_probe: None,
         }));
     }
     let projection = match typer.type_of_tpt(function_tree, context) {
@@ -10261,4 +11042,177 @@ fn git_revision(root: &Path) -> String {
         .collect::<String>()
         .trim()
         .to_owned()
+}
+
+#[cfg(test)]
+mod resolver_profile_tests {
+    use super::*;
+
+    fn package_prefix(store: &mut SemanticStore) -> dotty_core::ids::TypeId {
+        let mut packages = Packages::new();
+        let package = packages
+            .enter(store, dotty_core::SymbolOrigin::Synthetic, &["sample"])
+            .pop()
+            .expect("package is entered")
+            .symbol;
+        let no_prefix = store.types.alloc(Type::NoPrefix);
+        store.types.alloc(Type::type_ref(no_prefix, package))
+    }
+
+    fn request(
+        store: &mut SemanticStore,
+        prefix: dotty_core::ids::TypeId,
+        namespace: Namespace,
+    ) -> MemberRequest {
+        let name = store.names.intern("Missing");
+        MemberRequest {
+            prefix,
+            name: dotty_core::Name::new(name, namespace),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        }
+    }
+
+    #[test]
+    fn package_type_request_is_profiled_as_type_member_miss() {
+        let mut store = SemanticStore::new();
+        let prefix = package_prefix(&mut store);
+        let request = request(&mut store, prefix, Namespace::Type);
+        let profile = prefix_profile(&store, prefix);
+        assert_eq!(profile.shape, "package TypeRef");
+        assert_eq!(
+            unresolved_member_kind(&store, &request, &profile),
+            "package type member unresolved"
+        );
+    }
+
+    #[test]
+    fn package_term_request_is_profiled_as_unsupported_term_miss() {
+        let mut store = SemanticStore::new();
+        let prefix = package_prefix(&mut store);
+        let request = request(&mut store, prefix, Namespace::Term);
+        let profile = prefix_profile(&store, prefix);
+        assert_eq!(
+            unresolved_member_kind(&store, &request, &profile),
+            "package term member unsupported"
+        );
+    }
+
+    #[test]
+    fn complete_class_info_is_not_misclassified_as_incomplete() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let scope = store
+            .scopes
+            .alloc(dotty_core::Scope::new(Some(definitions.object_class)));
+        let info = store.types.alloc(Type::ClassInfo(dotty_core::ClassInfo {
+            prefix: definitions.no_prefix,
+            class: definitions.object_class,
+            parents: Vec::new(),
+            declarations: scope,
+            self_type: None,
+        }));
+        store.symbols.get_mut(definitions.object_class).info =
+            dotty_core::SymbolInfo::Complete(info);
+        let request = request(&mut store, definitions.object_type, Namespace::Term);
+        let profile = prefix_profile(&store, definitions.object_type);
+        assert_eq!(
+            unresolved_member_kind(&store, &request, &profile),
+            "other resolver Ok(None)"
+        );
+    }
+
+    #[test]
+    fn missing_class_info_is_reported_as_unavailable_scope() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let request = request(&mut store, definitions.object_type, Namespace::Term);
+        let profile = prefix_profile(&store, definitions.object_type);
+        assert_eq!(
+            unresolved_member_kind(&store, &request, &profile),
+            "class member scope unavailable: incomplete class info"
+        );
+    }
+
+    #[test]
+    fn unresolved_classpath_name_has_a_stable_error_category() {
+        let error = ResolutionError::Malformed {
+            reason: "class not found: sample/Missing".to_owned(),
+        };
+        assert_eq!(normalized_error(&error).0, "unresolved class");
+    }
+
+    #[test]
+    fn nested_dependency_error_retains_top_and_root_classes() {
+        let error = ResolutionError::Malformed { reason: "class sample/Outer failed to load because sample/Inner failed: class not found: java/lang/Object".to_owned() };
+        let (category, requested, root) = normalized_error(&error);
+        assert_eq!(category, "dependency failure");
+        assert_eq!(requested, "sample/Outer");
+        assert_eq!(root, "java/lang/Object");
+    }
+
+    #[test]
+    fn unresolved_type_variable_is_a_stable_root_cause() {
+        let error = ResolutionError::Malformed { reason: "signature in class file for java/lang/invoke/ClassSpecializer$SpeciesData references unresolved type variable K".to_owned() };
+        let (category, _, root) = normalized_error(&error);
+        assert_eq!(category, "UnresolvedTypeVariable");
+        assert_eq!(root, "java/lang/invoke/ClassSpecializer$SpeciesData");
+    }
+
+    #[test]
+    fn unresolved_tasty_supertype_is_separate_from_classfile_failure() {
+        let error = ResolutionError::Malformed {
+            reason: "invalid .tasty file for scala/Foo: UnresolvedSupertype { address: 3 }"
+                .to_owned(),
+        };
+        assert_eq!(
+            normalized_error(&error).0,
+            "InvalidTastyFile::UnresolvedSupertype"
+        );
+    }
+
+    #[test]
+    fn malformed_classfile_signature_is_grouped_without_payload_text() {
+        let error = ResolutionError::Malformed {
+            reason: "malformed signature in class file for java/util/List: bad bound".to_owned(),
+        };
+        assert_eq!(normalized_error(&error).0, "malformed classfile/signature");
+    }
+
+    #[test]
+    fn classfile_and_tasty_failures_remain_distinct() {
+        let classfile = ResolutionError::Malformed {
+            reason: "invalid class file for sample/Foo: invalid magic".to_owned(),
+        };
+        let tasty = ResolutionError::Malformed {
+            reason: "invalid .tasty file for sample/Foo: bad header".to_owned(),
+        };
+        assert_ne!(normalized_error(&classfile).0, normalized_error(&tasty).0);
+    }
+
+    #[test]
+    fn duplicate_request_volume_is_distinct_from_target_count() {
+        let mut metrics = ResolverMetrics::default();
+        let key = "prefix=sample::namespace=type::name=Missing::space=Prefix".to_owned();
+        {
+            let target = metrics.member_request_targets.entry(key).or_default();
+            target.requests += 2;
+            target
+                .files
+                .extend(["A.scala".to_owned(), "B.scala".to_owned()]);
+            target.owners.insert("sample".to_owned());
+            target.names.insert("Missing".to_owned());
+            assert_eq!(target.requests, 2);
+            assert_eq!(target.files.len(), 2);
+        }
+        assert_eq!(metrics.member_request_targets.len(), 1);
+    }
+
+    #[test]
+    fn profile_tables_sort_deterministically() {
+        let mut table = BTreeMap::new();
+        table.insert("zeta".to_owned(), 1);
+        table.insert("alpha".to_owned(), 2);
+        assert_eq!(table.keys().cloned().collect::<Vec<_>>(), ["alpha", "zeta"]);
+    }
 }
