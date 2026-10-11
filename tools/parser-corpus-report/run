@@ -6,7 +6,7 @@ source "${script_dir}/source_checkout.sh"
 repo_dir=$(cd "${script_dir}/../.." && pwd)
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 <scala3-checkout> [--namer] [--skip-oracle] [--output <report.json>] [--timeout-ms <n>]" >&2
+  echo "usage: $0 <scala3-checkout> [--namer] [--namer-diagnostics] [--skip-oracle] [--output <report.json>] [--timeout-ms <n>]" >&2
   exit 2
 fi
 

@@ -1105,6 +1105,7 @@ struct ParsedSource {
     has_parser_capture_syntax: bool,
 }
 
+#[cfg(test)]
 fn parse_source(source: &str, source_file_name: &str, run_namer: bool) -> ParsedSource {
     parse_source_with_modes(source, source_file_name, run_namer, false)
 }

@@ -1,0 +1,221 @@
+{
+  "schema_version": 9,
+  "corpus_roots": [
+    "library/src",
+    "compiler/src"
+  ],
+  "source_version": "3.9.0",
+  "source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "source_sets": {},
+  "parser_revision": "e4fe876e9f011025a7d5af14a1bbd5928f25238f",
+  "scala_oracle_files": null,
+  "scala_oracle_failures": null,
+  "files_attempted": 1236,
+  "files_parsed_without_diagnostics": 1236,
+  "files_parsed_with_recoverable_diagnostics": 0,
+  "hard_parser_failures": 0,
+  "process_failures": 0,
+  "panics": 0,
+  "hangs": 0,
+  "scanner_diagnostics": 0,
+  "diagnostic_histogram": {},
+  "first_failure_histogram": {},
+  "capture_checking_cohorts": {
+    "disabled": {
+      "files": 994,
+      "clean": 994,
+      "recoverable": 0,
+      "hard_failures": 0,
+      "scanner_diagnostics": 0,
+      "diagnostic_histogram": {},
+      "first_failure_histogram": {},
+      "files_with_raw_caret_character": 83,
+      "files_with_caret_operator_token": 21,
+      "files_with_parser_capture_syntax": 0,
+      "raw_caret_without_operator_examples": [
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/ScalaPrimitivesOps.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatureVisitor.scala",
+        "compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala",
+        "compiler/src/dotty/tools/backend/jvm/analysis/package.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/CopyProp.scala",
+        "compiler/src/dotty/tools/backend/jvm/opt/InlinerHeuristics.scala",
+        "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        "compiler/src/dotty/tools/dotc/cc/Capability.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureOps.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala",
+        "compiler/src/dotty/tools/dotc/cc/CapturingType.scala",
+        "compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala",
+        "compiler/src/dotty/tools/dotc/cc/Mutability.scala",
+        "compiler/src/dotty/tools/dotc/cc/RetainingAnnotation.scala",
+        "compiler/src/dotty/tools/dotc/cc/SepCheck.scala",
+        "compiler/src/dotty/tools/dotc/cc/Setup.scala",
+        "compiler/src/dotty/tools/dotc/cc/Synthetics.scala",
+        "compiler/src/dotty/tools/dotc/config/PathResolver.scala",
+        "compiler/src/dotty/tools/dotc/config/ScalaVersion.scala"
+      ],
+      "operator_without_capture_ast_examples": [
+        "compiler/src/dotty/tools/dotc/core/Flags.scala",
+        "compiler/src/dotty/tools/dotc/core/Periods.scala",
+        "compiler/src/dotty/tools/dotc/core/TypeEval.scala",
+        "compiler/src/dotty/tools/dotc/core/tasty/TastyPickler.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/internal/SemanticdbInputStream.scala",
+        "compiler/src/dotty/tools/dotc/semanticdb/internal/SemanticdbOutputStream.scala",
+        "compiler/src/dotty/tools/dotc/transform/sjs/JSSymUtils.scala",
+        "compiler/src/dotty/tools/dotc/typer/ConstFold.scala",
+        "compiler/src/dotty/tools/dotc/typer/Typer.scala",
+        "compiler/src/dotty/tools/dotc/util/HashMap.scala",
+        "compiler/src/dotty/tools/dotc/util/HashSet.scala",
+        "compiler/src/dotty/tools/dotc/util/PerfectHashing.scala",
+        "library/src/scala/Boolean.scala",
+        "library/src/scala/Byte.scala",
+        "library/src/scala/Char.scala",
+        "library/src/scala/Int.scala",
+        "library/src/scala/Long.scala",
+        "library/src/scala/Short.scala",
+        "library/src/scala/concurrent/duration/Duration.scala",
+        "library/src/scala/math/BigInt.scala"
+      ]
+    },
+    "enabled": {
+      "files": 242,
+      "clean": 242,
+      "recoverable": 0,
+      "hard_failures": 0,
+      "scanner_diagnostics": 0,
+      "diagnostic_histogram": {},
+      "first_failure_histogram": {},
+      "files_with_raw_caret_character": 113,
+      "files_with_caret_operator_token": 109,
+      "files_with_parser_capture_syntax": 104,
+      "raw_caret_without_operator_examples": [
+        "library/src/scala/annotation/retains.scala",
+        "library/src/scala/caps/package.scala",
+        "library/src/scala/quoted/Quotes.scala",
+        "library/src/scala/util/Either.scala"
+      ],
+      "operator_without_capture_ast_examples": [
+        "library/src/scala/collection/Hashing.scala",
+        "library/src/scala/collection/generic/BitOperations.scala",
+        "library/src/scala/compiletime/ops/boolean.scala",
+        "library/src/scala/compiletime/ops/int.scala",
+        "library/src/scala/compiletime/ops/long.scala"
+      ]
+    }
+  },
+  "namer": {
+    "files_parse_prevented_naming": 0,
+    "files_namer_ran": 1236,
+    "files_namer_succeeded": 1236,
+    "files_namer_returned_error": 0,
+    "files_named_after_parser_recovery": 0,
+    "files_with_namer_errors_after_parser_recovery": 0,
+    "files_with_invariant_failures": 0,
+    "failed_calls_with_transaction_residue": 0,
+    "namer_success_percent": 100.0,
+    "namer_typed_error_percent": 0.0,
+    "clean_parse_vs_namer_success_delta": 0,
+    "namer_error_histogram": {},
+    "invariant_failure_histogram": {},
+    "enum_identity_audit": {
+      "definitions_encountered": 78,
+      "class_identities_materialized": 75,
+      "companion_identity_pairs_materialized": 75,
+      "definitions_blocked_by_parser_recovery": 0,
+      "singleton_cases_encountered": 390,
+      "singleton_cases_materialized": 387,
+      "comma_group_singleton_cases_encountered": 130,
+      "comma_group_singleton_cases_materialized": 125,
+      "parameterized_cases_encountered": 91,
+      "parameterized_cases_materialized": 91,
+      "cases_blocked_by_parser_recovery": 0
+    },
+    "export_handoff_audit": {
+      "syntax_occurrences": 10,
+      "sites_recorded": 9,
+      "sites_blocked_by_parser_recovery": 0,
+      "sites_in_method_bodies": 1,
+      "forwarders_synthesized": 0
+    },
+    "diagnostic_aware": {
+      "files_namer_ran": 1236,
+      "files_namer_succeeded": 1236,
+      "files_namer_succeeded_with_diagnostics": 0,
+      "files_source_rejected": 0,
+      "files_source_rejected_after_parser_recovery": 0,
+      "files_namer_returned_internal_error": 0,
+      "files_with_invariant_failures": 0,
+      "failed_calls_with_transaction_residue": 0,
+      "source_diagnostic_histogram": {},
+      "internal_error_histogram": {},
+      "invariant_failure_histogram": {}
+    }
+  },
+  "deferred_features": {
+    "case_class_synthetic_apis": {
+      "files": 157,
+      "occurrences": 659,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 659,
+      "examples": [
+        "compiler/src/dotty/tools/FatalError.scala",
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala"
+      ]
+    },
+    "context_bound_evidence_synthesis": {
+      "files": 42,
+      "occurrences": 812,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 812,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/cc/SepCheck.scala",
+        "compiler/src/dotty/tools/dotc/config/Settings.scala",
+        "compiler/src/dotty/tools/dotc/core/OrderingConstraint.scala",
+        "compiler/src/dotty/tools/dotc/core/TypeEval.scala",
+        "compiler/src/dotty/tools/dotc/printing/Formatting.scala"
+      ]
+    },
+    "derives_clauses": {
+      "files": 25,
+      "occurrences": 135,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 135,
+      "examples": [
+        "compiler/src/dotty/tools/dotc/cc/Capability.scala",
+        "compiler/src/dotty/tools/dotc/cc/CaptureSet.scala",
+        "compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala",
+        "compiler/src/dotty/tools/dotc/cc/Mutability.scala",
+        "compiler/src/dotty/tools/dotc/cc/SepCheck.scala"
+      ]
+    },
+    "local_definitions": {
+      "files": 731,
+      "occurrences": 34510,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 34510,
+      "examples": [
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala"
+      ]
+    },
+    "source_annotations": {
+      "files": 563,
+      "occurrences": 4035,
+      "materialized_occurrences": 0,
+      "deferred_occurrences": 4035,
+      "examples": [
+        "compiler/src/dotty/tools/MainGenericCompiler.scala",
+        "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala",
+        "compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala"
+      ]
+    }
+  }
+}
