@@ -101,6 +101,14 @@ resolution.
   (`SymbolKind::Field`/`Method`/`Constructor`) with real `Type::Method`/
   `Type::Poly` types, lowered from JVM descriptors and — when present
   and consistent with the descriptor — generic `Signature` attributes.
+- JVM signature type variables use this class's type parameters, followed
+  by enclosing member-class parameters from nearest to farthest. A method's
+  own parameters shadow all class parameters. Enclosing parameters are
+  visible only across non-static member-class edges recorded by the current
+  class's `InnerClasses` self-entry; a static edge stops lookup. The scopes
+  come from canonical class symbols, including declaration scopes already
+  entered for an enclosing class that is still loading. Missing or out-of-
+  scope names remain `UnresolvedTypeVariable` errors.
 - Annotations (`RuntimeVisibleAnnotations`/`RuntimeInvisibleAnnotations`)
   resolved best-effort onto real `dotty_core::Annotation`/`AnnotationId`
   entries on their owning symbol, plus a JVM-facing
@@ -174,10 +182,12 @@ behavior — each with a doc comment at its own definition site:
   `ClassLoader::resolve_semantic_owner`'s doc comment. The raw pair is
   still available via `ClassfileMetadata::enclosing_method`.
 - **A `.`-qualified inner-class generic signature
-  (`Outer<T>.Inner<U>`) only keeps the last segment's own type
-  arguments.** An outer qualifier's type arguments are dropped rather
-  than modeled as a fully qualified prefix chain — see
-  `ClassLoader::lower_class_type_signature`'s doc comment.
+  (`Outer<T>.Inner<U>`) only keeps the last segment's own applied type
+  arguments.** The outer qualifier's applied arguments are still dropped
+  rather than modeled as a fully qualified prefix chain — see
+  `ClassLoader::lower_class_type_signature`'s doc comment. Independently,
+  type-variable names in the nested class signature can resolve through the
+  enclosing class scopes described above.
 
 ## 4. Architecture
 

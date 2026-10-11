@@ -896,6 +896,22 @@ Classpath-resolution buckets are also reported separately and excluded from
 the Typer-semantic ranking so missing external symbols cannot masquerade as
 Typer features.
 
+Issue #973 extends JVM classfile signature lookup to enclosing non-static
+member-class scopes. Method parameters shadow the current class, and class
+parameters shadow progressively more distant enclosing classes; static nested
+classes stop that lookup. The regression uses real JDK 21
+`ClassSpecializer$SpeciesData` bytes and confirms its `key` field references
+the canonical `K` parameter symbol owned by `ClassSpecializer`. In two
+byte-identical pinned-corpus runs, the #972 cohort's 163 unresolved type
+variable errors across 30 requested roots falls to zero. Total member
+resolution errors fall from 452 to 347, while external member requests move
+from 7,802 to 7,895 as resolution reaches further. One ordinary function-type
+row moves from `SymbolResolution` to the deeper `ImportQualifierNotFound`
+blocker; this is resolution movement, not a claim that the affected method now
+types successfully. Remaining classloader errors are dominated by 342
+unresolved Scala TASTy supertypes. The detailed report records these results
+and the still-blocked broader classpath gate.
+
 The `local_patdefs` section profiles source `PatDef` shapes, binders, and
 typed outcomes inside named method bodies. Outcomes are grouped by
 immutable/mutable/lazy form, binder count, root pattern family, inferred vs
