@@ -45,7 +45,9 @@ pub use error::{
     ExtractorResultMemberIssue, FieldInitializerContextIssue, PatternKind,
     TuplePatternResolutionIssue, TypeArgumentBoundSide, TyperError,
 };
-pub use source_function::{MAX_SOURCE_FUNCTION_ARITY, SourceFunctionKind};
+pub use source_function::{
+    MAX_SOURCE_FUNCTION_ARITY, SourceFunctionFamily, SourceFunctionKind, SourceFunctionPurity,
+};
 
 #[path = "../lookup/mod.rs"]
 mod lookup;

@@ -1307,10 +1307,16 @@ the Scala 3.9 impure function identities. In capture-checking mode, ordinary
 `scala.ImpureFunctionN` / `scala.ImpureContextFunctionN` aliases, whose bodies
 are retaining-cap annotated applications of `FunctionN` / `ContextFunctionN`.
 The current audit's 13 observations are 3 distinct one-argument ordinary
-`ImpureFunction1` source trees in 2 files. The typer still leaves all such
-impure types unsupported. The reference pins the exact alias representation,
+`ImpureFunction1` source trees in 2 files. The identity API resolves or
+materializes these canonical aliases, while source `FunctionWithMods`
+projection remains unsupported. The reference pins the exact alias representation,
 the generic-alias normalization prerequisite, and the boundaries around
 erased and capture-set function types: [impure function identity reference](../crates/dotty-typer/tests/fixtures/function-class-identities/ImpureFunctionTypeIdentities.oracle.md).
+The identity layer now models contextuality and purity as separate dimensions.
+Its family constructor resolves pure `FunctionN` / `ContextFunctionN` classes
+and validates or materializes impure `TypeAlias` identities with the pinned
+`TypeLambda` and `RetainsCap` body. This does not yet project impure source
+function trees or normalize applied generic aliases.
 
 ## Source function type projection (#827)
 

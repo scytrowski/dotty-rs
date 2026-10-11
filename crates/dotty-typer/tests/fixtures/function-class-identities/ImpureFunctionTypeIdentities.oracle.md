@@ -103,17 +103,19 @@ No new core type variant is needed. The type lambda must retain its binder and
 `ParamRef` identities; its arguments must not be substituted by position or
 type name outside that binder.
 
-Keep `SourceFunctionKind::{Ordinary, Contextual}` as the contextuality
-dimension for class identities. Model purity as an orthogonal dimension for
-the source function family, and use a separate alias-identity lookup for the
-impure cases. The existing `source_function_class` validates that a lookup
-returns a class or trait and therefore must remain the pure-class path.
-`source_function_type_constructor` returns a `TypeRef` to those class symbols;
-`project_function_type` projects only ordinary and `[Given]` non-erased trees.
-Its source type cache and transaction journal should be reused for either
-future path, while the impure path records a reference to the alias symbol
-instead of synthesizing a class. `ContextFunctionN` materialization remains
-the pure contextual class case and must not be reused to fake an impure alias.
+`SourceFunctionKind::{Ordinary, Contextual}` remains the contextuality
+dimension. `SourceFunctionFamily` adds purity orthogonally. The existing
+`source_function_class` validates class or trait symbols and remains the
+pure-class path; impure lookups validate or synthesize a canonical `TypeAlias`
+in the `scala` package. `source_function_family_type_constructor` returns a
+`TypeRef` to the class or alias selected by both dimensions. Synthesized alias
+bodies use a bound `TypeLambda` with contravariant inputs, a covariant result,
+and the canonical `scala.annotation.retainsCap` annotation. Package scope and
+resolver transactions preserve one identity and remove it on rollback.
+`project_function_type` still projects only ordinary and `[Given]` non-erased
+trees; using the new identity API for source projection is later work.
+`ContextFunctionN` materialization remains the pure contextual class case and
+is not reused to represent an impure alias.
 
 ## Generic alias normalization prerequisites
 
