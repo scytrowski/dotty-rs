@@ -195,8 +195,22 @@ impl SourceTyper<'_> {
                     .iter()
                     .copied()
             })
-            .filter(|symbol| self.store.symbols.get(*symbol).owner == Some(package))
             .collect()
+    }
+
+    fn semantically_equivalent_types(&mut self, left: TypeId, right: TypeId) -> bool {
+        matches!(self.is_subtype(left, right), Ok(true))
+            && matches!(self.is_subtype(right, left), Ok(true))
+    }
+
+    fn is_package_type_prefix(&self, prefix: TypeId, package: SymbolId) -> bool {
+        matches!(
+            self.store.types.try_get(prefix),
+            Some(Type::TypeRef {
+                prefix: root,
+                target: TypeRefTarget::Symbol(target),
+            }) if *root == self.definitions.no_prefix && *target == package
+        )
     }
 
     fn malformed_function_alias(&self, tree_index: u32, name: Name, reason: &str) -> TyperError {
@@ -412,7 +426,7 @@ impl SourceTyper<'_> {
             return Err(malformed(self, "alias info is not AliasingBounds"));
         };
         let lambda_id = *lambda_id;
-        let Some(Type::TypeLambda(lambda)) = self.store.types.try_get(lambda_id) else {
+        let Some(Type::TypeLambda(lambda)) = self.store.types.try_get(lambda_id).cloned() else {
             return Err(malformed(self, "alias body is not a TypeLambda"));
         };
         if lambda.params.len() != arity + 1 {
@@ -427,14 +441,14 @@ impl SourceTyper<'_> {
             } else {
                 Variance::Contravariant
             };
-            if param.declared_variance != Some(expected_variance)
-                || !matches!(
-                    self.store.types.try_get(param.bounds),
-                    Some(Type::Bounds { low, high })
-                        if *low == self.definitions.nothing_type
-                            && *high == self.definitions.any_type
-                )
-            {
+            let bounds_match = match self.store.types.try_get(param.bounds).cloned() {
+                Some(Type::Bounds { low, high }) => {
+                    self.semantically_equivalent_types(low, self.definitions.nothing_type)
+                        && self.semantically_equivalent_types(high, self.definitions.any_type)
+                }
+                _ => false,
+            };
+            if param.declared_variance != Some(expected_variance) || !bounds_match {
                 return Err(malformed(
                     self,
                     "type parameter bounds or variance are incompatible",
@@ -481,10 +495,10 @@ impl SourceTyper<'_> {
             }
         }
         let Type::TypeRef {
+            prefix: underlying_prefix,
             target: TypeRefTarget::Symbol(underlying),
-            ..
         } =
-            self.store.types.try_get(tycon).ok_or_else(|| {
+            self.store.types.try_get(tycon).cloned().ok_or_else(|| {
                 malformed(self, "alias body has an invalid function type reference")
             })?
         else {
@@ -493,13 +507,18 @@ impl SourceTyper<'_> {
                 "alias body does not reference a canonical function class",
             ));
         };
-        let underlying = *underlying;
         let canonical_underlying =
             self.source_function_class_inner(family.kind, arity, tree_index)?;
         if underlying != canonical_underlying {
             return Err(malformed(
                 self,
                 "alias body targets the wrong function family",
+            ));
+        }
+        if !self.is_package_type_prefix(underlying_prefix, package) {
+            return Err(malformed(
+                self,
+                "alias body function reference has a non-canonical prefix",
             ));
         }
         let annotation_type = self
@@ -509,36 +528,65 @@ impl SourceTyper<'_> {
             .ok_or_else(|| malformed(self, "alias body has an invalid annotation reference"))?
             .ty;
         let Type::TypeRef {
+            prefix: annotation_prefix,
             target: TypeRefTarget::Symbol(annotation_class),
             ..
-        } = self.store.types.try_get(annotation_type).ok_or_else(|| {
-            malformed(self, "retainsCap annotation has an invalid type reference")
-        })?
+        } = self
+            .store
+            .types
+            .try_get(annotation_type)
+            .cloned()
+            .ok_or_else(|| {
+                malformed(self, "retainsCap annotation has an invalid type reference")
+            })?
         else {
             return Err(malformed(
                 self,
                 "retainsCap annotation has no canonical class reference",
             ));
         };
-        if !self.store.symbols.contains(*annotation_class)
-            || self
-                .store
-                .names
-                .resolve(self.store.symbols.get(*annotation_class).name.text())
-                != "retainsCap"
-            || self
-                .store
-                .symbols
-                .get(*annotation_class)
-                .owner
-                .is_none_or(|owner| {
-                    !self.store.symbols.contains(owner)
-                        || self.package_path(owner) != ["scala", "annotation"]
-                })
+        if !self.store.symbols.contains(annotation_class)
+            || self.store.symbols.get(annotation_class).name
+                != Name::new(self.store.names.intern("retainsCap"), Namespace::Type)
+            || !matches!(
+                self.store.symbols.get(annotation_class).kind,
+                SymbolKind::Class | SymbolKind::Trait
+            )
         {
             return Err(malformed(
                 self,
                 "alias body has a non-canonical retainsCap annotation",
+            ));
+        }
+        let annotation_symbol = self.store.symbols.get(annotation_class);
+        let Some(annotation_package) = annotation_symbol.owner else {
+            return Err(malformed(
+                self,
+                "alias body has a retainsCap class without a package owner",
+            ));
+        };
+        if !self.store.symbols.contains(annotation_package)
+            || self.package_path(annotation_package) != ["scala", "annotation"]
+        {
+            return Err(malformed(
+                self,
+                "alias body has a non-canonical retainsCap annotation",
+            ));
+        }
+        if !self.is_package_type_prefix(annotation_prefix, annotation_package) {
+            return Err(malformed(
+                self,
+                "retainsCap annotation has a non-canonical prefix",
+            ));
+        }
+        let annotation = self.store.annotations.get(annotation);
+        if matches!(
+            &annotation.arguments,
+            dotty_core::AnnotationArguments::Known(arguments) if !arguments.is_empty()
+        ) {
+            return Err(malformed(
+                self,
+                "retainsCap annotation must not have term arguments",
             ));
         }
         Ok(())
@@ -953,10 +1001,13 @@ mod tests {
         arity: usize,
         definitions: Definitions,
     ) -> SymbolId {
-        let bounds = store.types.alloc(Type::Bounds {
-            low: definitions.nothing_type,
-            high: definitions.any_type,
-        });
+        let low = store
+            .types
+            .alloc(store.types.get(definitions.nothing_type).clone());
+        let high = store
+            .types
+            .alloc(store.types.get(definitions.any_type).clone());
+        let bounds = store.types.alloc(Type::Bounds { low, high });
         let reserved = store.types.reserve();
         let mut params = Vec::new();
         let mut args = Vec::new();
@@ -1053,6 +1104,79 @@ mod tests {
             classes,
             ..FunctionResolver::default()
         }
+    }
+
+    fn resolver_alias_fixture() -> (
+        AstArena<Untyped>,
+        SourceSemanticIndex,
+        SemanticStore,
+        Packages,
+        Definitions,
+        SymbolId,
+        FunctionResolver,
+        SymbolId,
+        TypeId,
+        dotty_core::AnnotationId,
+    ) {
+        let (arena, index, mut store, mut packages, definitions, scala) = setup();
+        let (annotation_package, annotation_name, annotation_class) =
+            add_retains_cap(&mut store, &mut packages, scala);
+        let mut resolver = resolver_with_function_classes(
+            &mut store,
+            scala,
+            annotation_package,
+            annotation_name,
+            annotation_class,
+            &[1],
+        );
+        let (underlying_name, underlying) = function_class(&mut store, scala, "Function1");
+        resolver.classes.insert(underlying_name, underlying);
+        let alias_name = Name::new(store.names.intern("ImpureFunction1"), Namespace::Type);
+        let alias = impure_alias_symbol(
+            &mut store,
+            scala,
+            annotation_class,
+            underlying,
+            alias_name,
+            1,
+            definitions,
+        );
+        resolver.classes.insert(alias_name, alias);
+        let info = match store.symbols.get(alias).info {
+            SymbolInfo::Complete(info) => info,
+            _ => unreachable!(),
+        };
+        let lambda = match store.types.get(info) {
+            Type::AliasingBounds { alias } => *alias,
+            _ => unreachable!(),
+        };
+        let result = match store.types.get(lambda) {
+            Type::TypeLambda(lambda) => lambda.result,
+            _ => unreachable!(),
+        };
+        let (underlying, annotation) = match store.types.get(result) {
+            Type::Annotated {
+                underlying,
+                annotation,
+            } => (*underlying, *annotation),
+            _ => unreachable!(),
+        };
+        let tycon = match store.types.get(underlying) {
+            Type::Applied { tycon, .. } => *tycon,
+            _ => unreachable!(),
+        };
+        (
+            arena,
+            index,
+            store,
+            packages,
+            definitions,
+            scala,
+            resolver,
+            alias,
+            tycon,
+            annotation,
+        )
     }
 
     #[test]
@@ -1470,6 +1594,198 @@ mod tests {
             ),
             Err(TyperError::SymbolResolution { .. })
         ));
+    }
+
+    #[test]
+    fn wrong_owner_scope_entry_is_rejected_without_synthesizing_a_duplicate() {
+        let (arena, index, mut store, mut packages, definitions, scala) = setup();
+        let (annotation_package, annotation_name, annotation_class) =
+            add_retains_cap(&mut store, &mut packages, scala);
+        let mut resolver = resolver_with_function_classes(
+            &mut store,
+            scala,
+            annotation_package,
+            annotation_name,
+            annotation_class,
+            &[1],
+        );
+        let (underlying_name, underlying) = function_class(&mut store, scala, "Function1");
+        resolver.classes.insert(underlying_name, underlying);
+        let alias_name = Name::new(store.names.intern("ImpureFunction1"), Namespace::Type);
+        let foreign_owner = packages
+            .enter(&mut store, SymbolOrigin::Synthetic, &["other"])
+            .last()
+            .unwrap()
+            .symbol;
+        let wrong_owner = store.symbols.alloc(Symbol {
+            name: alias_name,
+            owner: Some(foreign_owner),
+            kind: SymbolKind::TypeAlias,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let scope = packages.scope_of(scala).unwrap();
+        store.scopes.get_mut(scope).enter(alias_name, wrong_owner);
+        let mut checked_typer = typer(&arena, &index, &mut store, &packages, definitions, resolver);
+
+        assert!(matches!(
+            checked_typer.source_impure_function_alias(
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Ordinary,
+                    SourceFunctionPurity::Impure,
+                ),
+                1,
+                47,
+            ),
+            Err(TyperError::SymbolResolution { .. })
+        ));
+        assert_eq!(
+            checked_typer
+                .store
+                .scopes
+                .get(scope)
+                .lookup_all(&alias_name),
+            &[wrong_owner]
+        );
+    }
+
+    #[test]
+    fn alias_validation_rejects_noncanonical_annotation_shape() {
+        let (arena, index, mut store, packages, definitions, _, resolver, _alias, tycon, _) =
+            resolver_alias_fixture();
+        let wrong_prefix = store.types.alloc(Type::NoPrefix);
+        if let Type::TypeRef { prefix, .. } = store.types.get_mut(tycon) {
+            *prefix = wrong_prefix;
+        }
+        let mut typer = typer(&arena, &index, &mut store, &packages, definitions, resolver);
+
+        assert!(matches!(
+            typer.source_impure_function_alias(
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Ordinary,
+                    SourceFunctionPurity::Impure,
+                ),
+                1,
+                48,
+            ),
+            Err(TyperError::SymbolResolution { .. })
+        ));
+    }
+
+    #[test]
+    fn alias_validation_rejects_wrong_annotation_namespace_and_arguments() {
+        let (arena, index, mut store, packages, definitions, _, resolver, _, _, annotation) =
+            resolver_alias_fixture();
+        let annotation_ty = store.annotations.get(annotation).ty;
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(annotation_class),
+            ..
+        } = *store.types.get(annotation_ty)
+        else {
+            unreachable!()
+        };
+        store.symbols.get_mut(annotation_class).name =
+            Name::new(store.names.intern("retainsCap"), Namespace::Term);
+        let mut namespace_typer =
+            typer(&arena, &index, &mut store, &packages, definitions, resolver);
+        assert!(matches!(
+            namespace_typer.source_impure_function_alias(
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Ordinary,
+                    SourceFunctionPurity::Impure,
+                ),
+                1,
+                50,
+            ),
+            Err(TyperError::SymbolResolution { .. })
+        ));
+
+        let (arena, index, mut store, packages, definitions, _, resolver, _, _, annotation) =
+            resolver_alias_fixture();
+        let annotation_ty = store.annotations.get(annotation).ty;
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(annotation_class),
+            ..
+        } = *store.types.get(annotation_ty)
+        else {
+            unreachable!()
+        };
+        store.symbols.get_mut(annotation_class).kind = SymbolKind::Object;
+        let mut kind_typer = typer(&arena, &index, &mut store, &packages, definitions, resolver);
+        assert!(matches!(
+            kind_typer.source_impure_function_alias(
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Ordinary,
+                    SourceFunctionPurity::Impure,
+                ),
+                1,
+                52,
+            ),
+            Err(TyperError::SymbolResolution { .. })
+        ));
+
+        let (arena, index, mut store, packages, definitions, _, resolver, alias, _, annotation) =
+            resolver_alias_fixture();
+        let annotation_ty = store.annotations.get(annotation).ty;
+        let replacement = store.annotations.alloc(Annotation::with_arguments(
+            annotation_ty,
+            vec![dotty_core::AnnotationArgument {
+                name: None,
+                value: dotty_core::AnnotationValue::Constant(dotty_core::Constant::Int(1)),
+            }],
+        ));
+        let info = match store.symbols.get(alias).info {
+            SymbolInfo::Complete(info) => info,
+            _ => unreachable!(),
+        };
+        let lambda = match store.types.get(info) {
+            Type::AliasingBounds { alias } => *alias,
+            _ => unreachable!(),
+        };
+        let result = match store.types.get(lambda) {
+            Type::TypeLambda(lambda) => lambda.result,
+            _ => unreachable!(),
+        };
+        if let Type::Annotated { annotation, .. } = store.types.get_mut(result) {
+            *annotation = replacement;
+        }
+        let mut typer = typer(&arena, &index, &mut store, &packages, definitions, resolver);
+        assert!(matches!(
+            typer.source_impure_function_alias(
+                SourceFunctionFamily::new(
+                    SourceFunctionKind::Ordinary,
+                    SourceFunctionPurity::Impure,
+                ),
+                1,
+                51,
+            ),
+            Err(TyperError::SymbolResolution { .. })
+        ));
+    }
+
+    #[test]
+    fn alias_validation_accepts_fresh_equivalent_bounds() {
+        let (arena, index, mut store, packages, definitions, _, resolver, alias, _, _) =
+            resolver_alias_fixture();
+        let mut typer = typer(&arena, &index, &mut store, &packages, definitions, resolver);
+        assert_eq!(
+            typer
+                .source_impure_function_alias(
+                    SourceFunctionFamily::new(
+                        SourceFunctionKind::Ordinary,
+                        SourceFunctionPurity::Impure,
+                    ),
+                    1,
+                    49,
+                )
+                .unwrap(),
+            alias
+        );
     }
 
     #[test]
