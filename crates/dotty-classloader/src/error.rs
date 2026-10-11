@@ -481,6 +481,96 @@ mod tests {
     }
 
     #[test]
+    fn every_classload_variant_has_an_explicit_stable_code() {
+        use dotty_classfile::constant_pool::ConstantPoolIndex;
+        use dotty_classfile::reader::ReadError;
+
+        let name = BinaryName::from_internal("A");
+        let index = ConstantPoolIndex(1);
+        let version = ClassFileVersion {
+            major: 70,
+            minor: 0,
+        };
+        let errors = vec![
+            ClassLoadError::NotFound(name.clone()),
+            ClassLoadError::Io(
+                name.clone(),
+                Rc::new(ClassPathError::new(std::io::Error::other("io"))),
+            ),
+            ClassLoadError::InvalidClassFile(
+                name.clone(),
+                ClassFileError::Read(ReadError::UnexpectedEof {
+                    offset: 0,
+                    needed: 1,
+                    remaining: 0,
+                }),
+            ),
+            ClassLoadError::UnsupportedClassVersion(name.clone(), version),
+            ClassLoadError::MalformedReference(name.clone(), PoolRefError::InvalidIndex { index }),
+            ClassLoadError::MalformedDescriptor(
+                name.clone(),
+                ResolveDescriptorError::NotUtf8 { index },
+            ),
+            ClassLoadError::MalformedSignature(
+                name.clone(),
+                SignatureError::UnexpectedEnd { offset: 0 },
+            ),
+            ClassLoadError::NameMismatch {
+                requested: name.clone(),
+                actual: BinaryName::from_internal("B"),
+            },
+            ClassLoadError::InvalidTastyFile(name.clone(), TastyDecodeError::MissingTypeDef),
+            ClassLoadError::CircularInheritance(name.clone()),
+            ClassLoadError::InheritanceDepthExceeded(name.clone()),
+            ClassLoadError::DependencyFailure {
+                owner: name.clone(),
+                dependency: BinaryName::from_internal("B"),
+                source: Rc::new(ClassLoadError::NotFound(BinaryName::from_internal("B"))),
+            },
+            ClassLoadError::UnresolvedTypeVariable(name, "T".to_owned()),
+        ];
+        let codes: Vec<_> = errors.iter().map(ClassLoadError::code).collect();
+        let categories: Vec<_> = errors.iter().map(ClassLoadError::category).collect();
+
+        assert_eq!(
+            codes,
+            [
+                "classloader.not_found",
+                "classloader.classpath_error",
+                "classloader.invalid_class_file",
+                "classloader.unsupported_class_version",
+                "classloader.malformed_reference",
+                "classloader.malformed_descriptor",
+                "classloader.malformed_signature",
+                "classloader.name_mismatch",
+                "classloader.invalid_tasty_file",
+                "classloader.circular_inheritance",
+                "classloader.inheritance_depth_exceeded",
+                "classloader.dependency_failure",
+                "classloader.unresolved_type_variable",
+            ]
+        );
+        assert_eq!(
+            categories,
+            [
+                ClassLoadCategory::Missing,
+                ClassLoadCategory::IoOrEnvironment,
+                ClassLoadCategory::MalformedArtifact,
+                ClassLoadCategory::UnsupportedFeatureOrVersion,
+                ClassLoadCategory::MalformedArtifact,
+                ClassLoadCategory::MalformedArtifact,
+                ClassLoadCategory::MalformedArtifact,
+                ClassLoadCategory::MalformedArtifact,
+                ClassLoadCategory::Conditional,
+                ClassLoadCategory::MalformedArtifact,
+                ClassLoadCategory::UnsupportedFeatureOrVersion,
+                ClassLoadCategory::ResolutionOrDependency,
+                ClassLoadCategory::Conditional,
+            ]
+        );
+    }
+
+    #[test]
     fn typed_classpath_and_tasty_causes_keep_specific_root_classification() {
         use dotty_tasty::{HeaderError, file::TastyFileError};
 
