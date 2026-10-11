@@ -177,7 +177,7 @@ pub enum TastyDecodeError {
     /// A declared `Template` parent (superclass or mixin interface) has no
     /// name this decoder can resolve — see `resolve_parent_name_with_bare`'s
     /// doc comment for exactly which shapes are and are not resolved.
-    UnresolvedSupertype(UnresolvedParentReference),
+    UnresolvedSupertype(Box<UnresolvedParentReference>),
 }
 
 impl fmt::Display for TastyDecodeError {
@@ -221,7 +221,7 @@ impl TastyDecodeError {
             Self::Ast(_) => "tasty.ast_error",
             Self::MissingTypeDef => "tasty.missing_type_def",
             Self::NoTemplateBody => "tasty.no_template_body",
-            Self::UnresolvedSupertype => "tasty.unresolved_supertype",
+            Self::UnresolvedSupertype(_) => "tasty.unresolved_supertype",
         }
     }
 
@@ -257,7 +257,7 @@ impl TastyDecodeError {
                 ast_error_category(error)
             }
             Self::Parse(_) => ClassLoadCategory::MalformedArtifact,
-            Self::MissingTypeDef | Self::NoTemplateBody | Self::UnresolvedSupertype => {
+            Self::MissingTypeDef | Self::NoTemplateBody | Self::UnresolvedSupertype(_) => {
                 ClassLoadCategory::Conditional
             }
         }
@@ -429,9 +429,9 @@ fn decode_impl(
                 (Some(parent), _) => parent,
                 (None, false) => BinaryName::from_internal("java/lang/Object"),
                 (None, true) => {
-                    return Err(TastyDecodeError::UnresolvedSupertype(
+                    return Err(TastyDecodeError::UnresolvedSupertype(Box::new(
                         unresolved_parent_reference(&file, parent, parent_index, package),
-                    ));
+                    )));
                 }
             }
         }
@@ -448,12 +448,12 @@ fn decode_impl(
             &mut resolve_bare,
         );
         interfaces.push(resolution.ok_or_else(|| {
-            TastyDecodeError::UnresolvedSupertype(unresolved_parent_reference(
+            TastyDecodeError::UnresolvedSupertype(Box::new(unresolved_parent_reference(
                 &file,
                 parent,
                 parent_index,
                 package,
-            ))
+            )))
         })?);
     }
 
