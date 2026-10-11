@@ -241,7 +241,7 @@ impl SourceTyper<'_> {
     /// Selects between an expression's exact and already computed widened
     /// types without performing additional semantic mutations.
     pub(in crate::typer) fn adapt_pre_widened_expression_type_to_expected(
-        &self,
+        &mut self,
         expression_type: TypeId,
         widened_type: TypeId,
         expected: TypeId,
@@ -258,7 +258,7 @@ impl SourceTyper<'_> {
     }
 
     fn expected_type_contains_constant(
-        &self,
+        &mut self,
         expected: TypeId,
         depth: usize,
     ) -> Result<bool, TyperError> {
@@ -270,7 +270,7 @@ impl SourceTyper<'_> {
         let expected = crate::types::TypeNormalizer::new(self.store)
             .normalize_for_lookup(expected)
             .map_err(TyperError::TypeNormalization)?;
-        let Some(node) = self.store.types.try_get(expected) else {
+        let Some(node) = self.store.types.try_get(expected).cloned() else {
             return Err(TyperError::TypeNormalization(
                 if self.store.types.contains(expected) {
                     crate::types::TypeNormalizeError::UnfilledType { ty: expected }
@@ -282,8 +282,8 @@ impl SourceTyper<'_> {
         match node {
             Type::Constant(_) => Ok(true),
             Type::Or { left, right } => Ok(self
-                .expected_type_contains_constant(*left, depth + 1)?
-                || self.expected_type_contains_constant(*right, depth + 1)?),
+                .expected_type_contains_constant(left, depth + 1)?
+                || self.expected_type_contains_constant(right, depth + 1)?),
             _ => Ok(false),
         }
     }
