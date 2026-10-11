@@ -190,7 +190,7 @@ pub enum NamingOutcome {
     /// Naming completed and produced a usable semantic index.
     Named {
         /// The completed semantic index.
-        index: SourceSemanticIndex,
+        index: Box<SourceSemanticIndex>,
         /// Source diagnostics observed while naming. Currently empty on
         /// success because unsupported source issues reject the unit.
         diagnostics: Vec<NamerDiagnostic>,
@@ -597,7 +597,10 @@ pub fn name_compilation_unit_with_diagnostics(
     packages: &mut Packages,
 ) -> Result<NamingOutcome, NamerError> {
     match run_name_compilation_unit(arena, root, source, source_file_name, store, packages) {
-        Ok((index, diagnostics)) => Ok(NamingOutcome::Named { index, diagnostics }),
+        Ok((index, diagnostics)) => Ok(NamingOutcome::Named {
+            index: Box::new(index),
+            diagnostics,
+        }),
         Err((_error, Some(diagnostic))) => Ok(NamingOutcome::Rejected {
             diagnostics: vec![diagnostic],
         }),

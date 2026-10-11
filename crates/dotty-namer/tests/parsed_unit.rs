@@ -4472,7 +4472,7 @@ fn diagnostic_aware_naming_keeps_recovered_and_enum_owner_failures_internal() {
         &mut store.names,
     );
     let mut packages = Packages::new();
-    assert!(recovered.diagnostics.len() > 0);
+    assert!(!recovered.diagnostics.is_empty());
     let checkpoint = store.checkpoint();
     let error = name_compilation_unit_with_diagnostics(
         &recovered.ast,
