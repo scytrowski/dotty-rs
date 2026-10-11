@@ -503,10 +503,19 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     let package = requested
                         .rsplit_once('/')
                         .map_or("<default-package>", |(package, _)| package);
+                    let parent_profile = match error {
+                        ResolutionError::Malformed { reason } => {
+                            unresolved_tasty_parent_profile(reason)
+                        }
+                        _ => None,
+                    };
+                    let parent_profile = parent_profile.unwrap_or_else(|| {
+                        "parent_index=unknown::parent_shape=not-exposed::semantic_reference=unknown::reference_prefix=unknown::visible_names=[]::raw_shape=unknown".to_owned()
+                    });
                     *metrics
                         .tasty_supertype_failures
                         .entry(format!(
-                            "requested={requested}::source_package={package}::parent_shape=not-exposed-by-ClassLoadError"
+                            "requested={requested}::source_package={package}::{parent_profile}"
                         ))
                         .or_default() += 1;
                 }
@@ -850,6 +859,20 @@ fn normalized_error(error: &ResolutionError) -> (String, String, String) {
             "<resolver>".to_owned(),
         ),
     }
+}
+
+fn unresolved_tasty_parent_profile(reason: &str) -> Option<String> {
+    let details = reason
+        .rsplit("unresolved supertype reference at parent ")
+        .next()?;
+    let (index, details) = details.split_once(": shape=")?;
+    let (shape, details) = details.split_once(", semantic_reference=")?;
+    let (semantic_reference, details) = details.split_once(", reference_prefix=")?;
+    let (reference_prefix, details) = details.split_once(", names=")?;
+    let (visible_names, raw_shape) = details.split_once(", raw=")?;
+    Some(format!(
+        "parent_index={index}::parent_shape={shape}::semantic_reference={semantic_reference}::reference_prefix={reference_prefix}::visible_names={visible_names}::raw_shape={raw_shape}"
+    ))
 }
 
 fn deepest_dependency_cause(reason: &str) -> &str {
@@ -2441,8 +2464,8 @@ fn pinned_scala39_local_definition_audit() {
             .source_function_outcomes
             .get("type::Function::SymbolResolution")
             .map(|bucket| bucket.count),
-        Some(11),
-        "enclosing generic resolution should move one ordinary function-type method past its resolver blocker"
+        None,
+        "the shared Function1 parent fix should move this cohort away from SymbolResolution"
     );
     assert_eq!(audit.source_function_method_outcomes.len(), 25);
     assert_eq!(IMPURE_FUNCTION_BASELINE.len(), 13);
@@ -3114,12 +3137,12 @@ fn pinned_scala39_local_definition_audit() {
         let metrics = resolver_metrics.borrow();
         assert_eq!(
             metrics.external_member_requests(),
-            7_895,
-            "the #973 corpus result includes additional requests after the resolved JDK type became reachable"
+            8_070,
+            "the #974 shared TASTy parent fix makes additional Scala library classes reachable"
         );
         assert_eq!(
-            metrics.member_errors, 347,
-            "enclosing generic lookup reduces the pinned #972 baseline from 452 to 347 member resolution errors"
+            metrics.member_errors, 217,
+            "the shared-parent TASTy fix reduces the post-#973 member error count from 347 to 217"
         );
         assert_eq!(
             metrics.member_request_shapes.values().sum::<usize>(),
@@ -11319,12 +11342,22 @@ mod resolver_profile_tests {
     #[test]
     fn unresolved_tasty_supertype_is_separate_from_classfile_failure() {
         let error = ResolutionError::Malformed {
-            reason: "invalid .tasty file for scala/Foo: UnresolvedSupertype { address: 3 }"
+            reason: "invalid .tasty file for scala/Foo: unresolved supertype reference at parent 1: shape=applied, semantic_reference=true, reference_prefix=true, names=[\"scala/Parent\"], raw=LengthNode(tag=162)"
                 .to_owned(),
         };
         assert_eq!(
             normalized_error(&error).0,
             "InvalidTastyFile::UnresolvedSupertype"
+        );
+        assert_eq!(
+            unresolved_tasty_parent_profile(match &error {
+                ResolutionError::Malformed { reason } => reason,
+                _ => unreachable!(),
+            })
+            .as_deref(),
+            Some(
+                "parent_index=1::parent_shape=applied::semantic_reference=true::reference_prefix=true::visible_names=[\"scala/Parent\"]::raw_shape=LengthNode(tag=162)"
+            )
         );
     }
 

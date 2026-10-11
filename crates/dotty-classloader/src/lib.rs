@@ -51,5 +51,5 @@ pub mod classloader {
     pub use crate::resolver::ClasspathSymbolResolver;
     pub use crate::session::LoadingSession;
     pub use crate::symbol::{ClassRef, ClassfileMetadata};
-    pub use crate::tasty_symbol::TastyDecodeError;
+    pub use crate::tasty_symbol::{TastyDecodeError, UnresolvedParentReference};
 }
