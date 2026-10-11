@@ -23,8 +23,8 @@ pub enum LexerIssue {
     UnterminatedBackquotedIdentifier,
     /// A backquoted identifier was empty or consisted only of `_`.
     EmptyOrUnderscoreBackquotedIdentifier,
-    /// Incomparable indentation prefixes contain the same visual columns with
-    /// different mixtures of spaces and tabs.
+    /// Two indentation prefixes made of spaces and tabs that are incomparable
+    /// by prefix ordering.
     IncompatibleIndentationPrefixes,
 }
 
