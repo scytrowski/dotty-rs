@@ -562,6 +562,63 @@ printf 'The #950 snapshot recommended the import/classpath resolution sprint. It
         }
     ' "$tmp_dir/first.report"
     printf '\nThe raw profile below lists the current first blocker for each of the 22 pinned method trees. After #883, the former `LocalValueTypeMismatch` blocker moved to `ImportQualifierNotFound`; these observations show where typing stops and do not assert that the methods completed typing.\n\n'
+    printf '## #972 external resolution profile\n\n'
+    printf 'This audit-only profile leaves resolver semantics unchanged. Request keys use stable semantic owner paths, namespace, member name, and member space, not per-store arena IDs. The raw report contains ordered per-method request keys and outcomes. The `SymbolResolver` contract does not carry subsystem/site tags, so the audit reports that attribution as unavailable rather than guessing.\n\n'
+    printf 'The complete request-shape and outcome tables follow in the raw report. In brief, the profile separates package+type from package+term requests, records type-side `Foo` and object-side `Foo$` classpath resource hits without materializing them, and reports distinct keys alongside request volume and repeated-hit factor.\n\n'
+    printf '| Normalized outcome / probe | Count |\n| --- | ---: |\n'
+    awk '
+        /^resolver_metrics:$/ { in_metrics = 1; next }
+        /^resolver_581_comparison:$/ { in_metrics = 0 }
+        in_metrics && /^  (external_member_requests|external_member_unresolved|external_member_errors|package_term_requests_with_type_class_resource|package_term_distinct_targets_with_type_class_resource|package_type_requests_with_class_resource|package_type_distinct_targets_with_class_resource|package_term_companion_object_resource_requests|package_term_distinct_targets_with_companion_object_resource|package_object_or_dollar_looking_distinct_targets)=/ {
+            line = $0; sub(/^  /, "", line); split(line, fields, "="); value = substr(line, index(line, "=") + 1)
+            label = fields[1]
+            if (label == "external_member_requests") title = "External member requests"
+            else if (label == "external_member_unresolved") title = "Resolver `Ok(None)`"
+            else if (label == "external_member_errors") title = "Resolver errors"
+            else if (label == "package_term_requests_with_type_class_resource") title = "Package+term requests with a type-side class resource"
+            else if (label == "package_term_distinct_targets_with_type_class_resource") title = "Distinct package+term targets with a type-side class resource"
+            else if (label == "package_type_requests_with_class_resource") title = "Package+type requests with a class resource"
+            else if (label == "package_type_distinct_targets_with_class_resource") title = "Distinct package+type targets with a class resource"
+            else if (label == "package_term_companion_object_resource_requests") title = "Package+term requests with a `Foo$` resource"
+            else if (label == "package_term_distinct_targets_with_companion_object_resource") title = "Distinct package+term targets with a `Foo$` resource"
+            else title = "Package-object / dollar-looking targets"
+            print "| " title " | " value " |"
+        }
+        in_metrics && /^  member_error_kinds:$/ { in_errors = 1; next }
+        in_errors && /^  [^ ]/ { in_errors = 0 }
+        in_errors && /^    / { line = $0; sub(/^    /, "", line); split(line, item, "="); print "| Error root: `" item[1] "` | " item[2] " |" }
+    ' "$tmp_dir/first.report"
+    printf '\nDistinct targets by request outcome and normalized error family:\n\n'
+    printf '| Family / outcome | Distinct targets / files |\n| --- | --- |\n'
+    awk '
+        /^  member_request_outcome_distinct_targets:$/ { in_outcomes = 1; next }
+        in_outcomes && /^  [^ ]/ { in_outcomes = 0 }
+        in_outcomes && /^    / {
+            line = $0; sub(/^    /, "", line)
+            key = line; sub(/=[^=]*::files=.*/, "", key)
+            files = line; sub(/^.*::files=/, "", files)
+            targets = line; sub(/::files=.*/, "", targets); sub(/^.*=/, "", targets)
+            print "| `" key "` | " targets " targets, " files " files |"
+        }
+        /^  member_error_distinct_targets:$/ { in_errors = 1; next }
+        in_errors && /^  [^ ]/ { in_errors = 0 }
+        in_errors && /^    / {
+            line = $0; sub(/^    /, "", line)
+            key = line; sub(/=[^=]*::files=.*/, "", key)
+            files = line; sub(/^.*::files=/, "", files)
+            targets = line; sub(/::files=.*/, "", targets); sub(/^.*=/, "", targets)
+            print "| Error `" key "` | " targets " targets, " files " files |"
+        }
+        /^    distinct_incomplete_prefix_targets=/ { line = $0; sub(/^.*=/, "", line); print "| Incomplete class prefix targets | " line " targets |" }
+    ' "$tmp_dir/first.report"
+    printf '\n### Bounded implementation ranking\n\n'
+    printf '| Rank | Slice | Measured reach | Expected reachability gain | Risk and reusable work |\n| ---: | --- | --- | --- | --- |\n'
+    printf '| 1 | A. Nested-class generic environment | 163 errors / 30 requested roots; deepest root `java/lang/invoke/ClassSpecializer$SpeciesData` / `K` | Unlocks class loads currently failing through this repeated JDK dependency root. | Medium-high risk; reuse classfile signature decoding and dependency loading. |\n'
+    printf '| 2 | B. Scala TASTy supertype reference resolution | 289 errors / 22 requested roots | Removes the largest normalized error cohort and may unlock its dependent Scala class loads. | High semantic risk; reuse TASTy address/reference decoding and pinned Scala 3.9.0 fixtures. |\n'
+    printf '| 3 | C. Package type-member materialization | 357 unresolved requests / 33 distinct target keys | Completes only candidates whose class resources are present; current package type loader path already exists. | Low-medium risk; reuse `package + type -> load_class` after A/B loader fixes. |\n'
+    printf '| 4 | E. Completing a known incomplete class identity | 3,721 requests / 111 distinct incomplete prefix identities | Could unlock member lookup for repeated source/classloader class prefixes. | High identity/rollback risk; separate source and classpath origins, then reuse class completion transactions. |\n'
+    printf '| 5 | D. Package term/object materialization | 2,716 requests / 75 distinct target keys; type-side resource on 2,180 requests / 46 keys and `Foo$` on 2,177 / 45 | Potentially broad term lookup gains where a matching companion/object resource exists. | High module/companion identity risk; keep separate from type loading. |\n\n'
+    printf 'Recommended order: A, then B, then re-run the profile before choosing C versus E. D remains a separate object/module design slice because a type-side class resource does not prove that a term request resolves to its companion. The TASTy error contract does not expose the unresolved parent wire/source shape; the raw profile marks it unavailable and does not invent a binary name.\n\n'
     printf '## Previous type projection snapshot\n\n'
     printf 'The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.\n\n'
     printf '## Full raw audit output (JDK feature release %s)\n\n' "$jdk_release"
