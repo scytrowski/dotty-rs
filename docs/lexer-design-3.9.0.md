@@ -594,6 +594,15 @@ decimal or exponent literal produces an error token for the numeric portion and
 leaves the suffix available as a following identifier, matching Scala's
 recovery boundary.
 
+The public lexer diagnostic type is `dotty_lexer::LexerDiagnostic`, backed by
+the structured `LexerIssue` payload. Unsupported source characters,
+unterminated block comments, and malformed backquoted identifiers have
+dedicated variants. Other lexical and contextual diagnostics currently use a
+`Legacy { message }` variant as a migration bridge; XML diagnostic production
+continues to return strings internally, and migrating that family is a
+separate follow-up. The bridge preserves existing message text, spans, order,
+and recovery behavior without making typed issues renderable as strings.
+
 The lexer also has deterministic short-input hardening tests that exercise
 2,380 ASCII inputs, 1,111 Unicode/multibyte inputs, and 8,192 seeded mixed
 inputs containing whitespace, operators, delimiters, XML/comment markers,

@@ -1,5 +1,7 @@
 use dotty_core::token::TokenKind;
-use dotty_lexer::{ContextualScanner, RawItem, RawLexer, RawTokenKind};
+use dotty_lexer::{
+    ContextualScanner, LexerDiagnostic, LexerIssue, RawItem, RawLexer, RawTokenKind,
+};
 
 const FRAGMENTS: &[&str] = &[
     "a",
@@ -168,7 +170,7 @@ val errorId = raw"E?(\d+)".r"#;
         .expect("ordinary interpolated string scans with diagnostics");
     assert_eq!(ordinary.diagnostics().len(), 1);
     assert_eq!(
-        ordinary.diagnostics()[0].message(),
+        legacy_message(&ordinary.diagnostics()[0]).expect("legacy string diagnostic"),
         "invalid escape character"
     );
 }
@@ -192,11 +194,7 @@ fn assert_reaches_eof(source: &str) {
     assert_diagnostics_are_bounded(source, lexer.diagnostics(), 0);
 }
 
-fn assert_diagnostics_are_bounded(
-    source: &str,
-    diagnostics: &[dotty_core::diagnostics::Diagnostic],
-    seed: u64,
-) {
+fn assert_diagnostics_are_bounded(source: &str, diagnostics: &[LexerDiagnostic], seed: u64) {
     for diagnostic in diagnostics {
         assert!(
             source
@@ -205,6 +203,13 @@ fn assert_diagnostics_are_bounded(
             "seed {seed}, invalid diagnostic span {:?} in {source:?}",
             diagnostic.span()
         );
+    }
+}
+
+fn legacy_message(diagnostic: &LexerDiagnostic) -> Option<&str> {
+    match diagnostic.issue() {
+        LexerIssue::Legacy { message } => Some(message.as_str()),
+        _ => None,
     }
 }
 

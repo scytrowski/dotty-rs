@@ -1,11 +1,12 @@
 use core::fmt;
 
-use dotty_core::diagnostics::{Diagnostic, DiagnosticSeverity};
+use dotty_core::diagnostics::DiagnosticSeverity;
 use dotty_core::source::{SourceText, SourceTextError, TextRange, TextRangeError};
 
 use crate::identifier::{is_identifier_part, is_identifier_start, is_operator_character};
 use crate::xml::XmlState;
 use crate::{Cursor, CursorError, HardKeyword, Punctuation, RawItem, RawToken, RawTokenKind};
+use crate::{LexerDiagnostic, LexerIssue};
 use crate::{Trivia, TriviaKind};
 
 #[derive(Debug, Clone)]
@@ -29,7 +30,7 @@ struct StringState {
 pub struct RawLexer<'source> {
     source: SourceText<'source>,
     cursor: Cursor<'source>,
-    diagnostics: Vec<Diagnostic>,
+    diagnostics: Vec<LexerDiagnostic>,
     emitted_eof: bool,
     modes: Vec<LexMode>,
     pending: Option<RawItem>,
@@ -93,7 +94,7 @@ impl<'source> RawLexer<'source> {
     }
 
     /// Returns diagnostics collected while recovering from malformed input.
-    pub fn diagnostics(&self) -> &[Diagnostic] {
+    pub fn diagnostics(&self) -> &[LexerDiagnostic] {
         &self.diagnostics
     }
 
@@ -121,7 +122,7 @@ impl<'source> RawLexer<'source> {
         let start = self.cursor.position();
         let Some(character) = self.cursor.peek() else {
             if let Some(message) = self.xml.eof_message() {
-                self.report(start, message)?;
+                self.report_legacy(start, message)?;
             }
             self.emitted_eof = true;
             return Ok(Some(RawItem::Token(RawToken {
@@ -236,11 +237,7 @@ impl<'source> RawLexer<'source> {
 
         let _ = self.cursor.bump();
         let span = self.span(start)?;
-        self.diagnostics.push(Diagnostic::new(
-            DiagnosticSeverity::Error,
-            span,
-            format!("unsupported source character in the current lexer stage: {character:?}"),
-        ));
+        self.report_issue(start, LexerIssue::UnsupportedSourceCharacter { character })?;
         Ok(Some(RawItem::Token(RawToken {
             kind: RawTokenKind::Error,
             span,
@@ -268,7 +265,7 @@ impl<'source> RawLexer<'source> {
             let start = self.cursor.position();
             self.modes.clear();
             self.modes.push(LexMode::Normal);
-            self.report(start, "unterminated interpolation expression")?;
+            self.report_legacy(start, "unterminated interpolation expression")?;
             return Ok(Some(RawItem::Token(RawToken {
                 kind: RawTokenKind::Error,
                 span: self.span(start)?,
@@ -347,7 +344,7 @@ impl<'source> RawLexer<'source> {
             if self.cursor.is_eof() {
                 let start = state.part_start;
                 let _ = self.modes.pop();
-                self.report(start, "unclosed interpolated string literal")?;
+                self.report_legacy(start, "unclosed interpolated string literal")?;
                 return Ok(Some(RawItem::Token(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
@@ -360,7 +357,7 @@ impl<'source> RawLexer<'source> {
             }) {
                 let start = state.part_start;
                 let _ = self.modes.pop();
-                self.report(start, "unclosed interpolated string literal")?;
+                self.report_legacy(start, "unclosed interpolated string literal")?;
                 return Ok(Some(RawItem::Token(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
@@ -423,7 +420,10 @@ impl<'source> RawLexer<'source> {
                             return self
                                 .recover_interpolated_string(state.part_start, state.multiline);
                         }
-                        self.report(state.part_start, "invalid string interpolation splice")?;
+                        self.report_legacy(
+                            state.part_start,
+                            "invalid string interpolation splice",
+                        )?;
                         return self.recover_interpolated_string(state.part_start, state.multiline);
                     }
                 }
@@ -446,7 +446,7 @@ impl<'source> RawLexer<'source> {
         loop {
             if self.cursor.is_eof() {
                 let _ = self.modes.pop();
-                self.report(start, "unclosed interpolated string literal")?;
+                self.report_legacy(start, "unclosed interpolated string literal")?;
                 return Ok(Some(RawItem::Token(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
@@ -475,7 +475,7 @@ impl<'source> RawLexer<'source> {
                 is_substitute(character) || (!multiline && is_literal_line_terminator(character))
             }) {
                 let _ = self.modes.pop();
-                self.report(start, "unclosed interpolated string literal")?;
+                self.report_legacy(start, "unclosed interpolated string literal")?;
                 return Ok(Some(RawItem::Token(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
@@ -494,7 +494,7 @@ impl<'source> RawLexer<'source> {
         let start = self.cursor.position();
         if !self.cursor.peek().is_some_and(is_identifier_start) {
             let _ = self.modes.pop();
-            self.report(start, "interpolation identifier expected after `$`")?;
+            self.report_legacy(start, "interpolation identifier expected after `$`")?;
             return Ok(Some(RawItem::Token(RawToken {
                 kind: RawTokenKind::Error,
                 span: self.span(start)?,
@@ -573,10 +573,10 @@ impl<'source> RawLexer<'source> {
             match self.cursor.peek() {
                 None => {
                     let span = self.span(start)?;
-                    self.diagnostics.push(Diagnostic::new(
+                    self.diagnostics.push(LexerDiagnostic::with_issue(
                         DiagnosticSeverity::Error,
                         span,
-                        "unterminated block comment",
+                        LexerIssue::UnterminatedBlockComment,
                     ));
                     break;
                 }
@@ -689,10 +689,10 @@ impl<'source> RawLexer<'source> {
         )?)?;
 
         if !closed {
-            self.diagnostics.push(Diagnostic::new(
+            self.diagnostics.push(LexerDiagnostic::with_issue(
                 DiagnosticSeverity::Error,
                 span,
-                "unterminated backquoted identifier",
+                LexerIssue::UnterminatedBackquotedIdentifier,
             ));
             return Ok(RawToken {
                 kind: RawTokenKind::Error,
@@ -700,10 +700,10 @@ impl<'source> RawLexer<'source> {
             });
         }
         if content.is_empty() || content == "_" {
-            self.diagnostics.push(Diagnostic::new(
+            self.diagnostics.push(LexerDiagnostic::with_issue(
                 DiagnosticSeverity::Error,
                 span,
-                "backquoted identifier must not be empty or equal to `_`",
+                LexerIssue::EmptyOrUnderscoreBackquotedIdentifier,
             ));
             return Ok(RawToken {
                 kind: RawTokenKind::Error,
@@ -744,7 +744,7 @@ impl<'source> RawLexer<'source> {
         let spelling = self.source.slice(span)?;
         self.xml.update_token(kind, spelling);
         if let Some(message) = self.xml.take_error() {
-            self.report(span.start(), message)?;
+            self.report_legacy(span.start(), message)?;
         }
         Ok(())
     }
@@ -862,7 +862,7 @@ impl<'source> RawLexer<'source> {
                     .peek()
                     .is_some_and(|character| character.is_ascii_digit())
                 {
-                    self.report(start, "exponent must contain at least one digit")?;
+                    self.report_legacy(start, "exponent must contain at least one digit")?;
                 } else {
                     self.scan_decimal_digits(start, "exponent")?;
                 }
@@ -883,7 +883,7 @@ impl<'source> RawLexer<'source> {
                 kind = RawTokenKind::DoubleLiteral;
             }
             Some('l' | 'L') => {
-                self.report(start, "long suffix is only valid on an integer literal")?;
+                self.report_legacy(start, "long suffix is only valid on an integer literal")?;
                 kind = RawTokenKind::Error;
                 invalid_suffix = true;
             }
@@ -899,7 +899,7 @@ impl<'source> RawLexer<'source> {
             && !invalid_non_decimal_digit
             && !invalid_suffix
         {
-            self.report(start, "invalid literal number")?;
+            self.report_legacy(start, "invalid literal number")?;
         }
 
         Ok(RawToken {
@@ -919,7 +919,7 @@ impl<'source> RawLexer<'source> {
                 let _ = self.cursor.bump();
             } else if character == '_' {
                 if !saw_digit || trailing_separator {
-                    self.report(start, "invalid numeric separator")?;
+                    self.report_legacy(start, "invalid numeric separator")?;
                 }
                 trailing_separator = true;
                 let _ = self.cursor.bump();
@@ -929,16 +929,16 @@ impl<'source> RawLexer<'source> {
         }
 
         if trailing_separator {
-            self.report(start, "numeric literal must not end with a separator")?;
+            self.report_legacy(start, "numeric literal must not end with a separator")?;
         }
         let invalid_non_decimal_digit = base != 10
             && self.cursor.peek().is_some_and(|character| {
                 character.is_ascii_alphanumeric() && !(saw_digit && matches!(character, 'l' | 'L'))
             });
         if invalid_non_decimal_digit {
-            self.report(start, "invalid digit in non-decimal literal")?;
+            self.report_legacy(start, "invalid digit in non-decimal literal")?;
         } else if !saw_digit {
-            self.report(start, "numeric literal must contain a digit")?;
+            self.report_legacy(start, "numeric literal must contain a digit")?;
         }
 
         Ok(())
@@ -955,7 +955,7 @@ impl<'source> RawLexer<'source> {
                 let _ = self.cursor.bump();
             } else if character == '_' {
                 if !saw_digit || trailing_separator {
-                    self.report(start, "invalid numeric separator")?;
+                    self.report_legacy(start, "invalid numeric separator")?;
                 }
                 trailing_separator = true;
                 let _ = self.cursor.bump();
@@ -965,10 +965,10 @@ impl<'source> RawLexer<'source> {
         }
 
         if trailing_separator {
-            self.report(start, "numeric literal must not end with a separator")?;
+            self.report_legacy(start, "numeric literal must not end with a separator")?;
         }
         if !saw_digit {
-            self.report(start, format!("{component} must contain a digit"))?;
+            self.report_legacy(start, format!("{component} must contain a digit"))?;
         }
 
         Ok(())
@@ -980,7 +980,7 @@ impl<'source> RawLexer<'source> {
 
         match self.cursor.peek() {
             None | Some('\n' | '\r' | '\u{001a}') => {
-                self.report(start, "unterminated character literal")?;
+                self.report_legacy(start, "unterminated character literal")?;
                 return Ok(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
@@ -988,7 +988,7 @@ impl<'source> RawLexer<'source> {
             }
             Some('\'') => {
                 let _ = self.cursor.bump();
-                self.report(start, "empty character literal")?;
+                self.report_legacy(start, "empty character literal")?;
                 return Ok(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
@@ -1000,7 +1000,10 @@ impl<'source> RawLexer<'source> {
             Some(character) => {
                 let _ = self.cursor.bump();
                 if character.len_utf16() != 1 {
-                    self.report(start, "character literal must contain one UTF-16 code unit")?;
+                    self.report_legacy(
+                        start,
+                        "character literal must contain one UTF-16 code unit",
+                    )?;
                     valid = false;
                 }
             }
@@ -1012,7 +1015,7 @@ impl<'source> RawLexer<'source> {
             && !self.cursor.peek().is_some_and(is_literal_line_terminator)
         {
             valid = false;
-            self.report(start, "character literal contains more than one character")?;
+            self.report_legacy(start, "character literal contains more than one character")?;
             while let Some(character) = self.cursor.peek() {
                 let _ = self.cursor.bump();
                 if character == '\'' || is_literal_line_terminator(character) {
@@ -1021,7 +1024,7 @@ impl<'source> RawLexer<'source> {
             }
         } else if !self.cursor.is_eof() {
             valid = false;
-            self.report(start, "unterminated character literal")?;
+            self.report_legacy(start, "unterminated character literal")?;
         }
 
         Ok(RawToken {
@@ -1055,7 +1058,7 @@ impl<'source> RawLexer<'source> {
                     });
                 }
                 Some('\n' | '\r' | '\u{001a}') => {
-                    self.report(start, "unclosed string literal")?;
+                    self.report_legacy(start, "unclosed string literal")?;
                     return Ok(RawToken {
                         kind: RawTokenKind::Error,
                         span: self.span(start)?,
@@ -1068,7 +1071,7 @@ impl<'source> RawLexer<'source> {
                     let _ = self.cursor.bump();
                 }
                 None => {
-                    self.report(start, "unclosed string literal")?;
+                    self.report_legacy(start, "unclosed string literal")?;
                     return Ok(RawToken {
                         kind: RawTokenKind::Error,
                         span: self.span(start)?,
@@ -1091,14 +1094,14 @@ impl<'source> RawLexer<'source> {
                 });
             }
             if self.cursor.peek().is_some_and(is_substitute) {
-                self.report(start, "unclosed multi-line string literal")?;
+                self.report_legacy(start, "unclosed multi-line string literal")?;
                 return Ok(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
                 });
             }
             if self.cursor.bump().is_none() {
-                self.report(start, "unclosed multi-line string literal")?;
+                self.report_legacy(start, "unclosed multi-line string literal")?;
                 return Ok(RawToken {
                     kind: RawTokenKind::Error,
                     span: self.span(start)?,
@@ -1124,11 +1127,11 @@ impl<'source> RawLexer<'source> {
             Some('0'..='7') => self.scan_octal_escape(start)?,
             Some(_) => {
                 let _ = self.cursor.bump();
-                self.report(start, "invalid escape character")?;
+                self.report_legacy(start, "invalid escape character")?;
                 false
             }
             None => {
-                self.report(start, "unterminated escape sequence")?;
+                self.report_legacy(start, "unterminated escape sequence")?;
                 false
             }
         };
@@ -1147,11 +1150,11 @@ impl<'source> RawLexer<'source> {
                     let _ = self.cursor.bump();
                 }
                 Some(_) => {
-                    self.report(start, "invalid character in Unicode escape sequence")?;
+                    self.report_legacy(start, "invalid character in Unicode escape sequence")?;
                     return Ok(false);
                 }
                 None => {
-                    self.report(start, "incomplete Unicode escape sequence")?;
+                    self.report_legacy(start, "incomplete Unicode escape sequence")?;
                     return Ok(false);
                 }
             }
@@ -1171,18 +1174,33 @@ impl<'source> RawLexer<'source> {
             let _ = self.cursor.bump();
             count += 1;
         }
-        self.report(
+        self.report_legacy(
             start,
             "octal escape literals are unsupported; use a Unicode escape",
         )?;
         Ok(true)
     }
 
-    fn report(&mut self, start: u32, message: impl Into<String>) -> Result<(), RawLexerError> {
-        self.diagnostics.push(Diagnostic::new(
+    fn report_legacy(
+        &mut self,
+        start: u32,
+        message: impl Into<String>,
+    ) -> Result<(), RawLexerError> {
+        self.diagnostics.push(LexerDiagnostic::with_issue(
             DiagnosticSeverity::Error,
             self.span(start)?,
-            message,
+            LexerIssue::Legacy {
+                message: message.into(),
+            },
+        ));
+        Ok(())
+    }
+
+    fn report_issue(&mut self, start: u32, issue: LexerIssue) -> Result<(), RawLexerError> {
+        self.diagnostics.push(LexerDiagnostic::with_issue(
+            DiagnosticSeverity::Error,
+            self.span(start)?,
+            issue,
         ));
         Ok(())
     }
@@ -1286,6 +1304,23 @@ mod tests {
 
     use super::*;
 
+    trait LegacyDiagnosticMessage {
+        fn legacy_message(&self) -> Option<&str>;
+
+        fn legacy_text(&self) -> &str {
+            self.legacy_message().expect("expected legacy diagnostic")
+        }
+    }
+
+    impl LegacyDiagnosticMessage for LexerDiagnostic {
+        fn legacy_message(&self) -> Option<&str> {
+            match self.issue() {
+                LexerIssue::Legacy { message } => Some(message.as_str()),
+                _ => None,
+            }
+        }
+    }
+
     fn visit_short_ascii_inputs(
         alphabet: &[char],
         current: &mut String,
@@ -1351,7 +1386,7 @@ mod tests {
         }
     }
 
-    fn scan(source: &str) -> (Vec<RawItem>, Vec<Diagnostic>) {
+    fn scan(source: &str) -> (Vec<RawItem>, Vec<LexerDiagnostic>) {
         let mut lexer = RawLexer::new(source).expect("valid source");
         let mut items = Vec::new();
         while let Some(item) = lexer.next().expect("lexing succeeds") {
@@ -1957,6 +1992,11 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].span(), TextRange::new(0, 1).unwrap());
+        assert_eq!(diagnostics[0].severity(), DiagnosticSeverity::Error);
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::UnsupportedSourceCharacter { character: '\0' }
+        );
     }
 
     fn trivia(kind: TriviaKind, start: u32, end: u32) -> RawItem {
@@ -2313,10 +2353,11 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].span(), TextRange::new(1, 2).unwrap());
-        assert!(
-            diagnostics[0]
-                .message()
-                .contains("unsupported source character")
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::UnsupportedSourceCharacter {
+                character: '\u{001a}'
+            }
         );
     }
 
@@ -2354,7 +2395,7 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(diagnostics[0].span(), TextRange::new(0, 2).unwrap());
-        assert!(diagnostics[0].message().contains("unclosed string"));
+        assert!(diagnostics[0].legacy_text().contains("unclosed string"));
         assert_eq!(diagnostics[1].span(), TextRange::new(2, 3).unwrap());
     }
 
@@ -2373,7 +2414,7 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 2);
         assert_eq!(diagnostics[0].span(), TextRange::new(0, 4).unwrap());
-        assert!(diagnostics[0].message().contains("unclosed multi-line"));
+        assert!(diagnostics[0].legacy_text().contains("unclosed multi-line"));
         assert_eq!(diagnostics[1].span(), TextRange::new(4, 5).unwrap());
     }
 
@@ -2427,6 +2468,11 @@ mod tests {
             diagnostics[0].span(),
             TextRange::new(0, 10).expect("valid range")
         );
+        assert_eq!(diagnostics[0].severity(), DiagnosticSeverity::Error);
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::UnterminatedBlockComment
+        );
     }
 
     #[test]
@@ -2445,6 +2491,48 @@ mod tests {
             vec![TextRange::new(0, 2).unwrap(), TextRange::new(3, 6).unwrap()]
         );
         assert_eq!(diagnostics.len(), 2);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.issue())
+                .collect::<Vec<_>>(),
+            vec![
+                &LexerIssue::EmptyOrUnderscoreBackquotedIdentifier,
+                &LexerIssue::EmptyOrUnderscoreBackquotedIdentifier,
+            ]
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.span())
+                .collect::<Vec<_>>(),
+            vec![TextRange::new(0, 2).unwrap(), TextRange::new(3, 6).unwrap()]
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.severity() == DiagnosticSeverity::Error)
+        );
+    }
+
+    #[test]
+    fn reports_an_unterminated_backquoted_identifier_with_a_typed_issue() {
+        let (items, diagnostics) = scan("`name");
+
+        assert_eq!(
+            items,
+            vec![
+                token(RawTokenKind::Error, 0, 5),
+                token(RawTokenKind::Eof, 5, 5)
+            ]
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity(), DiagnosticSeverity::Error);
+        assert_eq!(diagnostics[0].span(), TextRange::new(0, 5).unwrap());
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::UnterminatedBackquotedIdentifier
+        );
     }
 
     #[test]
@@ -2628,7 +2716,7 @@ mod tests {
             diagnostics[0].span(),
             TextRange::new(0, 3).expect("valid range")
         );
-        assert!(diagnostics[0].message().contains("exponent"));
+        assert!(diagnostics[0].legacy_text().contains("exponent"));
     }
 
     #[test]
@@ -2648,7 +2736,7 @@ mod tests {
         assert!(
             diagnostics
                 .iter()
-                .all(|diagnostic| diagnostic.message().contains("digit"))
+                .all(|diagnostic| { diagnostic.legacy_text().contains("digit") })
         );
     }
 
@@ -2671,7 +2759,7 @@ mod tests {
         assert!(
             diagnostics
                 .iter()
-                .all(|diagnostic| diagnostic.message().contains("invalid digit"))
+                .all(|diagnostic| { diagnostic.legacy_text().contains("invalid digit") })
         );
     }
 
@@ -2753,7 +2841,7 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message().contains("long suffix"));
+        assert!(diagnostics[0].legacy_text().contains("long suffix"));
     }
 
     #[test]
@@ -2769,7 +2857,7 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message().contains("long suffix"));
+        assert!(diagnostics[0].legacy_text().contains("long suffix"));
     }
 
     #[test]
@@ -2986,7 +3074,11 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].span(), TextRange::new(5, 6).unwrap());
-        assert!(diagnostics[0].message().contains("unterminated character"));
+        assert!(
+            diagnostics[0]
+                .legacy_text()
+                .contains("unterminated character")
+        );
     }
 
     #[test]
@@ -3025,7 +3117,11 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].span(), TextRange::new(5, 6).unwrap());
-        assert!(diagnostics[0].message().contains("unterminated character"));
+        assert!(
+            diagnostics[0]
+                .legacy_text()
+                .contains("unterminated character")
+        );
     }
 
     #[test]
@@ -3045,7 +3141,11 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].span(), TextRange::new(1, 2).unwrap());
-        assert!(diagnostics[0].message().contains("unterminated character"));
+        assert!(
+            diagnostics[0]
+                .legacy_text()
+                .contains("unterminated character")
+        );
     }
 
     #[test]
@@ -3065,7 +3165,11 @@ mod tests {
         );
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].span(), TextRange::new(5, 6).unwrap());
-        assert!(diagnostics[0].message().contains("unterminated character"));
+        assert!(
+            diagnostics[0]
+                .legacy_text()
+                .contains("unterminated character")
+        );
     }
 
     #[test]
@@ -3253,7 +3357,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].message(),
+            diagnostics[0].legacy_text(),
             "mismatched XML closing tag: expected </root>, found </wrong>"
         );
         assert_eq!(
@@ -3268,7 +3372,10 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "XML closing tag name expected");
+        assert_eq!(
+            diagnostics[0].legacy_text(),
+            "XML closing tag name expected"
+        );
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new((source.len() - 4) as u32, source.len() as u32).expect("valid range")
@@ -3282,7 +3389,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].message(),
+            diagnostics[0].legacy_text(),
             "XML closing tag cannot contain attributes"
         );
         assert_eq!(
@@ -3298,7 +3405,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].message(),
+            diagnostics[0].legacy_text(),
             "XML closing tag cannot contain attributes"
         );
         assert_eq!(
@@ -3392,7 +3499,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "unterminated XML tag");
+        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML tag");
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3405,7 +3512,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "unterminated XML tag");
+        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML tag");
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3418,7 +3525,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "unterminated XML tag");
+        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML tag");
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3432,7 +3539,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].message(),
+            diagnostics[0].legacy_text(),
             "XML attribute expression must be closed"
         );
         assert_eq!(
@@ -3448,7 +3555,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].message(),
+            diagnostics[0].legacy_text(),
             "XML attribute expression must be closed"
         );
         assert_eq!(
@@ -3463,7 +3570,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "unterminated XML tag");
+        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML tag");
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3476,7 +3583,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "unterminated XML tag");
+        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML tag");
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3489,7 +3596,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "unterminated XML tag");
+        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML tag");
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3564,7 +3671,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "unterminated XML comment");
+        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML comment");
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3577,7 +3684,10 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "unterminated XML CDATA section");
+        assert_eq!(
+            diagnostics[0].legacy_text(),
+            "unterminated XML CDATA section"
+        );
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3598,7 +3708,10 @@ mod tests {
         let malformed_end = source.find("></").expect("malformed CDATA close") as u32;
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "unterminated XML CDATA section");
+        assert_eq!(
+            diagnostics[0].legacy_text(),
+            "unterminated XML CDATA section"
+        );
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(malformed_end, malformed_end + 3).expect("valid range")
@@ -3645,7 +3758,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].message(),
+            diagnostics[0].legacy_text(),
             "invalid `--` sequence in XML comment"
         );
         assert_eq!(
@@ -3667,7 +3780,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "unterminated XML expression");
+        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML expression");
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3747,7 +3860,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].message(),
+            diagnostics[0].legacy_text(),
             "XML attribute name must be followed by `=`"
         );
     }
@@ -3758,7 +3871,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].message(),
+            diagnostics[0].legacy_text(),
             "XML attribute value expected after `=`"
         );
     }
@@ -3769,7 +3882,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].message(),
+            diagnostics[0].legacy_text(),
             "XML attribute name must be followed by `=`"
         );
     }
@@ -3780,7 +3893,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].message(),
+            diagnostics[0].legacy_text(),
             "XML attribute value expected after `=`"
         );
     }
@@ -3791,7 +3904,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].message(),
+            diagnostics[0].legacy_text(),
             "XML attribute value must follow `=`"
         );
     }
@@ -3801,7 +3914,7 @@ mod tests {
         let (_, diagnostics) = scan("<item 123/>");
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "XML attribute name expected");
+        assert_eq!(diagnostics[0].legacy_text(), "XML attribute name expected");
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(6, 9).expect("valid range")
@@ -3813,7 +3926,7 @@ mod tests {
         let (_, diagnostics) = scan("<item {flag}/>");
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "XML attribute name expected");
+        assert_eq!(diagnostics[0].legacy_text(), "XML attribute name expected");
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(6, 7).expect("valid range")
@@ -3825,7 +3938,7 @@ mod tests {
         let (_, diagnostics) = scan("<item @ />");
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "XML attribute name expected");
+        assert_eq!(diagnostics[0].legacy_text(), "XML attribute name expected");
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(6, 7).expect("valid range")
@@ -3923,7 +4036,7 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].message(),
+            diagnostics[0].legacy_text(),
             "invalid `--` sequence in XML comment"
         );
         assert_eq!(
@@ -4056,7 +4169,7 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message().contains("UTF-16 code unit"));
+        assert!(diagnostics[0].legacy_text().contains("UTF-16 code unit"));
     }
 
     #[test]
@@ -4072,7 +4185,11 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message().contains("more than one character"));
+        assert!(
+            diagnostics[0]
+                .legacy_text()
+                .contains("more than one character")
+        );
     }
 
     #[test]
@@ -4192,7 +4309,7 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message().contains("Unicode escape"));
+        assert!(diagnostics[0].legacy_text().contains("Unicode escape"));
     }
 
     #[test]
@@ -4208,7 +4325,7 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message().contains("escape"));
+        assert!(diagnostics[0].legacy_text().contains("escape"));
     }
 
     #[test]
@@ -4223,7 +4340,7 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message().contains("octal escape"));
+        assert!(diagnostics[0].legacy_text().contains("octal escape"));
     }
 
     #[test]
@@ -4238,7 +4355,7 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message().contains("octal escape"));
+        assert!(diagnostics[0].legacy_text().contains("octal escape"));
     }
 
     #[test]
@@ -4288,7 +4405,7 @@ mod tests {
         let (_, diagnostics) = scan(r#"s"\d+""#);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].message(), "invalid escape character");
+        assert_eq!(diagnostics[0].legacy_text(), "invalid escape character");
     }
 
     #[test]
@@ -4499,7 +4616,11 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message().contains("interpolation splice"));
+        assert!(
+            diagnostics[0]
+                .legacy_text()
+                .contains("interpolation splice")
+        );
     }
 
     #[test]
@@ -4515,7 +4636,11 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message().contains("interpolation splice"));
+        assert!(
+            diagnostics[0]
+                .legacy_text()
+                .contains("interpolation splice")
+        );
     }
 
     #[test]
@@ -4531,7 +4656,7 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message().contains("unclosed"));
+        assert!(diagnostics[0].legacy_text().contains("unclosed"));
     }
 
     #[test]
@@ -4687,7 +4812,10 @@ mod tests {
             ]
         );
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message().contains("backquoted identifier"));
+        assert_eq!(
+            diagnostics[0].issue(),
+            &LexerIssue::UnterminatedBackquotedIdentifier
+        );
     }
 
     #[test]

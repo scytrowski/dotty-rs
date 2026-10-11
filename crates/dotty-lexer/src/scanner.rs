@@ -1,9 +1,11 @@
-use dotty_core::diagnostics::Diagnostic;
+use dotty_core::diagnostics::DiagnosticSeverity;
 use dotty_core::source::{TextRange, TextRangeError, is_line_break_char};
 use dotty_core::token::{HardKeyword, Punctuation, ScannerEvent, Token, TokenKind, TokenSource};
 
 use crate::xml::XmlState;
-use crate::{RawItem, RawLexer, RawLexerError, RawToken, RawTokenKind, Trivia};
+use crate::{
+    LexerDiagnostic, LexerIssue, RawItem, RawLexer, RawLexerError, RawToken, RawTokenKind, Trivia,
+};
 
 /// The first parser-facing scanner stage.
 ///
@@ -16,7 +18,7 @@ pub struct ContextualScanner {
     source: String,
     tokens: Vec<Token>,
     position: usize,
-    diagnostics: Vec<Diagnostic>,
+    diagnostics: Vec<LexerDiagnostic>,
     feedback_regions: Vec<FeedbackRegion>,
     /// Synthetic indent tokens whose regions ended at a delimiter. They stay
     /// in the consumed stream but must not be reused by a later outdent scan.
@@ -75,7 +77,7 @@ impl ContextualScanner {
     }
 
     /// Returns the diagnostics collected by the raw and contextual stages.
-    pub fn diagnostics(&self) -> &[Diagnostic] {
+    pub fn diagnostics(&self) -> &[LexerDiagnostic] {
         &self.diagnostics
     }
 
@@ -1115,7 +1117,7 @@ impl TokenSource for ContextualScanner {
 fn build_tokens(
     source: &str,
     items: &[RawItem],
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<LexerDiagnostic>,
 ) -> Result<Vec<Token>, RawLexerError> {
     let mut tokens = Vec::new();
     let mut trivia = Vec::new();
@@ -1182,9 +1184,12 @@ fn build_tokens(
                     if brace_depth == 0 {
                         if has_incomparable_indentation(&indentation_stack, &indentation) {
                             let line_start = line_start_offset(source, raw.span.start());
-                            diagnostics.push(Diagnostic::error(
+                            diagnostics.push(LexerDiagnostic::with_issue(
+                                DiagnosticSeverity::Error,
                                 TextRange::new(line_start, raw.span.start())?,
-                                "incompatible indentation prefixes",
+                                LexerIssue::Legacy {
+                                    message: "incompatible indentation prefixes".to_owned(),
+                                },
                             ));
                         }
                         closed_same_indent_case = adjust_indentation(
@@ -2192,6 +2197,23 @@ fn to_token_kind(kind: RawTokenKind, previous: Option<TokenKind>) -> TokenKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    trait LegacyDiagnosticMessage {
+        fn legacy_message(&self) -> Option<&str>;
+
+        fn legacy_text(&self) -> &str {
+            self.legacy_message().expect("expected legacy diagnostic")
+        }
+    }
+
+    impl LegacyDiagnosticMessage for LexerDiagnostic {
+        fn legacy_message(&self) -> Option<&str> {
+            match self.issue() {
+                LexerIssue::Legacy { message } => Some(message.as_str()),
+                _ => None,
+            }
+        }
+    }
 
     fn kinds(source: &str) -> Vec<TokenKind> {
         ContextualScanner::new(source)
@@ -6249,12 +6271,46 @@ mod tests {
     }
 
     #[test]
+    fn forwards_mixed_typed_and_legacy_raw_diagnostics_in_source_order() {
+        let scanner = ContextualScanner::new("\0\"\\q\"").expect("source scans");
+
+        assert_eq!(scanner.diagnostics().len(), 2);
+        assert_eq!(
+            scanner.diagnostics()[0].issue(),
+            &LexerIssue::UnsupportedSourceCharacter { character: '\0' }
+        );
+        assert_eq!(
+            scanner.diagnostics()[0].span(),
+            TextRange::new(0, 1).unwrap()
+        );
+        assert_eq!(
+            scanner.diagnostics()[0].severity(),
+            DiagnosticSeverity::Error
+        );
+        assert_eq!(
+            scanner.diagnostics()[1].legacy_message(),
+            Some("invalid escape character")
+        );
+        assert_eq!(
+            scanner.diagnostics()[1].span(),
+            TextRange::new(1, 4).unwrap()
+        );
+        assert_eq!(
+            scanner.diagnostics()[1].severity(),
+            DiagnosticSeverity::Error
+        );
+    }
+
+    #[test]
     fn forwards_unterminated_xml_element_diagnostic() {
         let source = "<item>text";
         let scanner = ContextualScanner::new(source).expect("source scans");
 
         assert_eq!(scanner.diagnostics().len(), 1);
-        assert_eq!(scanner.diagnostics()[0].message(), "unterminated XML tag");
+        assert_eq!(
+            scanner.diagnostics()[0].legacy_text(),
+            "unterminated XML tag"
+        );
         assert_eq!(
             scanner.diagnostics()[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -6267,7 +6323,7 @@ mod tests {
 
         assert_eq!(scanner.diagnostics().len(), 1);
         assert_eq!(
-            scanner.diagnostics()[0].message(),
+            scanner.diagnostics()[0].legacy_text(),
             "XML attribute value expected after `=`"
         );
     }
@@ -6279,7 +6335,7 @@ mod tests {
 
         assert_eq!(scanner.diagnostics().len(), 1);
         assert_eq!(
-            scanner.diagnostics()[0].message(),
+            scanner.diagnostics()[0].legacy_text(),
             "XML attribute name expected"
         );
         assert_eq!(
@@ -6302,7 +6358,7 @@ mod tests {
 
         assert_eq!(scanner.diagnostics().len(), 1);
         assert_eq!(
-            scanner.diagnostics()[0].message(),
+            scanner.diagnostics()[0].legacy_text(),
             "XML attribute expression must be closed"
         );
         assert_eq!(
@@ -6319,7 +6375,7 @@ mod tests {
 
         assert_eq!(scanner.diagnostics().len(), 1);
         assert_eq!(
-            scanner.diagnostics()[0].message(),
+            scanner.diagnostics()[0].legacy_text(),
             "unterminated XML CDATA section"
         );
         assert!(
@@ -6342,7 +6398,7 @@ mod tests {
 
         assert_eq!(scanner.diagnostics().len(), 1);
         assert_eq!(
-            scanner.diagnostics()[0].message(),
+            scanner.diagnostics()[0].legacy_text(),
             "XML closing tag cannot contain attributes"
         );
         assert_eq!(
@@ -6358,7 +6414,7 @@ mod tests {
 
         assert_eq!(scanner.diagnostics().len(), 1);
         assert_eq!(
-            scanner.diagnostics()[0].message(),
+            scanner.diagnostics()[0].legacy_text(),
             "incompatible indentation prefixes"
         );
     }
