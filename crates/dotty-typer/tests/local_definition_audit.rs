@@ -201,6 +201,18 @@ fn member_request_shape_summaries(
     by_shape
 }
 
+fn member_request_repeat_factors(summary: &RequestShapeSummary) -> (String, String) {
+    let known_repeat = (!summary.distinct_keys.is_empty())
+        .then(|| summary.known_requests as f64 / summary.distinct_keys.len() as f64)
+        .map_or_else(|| "unavailable".to_owned(), |factor| format!("{factor:.3}"));
+    let repeat = if summary.unknown_identity_requests > 0 {
+        "unavailable (unknown identities included)".to_owned()
+    } else {
+        known_repeat.clone()
+    };
+    (repeat, known_repeat)
+}
+
 impl ClassPathEntry for SharedClassPath {
     fn find_class(
         &self,
@@ -841,9 +853,11 @@ fn normalized_error(error: &ResolutionError) -> (String, String, String) {
 }
 
 fn deepest_dependency_cause(reason: &str) -> &str {
-    reason
-        .rsplit_once(" failed: ")
-        .map_or(reason, |(_, cause)| cause)
+    let mut cause = reason;
+    while let Some((_, nested)) = cause.rsplit_once(" failed: ") {
+        cause = nested;
+    }
+    cause
 }
 
 fn error_binary_names(reason: &str) -> Vec<String> {
@@ -7167,14 +7181,7 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     println!("  member_request_key_summary:");
     for (shape, summary) in member_request_shape_summaries(metrics) {
         let distinct = summary.distinct_keys.len();
-        let known_repeat = (distinct > 0)
-            .then(|| summary.known_requests as f64 / distinct as f64)
-            .map_or_else(|| "unavailable".to_owned(), |factor| format!("{factor:.3}"));
-        let repeat = if summary.unknown_identity_requests > 0 {
-            "unavailable (unknown identities included)".to_owned()
-        } else {
-            known_repeat.clone()
-        };
+        let (repeat, known_repeat) = member_request_repeat_factors(&summary);
         println!(
             "    {shape}: requests={}, known_requests={}, distinct_keys={distinct}, unknown_identity_requests={}, owners={}, names={}, files={}, repeated_hit_factor={repeat}, known_repeated_hit_factor={known_repeat}, outcomes={:?}",
             summary.requests,
@@ -11291,6 +11298,17 @@ mod resolver_profile_tests {
     }
 
     #[test]
+    fn deeply_nested_dependency_error_is_classified_by_its_deepest_cause() {
+        let error = ResolutionError::Malformed {
+            reason: "class sample/A failed to load because sample/B failed: class sample/C failed to load because circular inheritance involving sample/C".to_owned(),
+        };
+        let (category, requested, root) = normalized_error(&error);
+        assert_eq!(category, "circular inheritance");
+        assert_eq!(requested, "sample/A");
+        assert_eq!(root, "sample/C");
+    }
+
+    #[test]
     fn unresolved_type_variable_is_a_stable_root_cause() {
         let error = ResolutionError::Malformed { reason: "signature in class file for java/lang/invoke/ClassSpecializer$SpeciesData references unresolved type variable K".to_owned() };
         let (category, _, root) = normalized_error(&error);
@@ -11376,6 +11394,12 @@ mod resolver_profile_tests {
         assert_eq!(target.requests, 2);
         assert_eq!(target.families["ThisType"].requests, 1);
         assert_eq!(target.families["TypeRef"].requests, 1);
+        let forward_summary = member_request_shape_summaries(&forward);
+        let reverse_summary = member_request_shape_summaries(&reverse);
+        assert_eq!(forward_summary["ThisType"].requests, 1);
+        assert_eq!(forward_summary["TypeRef"].requests, 1);
+        assert_eq!(forward_summary["ThisType"], reverse_summary["ThisType"]);
+        assert_eq!(forward_summary["TypeRef"], reverse_summary["TypeRef"]);
     }
 
     #[test]
@@ -11402,6 +11426,13 @@ mod resolver_profile_tests {
         assert_eq!(summary.unknown_identity_requests, 2);
         assert!(summary.distinct_keys.is_empty());
         assert!(summary.owners.is_empty());
+        assert_eq!(
+            member_request_repeat_factors(&summary),
+            (
+                "unavailable (unknown identities included)".to_owned(),
+                "unavailable".to_owned()
+            )
+        );
         assert_eq!(
             metrics
                 .member_request_targets
