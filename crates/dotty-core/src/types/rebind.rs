@@ -82,6 +82,20 @@ pub enum TypeRebindError {
         index: u32,
         arity: usize,
     },
+    /// Explicit type arguments do not match a type lambda's arity.
+    TypeLambdaArityMismatch {
+        source: TypeId,
+        expected: usize,
+        actual: usize,
+    },
+    /// The type lambda has more parameters than a `ParamRef` index can represent.
+    TypeLambdaArityExceedsIndex { source: TypeId, actual: usize },
+    /// A parameter reference to the instantiated type lambda has an invalid index.
+    InvalidTypeLambdaParamRef {
+        binder: TypeId,
+        index: u32,
+        arity: usize,
+    },
     /// A referenced type id is outside the store's type arena.
     InvalidType { id: TypeId },
     /// An annotation id is outside the store's annotation arena.
@@ -137,6 +151,25 @@ impl fmt::Display for TypeRebindError {
             Self::PolyArityExceedsIndex { actual, .. } => write!(
                 formatter,
                 "a polymorphic type with {actual} parameters exceeds the parameter index limit"
+            ),
+            Self::TypeLambdaArityMismatch {
+                expected, actual, ..
+            } => write!(
+                formatter,
+                "{actual} type arguments were given for a type lambda with {expected} parameters"
+            ),
+            Self::TypeLambdaArityExceedsIndex { actual, .. } => write!(
+                formatter,
+                "a type lambda with {actual} parameters exceeds the parameter index limit"
+            ),
+            Self::InvalidTypeLambdaParamRef {
+                binder,
+                index,
+                arity,
+            } => write!(
+                formatter,
+                "type lambda binder {} has {arity} parameters, but parameter reference {index} was used",
+                binder.index()
             ),
             Self::InvalidPolyParamRef {
                 binder,
@@ -235,6 +268,16 @@ pub struct InstantiatedPoly {
     pub bounds: Vec<TypeId>,
 }
 
+/// The result and parameter bounds produced by explicit instantiation of a
+/// [`Type::TypeLambda`] binder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstantiatedTypeLambda {
+    /// The type lambda result with the consumed type parameters substituted.
+    pub result: TypeId,
+    /// Instantiated bounds in the same order as the original parameters.
+    pub bounds: Vec<TypeId>,
+}
+
 /// Instantiates a polymorphic semantic type with explicit positional type
 /// arguments. Substitution uses the binder `TypeId` and parameter index, not
 /// the source parameter names. Nested binders are copied with their own
@@ -294,6 +337,73 @@ pub fn instantiate_poly(
         .collect::<Result<Vec<_>, _>>();
     match (result, bounds) {
         (Ok(result), Ok(bounds)) => Ok(InstantiatedPoly { result, bounds }),
+        (Err(error), _) | (_, Err(error)) => {
+            rebinder.store.rollback_to(checkpoint);
+            Err(error)
+        }
+    }
+}
+
+/// Instantiates a type lambda with exact positional type arguments.
+///
+/// Substitution uses the binder `TypeId` and parameter index, never parameter
+/// names. Nested binders remain hygienic and the original graph is unchanged.
+/// On malformed input, all allocations made by the operation are rolled back.
+pub fn instantiate_type_lambda(
+    store: &mut SemanticStore,
+    source: TypeId,
+    arguments: &[TypeId],
+) -> Result<InstantiatedTypeLambda, TypeRebindError> {
+    if !store.types.contains(source) {
+        return Err(TypeRebindError::InvalidType { id: source });
+    }
+    if !store.types.is_filled(source) {
+        return Err(TypeRebindError::UnfilledType { id: source });
+    }
+    let Type::TypeLambda(lambda) = store.types.get(source).clone() else {
+        return Err(TypeRebindError::NotATypeLambda { source });
+    };
+    if arguments.len() != lambda.params.len() {
+        return Err(TypeRebindError::TypeLambdaArityMismatch {
+            source,
+            expected: lambda.params.len(),
+            actual: arguments.len(),
+        });
+    }
+    if lambda.params.len() > u32::MAX as usize {
+        return Err(TypeRebindError::TypeLambdaArityExceedsIndex {
+            source,
+            actual: lambda.params.len(),
+        });
+    }
+    for argument in arguments {
+        if !store.types.contains(*argument) {
+            return Err(TypeRebindError::InvalidType { id: *argument });
+        }
+        if !store.types.is_filled(*argument) {
+            return Err(TypeRebindError::UnfilledType { id: *argument });
+        }
+    }
+
+    let checkpoint = store.checkpoint();
+    let mut rebinder = Rebinder::new(store);
+    rebinder.lambda_source = Some(source);
+    for (index, ty) in arguments.iter().copied().enumerate() {
+        let index =
+            u32::try_from(index).map_err(|_| TypeRebindError::TypeLambdaArityExceedsIndex {
+                source,
+                actual: arguments.len(),
+            })?;
+        rebinder.lambda_arguments.insert(index, ty);
+    }
+    let result = rebinder.ty(lambda.result);
+    let bounds = lambda
+        .params
+        .iter()
+        .map(|parameter| rebinder.ty(parameter.bounds))
+        .collect::<Result<Vec<_>, _>>();
+    match (result, bounds) {
+        (Ok(result), Ok(bounds)) => Ok(InstantiatedTypeLambda { result, bounds }),
         (Err(error), _) | (_, Err(error)) => {
             rebinder.store.rollback_to(checkpoint);
             Err(error)
@@ -867,6 +977,10 @@ struct Rebinder<'a> {
     poly_arguments: HashMap<u32, TypeId>,
     /// The exact outer binder whose parameter references are consumed.
     poly_source: Option<TypeId>,
+    /// Explicit argument types indexed by a TypeLambda parameter position.
+    lambda_arguments: HashMap<u32, TypeId>,
+    /// The exact outer TypeLambda binder whose parameter references are consumed.
+    lambda_source: Option<TypeId>,
     /// `(target class, new recursive binder)` for [`close_over_this`]: every
     /// `ThisType { class: target }` becomes the one canonical `RecThis` of the
     /// new binder. `None` outside a close-over call.
@@ -890,6 +1004,8 @@ impl<'a> Rebinder<'a> {
             replacements: HashMap::new(),
             poly_arguments: HashMap::new(),
             poly_source: None,
+            lambda_arguments: HashMap::new(),
+            lambda_source: None,
             close_over: None,
             close_over_rec_this: None,
             in_progress: HashSet::new(),
@@ -1217,6 +1333,14 @@ impl<'a> Rebinder<'a> {
                             binder,
                             index,
                             arity: self.poly_arguments.len(),
+                        },
+                    )?
+                } else if self.lambda_source == Some(binder) {
+                    self.lambda_arguments.get(&index).copied().ok_or(
+                        TypeRebindError::InvalidTypeLambdaParamRef {
+                            binder,
+                            index,
+                            arity: self.lambda_arguments.len(),
                         },
                     )?
                 } else {
@@ -2080,6 +2204,95 @@ mod tests {
                 })
             );
         }
+        assert_eq!(f.store.checkpoint(), before);
+    }
+
+    #[test]
+    fn explicit_type_lambda_instantiation_substitutes_result_and_parameter_bounds() {
+        let mut f = Fixture::new();
+        let lambda = f.lambda(&["A"], |f, me| {
+            let parameter = f.param_ref(me, 0);
+            f.applied(&[parameter, parameter])
+        });
+        let parameter = f.get_lambda(lambda).params[0];
+        let low = f.param_ref(lambda, 0);
+        let high = f.param_ref(lambda, 0);
+        *f.store.types.get_mut(parameter.bounds) = Type::Bounds { low, high };
+
+        let instantiated = instantiate_type_lambda(&mut f.store, lambda, &[f.leaf]).unwrap();
+
+        let Type::Applied { args, .. } = f.store.types.get(instantiated.result) else {
+            panic!("instantiated result should remain applied")
+        };
+        assert_eq!(args, &[f.leaf, f.leaf]);
+        assert!(matches!(
+            f.store.types.get(instantiated.bounds[0]),
+            Type::Bounds { low: found_low, high: found_high }
+                if *found_low == f.leaf && *found_high == f.leaf
+        ));
+    }
+
+    #[test]
+    fn explicit_type_lambda_instantiation_keeps_nested_binders_hygienic() {
+        let mut f = Fixture::new();
+        let outer = f.store.types.reserve();
+        let outer_id = outer.id();
+        let outer_ref = f.param_ref(outer_id, 0);
+        let inner = f.store.types.reserve();
+        let inner_id = inner.id();
+        let inner_ref = f.param_ref(inner_id, 0);
+        let dependent_bounds = f.store.types.alloc(Type::Bounds {
+            low: outer_ref,
+            high: outer_ref,
+        });
+        let inner_params = vec![f.param("B", dependent_bounds)];
+        let inner_lambda = f.store.types.fill(
+            inner,
+            Type::TypeLambda(TypeLambda {
+                params: inner_params,
+                result: inner_ref,
+            }),
+        );
+        let outer_bounds = f.plain_bounds();
+        let outer_params = vec![f.param("A", outer_bounds)];
+        let outer_lambda = f.store.types.fill(
+            outer,
+            Type::TypeLambda(TypeLambda {
+                params: outer_params,
+                result: inner_lambda,
+            }),
+        );
+
+        let instantiated = instantiate_type_lambda(&mut f.store, outer_lambda, &[f.leaf]).unwrap();
+
+        let Type::TypeLambda(inner) = f.store.types.get(instantiated.result) else {
+            panic!("nested TypeLambda result should remain a type lambda")
+        };
+        assert_ne!(instantiated.result, inner_lambda);
+        assert!(matches!(
+            f.store.types.get(inner.params[0].bounds),
+            Type::Bounds { low, high } if *low == f.leaf && *high == f.leaf
+        ));
+        assert!(matches!(
+            f.store.types.get(inner.result),
+            Type::ParamRef { binder, index: 0 } if *binder == instantiated.result
+        ));
+    }
+
+    #[test]
+    fn explicit_type_lambda_instantiation_rejects_wrong_arity_without_allocating() {
+        let mut f = Fixture::new();
+        let lambda = f.lambda(&["A", "B"], |f, binder| f.param_ref(binder, 0));
+        let before = f.store.checkpoint();
+
+        assert_eq!(
+            instantiate_type_lambda(&mut f.store, lambda, &[f.leaf]),
+            Err(TypeRebindError::TypeLambdaArityMismatch {
+                source: lambda,
+                expected: 2,
+                actual: 1,
+            })
+        );
         assert_eq!(f.store.checkpoint(), before);
     }
 
