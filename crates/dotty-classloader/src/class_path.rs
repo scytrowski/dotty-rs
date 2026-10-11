@@ -1,4 +1,5 @@
 use crate::binary_name::BinaryName;
+use crate::error::ClassLoadCategory;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
@@ -98,6 +99,24 @@ impl ClassPathError {
     pub fn invalid_binary_name(name: BinaryName) -> Self {
         Self {
             source: ClassPathErrorSource::InvalidBinaryName(name),
+        }
+    }
+
+    /// Stable identifier for the retained classpath failure kind.
+    pub fn code(&self) -> &'static str {
+        match &self.source {
+            ClassPathErrorSource::Io(_) => "classpath.io",
+            ClassPathErrorSource::Zip(error) => error.code(),
+            ClassPathErrorSource::InvalidBinaryName(_) => "classpath.invalid_binary_name",
+        }
+    }
+
+    /// Category derived from the retained classpath cause.
+    pub fn category(&self) -> ClassLoadCategory {
+        match &self.source {
+            ClassPathErrorSource::Io(_) => ClassLoadCategory::IoOrEnvironment,
+            ClassPathErrorSource::Zip(error) => error.category(),
+            ClassPathErrorSource::InvalidBinaryName(_) => ClassLoadCategory::MalformedArtifact,
         }
     }
 }

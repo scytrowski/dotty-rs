@@ -1,4 +1,5 @@
 use crate::binary_name::BinaryName;
+use crate::error::ClassLoadCategory;
 use dotty_classfile::access_flags::{
     ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
     ACC_SYNTHETIC, ClassAccessFlags, FieldAccessFlags, MethodAccessFlags,
@@ -184,6 +185,57 @@ impl std::error::Error for TastyDecodeError {
             Self::Parse(source) => Some(source),
             Self::Ast(source) => Some(source),
             Self::MissingTypeDef | Self::NoTemplateBody | Self::UnresolvedSupertype => None,
+        }
+    }
+}
+
+impl TastyDecodeError {
+    /// Stable identifier for the retained TASTy projection failure kind.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Parse(_) => "tasty.parse_error",
+            Self::Ast(_) => "tasty.ast_error",
+            Self::MissingTypeDef => "tasty.missing_type_def",
+            Self::NoTemplateBody => "tasty.no_template_body",
+            Self::UnresolvedSupertype => "tasty.unresolved_supertype",
+        }
+    }
+
+    /// Stable identifier for the deepest typed parse cause where the
+    /// parser exposes one, or this projection error's own code otherwise.
+    pub fn root_cause_code(&self) -> &'static str {
+        use dotty_tasty::{HeaderError, file::TastyFileError};
+        match self {
+            Self::Parse(TastyFileError::Header(HeaderError::UnsupportedVersion { .. })) => {
+                "tasty.unsupported_version"
+            }
+            Self::Parse(TastyFileError::Header(HeaderError::IncompatibleVersion { .. })) => {
+                "tasty.incompatible_version"
+            }
+            Self::Parse(TastyFileError::Header(HeaderError::InvalidMagic { .. })) => {
+                "tasty.invalid_magic"
+            }
+            Self::Parse(TastyFileError::Header(_)) => "tasty.invalid_header",
+            Self::Parse(_) => "tasty.parse_error",
+            Self::Ast(_) => "tasty.ast_error",
+            other => other.code(),
+        }
+    }
+
+    /// Category based on available typed information. The parser and AST
+    /// wrappers currently retain causes whose nested format/version detail
+    /// is not exposed here, so those families remain conditional.
+    pub fn category(&self) -> ClassLoadCategory {
+        use dotty_tasty::{HeaderError, file::TastyFileError};
+        match self {
+            Self::Parse(TastyFileError::Header(
+                HeaderError::UnsupportedVersion { .. } | HeaderError::IncompatibleVersion { .. },
+            )) => ClassLoadCategory::UnsupportedFeatureOrVersion,
+            Self::Parse(_) => ClassLoadCategory::MalformedArtifact,
+            Self::Ast(_)
+            | Self::MissingTypeDef
+            | Self::NoTemplateBody
+            | Self::UnresolvedSupertype => ClassLoadCategory::Conditional,
         }
     }
 }
