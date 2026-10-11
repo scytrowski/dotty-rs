@@ -47,7 +47,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let [parent_at, info_at] = children[..] else {
             return Err(UnpickleError::MalformedType {
                 address: at,
-                reason: "a refined type has a parent and a refinement",
+                reason: crate::error::TypeReason::RefinedTypeShape,
             });
         };
 

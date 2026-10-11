@@ -422,7 +422,7 @@ impl TastyUnpickler<'_, '_, '_> {
         if depth > MAX_TREE_DEPTH {
             return Err(UnpickleError::MalformedType {
                 address: at,
-                reason: "a parent tree nests too deeply",
+                reason: crate::error::TypeReason::ParentTreeDepthLimit,
             });
         }
         // A link that cannot be followed is reported when the parent is
@@ -582,7 +582,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let Some((body, params)) = children.split_last() else {
             return Err(UnpickleError::MalformedType {
                 address: tree,
-                reason: "a lambda type tree has type parameters and a body",
+                reason: crate::error::TypeReason::LambdaTreeShape,
             });
         };
         // Every parameter is entered before any bounds or the body are
@@ -591,7 +591,7 @@ impl TastyUnpickler<'_, '_, '_> {
             if ast.tag_at(*param) != Some(TYPEPARAM_TAG) {
                 return Err(UnpickleError::MalformedType {
                     address: tree,
-                    reason: "a lambda type tree parameter is not a type parameter",
+                    reason: crate::error::TypeReason::LambdaParameterKind,
                 });
             }
             let parameter = ast.node(*param)?.decode_parameter()?;
@@ -652,7 +652,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let Some((parent, stats)) = children.split_first() else {
             return Err(UnpickleError::MalformedType {
                 address: tree,
-                reason: "a refined type tree has a parent",
+                reason: crate::error::TypeReason::RefinedTreeUnexpectedParent,
             });
         };
 

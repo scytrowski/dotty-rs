@@ -110,7 +110,7 @@ impl TastyUnpickler<'_, '_, '_> {
             _ => {
                 return Err(UnpickleError::MalformedDefinition {
                     address: at,
-                    reason: "a class definition's first child is its template",
+                    reason: crate::error::DefinitionReason::ClassTemplatePosition,
                 });
             }
         };
@@ -181,7 +181,7 @@ impl TastyUnpickler<'_, '_, '_> {
         if wrapped > MAX_SHARED_DEPTH {
             return Err(UnpickleError::MalformedParentTree {
                 address: at,
-                reason: "a parent constructor call nests too deeply",
+                reason: crate::error::ParentTreeReason::NestingLimit,
             });
         }
         // Dotty reads `SHAREDterm` as the tree at its target.
@@ -221,7 +221,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let Some(first) = children.first().copied() else {
             return Err(UnpickleError::MalformedParentTree {
                 address: at,
-                reason: "a parent constructor call has a function",
+                reason: crate::error::ParentTreeReason::ConstructorHasNoFunction,
             });
         };
         let ty = match tag {
@@ -248,19 +248,19 @@ impl TastyUnpickler<'_, '_, '_> {
                 if name != CONSTRUCTOR_NAME {
                     return Err(UnpickleError::MalformedParentTree {
                         address: at,
-                        reason: "a parent constructor selection selects <init>",
+                        reason: crate::error::ParentTreeReason::SelectsConstructor,
                     });
                 }
                 if ast.tag_at(first) != Some(NEW_TAG) {
                     return Err(UnpickleError::MalformedParentTree {
                         address: at,
-                        reason: "a parent constructor selection is on NEW",
+                        reason: crate::error::ParentTreeReason::SelectsNew,
                     });
                 }
                 let [new_tpt] = ast.children(first) else {
                     return Err(UnpickleError::MalformedParentTree {
                         address: first,
-                        reason: "NEW has one type tree",
+                        reason: crate::error::ParentTreeReason::NewTypeTreeArity,
                     });
                 };
                 self.type_of_tpt(ast, address(new_tpt.offset), first, depth)?
@@ -284,7 +284,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let [tree] = ast.children(at) else {
             return Err(UnpickleError::InvalidSelfTypeTree {
                 address: at,
-                reason: "a self definition has one type tree",
+                reason: crate::error::SelfTypeTreeReason::TypeTreeArity,
             });
         };
         self.type_of_tpt(ast, address(tree.offset), at, depth)

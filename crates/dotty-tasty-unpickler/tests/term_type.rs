@@ -802,7 +802,7 @@ fn a_qualified_this_that_names_no_class_is_refused_and_leaves_nothing_behind() {
         unpickler.unpickle_term_type(unit.at("qualthis bare")),
         Err(UnpickleError::MalformedType {
             address: unit.at("qualthis bare"),
-            reason: "the qualifier of a qualified this is not a type identifier",
+            reason: dotty_tasty_unpickler::tasty_unpickler::TypeReason::QualifiedThisQualifierKind,
         })
     );
     assert_eq!(unpickler.index().term_tree_count(), 0);

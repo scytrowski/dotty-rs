@@ -7,6 +7,106 @@ use dotty_core::symbols::SymbolKind;
 use dotty_core::types::TypeRebindError;
 use dotty_tasty::tasty::{AstError, TastyFileError};
 
+/// Structural reason a template parent could not be projected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParentTreeReason {
+    /// Parent constructor wrappers exceeded the supported traversal bound.
+    NestingLimit,
+    /// The constructor call has no function child.
+    ConstructorHasNoFunction,
+    /// The constructor selection names `<init>` instead of its class.
+    SelectsConstructor,
+    /// The constructor selection is applied to `NEW`.
+    SelectsNew,
+    /// `NEW` does not have exactly one type-tree child.
+    NewTypeTreeArity,
+}
+
+/// Structural reason a `SELFDEF` could not be projected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfTypeTreeReason {
+    /// The self definition does not have exactly one type-tree child.
+    TypeTreeArity,
+}
+
+/// Structural reason a definition could not be completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefinitionReason {
+    /// A class definition's first child is not its template.
+    ClassTemplatePosition,
+    /// The method result type is absent after the parameter nodes.
+    ResultTypePosition,
+    /// The encoded header contains more parameters than the AST nodes.
+    HeaderParametersExceedNodes,
+    /// An encoded header parameter's kind differs from its AST node.
+    HeaderParameterTagMismatch,
+    /// The AST contains more parameter nodes than the encoded header.
+    ParameterNodesExceedHeader,
+    /// An opaque alias does not have exactly one right-hand-side tree.
+    OpaqueAliasRhsArity,
+    /// Opaque bounds children disagree with their encoded shape.
+    OpaqueBoundsShape,
+    /// Opaque alias graph traversal exceeded its supported depth.
+    OpaqueAliasDepthLimit,
+    /// A type alias does not have exactly one right-hand-side tree.
+    TypeAliasRhsArity,
+    /// A generic opaque alias lambda does not have parameters and a body.
+    OpaqueLambdaShape,
+    /// Nested opaque alias parameter lambdas are not projected yet.
+    NestedOpaqueParameterLambdasUnsupported,
+}
+
+/// Structural reason a refined type tree could not be projected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefinedTypeTreeReason {
+    /// The refined tree is missing its parent type tree.
+    MissingParent,
+    /// A refinement stat is outside the supported member-definition subset.
+    UnsupportedMemberStat,
+}
+
+/// Structural reason a type or type tree could not be projected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeReason {
+    MatchTypeShape,
+    ChildShapeMismatch,
+    OwnerSpaceNameDesignator,
+    RefinedTypeShape,
+    InvalidReferenceTargetShape,
+    BinderChildMismatch,
+    EmptyBinder,
+    InvalidVarianceMarker,
+    AnnotationTailShape,
+    AnnotationAddressIsNotNode,
+    AnnotatedTypeShape,
+    IdentifierTypeTreeArity,
+    AnnotationApplyFunctionMissing,
+    AnnotationApplyArityMismatch,
+    AnnotationTypeApplyFunctionMissing,
+    AnnotationTypeApplyArityMismatch,
+    AnnotationSelectionShape,
+    AnnotationNewClassArity,
+    NamedArgumentArity,
+    AnnotationLiteralNotConstant,
+    RecursiveTypeArity,
+    ParentTreeDepthLimit,
+    TypeTreeDepthLimit,
+    LambdaTreeShape,
+    LambdaParameterKind,
+    RefinedTreeUnexpectedParent,
+    IdentifierTermTypeArity,
+    TermSelectionQualifierArity,
+    QualifiedThisQualifierArity,
+    QualifiedThisQualifierKind,
+    ExplicitTypeTreeArity,
+    ByNameTypeTreeArity,
+    AppliedTypeConstructorMissing,
+    BoundsTypeTreeArity,
+    TypeSelectionQualifierArity,
+    SingletonTreeReferenceArity,
+    AnnotatedTypeTreeShape,
+}
+
 /// Why semantic unpickling of a TASTy file failed.
 ///
 /// Malformed or unsupported TASTy input is always reported through this type;
@@ -75,14 +175,23 @@ pub enum UnpickleError {
     UnsupportedParentTree { address: u32, tag: u8 },
     /// The template parent at `address` has the right wrapper but not the
     /// shape it requires (Milestone 5d1).
-    MalformedParentTree { address: u32, reason: &'static str },
+    MalformedParentTree {
+        address: u32,
+        reason: ParentTreeReason,
+    },
     /// The self definition at `address` does not have the shape
     /// `SELFDEF name type_tree` (Milestone 5d1).
-    InvalidSelfTypeTree { address: u32, reason: &'static str },
+    InvalidSelfTypeTree {
+        address: u32,
+        reason: SelfTypeTreeReason,
+    },
     /// The definition at `address` has a header that does not agree with its
     /// nodes (a parameter clause sequence that cannot be aligned with the
     /// parameter nodes, or a missing result type).
-    MalformedDefinition { address: u32, reason: &'static str },
+    MalformedDefinition {
+        address: u32,
+        reason: DefinitionReason,
+    },
     /// The method whose parameter is at `address` has a parameter modifier
     /// (`INLINE`, `TRACKED`, `INTO`: `tag`) whose upstream adaptation
     /// (`MethodType.fromSymbols`) `dotty-core` cannot represent. The method is
@@ -135,7 +244,10 @@ pub enum UnpickleError {
     /// agree with (its indexed children disagree with its wire shape), or a
     /// member's projected `Refined.info` reason `reason` describes (Milestone
     /// 5d2b).
-    MalformedRefinedTypeTree { address: u32, reason: &'static str },
+    MalformedRefinedTypeTree {
+        address: u32,
+        reason: RefinedTypeTreeReason,
+    },
     /// Two immediate stats of the `REFINEDtpt` at `address` declare the same
     /// `name` in the same namespace: Dotty rejects an overloaded refinement
     /// member, so the second declaration is refused rather than shadowing or
@@ -237,7 +349,7 @@ pub enum UnpickleError {
     UnsupportedSignedReference { address: u32, name: String },
     /// The compound type node at `address` has a shape the semantic model
     /// cannot express: its indexed children disagree with its wire shape.
-    MalformedType { address: u32, reason: &'static str },
+    MalformedType { address: u32, reason: TypeReason },
     /// The `ANNOTATEDtype` at `address` carries a full annotation tree, whose
     /// root node at `annotation_address` has tag `tag`. The annotated type is
     /// understood; the tree is not, and is never dropped to fit the compact
@@ -399,15 +511,15 @@ impl fmt::Display for UnpickleError {
             ),
             Self::MalformedParentTree { address, reason } => write!(
                 formatter,
-                "the template parent at address {address} is malformed: {reason}"
+                "the template parent at address {address} is malformed: {reason:?}"
             ),
             Self::InvalidSelfTypeTree { address, reason } => write!(
                 formatter,
-                "the self definition at address {address} is malformed: {reason}"
+                "the self definition at address {address} is malformed: {reason:?}"
             ),
             Self::MalformedDefinition { address, reason } => write!(
                 formatter,
-                "the definition at address {address} is malformed: {reason}"
+                "the definition at address {address} is malformed: {reason:?}"
             ),
             Self::UnsupportedMethodParameterSemantics { address, tag } => write!(
                 formatter,
@@ -451,7 +563,7 @@ impl fmt::Display for UnpickleError {
             ),
             Self::MalformedRefinedTypeTree { address, reason } => write!(
                 formatter,
-                "the refined type tree at address {address} is malformed: {reason}"
+                "the refined type tree at address {address} is malformed: {reason:?}"
             ),
             Self::UnsupportedRefinementOverload { address, name } => write!(
                 formatter,
@@ -584,7 +696,7 @@ impl fmt::Display for UnpickleError {
             ),
             Self::MalformedType { address, reason } => write!(
                 formatter,
-                "the type at address {address} is malformed: {reason}"
+                "the type at address {address} is malformed: {reason:?}"
             ),
             Self::BoundsVarianceTargetPending { address, .. } => write!(
                 formatter,

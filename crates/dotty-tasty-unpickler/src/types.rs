@@ -423,7 +423,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 let [bound_at, scrutinee_at, case_ats @ ..] = &children[..] else {
                     return Err(UnpickleError::MalformedType {
                         address: at,
-                        reason: "a match type has a bound and a scrutinee",
+                        reason: crate::error::TypeReason::MatchTypeShape,
                     });
                 };
                 let bound = self.type_at(ast, *bound_at, at, depth)?;
@@ -583,7 +583,7 @@ impl TastyUnpickler<'_, '_, '_> {
         if children.len() != count {
             return Err(UnpickleError::MalformedType {
                 address: at,
-                reason: "the node's children do not match its shape",
+                reason: crate::error::TypeReason::ChildShapeMismatch,
             });
         }
         children
@@ -668,7 +668,7 @@ impl TastyUnpickler<'_, '_, '_> {
             // name designator.
             Resolved::Structural(_) => Err(UnpickleError::MalformedType {
                 address: at,
-                reason: "an owner-space reference resolved to a name designator",
+                reason: crate::error::TypeReason::OwnerSpaceNameDesignator,
             }),
         }
     }

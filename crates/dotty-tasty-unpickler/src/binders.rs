@@ -276,7 +276,7 @@ impl TastyUnpickler<'_, '_, '_> {
         if children.len() != names.len() + 1 {
             return Err(UnpickleError::MalformedType {
                 address: at,
-                reason: "the binder's children disagree with its parameters",
+                reason: crate::error::TypeReason::BinderChildMismatch,
             });
         }
         if names.is_empty() && form.requires_parameters() {
@@ -284,7 +284,7 @@ impl TastyUnpickler<'_, '_, '_> {
             // parameter (unlike a `MethodType`, where `()` is a clause).
             return Err(UnpickleError::MalformedType {
                 address: at,
-                reason: "the binder has no parameters",
+                reason: crate::error::TypeReason::EmptyBinder,
             });
         }
         let mut interned = Vec::with_capacity(names.len());
@@ -460,7 +460,7 @@ pub(crate) fn declared_variances(at: u32, markers: &[u8]) -> Result<Vec<Variance
             // The structural decoder only lets the three markers through.
             _ => Err(UnpickleError::MalformedType {
                 address: at,
-                reason: "a bounds tail holds a marker that is not a variance",
+                reason: crate::error::TypeReason::InvalidVarianceMarker,
             }),
         })
         .collect()

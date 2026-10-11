@@ -49,7 +49,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let [parent_at] = children[..] else {
             return Err(UnpickleError::MalformedType {
                 address: at,
-                reason: "a recursive type has exactly one child",
+                reason: crate::error::TypeReason::RecursiveTypeArity,
             });
         };
 

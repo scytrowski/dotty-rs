@@ -125,7 +125,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let Some(tag) = ast.tag_at(annotation_at) else {
             return Err(UnpickleError::MalformedType {
                 address: at,
-                reason: "the annotation of an annotated type is not a node",
+                reason: crate::error::TypeReason::AnnotationAddressIsNotNode,
             });
         };
         if tag != SHAREDTERM_TAG {
@@ -180,7 +180,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let [underlying_at, annotation_at] = children[..] else {
             return Err(UnpickleError::MalformedType {
                 address: at,
-                reason: "an annotated type has a parent and an annotation",
+                reason: crate::error::TypeReason::AnnotatedTypeShape,
             });
         };
 
@@ -221,7 +221,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let Some(annotation_tag) = ast.tag_at(annotation_at) else {
             return Err(UnpickleError::MalformedType {
                 address: at,
-                reason: "the annotation is not a node",
+                reason: crate::error::TypeReason::AnnotationAddressIsNotNode,
             });
         };
         if is_compact_annot_type_tag(annotation_tag) {
@@ -342,7 +342,7 @@ impl TastyUnpickler<'_, '_, '_> {
             annotation_address: annotation_at,
             tag,
         };
-        let malformed = |reason: &'static str| UnpickleError::MalformedType {
+        let malformed = |reason: crate::error::TypeReason| UnpickleError::MalformedType {
             address: annotation_at,
             reason,
         };
@@ -357,11 +357,11 @@ impl TastyUnpickler<'_, '_, '_> {
                 (RawTree::LengthNode(node), APPLY_TAG) => {
                     let apply = node.decode_apply()?;
                     let [function, arguments @ ..] = &children[..] else {
-                        return Err(malformed("an application has a function"));
+                        return Err(malformed(crate::error::TypeReason::AnnotationApplyFunctionMissing));
                     };
                     if arguments.len() != apply.arguments.len() {
                         return Err(malformed(
-                            "an application's arguments do not match its shape",
+                            crate::error::TypeReason::AnnotationApplyArityMismatch,
                         ));
                     }
                     layers.push(arguments.to_vec());
@@ -370,11 +370,11 @@ impl TastyUnpickler<'_, '_, '_> {
                 (RawTree::LengthNode(node), TYPEAPPLY_TAG) => {
                     let apply = node.decode_type_apply()?;
                     let [function, arguments @ ..] = &children[..] else {
-                        return Err(malformed("a type application has a function"));
+                        return Err(malformed(crate::error::TypeReason::AnnotationTypeApplyFunctionMissing));
                     };
                     if arguments.len() != apply.type_arguments.len() {
                         return Err(malformed(
-                            "a type application's arguments do not match its shape",
+                            crate::error::TypeReason::AnnotationTypeApplyArityMismatch,
                         ));
                     }
                     // Type arguments belong to the constructor call, once.
@@ -391,14 +391,14 @@ impl TastyUnpickler<'_, '_, '_> {
                         return Err(unsupported(tag));
                     }
                     let [qualifier, _owner] = children[..] else {
-                        return Err(malformed("a selection has a qualifier and an owner"));
+                        return Err(malformed(crate::error::TypeReason::AnnotationSelectionShape));
                     };
                     current = qualifier;
                 }
                 (RawTree::Ast { .. }, NEW_TAG) => {
                     tree.decode_new()?;
                     let [class] = children[..] else {
-                        return Err(malformed("a `new` has one class"));
+                        return Err(malformed(crate::error::TypeReason::AnnotationNewClassArity));
                     };
                     // `allTermArguments`: the arguments of `fn` come before the
                     // arguments of the `Apply` around it.
@@ -432,7 +432,7 @@ impl TastyUnpickler<'_, '_, '_> {
             let [type_at] = child_addresses(ast, tree_at)[..] else {
                 return Err(UnpickleError::MalformedType {
                     address: tree_at,
-                    reason: "an identifier type tree has one type",
+                    reason: crate::error::TypeReason::IdentifierTypeTreeArity,
                 });
             };
             type_at
@@ -471,7 +471,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 let [value_at] = child_addresses(ast, argument_at)[..] else {
                     return Err(UnpickleError::MalformedType {
                         address: argument_at,
-                        reason: "a named argument has one value",
+                        reason: crate::error::TypeReason::NamedArgumentArity,
                     });
                 };
                 (Some(name), value_at)
@@ -496,7 +496,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let Type::Constant(constant) = self.store.types.get(id) else {
             return Err(UnpickleError::MalformedType {
                 address: value_at,
-                reason: "an annotation argument literal is not a constant",
+                reason: crate::error::TypeReason::AnnotationLiteralNotConstant,
             });
         };
         Ok(AnnotationArgument {
