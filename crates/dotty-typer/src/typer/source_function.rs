@@ -1845,6 +1845,10 @@ mod tests {
                     if *found == expected_class
             ));
             assert_eq!(args, &arguments);
+            assert_eq!(
+                crate::typer::lookup::class_symbol_for_type(typer.store, applied, false).unwrap(),
+                expected_class
+            );
 
             let pure_tycon = typer
                 .source_function_family_type_constructor(

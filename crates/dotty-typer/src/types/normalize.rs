@@ -219,7 +219,7 @@ impl<'a> TypeNormalizer<'a> {
     /// wrappers share one depth budget, and repeated outer nodes are reported
     /// as malformed cycles.
     pub fn normalize_for_lookup(&mut self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
-        self.normalize_outer(ty, true)
+        self.normalize_outer(ty, false)
     }
 
     /// Dealiases and unwraps flexible types while preserving `RetainsCap`.
