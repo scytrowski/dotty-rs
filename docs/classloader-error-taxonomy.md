@@ -57,11 +57,11 @@ are corrupt:
 | --- | --- | --- |
 | `NotFound(BinaryName)` | `Missing` | `loader::load_uncached` creates it only after `ClassPathEntry::find_class` returns `Ok(None)`. It retains the requested name. An entry's `Ok(None)` is distinct from an I/O error. `resolver::resolve_target` and `resolve_package_inner` translate this cause to `Ok(None)`. |
 | `Io(BinaryName, Rc<ClassPathError>)` | `IoOrEnvironment`, conditionally malformed path/archive | `loader::load_uncached` wraps a failing `find_class`. The name and typed source survive, but the source does not expose the failing classpath entry or attempted format. `ClassPathError::InvalidBinaryName` is not an environmental I/O failure; ZIP parsing can mean a malformed archive or an unsupported ZIP feature. |
-| `InvalidClassFile(BinaryName, ClassFileError)` | `MalformedArtifact` | `loader::load_uncached_class` maps `ClassFile::decode` failures here. The requested name and typed codec error survive. `ClassFileError` distinguishes read, header, constant-pool, and attribute failures, but classfile errors do not expose a further `Error::source` chain. |
+| `InvalidClassFile(BinaryName, ClassFileError)` | `Conditional` | `loader::load_uncached_class` maps `ClassFile::decode` failures here. The requested name and typed codec error survive. Read/header/constant-pool/attribute format violations are `MalformedArtifact`, while `ClassFileError::Attribute(AttributeError::TooDeeplyNestedAnnotation)` is an implementation bound (`DEFAULT_MAX_ANNOTATION_DEPTH = 128`) and is `UnsupportedFeatureOrVersion`. Classfile errors do not expose a further `Error::source` chain. |
 | `UnsupportedClassVersion(BinaryName, ClassFileVersion)` | `UnsupportedFeatureOrVersion` | `loader::load_uncached_class` checks `ClassFileVersion::is_compatible` before allocating a symbol. The exact major/minor version and requested name survive. |
 | `MalformedReference(BinaryName, PoolRefError)` | `MalformedArtifact` | Produced by `loader::resolve_name` and constant-pool reference resolution in class, member, nesting, and annotation lowering. The owning/requested class and typed pool failure survive. |
 | `MalformedDescriptor(BinaryName, ResolveDescriptorError)` | `MalformedArtifact` | Produced while lowering field and method descriptors in `loader::lower_field_type` and `loader::lower_method_descriptor`. The owner and typed descriptor cause survive. |
-| `MalformedSignature(BinaryName, SignatureError)` | `MalformedArtifact` | Produced while parsing/lowering class, field, and method `Signature` attributes. Grammar errors are malformed signature data. A syntactically valid signature whose variable cannot be resolved is reported separately as `UnresolvedTypeVariable`. |
+| `MalformedSignature(BinaryName, SignatureError)` | `Conditional` | Produced while parsing/lowering class, field, and method `Signature` attributes. Grammar errors are `MalformedArtifact`; `SignatureError::TooDeeplyNested` is an implementation bound (`DEFAULT_MAX_SIGNATURE_DEPTH = 128`) and is `UnsupportedFeatureOrVersion`. A syntactically valid signature whose variable cannot be resolved is reported separately as `UnresolvedTypeVariable`. |
 | `NameMismatch { requested, actual }` | `MalformedArtifact` / resource identity mismatch | `loader::load_uncached_class` resolves `this_class` and checks it against the requested binary name. Both names survive. The class bytes may be valid in isolation, but the resource cannot satisfy this lookup. |
 | `InvalidTastyFile(BinaryName, TastyDecodeError)` | `Conditional` | `loader::load_uncached_tasty` maps projection failures here; package-alias resolution can also convert a typed TASTy failure through `TastyAliasResolutionError::into_class_load_error`. `Parse`/`Ast` can be malformed or unsupported; `MissingTypeDef`, `NoTemplateBody`, and `UnresolvedSupertype` do not prove corrupt bytes (see below). |
 | `CircularInheritance(BinaryName)` | `MalformedArtifact` | `loader::load_class_with_inheritance_ancestry` emits it when an in-progress name is already on the superclass/interface ancestry. A class's direct or indirect superclass/interface cycle is invalid; member-type cycles are intentionally handled differently. |
@@ -169,6 +169,13 @@ and use `transact` to roll back failed store/session mutations.
 2. Add exhaustive stable `ClassLoadError::code()` and category/root-cause
    accessors. Codes should name the outer variant and use the `classloader.`
    prefix; nested TASTy/classpath causes may expose typed codes of their own.
+   Categories for `InvalidClassFile` and `MalformedSignature` must follow the
+   retained typed cause: malformed structure/grammar maps to
+   `MalformedArtifact`, while `TooDeeplyNestedAnnotation` and
+   `TooDeeplyNested` map to `UnsupportedFeatureOrVersion`. The latter limits
+   are implementation-defined stack-safety bounds, not JVM format constraints;
+   avoid classifying the entire wrapper variant as malformed just from its
+   name.
    Suggested outer codes:
 
    | Variant | Suggested stable code |
@@ -244,7 +251,12 @@ specific provenance blind spot to cover in #980. Its tests should use small
 fixtures for malformed `.class`, malformed `.tasty`, unsupported class
 version, missing class, nested dependency failure, and a cached repeated
 failure; assert code/category, source identity, origin/format presence or
-absence, and no extra lookup when cached. Include archive/JMOD provenance
-where fixture support allows it, and verify that a failed dependency reports
-the dependency resource. Keep existing classpath-selection, `Display`,
-resolver, cache, and rollback behavior unchanged.
+absence, and no extra lookup when cached. Include fixtures whose signatures
+and annotation element values exceed the classfile decoder's depth limits:
+assert that the retained causes are `SignatureError::TooDeeplyNested` and
+`AttributeError::TooDeeplyNestedAnnotation` and classify them as
+`UnsupportedFeatureOrVersion`, while nearby malformed grammar/structure
+remains `MalformedArtifact`. Include archive/JMOD provenance where fixture
+support allows it, and verify that a failed dependency reports the dependency
+resource. Keep existing classpath-selection, `Display`, resolver, cache, and
+rollback behavior unchanged.
