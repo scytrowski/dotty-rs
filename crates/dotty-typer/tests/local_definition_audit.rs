@@ -73,6 +73,7 @@ struct ResolverMetrics {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RequestTargetMetrics {
     requests: usize,
+    identity_known: bool,
     files: BTreeSet<String>,
     owners: BTreeSet<String>,
     names: BTreeSet<String>,
@@ -87,6 +88,18 @@ struct RequestFamilyMetrics {
     files: BTreeSet<String>,
     owners: BTreeSet<String>,
     names: BTreeSet<String>,
+    outcomes: BTreeMap<String, usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RequestShapeSummary {
+    requests: usize,
+    known_requests: usize,
+    unknown_identity_requests: usize,
+    distinct_keys: BTreeSet<String>,
+    owners: BTreeSet<String>,
+    names: BTreeSet<String>,
+    files: BTreeSet<String>,
     outcomes: BTreeMap<String, usize>,
 }
 
@@ -139,6 +152,7 @@ fn record_member_request_target(
         .entry(observation.target_key)
         .or_default();
     target.requests += 1;
+    target.identity_known = observation.owner.is_some();
     target.files.insert(observation.file.to_owned());
     if let Some(owner) = observation.owner {
         target.owners.insert(owner.to_owned());
@@ -160,6 +174,31 @@ fn record_member_request_target(
         .outcomes
         .entry(observation.outcome.to_owned())
         .or_default() += 1;
+}
+
+fn member_request_shape_summaries(
+    metrics: &ResolverMetrics,
+) -> BTreeMap<String, RequestShapeSummary> {
+    let mut by_shape = BTreeMap::<String, RequestShapeSummary>::new();
+    for (key, target) in &metrics.member_request_targets {
+        for (shape, family) in &target.families {
+            let summary = by_shape.entry(shape.clone()).or_default();
+            summary.requests += family.requests;
+            if target.identity_known {
+                summary.known_requests += family.requests;
+                summary.distinct_keys.insert(key.clone());
+            } else {
+                summary.unknown_identity_requests += family.requests;
+            }
+            summary.owners.extend(family.owners.iter().cloned());
+            summary.names.extend(family.names.iter().cloned());
+            summary.files.extend(family.files.iter().cloned());
+            for (outcome, count) in &family.outcomes {
+                *summary.outcomes.entry(outcome.clone()).or_default() += count;
+            }
+        }
+    }
+    by_shape
 }
 
 impl ClassPathEntry for SharedClassPath {
@@ -355,11 +394,13 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             .or_default()
             .entry(format!("{target_key}::outcome={outcome}"))
             .or_default() += 1;
-        metrics
-            .member_request_outcome_targets
-            .entry(format!("{shape}::outcome={outcome}"))
-            .or_default()
-            .insert(target_key.clone());
+        if prefix.identity_known {
+            metrics
+                .member_request_outcome_targets
+                .entry(format!("{shape}::outcome={outcome}"))
+                .or_default()
+                .insert(target_key.clone());
+        }
         metrics
             .member_request_outcome_files
             .entry(format!("{shape}::outcome={outcome}"))
@@ -7124,44 +7165,25 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         println!("    {kind}={count}");
     }
     println!("  member_request_key_summary:");
-    let mut by_shape = BTreeMap::<
-        String,
-        (
-            usize,
-            BTreeSet<String>,
-            BTreeSet<String>,
-            BTreeSet<String>,
-            BTreeSet<String>,
-            BTreeMap<String, usize>,
-        ),
-    >::new();
-    for (key, target) in &metrics.member_request_targets {
-        for (shape, family) in &target.families {
-            let summary = by_shape.entry(shape.clone()).or_default();
-            summary.0 += family.requests;
-            summary.1.insert(key.clone());
-            summary.2.extend(family.owners.iter().cloned());
-            summary.3.extend(family.names.iter().cloned());
-            summary.4.extend(family.files.iter().cloned());
-            for (outcome, count) in &family.outcomes {
-                *summary.5.entry(outcome.clone()).or_default() += count;
-            }
-        }
-    }
-    for (shape, summary) in by_shape {
-        let distinct = summary.1.len();
-        let repeat = if distinct == 0 {
-            0.0
+    for (shape, summary) in member_request_shape_summaries(metrics) {
+        let distinct = summary.distinct_keys.len();
+        let known_repeat = (distinct > 0)
+            .then(|| summary.known_requests as f64 / distinct as f64)
+            .map_or_else(|| "unavailable".to_owned(), |factor| format!("{factor:.3}"));
+        let repeat = if summary.unknown_identity_requests > 0 {
+            "unavailable (unknown identities included)".to_owned()
         } else {
-            summary.0 as f64 / distinct as f64
+            known_repeat.clone()
         };
         println!(
-            "    {shape}: requests={}, distinct_keys={distinct}, owners={}, names={}, files={}, repeated_hit_factor={repeat:.3}, outcomes={:?}",
-            summary.0,
-            summary.2.len(),
-            summary.3.len(),
-            summary.4.len(),
-            summary.5
+            "    {shape}: requests={}, known_requests={}, distinct_keys={distinct}, unknown_identity_requests={}, owners={}, names={}, files={}, repeated_hit_factor={repeat}, known_repeated_hit_factor={known_repeat}, outcomes={:?}",
+            summary.requests,
+            summary.known_requests,
+            summary.unknown_identity_requests,
+            summary.owners.len(),
+            summary.names.len(),
+            summary.files.len(),
+            summary.outcomes
         );
     }
     println!("  member_requests_by_enclosing_method:");
@@ -11354,6 +11376,41 @@ mod resolver_profile_tests {
         assert_eq!(target.requests, 2);
         assert_eq!(target.families["ThisType"].requests, 1);
         assert_eq!(target.families["TypeRef"].requests, 1);
+    }
+
+    #[test]
+    fn unknown_prefix_requests_are_not_counted_as_distinct_known_targets() {
+        let mut metrics = ResolverMetrics::default();
+        for request_number in 1..=2 {
+            record_member_request_target(
+                &mut metrics,
+                RequestTargetObservation {
+                    target_key: format!("prefix=<unknown>::request={request_number}"),
+                    shape: "unsupported/other".to_owned(),
+                    owner: None,
+                    name: "Missing",
+                    file: "Use.scala",
+                    method: "run",
+                    outcome: "unsupported prefix shape",
+                },
+            );
+        }
+
+        let summary = member_request_shape_summaries(&metrics)["unsupported/other"].clone();
+        assert_eq!(summary.requests, 2);
+        assert_eq!(summary.known_requests, 0);
+        assert_eq!(summary.unknown_identity_requests, 2);
+        assert!(summary.distinct_keys.is_empty());
+        assert!(summary.owners.is_empty());
+        assert_eq!(
+            metrics
+                .member_request_targets
+                .values()
+                .map(|target| target.requests)
+                .sum::<usize>(),
+            2,
+            "unknown requests remain available for per-request attribution"
+        );
     }
 
     #[test]

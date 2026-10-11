@@ -414,8 +414,6 @@ Distinct targets by request outcome and normalized error family:
 | `space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=other success` | 1 targets, 1 files |
 | `space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=package type member unresolved` | 33 targets, 42 files |
 | `space=Prefix::prefix=trait TypeRef::target=Trait::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=class member scope unavailable: incomplete class info` | 18 targets, 5 files |
-| `space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=unsupported prefix shape` | 248 targets, 14 files |
-| `space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=unsupported prefix shape` | 247 targets, 11 files |
 | Incomplete class prefix targets | 111 targets |
 
 ### Bounded implementation ranking
@@ -1123,8 +1121,6 @@ resolver_581_comparison:
     space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=other success=1::files=1
     space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=package type member unresolved=33::files=42
     space=Prefix::prefix=trait TypeRef::target=Trait::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=class member scope unavailable: incomplete class info=18::files=5
-    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=unsupported prefix shape=248::files=14
-    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=unsupported prefix shape=247::files=11
   unresolved_member_kinds:
     class member scope unavailable: incomplete class info=3721
     other resolver Ok(None)=60
@@ -1132,14 +1128,14 @@ resolver_581_comparison:
     package type member unresolved=357
     unsupported prefix shape=495
   member_request_key_summary:
-    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver: requests=1845, distinct_keys=280, owners=86, names=160, files=79, repeated_hit_factor=6.589, outcomes={"class member scope unavailable: incomplete class info": 1825, "other resolver Ok(None)": 20}
-    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=1873, distinct_keys=385, owners=70, names=132, files=64, repeated_hit_factor=4.865, outcomes={"class member scope unavailable: incomplete class info": 1833, "other resolver Ok(None)": 40}
-    space=Prefix::prefix=class TypeRef::target=Class::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=40, distinct_keys=18, owners=13, names=13, files=13, repeated_hit_factor=2.222, outcomes={"class member scope unavailable: incomplete class info": 40}
-    space=Prefix::prefix=package TypeRef::target=Package::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver: requests=2716, distinct_keys=75, owners=30, names=68, files=115, repeated_hit_factor=36.213, outcomes={"package term member unsupported": 2716}
-    space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=810, distinct_keys=85, owners=20, names=76, files=101, repeated_hit_factor=9.529, outcomes={"error": 452, "other success": 1, "package type member unresolved": 357}
-    space=Prefix::prefix=trait TypeRef::target=Trait::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=23, distinct_keys=18, owners=6, names=17, files=5, repeated_hit_factor=1.278, outcomes={"class member scope unavailable: incomplete class info": 23}
-    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver: requests=248, distinct_keys=248, owners=0, names=66, files=14, repeated_hit_factor=1.000, outcomes={"unsupported prefix shape": 248}
-    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=247, distinct_keys=247, owners=0, names=46, files=11, repeated_hit_factor=1.000, outcomes={"unsupported prefix shape": 247}
+    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver: requests=1845, known_requests=1845, distinct_keys=280, unknown_identity_requests=0, owners=86, names=160, files=79, repeated_hit_factor=6.589, known_repeated_hit_factor=6.589, outcomes={"class member scope unavailable: incomplete class info": 1825, "other resolver Ok(None)": 20}
+    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=1873, known_requests=1873, distinct_keys=385, unknown_identity_requests=0, owners=70, names=132, files=64, repeated_hit_factor=4.865, known_repeated_hit_factor=4.865, outcomes={"class member scope unavailable: incomplete class info": 1833, "other resolver Ok(None)": 40}
+    space=Prefix::prefix=class TypeRef::target=Class::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=40, known_requests=40, distinct_keys=18, unknown_identity_requests=0, owners=13, names=13, files=13, repeated_hit_factor=2.222, known_repeated_hit_factor=2.222, outcomes={"class member scope unavailable: incomplete class info": 40}
+    space=Prefix::prefix=package TypeRef::target=Package::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver: requests=2716, known_requests=2716, distinct_keys=75, unknown_identity_requests=0, owners=30, names=68, files=115, repeated_hit_factor=36.213, known_repeated_hit_factor=36.213, outcomes={"package term member unsupported": 2716}
+    space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=810, known_requests=810, distinct_keys=85, unknown_identity_requests=0, owners=20, names=76, files=101, repeated_hit_factor=9.529, known_repeated_hit_factor=9.529, outcomes={"error": 452, "other success": 1, "package type member unresolved": 357}
+    space=Prefix::prefix=trait TypeRef::target=Trait::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=23, known_requests=23, distinct_keys=18, unknown_identity_requests=0, owners=6, names=17, files=5, repeated_hit_factor=1.278, known_repeated_hit_factor=1.278, outcomes={"class member scope unavailable: incomplete class info": 23}
+    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver: requests=248, known_requests=0, distinct_keys=0, unknown_identity_requests=248, owners=0, names=66, files=14, repeated_hit_factor=unavailable (unknown identities included), known_repeated_hit_factor=unavailable, outcomes={"unsupported prefix shape": 248}
+    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=247, known_requests=0, distinct_keys=0, unknown_identity_requests=247, owners=0, names=46, files=11, repeated_hit_factor=unavailable (unknown identities included), known_repeated_hit_factor=unavailable, outcomes={"unsupported prefix shape": 247}
   member_requests_by_enclosing_method:
     compiler/src/dotty/tools/MainGenericCompiler.scala#tree=243::dotty.tools.CompileSettings.withTargetScript: requests=1, distinct_request_outcomes=1
       prefix=scala.util::namespace=term::name=Try::space=Prefix::outcome=package term member unsupported=1
