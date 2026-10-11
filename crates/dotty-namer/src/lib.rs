@@ -5,7 +5,9 @@
 //! accepts phase-indexed trees from `dotty-core`, so parser clients can pass
 //! their arena without exposing parser-private types to naming.
 
+mod diagnostics;
 mod naming;
 
+pub use diagnostics::{NamerDiagnostic, NamerIssue, VisibilityAccess};
 pub use dotty_core::{SourceContext, SourceContextId, SourceDefinition, SourceSemanticIndex};
 pub use naming::{NamerError, name_compilation_unit};
