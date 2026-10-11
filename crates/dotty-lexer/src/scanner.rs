@@ -1187,9 +1187,7 @@ fn build_tokens(
                             diagnostics.push(LexerDiagnostic::with_issue(
                                 DiagnosticSeverity::Error,
                                 TextRange::new(line_start, raw.span.start())?,
-                                LexerIssue::Legacy {
-                                    message: "incompatible indentation prefixes".to_owned(),
-                                },
+                                LexerIssue::IncompatibleIndentationPrefixes,
                             ));
                         }
                         closed_same_indent_case = adjust_indentation(
@@ -2198,23 +2196,6 @@ fn to_token_kind(kind: RawTokenKind, previous: Option<TokenKind>) -> TokenKind {
 mod tests {
     use super::*;
     use crate::XmlIssue;
-
-    trait LegacyDiagnosticMessage {
-        fn legacy_message(&self) -> Option<&str>;
-
-        fn legacy_text(&self) -> &str {
-            self.legacy_message().expect("expected legacy diagnostic")
-        }
-    }
-
-    impl LegacyDiagnosticMessage for LexerDiagnostic {
-        fn legacy_message(&self) -> Option<&str> {
-            match self.issue() {
-                LexerIssue::Legacy { message } => Some(message.as_str()),
-                _ => None,
-            }
-        }
-    }
 
     fn xml_issue(diagnostic: &LexerDiagnostic) -> &XmlIssue {
         match diagnostic.issue() {
@@ -6440,13 +6421,51 @@ mod tests {
 
     #[test]
     fn diagnoses_incomparable_indentation_prefixes() {
-        let scanner =
-            ContextualScanner::new("if ready then\n  first\n\tsecond").expect("source scans");
+        let source = "if ready then\n  first\n\tsecond";
+        let scanner = ContextualScanner::new(source).expect("source scans");
 
         assert_eq!(scanner.diagnostics().len(), 1);
         assert_eq!(
-            scanner.diagnostics()[0].legacy_text(),
-            "incompatible indentation prefixes"
+            scanner.diagnostics()[0].issue(),
+            &LexerIssue::IncompatibleIndentationPrefixes
+        );
+        assert_eq!(
+            scanner.diagnostics()[0].severity(),
+            DiagnosticSeverity::Error
+        );
+        assert_eq!(
+            scanner.diagnostics()[0].span(),
+            TextRange::new(22, 23).expect("indentation prefix span is valid")
+        );
+    }
+
+    #[test]
+    fn keeps_each_incomparable_indentation_diagnostic_typed_and_ordered() {
+        let source = "if ready then\n  first\n\tsecond\nif another then\n    third\n \tfourth";
+        let scanner = ContextualScanner::new(source).expect("source scans");
+
+        assert_eq!(scanner.diagnostics().len(), 2);
+        assert_eq!(
+            scanner
+                .diagnostics()
+                .iter()
+                .map(LexerDiagnostic::issue)
+                .collect::<Vec<_>>(),
+            [
+                &LexerIssue::IncompatibleIndentationPrefixes,
+                &LexerIssue::IncompatibleIndentationPrefixes,
+            ]
+        );
+        assert_eq!(
+            scanner
+                .diagnostics()
+                .iter()
+                .map(LexerDiagnostic::span)
+                .collect::<Vec<_>>(),
+            [
+                TextRange::new(22, 23).expect("first prefix range is valid"),
+                TextRange::new(56, 58).expect("second prefix range is valid"),
+            ]
         );
     }
 

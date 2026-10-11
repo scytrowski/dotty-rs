@@ -599,10 +599,16 @@ the structured `LexerIssue` payload. Unsupported source characters,
 unterminated block comments, and malformed backquoted identifiers have
 dedicated variants, as do numeric, literal, escape, and interpolation
 failures. XML state and raw-lexer forwarding use typed `XmlIssue` variants,
-including source tag names for mismatched or unmatched closing tags. The
-temporary `Legacy { message }` variant remains only for contextual indentation
-diagnostics. Diagnostic spans, order, and recovery behavior are preserved
-without making typed issues renderable as strings.
+including source tag names for mismatched or unmatched closing tags; contextual
+indentation errors are represented by `IncompatibleIndentationPrefixes`. All
+issues expose a stable, text-independent `code()` identifier for machine
+classification. The lexer does not render issues to messages: a future renderer
+will need to choose user-facing wording, localization, and how to present
+payload data such as characters, bases, and XML tag names. Diagnostic spans,
+order, severity, and recovery behavior are preserved.
+The parser corpus and smoke tools inspect scanner diagnostics only as a count
+or presence flag, so this payload migration does not change their report schema
+or require baseline regeneration.
 
 The lexer also has deterministic short-input hardening tests that exercise
 2,380 ASCII inputs, 1,111 Unicode/multibyte inputs, and 8,192 seeded mixed
