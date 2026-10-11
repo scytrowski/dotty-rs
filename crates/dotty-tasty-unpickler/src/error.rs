@@ -6,6 +6,7 @@ use dotty_core::resolution::ResolutionError;
 use dotty_core::symbols::SymbolKind;
 use dotty_core::types::TypeRebindError;
 use dotty_tasty::tasty::{AstError, TastyFileError};
+use dotty_tasty::term::TermError;
 
 /// Structural reason a template parent could not be projected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1378,12 +1379,23 @@ fn ast_category(error: &AstError) -> UnpickleErrorCategory {
         | AstError::UnsupportedRelocation { .. }
         | AstError::RecursionLimit { .. } => UnsupportedFeature,
         AstError::RelocationDidNotConverge { .. } => InternalInvariant,
+        AstError::Term(error) => term_category(error),
         AstError::Read(_)
-        | AstError::Term(_)
         | AstError::InvalidTag { .. }
         | AstError::UnexpectedTag { .. }
         | AstError::InvalidAstReference { .. }
         | AstError::AstNodeCountMismatch { .. } => MalformedInput,
+    }
+}
+
+fn term_category(error: &TermError) -> UnpickleErrorCategory {
+    match error {
+        TermError::UnsupportedCategory { .. } | TermError::RecursionLimit { .. } => {
+            UnpickleErrorCategory::UnsupportedFeature
+        }
+        TermError::Read(_) | TermError::InvalidTag { .. } | TermError::InvalidConstant { .. } => {
+            UnpickleErrorCategory::MalformedInput
+        }
     }
 }
 
@@ -1452,6 +1464,25 @@ mod tests {
         assert_eq!(
             malformed_ast.category(),
             UnpickleErrorCategory::MalformedInput
+        );
+
+        let nested_term_limit = UnpickleError::Tasty(TastyFileError::Asts(AstError::Term(
+            TermError::RecursionLimit {
+                offset: 12,
+                limit: 256,
+            },
+        )));
+        assert_eq!(
+            nested_term_limit.category(),
+            UnpickleErrorCategory::UnsupportedFeature
+        );
+        assert_eq!(
+            UnpickleError::Ast(AstError::Term(TermError::RecursionLimit {
+                offset: 12,
+                limit: 256,
+            }))
+            .category(),
+            nested_term_limit.category()
         );
     }
 
