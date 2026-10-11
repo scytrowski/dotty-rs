@@ -11,5 +11,6 @@ mod naming;
 pub use diagnostics::{NamerDiagnostic, NamerIssue, VisibilityAccess};
 pub use dotty_core::{SourceContext, SourceContextId, SourceDefinition, SourceSemanticIndex};
 pub use naming::{
-    NamerError, NamingOutcome, name_compilation_unit, name_compilation_unit_with_diagnostics,
+    NamerError, NamingOutcome, SourceParseStatus, name_compilation_unit,
+    name_compilation_unit_with_diagnostics,
 };

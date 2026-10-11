@@ -181,6 +181,19 @@ impl fmt::Display for NamerError {
 
 impl Error for NamerError {}
 
+/// Whether the caller's source parser reported recovery diagnostics.
+///
+/// The namer does not depend on parser diagnostics, so callers must pass
+/// [`Recovered`](Self::Recovered) whenever parsing returned any diagnostics,
+/// including cases whose recovered AST contains no `ErrorNode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceParseStatus {
+    /// Parsing completed without diagnostics.
+    Clean,
+    /// Parsing reported one or more diagnostics or recovery events.
+    Recovered,
+}
+
 /// Result of naming through the opt-in diagnostic-aware entry point.
 ///
 /// A rejected unit has source diagnostics but no semantic index. Structural
@@ -577,9 +590,17 @@ pub fn name_compilation_unit(
     store: &mut SemanticStore,
     packages: &mut Packages,
 ) -> Result<SourceSemanticIndex, NamerError> {
-    run_name_compilation_unit(arena, root, source, source_file_name, store, packages)
-        .map(|(index, _)| index)
-        .map_err(|(error, _)| error)
+    run_name_compilation_unit(
+        arena,
+        root,
+        source,
+        source_file_name,
+        SourceParseStatus::Recovered,
+        store,
+        packages,
+    )
+    .map(|(index, _)| index)
+    .map_err(|(error, _)| error)
 }
 
 /// Runs source naming and classifies verified source failures as diagnostics.
@@ -593,10 +614,19 @@ pub fn name_compilation_unit_with_diagnostics(
     root: TreeId<Untyped>,
     source: SourceId,
     source_file_name: &str,
+    parse_status: SourceParseStatus,
     store: &mut SemanticStore,
     packages: &mut Packages,
 ) -> Result<NamingOutcome, NamerError> {
-    match run_name_compilation_unit(arena, root, source, source_file_name, store, packages) {
+    match run_name_compilation_unit(
+        arena,
+        root,
+        source,
+        source_file_name,
+        parse_status,
+        store,
+        packages,
+    ) {
         Ok((index, diagnostics)) => Ok(NamingOutcome::Named {
             index: Box::new(index),
             diagnostics,
@@ -613,14 +643,16 @@ fn run_name_compilation_unit(
     root: TreeId<Untyped>,
     source: SourceId,
     source_file_name: &str,
+    parse_status: SourceParseStatus,
     store: &mut SemanticStore,
     packages: &mut Packages,
 ) -> Result<(SourceSemanticIndex, Vec<NamerDiagnostic>), (NamerError, Option<NamerDiagnostic>)> {
     let checkpoint = store.checkpoint();
     let package_mark = packages.mark();
-    let source_diagnostics_allowed = !arena
-        .iter()
-        .any(|(_, tree)| matches!(tree.kind, TreeKind::PhaseSpecific(UntypedNode::Error(_))));
+    let source_diagnostics_allowed = parse_status == SourceParseStatus::Clean
+        && !arena
+            .iter()
+            .any(|(_, tree)| matches!(tree.kind, TreeKind::PhaseSpecific(UntypedNode::Error(_))));
     let (result, scope_insertions, companion_links, source_diagnostic) = {
         let mut namer = Namer {
             arena,
@@ -2737,7 +2769,7 @@ impl Namer<'_> {
         owner: Option<SymbolId>,
     ) -> NamerError {
         if self.source_diagnostics_allowed
-            && self.has_only_source_owned_visibility_boundaries(owner)
+            && self.visibility_owner_chain_has_no_synthetic_module_class(owner)
             && let Some(span) = self
                 .arena
                 .get(tree)
@@ -2764,14 +2796,18 @@ impl Namer<'_> {
         }
     }
 
-    /// Avoid classifying owner-resolution failures under non-source scopes.
+    /// Avoid classifying owner-resolution failures under synthetic enum
+    /// companion scopes, which currently hide the source enum boundary.
     /// In particular, enum case parameters are owned below a synthetic
     /// companion module class whose source enum boundary is not represented in
     /// the current semantic owner chain.
-    fn has_only_source_owned_visibility_boundaries(&self, mut owner: Option<SymbolId>) -> bool {
+    fn visibility_owner_chain_has_no_synthetic_module_class(
+        &self,
+        mut owner: Option<SymbolId>,
+    ) -> bool {
         while let Some(symbol) = owner {
             let info = self.store.symbols.get(symbol);
-            if !matches!(info.origin, SymbolOrigin::Source(_)) {
+            if info.kind == SymbolKind::ModuleClass && info.origin == SymbolOrigin::Synthetic {
                 return false;
             }
             owner = info.owner;

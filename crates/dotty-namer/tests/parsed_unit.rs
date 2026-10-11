@@ -5,7 +5,7 @@ use dotty_core::{
 };
 use dotty_namer::{
     NamerDiagnostic, NamerError, NamerIssue, NamingOutcome, SourceContextId, SourceDefinition,
-    SourceSemanticIndex, VisibilityAccess, name_compilation_unit,
+    SourceParseStatus, SourceSemanticIndex, VisibilityAccess, name_compilation_unit,
     name_compilation_unit_with_diagnostics,
 };
 use dotty_parser::{DeclarationIssue, ParseIssue, parse_compilation_unit};
@@ -4373,6 +4373,7 @@ fn diagnostic_aware_naming_names_clean_source_without_diagnostics() {
         parsed.root,
         source,
         "Clean.scala",
+        SourceParseStatus::Clean,
         &mut store,
         &mut packages,
     )
@@ -4410,6 +4411,7 @@ fn diagnostic_aware_naming_rejects_confirmed_invalid_visibility_and_rolls_back()
         parsed.root,
         source,
         "InvalidVisibility.scala",
+        SourceParseStatus::Clean,
         &mut store,
         &mut packages,
     )
@@ -4444,6 +4446,7 @@ fn diagnostic_aware_naming_rejects_confirmed_invalid_visibility_and_rolls_back()
         parsed.root,
         source,
         "InvalidVisibility.scala",
+        SourceParseStatus::Clean,
         &mut store,
         &mut packages,
     )
@@ -4461,6 +4464,40 @@ fn diagnostic_aware_naming_rejects_confirmed_invalid_visibility_and_rolls_back()
 
 #[test]
 fn diagnostic_aware_naming_keeps_recovered_and_enum_owner_failures_internal() {
+    let separator_text = "class Outer { private[Missing] val hidden = 1 val next = 2 }";
+    let separator_source = SourceId::from_index(322);
+    let mut separator_store = SemanticStore::new();
+    let scanner = dotty_lexer::ContextualScanner::new(separator_text).expect("source should lex");
+    let separator_recovery = parse_compilation_unit(
+        SourceText::new(separator_text).unwrap(),
+        separator_source,
+        scanner,
+        &mut separator_store.names,
+    );
+    assert!(!separator_recovery.diagnostics.is_empty());
+    assert!(separator_recovery.ast.iter().all(|(_, tree)| !matches!(
+        tree.kind,
+        TreeKind::PhaseSpecific(dotty_core::ast::UntypedNode::Error(_))
+    )));
+    let separator_checkpoint = separator_store.checkpoint();
+    let mut separator_packages = Packages::new();
+    let error = name_compilation_unit_with_diagnostics(
+        &separator_recovery.ast,
+        separator_recovery.root,
+        separator_source,
+        "RecoveredSeparator.scala",
+        SourceParseStatus::Recovered,
+        &mut separator_store,
+        &mut separator_packages,
+    )
+    .expect_err("parser diagnostics without ErrorNodes must remain recovery-sensitive");
+    assert!(matches!(
+        error,
+        NamerError::InvalidVisibilityQualifier { .. }
+    ));
+    assert_eq!(separator_store.checkpoint(), separator_checkpoint);
+    assert!(separator_packages.is_empty());
+
     let recovered_text = "class Outer { private[Missing] val hidden = }";
     let source = SourceId::from_index(319);
     let mut store = SemanticStore::new();
@@ -4479,6 +4516,7 @@ fn diagnostic_aware_naming_keeps_recovered_and_enum_owner_failures_internal() {
         recovered.root,
         source,
         "RecoveredVisibility.scala",
+        SourceParseStatus::Recovered,
         &mut store,
         &mut packages,
     )
@@ -4501,6 +4539,7 @@ fn diagnostic_aware_naming_keeps_recovered_and_enum_owner_failures_internal() {
         enum_source.root,
         source,
         "Color.scala",
+        SourceParseStatus::Clean,
         &mut store,
         &mut packages,
     )
@@ -4511,6 +4550,40 @@ fn diagnostic_aware_naming_keeps_recovered_and_enum_owner_failures_internal() {
     ));
     assert_eq!(store.checkpoint(), checkpoint);
     assert!(packages.is_empty());
+}
+
+#[test]
+fn diagnostic_aware_naming_accepts_a_shared_synthetic_package_owner() {
+    let (parsed, source, mut store) =
+        parsed_source("class Outer { private[Missing] val hidden = 1 }", 323);
+    let mut packages = Packages::new();
+    packages.enter(
+        &mut store,
+        dotty_core::SymbolOrigin::Synthetic,
+        &[] as &[&str],
+    );
+    let checkpoint = store.checkpoint();
+
+    let outcome = name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "SharedPackage.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .expect("a trusted shared package owner should not suppress source classification");
+
+    let NamingOutcome::Rejected { diagnostics } = outcome else {
+        panic!("invalid visibility source should be rejected");
+    };
+    assert_eq!(diagnostics.len(), 1);
+    assert!(matches!(
+        diagnostics[0].issue(),
+        NamerIssue::InvalidVisibilityQualifier { qualifier, .. } if qualifier == "Missing"
+    ));
+    assert_eq!(store.checkpoint(), checkpoint);
 }
 
 #[test]
@@ -4531,6 +4604,7 @@ fn diagnostic_aware_naming_keeps_malformed_root_internal_and_rolls_back() {
         parsed.root,
         source,
         "MalformedRoot.scala",
+        SourceParseStatus::Clean,
         &mut store,
         &mut packages,
     )
