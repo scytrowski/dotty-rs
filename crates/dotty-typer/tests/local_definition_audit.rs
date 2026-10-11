@@ -284,6 +284,8 @@ struct FunctionWithModsObservation {
     method: String,
     blocker_origin_tree: u32,
     blocker_origin_method: String,
+    first_failure_tree: u32,
+    first_failure_method: String,
     function_tree: u32,
     line: usize,
     span: String,
@@ -1516,6 +1518,24 @@ fn pinned_scala39_local_definition_audit() {
             .observations
             .iter()
             .all(|row| row.source_kind == "ordinary/impure")
+    );
+    assert_eq!(
+        audit
+            .function_with_mods_profile
+            .observations
+            .iter()
+            .filter(|row| row.attribution == "direct")
+            .count(),
+        1
+    );
+    assert_eq!(
+        audit
+            .function_with_mods_profile
+            .observations
+            .iter()
+            .filter(|row| row.attribution == "sibling/inherited")
+            .count(),
+        12
     );
     assert_eq!(
         audit
@@ -3954,6 +3974,8 @@ fn function_with_mods_profile_records_parser_shape_and_method_attribution() {
     assert_eq!(observation.source_kind, "contextual/pure");
     assert_eq!(observation.modifiers, "Given");
     assert_eq!(observation.attribution, "direct");
+    assert_eq!(observation.blocker_origin_method, "f");
+    assert_eq!(observation.first_failure_method, "f");
     assert_eq!(observation.line, 1);
 
     let (unnamed_method, _) = parsed
@@ -5285,13 +5307,15 @@ fn print_function_with_mods_profile(profile: &FunctionWithModsProfile) {
     println!("  observations:");
     for row in &profile.observations {
         println!(
-            "    path={} method={}#tree={} function_tree={} blocker_origin={}#tree={} attribution={} line={} span={} syntax={:?} params={} [{}] result={} kind={} modifiers=[{}] visibility={} annotations={} erased=[{}]",
+            "    path={} method={}#tree={} function_tree={} blocker_origin={}#tree={} first_failure={}#tree={} attribution={} line={} span={} syntax={:?} params={} [{}] result={} kind={} modifiers=[{}] visibility={} annotations={} erased=[{}]",
             row.path,
             row.method,
             row.method_tree,
             row.function_tree,
             row.blocker_origin_tree,
             row.blocker_origin_method,
+            row.first_failure_tree,
+            row.first_failure_method,
             row.attribution,
             row.line,
             row.span,
@@ -6695,18 +6719,37 @@ fn function_with_mods_observation(
     let TreeKind::DefDef(method) = &arena.get(method_tree).kind else {
         return None;
     };
-    let (_, origin_method_node) = arena
+    let (_, first_failure_node) = arena
         .iter()
         .find(|(origin_tree, _)| origin_tree.index() == blocker_origin_tree)?;
-    let TreeKind::DefDef(origin_method) = &origin_method_node.kind else {
+    let TreeKind::DefDef(first_failure_method) = &first_failure_node.kind else {
         return None;
     };
     let method_name = names.resolve(method.name.as_name().text()).to_owned();
-    let blocker_origin_method = names
-        .resolve(origin_method.name.as_name().text())
-        .to_owned();
     let position = node.position?;
     let span = position.span().range();
+    let (owner_tree, owner_node) = arena
+        .iter()
+        .filter_map(|(candidate_tree, candidate_node)| {
+            let TreeKind::DefDef(_) = &candidate_node.kind else {
+                return None;
+            };
+            let range = candidate_node.position?.span().range();
+            (range.start() <= span.start() && span.end() <= range.end()).then_some((
+                candidate_tree,
+                candidate_node,
+                range,
+            ))
+        })
+        .min_by_key(|(_, _, range)| range.end().saturating_sub(range.start()))
+        .map(|(candidate_tree, candidate_node, _)| (candidate_tree, candidate_node))?;
+    let TreeKind::DefDef(owner_method) = &owner_node.kind else {
+        return None;
+    };
+    let blocker_origin_method = names.resolve(owner_method.name.as_name().text()).to_owned();
+    let first_failure_method = names
+        .resolve(first_failure_method.name.as_name().text())
+        .to_owned();
     let source_prefix = source_text.get(..span.start() as usize)?;
     let syntax = source_text
         .get(span.start() as usize..span.end() as usize)?
@@ -6746,8 +6789,10 @@ fn function_with_mods_observation(
         path: path.to_owned(),
         method_tree: method_tree.index(),
         method: method_name,
-        blocker_origin_tree,
+        blocker_origin_tree: owner_tree.index(),
         blocker_origin_method,
+        first_failure_tree: blocker_origin_tree,
+        first_failure_method,
         function_tree,
         line,
         span: format!("{}..{}", span.start(), span.end()),
@@ -6765,10 +6810,10 @@ fn function_with_mods_observation(
             .map(|erased| if *erased { "erased" } else { "ordinary" })
             .collect::<Vec<_>>()
             .join(","),
-        attribution: if method_tree.index() == blocker_origin_tree {
+        attribution: if method_tree == owner_tree {
             "direct".to_owned()
         } else {
-            "inherited".to_owned()
+            "sibling/inherited".to_owned()
         },
     })
 }

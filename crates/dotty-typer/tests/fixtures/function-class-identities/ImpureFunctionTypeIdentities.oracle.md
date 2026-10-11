@@ -78,8 +78,13 @@ distinct `FunctionWithMods` source trees, across 2 files. They are at
 trees parse as one-argument `FunctionWithMods [Impure]`, with
 `erased_params=[false]`; none has `Given`, capture-set syntax, a pure arrow,
 annotations, or a visibility modifier. The first tree is observed from 11
-local methods and each wrapper tree from one local method. All 13 observations
-are inherited from their enclosing `checkFloatFormat` or `updateWith` method.
+local methods: its `forAllBetween` declaration is the one direct observation
+and ten other local methods inherit the blocker. Each wrapper tree is observed
+from a local `remap` method, while its direct source owner is the enclosing
+member `updateWith`; both are sibling/inherited observations. In total, 1
+observation is direct and 12 are sibling/inherited. The outer first-failure
+methods are `checkFloatFormat` for the first tree and `updateWith` for the two
+wrappers.
 This confirms that the current 13 / 2 bucket is the capture-checking rewrite
 of otherwise ordinary `=>` function types, not a mixture of erased or pure
 function syntax.
