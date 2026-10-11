@@ -216,27 +216,63 @@ impl TastyDecodeError {
                 "tasty.invalid_magic"
             }
             Self::Parse(TastyFileError::Header(_)) => "tasty.invalid_header",
+            Self::Parse(TastyFileError::Asts(error)) | Self::Ast(error) => ast_error_code(error),
             Self::Parse(_) => "tasty.parse_error",
-            Self::Ast(_) => "tasty.ast_error",
             other => other.code(),
         }
     }
 
-    /// Category based on available typed information. The parser and AST
-    /// wrappers currently retain causes whose nested format/version detail
-    /// is not exposed here, so those families remain conditional.
+    /// Category based on available typed information.
     pub fn category(&self) -> ClassLoadCategory {
         use dotty_tasty::{HeaderError, file::TastyFileError};
         match self {
             Self::Parse(TastyFileError::Header(
                 HeaderError::UnsupportedVersion { .. } | HeaderError::IncompatibleVersion { .. },
             )) => ClassLoadCategory::UnsupportedFeatureOrVersion,
+            Self::Parse(TastyFileError::Asts(error)) | Self::Ast(error) => {
+                ast_error_category(error)
+            }
             Self::Parse(_) => ClassLoadCategory::MalformedArtifact,
-            Self::Ast(_)
-            | Self::MissingTypeDef
-            | Self::NoTemplateBody
-            | Self::UnresolvedSupertype => ClassLoadCategory::Conditional,
+            Self::MissingTypeDef | Self::NoTemplateBody | Self::UnresolvedSupertype => {
+                ClassLoadCategory::Conditional
+            }
         }
+    }
+}
+
+fn ast_error_code(error: &AstError) -> &'static str {
+    use dotty_tasty::term::TermError;
+    match error {
+        AstError::UnsupportedCategory { .. } => "tasty.ast.unsupported_category",
+        AstError::UnsupportedRelocation { .. } => "tasty.ast.unsupported_relocation",
+        AstError::RecursionLimit { .. } => "tasty.ast.recursion_limit",
+        AstError::Term(TermError::UnsupportedCategory { .. }) => "tasty.term.unsupported_category",
+        AstError::Term(TermError::RecursionLimit { .. }) => "tasty.term.recursion_limit",
+        AstError::InvalidTag { .. } => "tasty.ast.invalid_tag",
+        AstError::InvalidAstReference { .. } => "tasty.ast.invalid_reference",
+        AstError::UnexpectedTag { .. } => "tasty.ast.unexpected_tag",
+        AstError::AstNodeCountMismatch { .. } => "tasty.ast.node_count_mismatch",
+        AstError::RelocationDidNotConverge { .. } => "tasty.ast.relocation_did_not_converge",
+        AstError::Read(_) | AstError::Term(_) => "tasty.ast_error",
+    }
+}
+
+fn ast_error_category(error: &AstError) -> ClassLoadCategory {
+    use dotty_tasty::term::TermError;
+    match error {
+        AstError::UnsupportedCategory { .. }
+        | AstError::UnsupportedRelocation { .. }
+        | AstError::RecursionLimit { .. }
+        | AstError::Term(
+            TermError::UnsupportedCategory { .. } | TermError::RecursionLimit { .. },
+        ) => ClassLoadCategory::UnsupportedFeatureOrVersion,
+        AstError::RelocationDidNotConverge { .. } => ClassLoadCategory::Conditional,
+        AstError::Read(_)
+        | AstError::Term(_)
+        | AstError::InvalidTag { .. }
+        | AstError::UnexpectedTag { .. }
+        | AstError::InvalidAstReference { .. }
+        | AstError::AstNodeCountMismatch { .. } => ClassLoadCategory::MalformedArtifact,
     }
 }
 

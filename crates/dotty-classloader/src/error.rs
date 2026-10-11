@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn typed_classpath_and_tasty_causes_keep_specific_root_classification() {
-        use dotty_tasty::{HeaderError, file::TastyFileError};
+        use dotty_tasty::{HeaderError, file::TastyFileError, tasty::AstError};
 
         let classpath = ClassLoadError::Io(
             BinaryName::from_internal("A"),
@@ -603,6 +603,19 @@ mod tests {
         assert_eq!(tasty.root_cause_code(), "tasty.unsupported_version");
         assert_eq!(
             tasty.category(),
+            ClassLoadCategory::UnsupportedFeatureOrVersion
+        );
+
+        let bounded_ast = ClassLoadError::InvalidTastyFile(
+            BinaryName::from_internal("A"),
+            TastyDecodeError::Ast(AstError::RecursionLimit {
+                offset: 17,
+                limit: 1024,
+            }),
+        );
+        assert_eq!(bounded_ast.root_cause_code(), "tasty.ast.recursion_limit");
+        assert_eq!(
+            bounded_ast.category(),
             ClassLoadCategory::UnsupportedFeatureOrVersion
         );
     }
