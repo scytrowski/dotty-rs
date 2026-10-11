@@ -96,12 +96,19 @@ text. A source rejection is not counted as a Namer success or an internal
 error. Existing legacy error metrics are still emitted alongside the new
 counts, so the same corpus run can compare both classifications.
 
-Run the diagnostic-aware Namer report over the pinned Scala 3.9.0 corpus
-without invoking the Scala oracle with:
+Recreate the checked-in Scala-only report directly from the pinned source
+checkout. This command does not prepare the other source sets used by the
+convenience runner:
 
 ```text
-tools/parser-corpus-report/run /tmp/scala3-3.9.0 --skip-oracle \
-  --namer-diagnostics --output /tmp/namer-diagnostics-3.9.0.json
+CARGO_TARGET_DIR=target cargo run --locked -p dotty-parser-corpus-report -- \
+  --root /tmp/scala3-3.9.0/library/src \
+  --root /tmp/scala3-3.9.0/compiler/src \
+  --source-version 3.9.0 \
+  --source-revision 777528f19a58e794c9954a42f433373472ec57f8 \
+  --parser-revision e4fe876e9f011025a7d5af14a1bbd5928f25238f \
+  --namer-diagnostics \
+  --output tools/parser-corpus-report/namer-diagnostics-v0.1-scala3-3.9.0.json
 ```
 
 [`namer-diagnostics-v0.1-scala3-3.9.0.json`](namer-diagnostics-v0.1-scala3-3.9.0.json)
