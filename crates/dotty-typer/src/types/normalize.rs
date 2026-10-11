@@ -222,23 +222,24 @@ impl<'a> TypeNormalizer<'a> {
         self.normalize_outer(ty, true)
     }
 
-    /// Dealiases and unwraps flexible types while preserving annotations.
+    /// Dealiases and unwraps flexible types while preserving `RetainsCap`.
     ///
     /// Type relations use this form so they cannot silently erase semantic
-    /// distinctions carried by annotations such as `scala.annotation.retainsCap`.
-    /// Relations that do not model an annotation must reject the resulting
+    /// distinctions carried by `scala.annotation.retainsCap`. Other
+    /// annotations keep the existing transparent normalization behavior.
+    /// Relations that do not model `RetainsCap` must reject the resulting
     /// `Annotated` type explicitly.
     pub fn normalize_for_relation(&mut self, ty: TypeId) -> Result<TypeId, TypeNormalizeError> {
-        self.normalize_outer(ty, false)
+        self.normalize_outer(ty, true)
     }
 
     fn normalize_outer(
         &mut self,
         ty: TypeId,
-        unwrap_annotations: bool,
+        preserve_retains_cap: bool,
     ) -> Result<TypeId, TypeNormalizeError> {
         let checkpoint = self.store.checkpoint();
-        match self.normalize_outer_inner(ty, unwrap_annotations) {
+        match self.normalize_outer_inner(ty, preserve_retains_cap) {
             Ok(normalized) => Ok(normalized),
             Err(error) => {
                 self.store.rollback_to(checkpoint);
@@ -250,7 +251,7 @@ impl<'a> TypeNormalizer<'a> {
     fn normalize_outer_inner(
         &mut self,
         ty: TypeId,
-        unwrap_annotations: bool,
+        preserve_retains_cap: bool,
     ) -> Result<TypeId, TypeNormalizeError> {
         let mut current = ty;
         let mut visited = Vec::new();
@@ -276,7 +277,12 @@ impl<'a> TypeNormalizer<'a> {
             }
             let underlying = match self.type_at(current)? {
                 Type::Flexible { underlying } => *underlying,
-                Type::Annotated { underlying, .. } if unwrap_annotations => *underlying,
+                Type::Annotated {
+                    underlying,
+                    annotation,
+                } if !preserve_retains_cap || !self.is_retains_cap_annotation(*annotation) => {
+                    *underlying
+                }
                 _ => return Ok(current),
             };
             if depth == MAX_TYPE_NORMALIZATION_DEPTH {
@@ -285,6 +291,51 @@ impl<'a> TypeNormalizer<'a> {
             depth += 1;
             current = underlying;
         }
+    }
+
+    fn is_retains_cap_annotation(&self, annotation: dotty_core::AnnotationId) -> bool {
+        let Some(annotation) = self.store.annotations.try_get(annotation) else {
+            return false;
+        };
+        let annotation_type = match self.store.types.try_get(annotation.ty) {
+            Some(Type::Applied { tycon, .. }) => *tycon,
+            Some(_) => annotation.ty,
+            None => return false,
+        };
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        }) = self.store.types.try_get(annotation_type)
+        else {
+            return false;
+        };
+        let mut symbol = *symbol;
+
+        let mut path = Vec::new();
+        let mut visited = Vec::new();
+        for _ in 0..MAX_TYPE_NORMALIZATION_DEPTH {
+            if !self.store.symbols.contains(symbol) || visited.contains(&symbol) {
+                return false;
+            }
+            visited.push(symbol);
+            let declaration = self.store.symbols.get(symbol);
+            let name = self.store.names.resolve(declaration.name.text());
+            let owner = declaration.owner;
+            if owner.is_some() || !name.is_empty() {
+                path.push(name);
+            }
+            let Some(owner) = owner else {
+                path.reverse();
+                return path == ["scala", "annotation", "retainsCap"];
+            };
+            if !self.store.symbols.contains(owner)
+                || self.store.symbols.get(owner).kind != SymbolKind::Package
+            {
+                return false;
+            }
+            symbol = owner;
+        }
+        false
     }
 
     fn alias_symbol(&self, ty: TypeId) -> Result<Option<SymbolId>, TypeNormalizeError> {

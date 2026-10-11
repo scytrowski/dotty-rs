@@ -1336,9 +1336,10 @@ normalization consumers observe the instantiated target without adding
 function-name special cases. This lets the impure function aliases above
 normalize to their annotated `FunctionN` / `ContextFunctionN` applications;
 source `FunctionWithMods` projection is still a separate increment. The
-nominal subtype relation preserves annotations during normalization and
-returns `UnsupportedType` for annotated types until their semantics are
-modeled, rather than erasing distinctions such as `RetainsCap`.
+nominal subtype relation keeps the `RetainsCap` annotation and returns
+`UnsupportedType` until capture-set semantics are modeled. Other annotations
+remain transparent to relation normalization and retain the existing typing
+behavior.
 
 ## Source function type projection (#827)
 
