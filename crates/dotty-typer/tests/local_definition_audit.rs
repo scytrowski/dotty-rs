@@ -159,55 +159,55 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             "prefix={}::namespace={namespace}::name={name}::space={space}",
             prefix.identity
         );
-        if prefix.target_kind == "Package" {
-            if let Some(class_path) = &self.class_path_probe {
-                let internal = if prefix.identity.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{}/{name}", prefix.identity.replace('.', "/"))
-                };
-                let binary =
-                    dotty_classloader::classloader::BinaryName::from_internal(internal.clone());
-                let mut metrics = self.metrics.borrow_mut();
-                match class_path.find_class(&binary) {
-                    Ok(Some(_)) => {
-                        if request.name.is_term() {
-                            metrics.package_term_type_class_resource += 1;
-                            metrics
-                                .package_term_type_class_targets
-                                .insert(target_key.clone());
-                        } else {
-                            metrics.package_type_class_resource += 1;
-                            metrics
-                                .package_type_class_targets
-                                .insert(target_key.clone());
-                        }
+        if prefix.target_kind == "Package"
+            && let Some(class_path) = &self.class_path_probe
+        {
+            let internal = if prefix.identity.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{name}", prefix.identity.replace('.', "/"))
+            };
+            let binary =
+                dotty_classloader::classloader::BinaryName::from_internal(internal.clone());
+            let mut metrics = self.metrics.borrow_mut();
+            match class_path.find_class(&binary) {
+                Ok(Some(_)) => {
+                    if request.name.is_term() {
+                        metrics.package_term_type_class_resource += 1;
+                        metrics
+                            .package_term_type_class_targets
+                            .insert(target_key.clone());
+                    } else {
+                        metrics.package_type_class_resource += 1;
+                        metrics
+                            .package_type_class_targets
+                            .insert(target_key.clone());
                     }
-                    Ok(None) if request.name.is_term() => {
-                        metrics.package_term_without_type_class_resource += 1
+                }
+                Ok(None) if request.name.is_term() => {
+                    metrics.package_term_without_type_class_resource += 1
+                }
+                Ok(None) => {}
+                Err(_) => metrics.package_classpath_probe_errors += 1,
+            }
+            if request.name.is_term() && (name == "package" || name.ends_with('$')) {
+                metrics
+                    .package_term_object_looking_targets
+                    .insert(target_key.clone());
+            }
+            if request.name.is_term() {
+                let companion = dotty_classloader::classloader::BinaryName::from_internal(format!(
+                    "{internal}$"
+                ));
+                match class_path.find_class(&companion) {
+                    Ok(Some(_)) => {
+                        metrics.package_term_companion_resource += 1;
+                        metrics
+                            .package_term_companion_targets
+                            .insert(target_key.clone());
                     }
                     Ok(None) => {}
                     Err(_) => metrics.package_classpath_probe_errors += 1,
-                }
-                if request.name.is_term() && (name == "package" || name.ends_with('$')) {
-                    metrics
-                        .package_term_object_looking_targets
-                        .insert(target_key.clone());
-                }
-                if request.name.is_term() {
-                    let companion = dotty_classloader::classloader::BinaryName::from_internal(
-                        format!("{internal}$"),
-                    );
-                    match class_path.find_class(&companion) {
-                        Ok(Some(_)) => {
-                            metrics.package_term_companion_resource += 1;
-                            metrics
-                                .package_term_companion_targets
-                                .insert(target_key.clone());
-                        }
-                        Ok(None) => {}
-                        Err(_) => metrics.package_classpath_probe_errors += 1,
-                    }
                 }
             }
         }
@@ -217,38 +217,37 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 store.symbols.get(symbol).info,
                 dotty_core::SymbolInfo::Complete(_)
             )
+            && let Some(class_path) = &self.class_path_probe
         {
-            if let Some(class_path) = &self.class_path_probe {
-                let origin = match store.symbols.get(symbol).origin {
-                    dotty_core::SymbolOrigin::Source(_) => "source",
-                    dotty_core::SymbolOrigin::Classfile(_) => "classloader",
-                    dotty_core::SymbolOrigin::Tasty(_) => "TASTy",
-                    dotty_core::SymbolOrigin::Builtin => "builtin",
-                    dotty_core::SymbolOrigin::Synthetic => "synthetic",
-                };
-                let candidate = audit_binary_candidate(store, symbol);
-                let status = match candidate.as_deref() {
-                    Some(name) => match class_path.find_class(
-                        &dotty_classloader::classloader::BinaryName::from_internal(name),
-                    ) {
-                        Ok(Some(_)) => "resource-found",
-                        Ok(None) => "resource-absent",
-                        Err(_) => "probe-error",
-                    },
-                    None => "binary-name-unrecoverable",
-                };
-                let key = format!(
-                    "state={}::origin={origin}::candidate={}::status={status}",
-                    symbol_info_label(store.symbols.get(symbol).info),
-                    candidate.as_deref().unwrap_or("<none>")
-                );
-                *self
-                    .metrics
-                    .borrow_mut()
-                    .incomplete_prefix_binary_resources
-                    .entry(key)
-                    .or_default() += 1;
-            }
+            let origin = match store.symbols.get(symbol).origin {
+                dotty_core::SymbolOrigin::Source(_) => "source",
+                dotty_core::SymbolOrigin::Classfile(_) => "classloader",
+                dotty_core::SymbolOrigin::Tasty(_) => "TASTy",
+                dotty_core::SymbolOrigin::Builtin => "builtin",
+                dotty_core::SymbolOrigin::Synthetic => "synthetic",
+            };
+            let candidate = audit_binary_candidate(store, symbol);
+            let status = match candidate.as_deref() {
+                Some(name) => match class_path.find_class(
+                    &dotty_classloader::classloader::BinaryName::from_internal(name),
+                ) {
+                    Ok(Some(_)) => "resource-found",
+                    Ok(None) => "resource-absent",
+                    Err(_) => "probe-error",
+                },
+                None => "binary-name-unrecoverable",
+            };
+            let key = format!(
+                "state={}::origin={origin}::candidate={}::status={status}",
+                symbol_info_label(store.symbols.get(symbol).info),
+                candidate.as_deref().unwrap_or("<none>")
+            );
+            *self
+                .metrics
+                .borrow_mut()
+                .incomplete_prefix_binary_resources
+                .entry(key)
+                .or_default() += 1;
         }
         let result = self.inner.resolve_member(store, request);
         let mut metrics = self.metrics.borrow_mut();
@@ -757,14 +756,14 @@ fn unresolved_member_kind(
             "package term member unsupported".to_owned()
         };
     }
-    if let Some(symbol) = prefix.symbol {
-        if !matches!(
+    if let Some(symbol) = prefix.symbol
+        && !matches!(
             store.symbols.get(symbol).info,
             dotty_core::SymbolInfo::Complete(_)
-        ) && matches!(prefix.target_kind, "Class" | "Trait" | "ModuleClass")
-        {
-            return "class member scope unavailable: incomplete class info".to_owned();
-        }
+        )
+        && matches!(prefix.target_kind, "Class" | "Trait" | "ModuleClass")
+    {
+        return "class member scope unavailable: incomplete class info".to_owned();
     }
     if prefix.target_kind == "unsupported" {
         "unsupported prefix shape".to_owned()
