@@ -71,9 +71,10 @@ JDK installation or modifying the fixture archive.
 
 ## Limits and compatibility notes
 
-- `java` and `javac` are not installed in the comparison environment. The
-  checked-in JAR/JMOD fixtures and classloader tests ran; the optional
-  `DOTTY_JDK21_HOME` real-JDK test was not run.
+- `java` and `javac` are not on `PATH` in the comparison environment, but the
+  Temurin JDK 21.0.8 installation at `/home/vdrake6/.jdks/jdk-21` provides the
+  JMODs required by the real-JDK gate. The test passed with
+  `DOTTY_JDK21_HOME=/home/vdrake6/.jdks/jdk-21 cargo test --locked -p dotty-classloader --lib jdk21_classspecializer_speciesdata_resolves_its_outer_k_parameter -- --ignored`.
 - No new unsupported semantic form surfaced during this regression pass. The
   existing taxonomy documents already identify conditional classifications
   where an error payload cannot distinguish malformed input from a valid
