@@ -236,6 +236,7 @@ struct RootFailure {
     range: TextRange,
     enclosing_method_tree: u32,
     failure: FailureClassification,
+    unsupported_type_tree: Option<u32>,
     missing_type_tree: Option<u32>,
     singleton_reference_tree: Option<u32>,
     local_method_signature: Option<(u32, String)>,
@@ -273,6 +274,36 @@ struct Audit {
     singleton_source_inventory: SingletonSourceInventory,
     source_function_method_outcomes: BTreeSet<String>,
     source_function_outcomes: BTreeMap<String, FailureBucket>,
+    function_with_mods_profile: FunctionWithModsProfile,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct FunctionWithModsObservation {
+    path: String,
+    method_tree: u32,
+    method: String,
+    blocker_origin_tree: u32,
+    blocker_origin_method: String,
+    first_failure_tree: u32,
+    first_failure_method: String,
+    function_tree: u32,
+    line: usize,
+    span: String,
+    syntax: String,
+    parameter_count: usize,
+    parameters: String,
+    result_kind: String,
+    source_kind: String,
+    modifiers: String,
+    visibility: String,
+    annotations: bool,
+    erased_params: String,
+    attribution: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct FunctionWithModsProfile {
+    observations: BTreeSet<FunctionWithModsObservation>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -314,6 +345,7 @@ impl Default for Audit {
             singleton_source_inventory: SingletonSourceInventory::default(),
             source_function_method_outcomes: BTreeSet::new(),
             source_function_outcomes: BTreeMap::new(),
+            function_with_mods_profile: FunctionWithModsProfile::default(),
         }
     }
 }
@@ -1182,6 +1214,9 @@ impl Audit {
             target.examples.extend(bucket.examples);
             target.examples = target.examples.iter().take(5).cloned().collect();
         }
+        self.function_with_mods_profile
+            .observations
+            .extend(other.function_with_mods_profile.observations);
     }
 }
 
@@ -1465,6 +1500,54 @@ fn pinned_scala39_local_definition_audit() {
         "all ordinary function-type baseline methods should retain their resolver blocker"
     );
     assert_eq!(audit.source_function_method_outcomes.len(), 25);
+    assert_eq!(audit.function_with_mods_profile.observations.len(), 13);
+    assert_eq!(
+        audit
+            .function_with_mods_profile
+            .observations
+            .iter()
+            .map(|row| (row.path.as_str(), row.function_tree))
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3,
+        "13 first-blocker observations should point to three source function-type trees"
+    );
+    assert!(
+        audit
+            .function_with_mods_profile
+            .observations
+            .iter()
+            .all(|row| row.source_kind == "ordinary/impure")
+    );
+    assert_eq!(
+        audit
+            .function_with_mods_profile
+            .observations
+            .iter()
+            .filter(|row| row.attribution == "direct")
+            .count(),
+        1
+    );
+    assert_eq!(
+        audit
+            .function_with_mods_profile
+            .observations
+            .iter()
+            .filter(|row| row.attribution == "sibling/inherited")
+            .count(),
+        12
+    );
+    assert_eq!(
+        audit
+            .function_with_mods_profile
+            .observations
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        2,
+        "the pinned FunctionWithMods first blockers should remain in the two known files"
+    );
 
     let missing_declared_type = audit
         .failures
@@ -2034,6 +2117,7 @@ fn pinned_scala39_local_definition_audit() {
     for record in &audit.source_function_method_outcomes {
         println!("  method={record}");
     }
+    print_function_with_mods_profile(&audit.function_with_mods_profile);
     print_missing_declared_type_profile(&audit.missing_declared_type_profile);
     print_ranked_gaps(&audit.failures);
     print_match_readiness(&audit.match_readiness);
@@ -3837,6 +3921,116 @@ fn unsupported_type_tree_failures_keep_exact_source_shapes() {
 }
 
 #[test]
+fn function_with_mods_profile_records_parser_shape_and_method_attribution() {
+    let source_text =
+        "object C { def f(x: (y: Int) ?=> Int): Int = 1; def g(x: Int ?=> Int): Int = 1 }";
+    let mut store = SemanticStore::new();
+    let source = SourceId::from_index(0);
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let (method_tree, _) = parsed
+        .ast
+        .iter()
+        .find(|(_, node)| matches!(&node.kind, TreeKind::DefDef(def) if store.names.resolve(def.name.as_name().text()) == "f"))
+        .expect("method f");
+    let method_range = parsed.ast.get(method_tree).position.unwrap().span().range();
+    let (function_tree, _) = parsed
+        .ast
+        .iter()
+        .find(|(_, node)| {
+            matches!(
+                &node.kind,
+                TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+            ) && node.position.is_some_and(|position| {
+                let range = position.span().range();
+                method_range.start() <= range.start() && range.end() <= method_range.end()
+            })
+        })
+        .expect("contextual function type");
+
+    let observation = function_with_mods_observation(
+        &parsed.ast,
+        &store.names,
+        source_text,
+        "Fixture.scala",
+        method_tree,
+        function_tree.index(),
+        method_tree.index(),
+    )
+    .expect("function observation");
+    assert_eq!(observation.method, "f");
+    assert_eq!(observation.parameter_count, 1);
+    assert!(
+        observation.parameters.contains("named:y/ValDef"),
+        "{}",
+        observation.parameters
+    );
+    assert_eq!(observation.source_kind, "contextual/pure");
+    assert_eq!(observation.modifiers, "Given");
+    assert_eq!(observation.attribution, "direct");
+    assert_eq!(observation.blocker_origin_method, "f");
+    assert_eq!(observation.first_failure_method, "f");
+    assert_eq!(
+        format_blocker_identity(
+            &observation.blocker_origin_method,
+            observation.blocker_origin_tree
+        ),
+        format!("f#tree={}", observation.blocker_origin_tree)
+    );
+    assert_eq!(
+        format_blocker_identity(
+            &observation.first_failure_method,
+            observation.first_failure_tree
+        ),
+        format!("f#tree={}", observation.first_failure_tree)
+    );
+    assert_eq!(observation.line, 1);
+
+    let (unnamed_method, _) = parsed
+        .ast
+        .iter()
+        .find(|(_, node)| matches!(&node.kind, TreeKind::DefDef(def) if store.names.resolve(def.name.as_name().text()) == "g"))
+        .expect("method g");
+    let unnamed_range = parsed
+        .ast
+        .get(unnamed_method)
+        .position
+        .unwrap()
+        .span()
+        .range();
+    let (unnamed_tree, _) = parsed
+        .ast
+        .iter()
+        .find(|(_, node)| {
+            matches!(
+                &node.kind,
+                TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(_))
+            ) && node.position.is_some_and(|position| {
+                let range = position.span().range();
+                unnamed_range.start() <= range.start() && range.end() <= unnamed_range.end()
+            })
+        })
+        .expect("unnamed contextual function type");
+    let unnamed = function_with_mods_observation(
+        &parsed.ast,
+        &store.names,
+        source_text,
+        "Fixture.scala",
+        unnamed_method,
+        unnamed_tree.index(),
+        unnamed_method.index(),
+    )
+    .expect("unnamed function observation");
+    assert!(unnamed.parameters.contains("unnamed:Int/Ident"));
+}
+
+#[test]
 fn missing_declared_type_profile_separates_inferred_fields_methods_and_explicit_types() {
     let source_text = "object Audit { val inferred = 1; var mutable = 2; val explicit: Int = 3; def inferredMethod = 4; def declaredMethod: Int = 5 }";
     let source = SourceId::from_index(0);
@@ -4705,10 +4899,15 @@ fn audit_source_inner(
                 } => Some(*tree_index),
                 _ => None,
             };
+            let unsupported_type_tree = match &error {
+                TyperError::UnsupportedTypeTree { tree_index, .. } => Some(*tree_index),
+                _ => None,
+            };
             root_failures.push(RootFailure {
                 range,
                 enclosing_method_tree: method_tree.index(),
                 failure,
+                unsupported_type_tree,
                 missing_type_tree,
                 singleton_reference_tree,
                 local_method_signature,
@@ -4829,6 +5028,7 @@ fn audit_source_inner(
                 local_method_signature,
                 local_value_declaration,
                 blocker_method_tree,
+                unsupported_type_tree,
             ) = root_failures
                 .iter()
                 .filter(|failure| {
@@ -4843,6 +5043,7 @@ fn audit_source_inner(
                         failure.local_method_signature.clone(),
                         failure.local_value_declaration,
                         Some(failure.enclosing_method_tree),
+                        failure.unsupported_type_tree,
                     )
                 })
                 .unwrap_or_else(|| {
@@ -4856,8 +5057,27 @@ fn audit_source_inner(
                         None,
                         None,
                         None,
+                        None,
                     )
                 });
+            if kind.bucket == "UnsupportedTypeTree::FunctionWithMods"
+                && let (Some(blocker_tree), Some(origin_tree)) =
+                    (unsupported_type_tree, blocker_method_tree)
+                && let Some(observation) = function_with_mods_observation(
+                    &parsed.ast,
+                    &typer.store().names,
+                    text,
+                    path,
+                    tree,
+                    blocker_tree,
+                    origin_tree,
+                )
+            {
+                audit
+                    .function_with_mods_profile
+                    .observations
+                    .insert(observation);
+            }
             if kind.bucket == "UnsupportedSingletonReference" {
                 let detail = singleton_reference_tree
                     .and_then(|reference_tree| {
@@ -5057,6 +5277,75 @@ fn print_match_readiness(readiness: &MatchReadiness) {
             .collect::<Vec<_>>();
         println!("    {shape}={count} files=[{}]", files.join(", "));
     }
+}
+
+fn print_function_with_mods_profile(profile: &FunctionWithModsProfile) {
+    let mut groups = BTreeMap::<(String, String, usize), Vec<&FunctionWithModsObservation>>::new();
+    for observation in &profile.observations {
+        groups
+            .entry((
+                observation.modifiers.clone(),
+                observation.erased_params.clone(),
+                observation.parameter_count,
+            ))
+            .or_default()
+            .push(observation);
+    }
+    println!("function_with_mods_first_blocker_profile:");
+    for ((modifiers, erased, arity), observations) in groups {
+        let distinct_trees = observations
+            .iter()
+            .map(|row| (row.path.as_str(), row.function_tree))
+            .collect::<BTreeSet<_>>();
+        let files = observations
+            .iter()
+            .map(|row| row.path.as_str())
+            .collect::<BTreeSet<_>>();
+        let locations = observations
+            .iter()
+            .map(|row| format!("{}:{}", row.path, row.line))
+            .collect::<BTreeSet<_>>();
+        let examples = observations
+            .iter()
+            .map(|row| format!("{}#tree={}", row.path, row.function_tree))
+            .collect::<BTreeSet<_>>();
+        println!(
+            "  modifiers=[{modifiers}] erased=[{erased}] arity={arity}: observations={} distinct_trees={} files={} arities=[{arity}] examples=[{}] locations=[{}]",
+            observations.len(),
+            distinct_trees.len(),
+            files.len(),
+            examples.into_iter().take(5).collect::<Vec<_>>().join(", "),
+            locations.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    println!("  observations:");
+    for row in &profile.observations {
+        println!(
+            "    path={} method={}#tree={} function_tree={} blocker_origin={} first_failure={} attribution={} line={} span={} syntax={:?} params={} [{}] result={} kind={} modifiers=[{}] visibility={} annotations={} erased=[{}]",
+            row.path,
+            row.method,
+            row.method_tree,
+            row.function_tree,
+            format_blocker_identity(&row.blocker_origin_method, row.blocker_origin_tree),
+            format_blocker_identity(&row.first_failure_method, row.first_failure_tree),
+            row.attribution,
+            row.line,
+            row.span,
+            row.syntax,
+            row.parameter_count,
+            row.parameters,
+            row.result_kind,
+            row.source_kind,
+            row.modifiers,
+            row.visibility,
+            row.annotations,
+            row.erased_params
+        );
+    }
+}
+
+fn format_blocker_identity(method: &str, tree: u32) -> String {
+    format!("{method}#tree={tree}")
 }
 
 fn collect_match_readiness(
@@ -6426,6 +6715,123 @@ fn local_method_trees(
                 .then_some((tree, node.position?.span().range()))
         })
         .collect()
+}
+
+fn function_with_mods_observation(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::names::NameInterner,
+    source_text: &str,
+    path: &str,
+    method_tree: dotty_core::TreeId<Untyped>,
+    function_tree: u32,
+    blocker_origin_tree: u32,
+) -> Option<FunctionWithModsObservation> {
+    let (_tree, node) = arena
+        .iter()
+        .find(|(tree, _)| tree.index() == function_tree)?;
+    let TreeKind::PhaseSpecific(UntypedNode::FunctionWithMods(function)) = &node.kind else {
+        return None;
+    };
+    let TreeKind::DefDef(method) = &arena.get(method_tree).kind else {
+        return None;
+    };
+    let (_, first_failure_node) = arena
+        .iter()
+        .find(|(origin_tree, _)| origin_tree.index() == blocker_origin_tree)?;
+    let TreeKind::DefDef(first_failure_method) = &first_failure_node.kind else {
+        return None;
+    };
+    let method_name = names.resolve(method.name.as_name().text()).to_owned();
+    let position = node.position?;
+    let span = position.span().range();
+    let (owner_tree, owner_node) = arena
+        .iter()
+        .filter_map(|(candidate_tree, candidate_node)| {
+            let TreeKind::DefDef(_) = &candidate_node.kind else {
+                return None;
+            };
+            let range = candidate_node.position?.span().range();
+            (range.start() <= span.start() && span.end() <= range.end()).then_some((
+                candidate_tree,
+                candidate_node,
+                range,
+            ))
+        })
+        .min_by_key(|(_, _, range)| range.end().saturating_sub(range.start()))
+        .map(|(candidate_tree, candidate_node, _)| (candidate_tree, candidate_node))?;
+    let TreeKind::DefDef(owner_method) = &owner_node.kind else {
+        return None;
+    };
+    let blocker_origin_method = names.resolve(owner_method.name.as_name().text()).to_owned();
+    let first_failure_method = names
+        .resolve(first_failure_method.name.as_name().text())
+        .to_owned();
+    let source_prefix = source_text.get(..span.start() as usize)?;
+    let syntax = source_text
+        .get(span.start() as usize..span.end() as usize)?
+        .to_owned();
+    let line = source_prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let parameters = function
+        .params
+        .iter()
+        .map(|parameter| {
+            let node = arena.get(*parameter);
+            let kind = tree_kind_label(&node.kind);
+            let name = match &node.kind {
+                TreeKind::Ident(ident) => format!("unnamed:{}", names.resolve(ident.name.text())),
+                TreeKind::ValDef(definition) => {
+                    format!("named:{}", names.resolve(definition.name.as_name().text()))
+                }
+                _ => format!("unnamed:{kind}"),
+            };
+            format!("{name}/{kind}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let result_kind = tree_kind_label(&arena.get(function.result).kind).to_owned();
+    let modifiers = source_modifier_list(&function.modifiers);
+    let visibility = source_visibility(names, function.modifiers.visibility);
+    let annotations = !function.modifiers.annotations.is_empty();
+    let source_kind = match (
+        function.modifiers.modifiers.contains(&Modifier::Given),
+        function.modifiers.modifiers.contains(&Modifier::Impure),
+    ) {
+        (false, false) => "ordinary/pure",
+        (false, true) => "ordinary/impure",
+        (true, false) => "contextual/pure",
+        (true, true) => "contextual/impure",
+    };
+    Some(FunctionWithModsObservation {
+        path: path.to_owned(),
+        method_tree: method_tree.index(),
+        method: method_name,
+        blocker_origin_tree: owner_tree.index(),
+        blocker_origin_method,
+        first_failure_tree: blocker_origin_tree,
+        first_failure_method,
+        function_tree,
+        line,
+        span: format!("{}..{}", span.start(), span.end()),
+        syntax,
+        parameter_count: function.params.len(),
+        parameters,
+        result_kind,
+        source_kind: source_kind.to_owned(),
+        modifiers,
+        visibility,
+        annotations,
+        erased_params: function
+            .erased_params
+            .iter()
+            .map(|erased| if *erased { "erased" } else { "ordinary" })
+            .collect::<Vec<_>>()
+            .join(","),
+        attribution: if method_tree == owner_tree {
+            "direct".to_owned()
+        } else {
+            "sibling/inherited".to_owned()
+        },
+    })
 }
 
 struct SourceFunctionMethodAudit<'a, 'typer> {
