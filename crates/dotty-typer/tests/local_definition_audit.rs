@@ -355,6 +355,285 @@ struct LocalValueBaselineRow {
     declaration_tree: u32,
 }
 
+#[derive(Clone, Copy)]
+struct LocalValueBaselineSignature {
+    path: &'static str,
+    method_tree: u32,
+    method: &'static str,
+    declaration_tree: u32,
+    declaration: &'static str,
+    declaration_kind: &'static str,
+    modifiers: &'static str,
+}
+
+// Independent #929 snapshot for identities and declaration shapes. Keep this
+// separate from the tree-index routing table: indexes alone can silently point
+// at a different AST node after parser changes.
+const LOCAL_VALUE_BASELINE_SIGNATURES: &[LocalValueBaselineSignature] = &[
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
+        method_tree: 167,
+        method: "elementType",
+        declaration_tree: 95,
+        declaration: "<anonymous>",
+        declaration_kind: "given",
+        modifiers: "Given,Final,Lazy",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
+        method_tree: 367,
+        method: "addPrimitive",
+        declaration_tree: 338,
+        declaration: "<anonymous>",
+        declaration_kind: "given",
+        modifiers: "Given,Final,Lazy",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
+        method_tree: 440,
+        method: "addPrimitives",
+        declaration_tree: 338,
+        declaration: "<anonymous>",
+        declaration_kind: "given",
+        modifiers: "Given,Final,Lazy",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala",
+        method_tree: 236,
+        method: "addRewrite",
+        declaration_tree: 195,
+        declaration: "<anonymous>",
+        declaration_kind: "given",
+        modifiers: "Given,Final,Lazy",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 10367,
+        method: "isStringMethodFromObject",
+        declaration_tree: 10316,
+        declaration: "pos",
+        declaration_kind: "implicit val",
+        modifiers: "Implicit",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 11524,
+        method: "abortMatch",
+        declaration_tree: 11493,
+        declaration: "pos",
+        declaration_kind: "implicit val",
+        modifiers: "Implicit",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 11629,
+        method: "invalidCase",
+        declaration_tree: 11493,
+        declaration: "pos",
+        declaration_kind: "implicit val",
+        modifiers: "Implicit",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 11651,
+        method: "genMatchableLiteral",
+        declaration_tree: 11493,
+        declaration: "pos",
+        declaration_kind: "implicit val",
+        modifiers: "Implicit",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 11745,
+        method: "isInt",
+        declaration_tree: 11493,
+        declaration: "pos",
+        declaration_kind: "implicit val",
+        modifiers: "Implicit",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 4923,
+        method: "isIgnorableDefaultParam",
+        declaration_tree: 4843,
+        declaration: "pos",
+        declaration_kind: "implicit val",
+        modifiers: "Implicit",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 4975,
+        method: "jsParams",
+        declaration_tree: 4843,
+        declaration: "pos",
+        declaration_kind: "implicit val",
+        modifiers: "Implicit",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 5228,
+        method: "genBody",
+        declaration_tree: 5197,
+        declaration: "pos",
+        declaration_kind: "implicit val",
+        modifiers: "Implicit",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 6279,
+        method: "genRhs",
+        declaration_tree: 5662,
+        declaration: "pos",
+        declaration_kind: "implicit val",
+        modifiers: "Implicit",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 6327,
+        method: "ctorAssignment",
+        declaration_tree: 5662,
+        declaration: "pos",
+        declaration_kind: "implicit val",
+        modifiers: "Implicit",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        method_tree: 6966,
+        method: "isJSDefaultParam",
+        declaration_tree: 6904,
+        declaration: "pos",
+        declaration_kind: "implicit val",
+        modifiers: "Implicit",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala",
+        method_tree: 2075,
+        method: "hasDefaultParam",
+        declaration_tree: 1862,
+        declaration: "pos",
+        declaration_kind: "implicit val",
+        modifiers: "Implicit",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/dotc/ast/Trees.scala",
+        method_tree: 10108,
+        method: "typeParamCount",
+        declaration_tree: 10035,
+        declaration: "ctx",
+        declaration_kind: "given",
+        modifiers: "Given,Final,Lazy",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/dotc/core/NameOps.scala",
+        method_tree: 895,
+        method: "collectDigits",
+        declaration_tree: 851,
+        declaration: "MaxSafeInt",
+        declaration_kind: "inline val",
+        modifiers: "Inline",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/dotc/transform/MixinOps.scala",
+        method_tree: 355,
+        method: "generateJUnitForwarder",
+        declaration_tree: 297,
+        declaration: "competingMethods",
+        declaration_kind: "lazy val",
+        modifiers: "Lazy",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/dotc/transform/MixinOps.scala",
+        method_tree: 375,
+        method: "generateSerializationForwarder",
+        declaration_tree: 297,
+        declaration: "competingMethods",
+        declaration_kind: "lazy val",
+        modifiers: "Lazy",
+    },
+    LocalValueBaselineSignature {
+        path: "compiler/src/dotty/tools/dotc/typer/Namer.scala",
+        method_tree: 8664,
+        method: "infoDontForceAnnots",
+        declaration_tree: 8645,
+        declaration: "accessorSyms",
+        declaration_kind: "lazy val",
+        modifiers: "Lazy",
+    },
+];
+
+const LOCAL_VALUE_BASELINE_TYPE_FORMS: &[(&str, u32, &str)] = &[
+    (
+        "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
+        95,
+        "explicit",
+    ),
+    (
+        "compiler/src/dotty/tools/backend/ScalaPrimitives.scala",
+        338,
+        "explicit",
+    ),
+    (
+        "compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala",
+        195,
+        "explicit",
+    ),
+    (
+        "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        10316,
+        "inferred",
+    ),
+    (
+        "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        11493,
+        "inferred",
+    ),
+    (
+        "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        4843,
+        "inferred",
+    ),
+    (
+        "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        5197,
+        "inferred",
+    ),
+    (
+        "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        5662,
+        "explicit",
+    ),
+    (
+        "compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala",
+        6904,
+        "inferred",
+    ),
+    (
+        "compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala",
+        1862,
+        "inferred",
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/ast/Trees.scala",
+        10035,
+        "explicit",
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/core/NameOps.scala",
+        851,
+        "inferred",
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/transform/MixinOps.scala",
+        297,
+        "inferred",
+    ),
+    (
+        "compiler/src/dotty/tools/dotc/typer/Namer.scala",
+        8645,
+        "inferred",
+    ),
+];
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct LocalValueBaselineOutcome {
     observation: LocalValueBlockerObservation,
@@ -586,6 +865,31 @@ fn record_local_value_baseline_outcomes(
         .chain(LOCAL_VALUE_INLINE_BASELINE_ROWS)
         .filter(|row| row.path == context.path && row.method_tree == context.method_tree.index())
     {
+        let signature = LOCAL_VALUE_BASELINE_SIGNATURES
+            .iter()
+            .find(|signature| {
+                signature.path == baseline.path
+                    && signature.method_tree == baseline.method_tree
+                    && signature.declaration_tree == baseline.declaration_tree
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "pinned local-value row has no independent signature: path={} method={} declaration={}",
+                    baseline.path, baseline.method_tree, baseline.declaration_tree
+                )
+            });
+        let expected_type_form = LOCAL_VALUE_BASELINE_TYPE_FORMS
+            .iter()
+            .find_map(|(path, declaration_tree, type_form)| {
+                (*path == baseline.path && *declaration_tree == baseline.declaration_tree)
+                    .then_some(*type_form)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "pinned local-value declaration has no frozen type form: path={} declaration={}",
+                    baseline.path, baseline.declaration_tree
+                )
+            });
         let observation = local_value_blocker_observation(
             context.arena,
             context.names,
@@ -601,6 +905,28 @@ fn record_local_value_baseline_outcomes(
                 baseline.path, baseline.method_tree, baseline.declaration_tree
             )
         });
+        assert_eq!(
+            observation.path, signature.path,
+            "pinned source path changed"
+        );
+        assert_eq!(
+            observation.enclosing_method,
+            format!(
+                "{}#tree={}:{}",
+                signature.path, signature.method_tree, signature.method
+            ),
+            "pinned enclosing method identity changed"
+        );
+        assert_eq!(observation.declaration_tree, signature.declaration_tree);
+        assert_eq!(
+            observation.node_kind, "ValDef",
+            "pinned declaration node kind changed"
+        );
+        assert_eq!(observation.declaration_name, signature.declaration);
+        assert_eq!(observation.declaration_kind, signature.declaration_kind);
+        assert_eq!(observation.modifiers, signature.modifiers);
+        assert_eq!(observation.type_form, expected_type_form);
+        assert_eq!(observation.attribution, "inherited");
         let declaration_tree = context
             .arena
             .iter()
@@ -1239,6 +1565,25 @@ fn pinned_scala39_local_definition_audit() {
     assert_eq!(count_modifier("Final"), 0);
     assert_eq!(count_modifier("Var"), 0);
     assert_eq!(audit.local_value_baseline_outcomes.len(), 21);
+    assert_eq!(LOCAL_VALUE_BASELINE_SIGNATURES.len(), 21);
+    assert_eq!(
+        audit
+            .local_value_baseline_outcomes
+            .iter()
+            .filter(|outcome| outcome.observation.type_form == "explicit")
+            .count(),
+        7,
+        "the frozen cohort should retain its seven explicit local value types"
+    );
+    assert_eq!(
+        audit
+            .local_value_baseline_outcomes
+            .iter()
+            .filter(|outcome| outcome.observation.type_form == "inferred")
+            .count(),
+        14,
+        "the frozen cohort should retain its fourteen inferred local value types"
+    );
     assert_eq!(
         audit
             .local_value_baseline_outcomes
