@@ -124,8 +124,8 @@ impl<'source> RawLexer<'source> {
 
         let start = self.cursor.position();
         let Some(character) = self.cursor.peek() else {
-            if let Some(message) = self.xml.eof_message() {
-                self.report_legacy(start, message)?;
+            if let Some(issue) = self.xml.eof_issue() {
+                self.report_issue(start, LexerIssue::Xml(issue))?;
             }
             self.emitted_eof = true;
             return Ok(Some(RawItem::Token(RawToken {
@@ -770,8 +770,8 @@ impl<'source> RawLexer<'source> {
     ) -> Result<(), RawLexerError> {
         let spelling = self.source.slice(span)?;
         self.xml.update_token(kind, spelling);
-        if let Some(message) = self.xml.take_error() {
-            self.report_legacy(span.start(), message)?;
+        if let Some(issue) = self.xml.take_error() {
+            self.report_issue(span.start(), LexerIssue::Xml(issue))?;
         }
         Ok(())
     }
@@ -1275,21 +1275,6 @@ impl<'source> RawLexer<'source> {
         Ok(true)
     }
 
-    fn report_legacy(
-        &mut self,
-        start: u32,
-        message: impl Into<String>,
-    ) -> Result<(), RawLexerError> {
-        self.diagnostics.push(LexerDiagnostic::with_issue(
-            DiagnosticSeverity::Error,
-            self.span(start)?,
-            LexerIssue::Legacy {
-                message: message.into(),
-            },
-        ));
-        Ok(())
-    }
-
     fn report_issue(&mut self, start: u32, issue: LexerIssue) -> Result<(), RawLexerError> {
         self.diagnostics.push(LexerDiagnostic::with_issue(
             DiagnosticSeverity::Error,
@@ -1394,24 +1379,15 @@ fn classify_keyword(text: &str) -> Option<HardKeyword> {
 
 #[cfg(test)]
 mod tests {
+    use crate::XmlIssue;
     use dotty_core::token::TokenKind;
 
     use super::*;
 
-    trait LegacyDiagnosticMessage {
-        fn legacy_message(&self) -> Option<&str>;
-
-        fn legacy_text(&self) -> &str {
-            self.legacy_message().expect("expected legacy diagnostic")
-        }
-    }
-
-    impl LegacyDiagnosticMessage for LexerDiagnostic {
-        fn legacy_message(&self) -> Option<&str> {
-            match self.issue() {
-                LexerIssue::Legacy { message } => Some(message.as_str()),
-                _ => None,
-            }
+    fn xml_issue(diagnostic: &LexerDiagnostic) -> &XmlIssue {
+        match diagnostic.issue() {
+            LexerIssue::Xml(issue) => issue,
+            other => panic!("expected XML diagnostic, got {other:?}"),
         }
     }
 
@@ -3561,8 +3537,11 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].legacy_text(),
-            "mismatched XML closing tag: expected </root>, found </wrong>"
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::MismatchedClosingTag {
+                expected: "root".to_owned(),
+                found: "wrong".to_owned(),
+            }
         );
         assert_eq!(
             diagnostics[0].span(),
@@ -3577,8 +3556,8 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].legacy_text(),
-            "XML closing tag name expected"
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::ClosingTagNameExpected
         );
         assert_eq!(
             diagnostics[0].span(),
@@ -3593,8 +3572,8 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].legacy_text(),
-            "XML closing tag cannot contain attributes"
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::ClosingTagCannotContainAttributes
         );
         assert_eq!(
             diagnostics[0].span(),
@@ -3609,8 +3588,8 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].legacy_text(),
-            "XML closing tag cannot contain attributes"
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::ClosingTagCannotContainAttributes
         );
         assert_eq!(
             diagnostics[0].span(),
@@ -3703,7 +3682,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML tag");
+        assert_eq!(xml_issue(&diagnostics[0]), &XmlIssue::UnterminatedTag);
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3716,7 +3695,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML tag");
+        assert_eq!(xml_issue(&diagnostics[0]), &XmlIssue::UnterminatedTag);
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3729,7 +3708,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML tag");
+        assert_eq!(xml_issue(&diagnostics[0]), &XmlIssue::UnterminatedTag);
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3743,8 +3722,8 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].legacy_text(),
-            "XML attribute expression must be closed"
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::AttributeExpressionMustBeClosed
         );
         assert_eq!(
             diagnostics[0].span(),
@@ -3759,8 +3738,8 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].legacy_text(),
-            "XML attribute expression must be closed"
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::AttributeExpressionMustBeClosed
         );
         assert_eq!(
             diagnostics[0].span(),
@@ -3774,7 +3753,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML tag");
+        assert_eq!(xml_issue(&diagnostics[0]), &XmlIssue::UnterminatedTag);
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3787,7 +3766,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML tag");
+        assert_eq!(xml_issue(&diagnostics[0]), &XmlIssue::UnterminatedTag);
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3800,7 +3779,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML tag");
+        assert_eq!(xml_issue(&diagnostics[0]), &XmlIssue::UnterminatedTag);
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3875,7 +3854,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML comment");
+        assert_eq!(xml_issue(&diagnostics[0]), &XmlIssue::UnterminatedComment);
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3888,10 +3867,7 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(
-            diagnostics[0].legacy_text(),
-            "unterminated XML CDATA section"
-        );
+        assert_eq!(xml_issue(&diagnostics[0]), &XmlIssue::UnterminatedCdata);
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -3912,10 +3888,7 @@ mod tests {
         let malformed_end = source.find("></").expect("malformed CDATA close") as u32;
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(
-            diagnostics[0].legacy_text(),
-            "unterminated XML CDATA section"
-        );
+        assert_eq!(xml_issue(&diagnostics[0]), &XmlIssue::UnterminatedCdata);
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(malformed_end, malformed_end + 3).expect("valid range")
@@ -3962,8 +3935,8 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].legacy_text(),
-            "invalid `--` sequence in XML comment"
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::InvalidCommentDoubleHyphen
         );
         assert_eq!(
             tokens
@@ -3984,7 +3957,10 @@ mod tests {
         let (_, diagnostics) = scan(source);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].legacy_text(), "unterminated XML expression");
+        assert_eq!(
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::UnterminatedExpression
+        );
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(source.len() as u32, source.len() as u32).expect("valid range")
@@ -4064,8 +4040,8 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].legacy_text(),
-            "XML attribute name must be followed by `=`"
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::AttributeNameMustBeFollowedByEquals
         );
     }
 
@@ -4075,9 +4051,23 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].legacy_text(),
-            "XML attribute value expected after `=`"
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::AttributeValueExpectedAfterEquals
         );
+    }
+
+    #[test]
+    fn diagnoses_an_unexpected_equals_in_an_xml_attribute_list() {
+        let source = "<item =/>";
+        let (_, diagnostics) = scan(source);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::UnexpectedAttributeEquals
+        );
+        assert_eq!(diagnostics[0].span(), TextRange::new(6, 9).unwrap());
+        assert_eq!(diagnostics[0].severity(), DiagnosticSeverity::Error);
     }
 
     #[test]
@@ -4086,8 +4076,8 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].legacy_text(),
-            "XML attribute name must be followed by `=`"
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::AttributeNameMustBeFollowedByEquals
         );
     }
 
@@ -4097,8 +4087,8 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].legacy_text(),
-            "XML attribute value expected after `=`"
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::AttributeValueExpectedAfterEquals
         );
     }
 
@@ -4108,8 +4098,8 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].legacy_text(),
-            "XML attribute value must follow `=`"
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::AttributeValueMustFollowEquals
         );
     }
 
@@ -4118,7 +4108,7 @@ mod tests {
         let (_, diagnostics) = scan("<item 123/>");
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].legacy_text(), "XML attribute name expected");
+        assert_eq!(xml_issue(&diagnostics[0]), &XmlIssue::AttributeNameExpected);
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(6, 9).expect("valid range")
@@ -4130,7 +4120,7 @@ mod tests {
         let (_, diagnostics) = scan("<item {flag}/>");
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].legacy_text(), "XML attribute name expected");
+        assert_eq!(xml_issue(&diagnostics[0]), &XmlIssue::AttributeNameExpected);
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(6, 7).expect("valid range")
@@ -4142,7 +4132,7 @@ mod tests {
         let (_, diagnostics) = scan("<item @ />");
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].legacy_text(), "XML attribute name expected");
+        assert_eq!(xml_issue(&diagnostics[0]), &XmlIssue::AttributeNameExpected);
         assert_eq!(
             diagnostics[0].span(),
             TextRange::new(6, 7).expect("valid range")
@@ -4240,8 +4230,8 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
-            diagnostics[0].legacy_text(),
-            "invalid `--` sequence in XML comment"
+            xml_issue(&diagnostics[0]),
+            &XmlIssue::InvalidCommentDoubleHyphen
         );
         assert_eq!(
             diagnostics[0].span(),

@@ -1,4 +1,4 @@
-use crate::RawTokenKind;
+use crate::{RawTokenKind, XmlIssue};
 use dotty_core::token::Punctuation;
 
 #[derive(Debug, Clone, Copy)]
@@ -38,7 +38,7 @@ pub(crate) struct XmlState {
     expressions: Vec<XmlExpression>,
     content: XmlContent,
     cdata_brackets: u8,
-    pending_error: Option<String>,
+    pending_error: Option<XmlIssue>,
     tag_open: bool,
     open_tags: Vec<String>,
     pending_tag_name: Option<PendingTagName>,
@@ -66,38 +66,34 @@ impl XmlState {
                 && !self.attribute_name_separator)
     }
 
-    pub(crate) fn eof_message(&self) -> Option<String> {
+    pub(crate) fn eof_issue(&self) -> Option<XmlIssue> {
         match self.content {
-            XmlContent::Comment => Some("unterminated XML comment".to_owned()),
-            XmlContent::Cdata => Some("unterminated XML CDATA section".to_owned()),
+            XmlContent::Comment => Some(XmlIssue::UnterminatedComment),
+            XmlContent::Cdata => Some(XmlIssue::UnterminatedCdata),
             XmlContent::Text
                 if self
                     .expressions
                     .last()
                     .is_some_and(|expression| expression.attribute) =>
             {
-                Some("XML attribute expression must be closed".to_owned())
+                Some(XmlIssue::AttributeExpressionMustBeClosed)
             }
             XmlContent::Text if !self.expressions.is_empty() => {
-                Some("unterminated XML expression".to_owned())
+                Some(XmlIssue::UnterminatedExpression)
             }
             XmlContent::Text if self.attribute_state == Some(XmlAttributeState::ExpectEquals) => {
-                Some("XML attribute name must be followed by `=`".to_owned())
+                Some(XmlIssue::AttributeNameMustBeFollowedByEquals)
             }
             XmlContent::Text if self.attribute_state == Some(XmlAttributeState::ExpectValue) => {
-                Some("XML attribute value expected after `=`".to_owned())
+                Some(XmlIssue::AttributeValueExpectedAfterEquals)
             }
-            XmlContent::Text if self.bang_declaration => {
-                Some("unterminated XML declaration".to_owned())
-            }
-            XmlContent::Text if self.tag_open || self.depth > 0 => {
-                Some("unterminated XML tag".to_owned())
-            }
+            XmlContent::Text if self.bang_declaration => Some(XmlIssue::UnterminatedDeclaration),
+            XmlContent::Text if self.tag_open || self.depth > 0 => Some(XmlIssue::UnterminatedTag),
             XmlContent::Text => None,
         }
     }
 
-    pub(crate) fn take_error(&mut self) -> Option<String> {
+    pub(crate) fn take_error(&mut self) -> Option<XmlIssue> {
         self.pending_error.take()
     }
 
@@ -123,7 +119,7 @@ impl XmlState {
                     self.cdata_brackets = 0;
                 }
                 RawTokenKind::Operator if spelling.ends_with("</") => {
-                    self.report_error("unterminated XML CDATA section");
+                    self.report_error(XmlIssue::UnterminatedCdata);
                     self.content = XmlContent::Text;
                     self.cdata_brackets = 0;
                 }
@@ -210,13 +206,14 @@ impl XmlState {
     }
 
     fn finalize_tag_name(&mut self) {
-        let Some(pending) = self.pending_tag_name.take() else {
+        let Some(pending) = self.pending_tag_name else {
             return;
         };
         let Some(name) = self.current_tag_name.take() else {
             return;
         };
 
+        self.pending_tag_name = None;
         self.tag_name_separator = false;
         match pending {
             PendingTagName::Opening => {
@@ -266,9 +263,9 @@ impl XmlState {
         }
 
         if self.attribute_state == Some(XmlAttributeState::ExpectEquals) {
-            self.report_error("XML attribute name must be followed by `=`");
+            self.report_error(XmlIssue::AttributeNameMustBeFollowedByEquals);
         } else if self.attribute_state == Some(XmlAttributeState::ExpectValue) {
-            self.report_error("XML attribute value expected after `=`");
+            self.report_error(XmlIssue::AttributeValueExpectedAfterEquals);
         }
         self.attribute_state = Some(XmlAttributeState::ExpectEquals);
     }
@@ -284,7 +281,7 @@ impl XmlState {
             self.attribute_state = Some(XmlAttributeState::ExpectNameOrEnd);
             self.attribute_name_separator = false;
         } else {
-            self.report_error("XML attribute value must follow `=`");
+            self.report_error(XmlIssue::AttributeValueMustFollowEquals);
         }
     }
 
@@ -302,13 +299,13 @@ impl XmlState {
 
         match self.attribute_state {
             Some(XmlAttributeState::ExpectNameOrEnd) => {
-                self.report_error("XML attribute name expected")
+                self.report_error(XmlIssue::AttributeNameExpected)
             }
             Some(XmlAttributeState::ExpectEquals) => {
-                self.report_error("XML attribute name must be followed by `=`")
+                self.report_error(XmlIssue::AttributeNameMustBeFollowedByEquals)
             }
             Some(XmlAttributeState::ExpectValue) => {
-                self.report_error("XML attribute value expected after `=`")
+                self.report_error(XmlIssue::AttributeValueExpectedAfterEquals)
             }
             Some(XmlAttributeState::InExpression) | None => {}
         }
@@ -316,7 +313,7 @@ impl XmlState {
 
     fn report_unexpected_closing_tag_token(&mut self) {
         if self.tag_open && self.closing_tag && self.pending_tag_name.is_none() {
-            self.report_error("XML closing tag cannot contain attributes");
+            self.report_error(XmlIssue::ClosingTagCannotContainAttributes);
         }
     }
 
@@ -326,27 +323,27 @@ impl XmlState {
             .is_some_and(|expression| self.depth == expression.xml_floor)
     }
 
-    fn report_error(&mut self, message: impl Into<String>) {
+    fn report_error(&mut self, issue: XmlIssue) {
         if self.pending_error.is_none() {
-            self.pending_error = Some(message.into());
+            self.pending_error = Some(issue);
         }
     }
 
     fn finish_opening_tag(&mut self) {
         self.finalize_tag_name();
         if self.pending_tag_name == Some(PendingTagName::Opening) {
-            self.report_error("XML opening tag name expected");
+            self.report_error(XmlIssue::OpeningTagNameExpected);
             self.pending_tag_name = None;
         }
         match self.attribute_state {
             Some(XmlAttributeState::ExpectEquals) => {
-                self.report_error("XML attribute name must be followed by `=`")
+                self.report_error(XmlIssue::AttributeNameMustBeFollowedByEquals)
             }
             Some(XmlAttributeState::ExpectValue) => {
-                self.report_error("XML attribute value expected after `=`")
+                self.report_error(XmlIssue::AttributeValueExpectedAfterEquals)
             }
             Some(XmlAttributeState::InExpression) => {
-                self.report_error("XML attribute expression must be closed")
+                self.report_error(XmlIssue::AttributeExpressionMustBeClosed)
             }
             Some(XmlAttributeState::ExpectNameOrEnd) | None => {}
         }
@@ -357,22 +354,23 @@ impl XmlState {
     fn finish_closing_tag(&mut self) {
         self.finalize_tag_name();
         if self.pending_tag_name == Some(PendingTagName::Closing) {
-            self.report_error("XML closing tag name expected");
+            self.report_error(XmlIssue::ClosingTagNameExpected);
             self.pending_tag_name = None;
         }
 
         if let Some(actual) = self.closing_tag_name.take() {
             match self.open_tags.pop() {
                 Some(expected) if expected == actual => {}
-                Some(expected) => self.report_error(format!(
-                    "mismatched XML closing tag: expected </{expected}>, found </{actual}>"
-                )),
-                None => self.report_error(format!(
-                    "XML closing tag </{actual}> has no matching opening tag"
-                )),
+                Some(expected) => self.report_error(XmlIssue::MismatchedClosingTag {
+                    expected,
+                    found: actual,
+                }),
+                None => self.report_error(XmlIssue::ClosingTagWithoutOpeningTag {
+                    found: Some(actual),
+                }),
             }
         } else if self.open_tags.pop().is_none() {
-            self.report_error("XML closing tag has no matching opening tag");
+            self.report_error(XmlIssue::ClosingTagWithoutOpeningTag { found: None });
         }
 
         self.closing_tag = false;
@@ -389,7 +387,7 @@ impl XmlState {
     }
 
     fn finish_empty_closing_tag(&mut self) {
-        self.report_error("XML closing tag name expected");
+        self.report_error(XmlIssue::ClosingTagNameExpected);
         let _ = self.open_tags.pop();
         self.depth = self.depth.saturating_sub(1);
         self.closing_tag = false;
@@ -479,7 +477,7 @@ impl XmlState {
                 self.content = XmlContent::Text;
             } else {
                 if spelling.contains("--") {
-                    self.report_error("invalid `--` sequence in XML comment");
+                    self.report_error(XmlIssue::InvalidCommentDoubleHyphen);
                 }
                 return false;
             }
@@ -509,7 +507,7 @@ impl XmlState {
             if self.attribute_state == Some(XmlAttributeState::ExpectEquals) {
                 self.attribute_state = Some(XmlAttributeState::ExpectValue);
             } else {
-                self.report_error("XML attribute `=` is unexpected");
+                self.report_error(XmlIssue::UnexpectedAttributeEquals);
             }
             self.finish_self_closing_tag();
             return self.depth == 0;
@@ -523,7 +521,7 @@ impl XmlState {
             if self.attribute_state == Some(XmlAttributeState::ExpectEquals) {
                 self.attribute_state = Some(XmlAttributeState::ExpectValue);
             } else {
-                self.report_error("XML attribute `=` is unexpected");
+                self.report_error(XmlIssue::UnexpectedAttributeEquals);
             }
             return false;
         }
@@ -666,7 +664,7 @@ mod tests {
         state.update_token(RawTokenKind::Identifier, "root");
 
         assert!(state.update_token(RawTokenKind::Operator, ">"));
-        assert!(state.eof_message().is_none());
+        assert!(state.eof_issue().is_none());
     }
 
     #[test]
@@ -686,11 +684,58 @@ mod tests {
         state.update_token(RawTokenKind::Identifier, "root");
         state.update_token(RawTokenKind::Operator, ">");
 
-        assert_eq!(
-            state.take_error().as_deref(),
-            Some("unterminated XML CDATA section")
-        );
+        assert_eq!(state.take_error(), Some(XmlIssue::UnterminatedCdata));
         assert!(state.can_start_literal());
+    }
+
+    #[test]
+    fn keeps_the_first_pending_xml_issue() {
+        let mut state = XmlState::default();
+        state.report_error(XmlIssue::UnterminatedTag);
+        state.report_error(XmlIssue::UnterminatedComment);
+
+        assert_eq!(state.take_error(), Some(XmlIssue::UnterminatedTag));
+    }
+
+    #[test]
+    fn reports_a_missing_opening_tag_name_and_finishes_the_tag() {
+        let mut state = XmlState::default();
+        state.update_token(RawTokenKind::XmlStart, "<");
+
+        assert!(!state.update_token(RawTokenKind::Operator, ">"));
+
+        assert_eq!(state.take_error(), Some(XmlIssue::OpeningTagNameExpected));
+        assert!(!state.tag_open);
+        assert_eq!(state.pending_tag_name, None);
+        assert_eq!(state.depth, 1);
+    }
+
+    #[test]
+    fn retains_the_actual_name_on_a_closing_tag_without_a_match() {
+        let mut state = XmlState::default();
+        state.update_token(RawTokenKind::XmlStart, "<");
+        state.update_token(RawTokenKind::Identifier, "root");
+        state.update_token(RawTokenKind::Operator, "/>");
+        state.update_token(RawTokenKind::XmlStart, "<");
+        state.update_token(RawTokenKind::Operator, "</");
+        state.update_token(RawTokenKind::Identifier, "orphan");
+        state.update_token(RawTokenKind::Operator, ">");
+
+        assert_eq!(
+            state.take_error(),
+            Some(XmlIssue::ClosingTagWithoutOpeningTag {
+                found: Some("orphan".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn reports_an_unterminated_xml_declaration_as_a_typed_eof_issue() {
+        let mut state = XmlState::default();
+        state.update_token(RawTokenKind::XmlStart, "<");
+        state.update_token(RawTokenKind::Operator, "!");
+
+        assert_eq!(state.eof_issue(), Some(XmlIssue::UnterminatedDeclaration));
     }
 
     #[test]
@@ -705,7 +750,7 @@ mod tests {
         state.update_token(RawTokenKind::Operator, "/>");
 
         assert!(state.can_start_literal());
-        assert!(state.eof_message().is_none());
+        assert!(state.eof_issue().is_none());
     }
 
     #[test]
@@ -722,6 +767,6 @@ mod tests {
 
         assert!(!state.update_token(RawTokenKind::Operator, ">"));
         assert!(state.can_start_literal());
-        assert!(state.eof_message().is_none());
+        assert!(state.eof_issue().is_none());
     }
 }

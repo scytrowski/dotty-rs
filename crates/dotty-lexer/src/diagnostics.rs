@@ -16,6 +16,8 @@ pub enum LexerIssue {
     Escape(EscapeIssue),
     /// A failure while scanning an interpolated string or splice.
     Interpolation(InterpolationIssue),
+    /// A failure while scanning XML syntax or recovering XML state.
+    Xml(XmlIssue),
     /// The lexer does not currently support this source character.
     UnsupportedSourceCharacter { character: char },
     /// A block comment reached end of input before it was closed.
@@ -108,6 +110,45 @@ pub enum InterpolationIssue {
     InvalidSplice { following_character: Option<char> },
     /// A simple `$` splice was not followed by an identifier.
     IdentifierExpectedAfterDollar,
+}
+
+/// Structured failures produced while tracking XML syntax and recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum XmlIssue {
+    /// An XML comment reached end of input before its terminator.
+    UnterminatedComment,
+    /// A CDATA section reached end of input before its terminator.
+    UnterminatedCdata,
+    /// An XML attribute expression reached end of input before its closing brace.
+    AttributeExpressionMustBeClosed,
+    /// An XML expression reached end of input before its closing brace.
+    UnterminatedExpression,
+    /// An attribute name was not followed by `=`.
+    AttributeNameMustBeFollowedByEquals,
+    /// An attribute assignment did not provide a value.
+    AttributeValueExpectedAfterEquals,
+    /// An XML declaration reached end of input before it was closed.
+    UnterminatedDeclaration,
+    /// An XML tag or containing element reached end of input before closing.
+    UnterminatedTag,
+    /// An attribute value was present without a preceding `=`.
+    AttributeValueMustFollowEquals,
+    /// An attribute name was expected in an opening tag.
+    AttributeNameExpected,
+    /// A closing tag contained attribute-like tokens.
+    ClosingTagCannotContainAttributes,
+    /// An opening tag began without a name.
+    OpeningTagNameExpected,
+    /// An XML closing tag began without a name.
+    ClosingTagNameExpected,
+    /// A closing tag name did not match the corresponding opening tag.
+    MismatchedClosingTag { expected: String, found: String },
+    /// A closing tag had no matching opening tag.
+    ClosingTagWithoutOpeningTag { found: Option<String> },
+    /// An XML comment contained the forbidden `--` sequence.
+    InvalidCommentDoubleHyphen,
+    /// An `=` token occurred where no attribute assignment was expected.
+    UnexpectedAttributeEquals,
 }
 
 /// A diagnostic reported by the raw lexer or contextual scanner.

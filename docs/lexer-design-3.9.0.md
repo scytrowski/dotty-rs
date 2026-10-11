@@ -598,11 +598,11 @@ The public lexer diagnostic type is `dotty_lexer::LexerDiagnostic`, backed by
 the structured `LexerIssue` payload. Unsupported source characters,
 unterminated block comments, and malformed backquoted identifiers have
 dedicated variants, as do numeric, literal, escape, and interpolation
-failures. XML diagnostics and contextual indentation diagnostics still use a
-temporary `Legacy { message }` variant; the XML state continues to produce
-strings internally until its separately scoped migration. The bridge preserves
-existing message text, spans, order, and recovery behavior without making
-typed issues renderable as strings.
+failures. XML state and raw-lexer forwarding use typed `XmlIssue` variants,
+including source tag names for mismatched or unmatched closing tags. The
+temporary `Legacy { message }` variant remains only for contextual indentation
+diagnostics. Diagnostic spans, order, and recovery behavior are preserved
+without making typed issues renderable as strings.
 
 The lexer also has deterministic short-input hardening tests that exercise
 2,380 ASCII inputs, 1,111 Unicode/multibyte inputs, and 8,192 seeded mixed

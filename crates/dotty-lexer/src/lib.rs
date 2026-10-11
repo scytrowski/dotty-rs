@@ -12,7 +12,7 @@ mod xml;
 pub use cursor::{Cursor, CursorError};
 pub use diagnostics::{
     EscapeIssue, InterpolationIssue, LexerDiagnostic, LexerIssue, LiteralIssue,
-    NonIntegerLiteralKind, NumericComponent, NumericIssue,
+    NonIntegerLiteralKind, NumericComponent, NumericIssue, XmlIssue,
 };
 pub use lexer::{RawLexer, RawLexerError};
 pub use raw_token::{HardKeyword, Punctuation, RawItem, RawToken, RawTokenKind};
