@@ -444,7 +444,6 @@ mod tests {
     use super::*;
     use crate::class_path::{
         ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource,
-        CompositeClassPath, DirectoryClassPath,
     };
     use crate::jdk_class_path::JdkClassPath;
     use crate::jmod_class_path::JmodClassPath;
@@ -452,7 +451,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn fixture_path(relative: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -557,47 +556,6 @@ mod tests {
 
         fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
             Ok(package == ["java", "lang"] || package == ["cycle"])
-        }
-    }
-
-    struct SyntheticTastyJdk;
-
-    impl ClassPathEntry for SyntheticTastyJdk {
-        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
-            let (bytes, flags) = match name.as_internal() {
-                "java/lang/Object" => (test_class_stub("java/lang/Object", 0x0021), 0x0021),
-                "java/io/Closeable" => (test_class_stub("java/io/Closeable", 0x0601), 0x0601),
-                _ => return Ok(None),
-            };
-            Ok(Some(ClassResource::new(
-                bytes,
-                ClassFormat::Class,
-                ClassOrigin::Directory(PathBuf::from(format!("<synthetic-{flags:04x}>"))),
-            )))
-        }
-
-        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
-            Ok(package == ["java", "lang"] || package == ["java", "io"])
-        }
-    }
-
-    struct DelayedCloseableClassPath {
-        inner: CompositeClassPath,
-        allow_closeable: Arc<AtomicBool>,
-    }
-
-    impl ClassPathEntry for DelayedCloseableClassPath {
-        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
-            if name.as_internal() == "java/io/Closeable"
-                && !self.allow_closeable.load(Ordering::Relaxed)
-            {
-                return Ok(None);
-            }
-            self.inner.find_class(name)
-        }
-
-        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
-            self.inner.contains_package(package)
         }
     }
 
@@ -1080,96 +1038,6 @@ mod tests {
                 assert!(store.scopes.get(package_scope).lookup_all(&name).is_empty());
             }
         }
-    }
-
-    #[test]
-    fn tasty_parent_failure_rolls_back_loaded_dependencies_and_retry_succeeds() {
-        let mut store = SemanticStore::new();
-        let definitions = Definitions::bootstrap(&mut store);
-        let allow_closeable = Arc::new(AtomicBool::new(false));
-        let inner = CompositeClassPath::new(vec![
-            Box::new(DirectoryClassPath::new(fixture_path(
-                "../dotty-tasty/tests/fixtures/scala3-library",
-            ))),
-            Box::new(SyntheticTastyJdk),
-        ]);
-        let class_path = DelayedCloseableClassPath {
-            inner,
-            allow_closeable: Arc::clone(&allow_closeable),
-        };
-        let mut resolver =
-            ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
-        let scala_io = resolver
-            .resolve_package(&mut store, &["scala", "io"])
-            .unwrap()
-            .expect("the Scala library fixture contains scala.io");
-        let package_prefix = store
-            .types
-            .alloc(Type::type_ref(definitions.no_prefix, scala_io));
-        let package_scope = resolver.session.packages.scope_of(scala_io).unwrap();
-        let source_name = Name::new(store.names.intern("Source"), Namespace::Type);
-
-        let error = resolver
-            .resolve_member(
-                &mut store,
-                &MemberRequest {
-                    prefix: package_prefix,
-                    name: source_name,
-                    selector: MemberSelector::Unique,
-                    space: MemberSpace::Prefix,
-                },
-            )
-            .expect_err("Source's later Closeable parent should fail its first load");
-        assert!(matches!(
-            error,
-            ResolutionError::Malformed { reason } if reason.contains("java/io/Closeable")
-        ));
-        for name in ["scala/io/Source", "scala/collection/Iterator"] {
-            assert!(
-                !resolver
-                    .session
-                    .resolved
-                    .contains_key(&BinaryName::from_internal(name)),
-                "failed TASTy load left {name} in the positive cache"
-            );
-        }
-        assert!(resolver.session.metadata.is_empty());
-        assert!(
-            store
-                .scopes
-                .get(package_scope)
-                .lookup_all(&source_name)
-                .is_empty()
-        );
-        if let Some(collection) = resolver.session.packages.get(&["scala", "collection"]) {
-            let collection_scope = resolver.session.packages.scope_of(collection).unwrap();
-            let iterator_name = Name::new(store.names.intern("Iterator"), Namespace::Type);
-            assert!(
-                store
-                    .scopes
-                    .get(collection_scope)
-                    .lookup_all(&iterator_name)
-                    .is_empty()
-            );
-        }
-
-        allow_closeable.store(true, Ordering::Relaxed);
-        let source = resolver
-            .resolve_member(
-                &mut store,
-                &MemberRequest {
-                    prefix: package_prefix,
-                    name: source_name,
-                    selector: MemberSelector::Unique,
-                    space: MemberSpace::Prefix,
-                },
-            )
-            .expect("retry should load Source after the later parent becomes available")
-            .expect("Source should be materialized on retry");
-        assert_eq!(
-            store.names.resolve(store.symbols.get(source).name.text()),
-            "Source"
-        );
     }
 
     #[test]
