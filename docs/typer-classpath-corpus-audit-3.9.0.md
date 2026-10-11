@@ -414,8 +414,8 @@ Distinct targets by request outcome and normalized error family:
 | `space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=other success` | 1 targets, 1 files |
 | `space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=package type member unresolved` | 33 targets, 42 files |
 | `space=Prefix::prefix=trait TypeRef::target=Trait::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=class member scope unavailable: incomplete class info` | 18 targets, 5 files |
-| `space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=unsupported prefix shape` | 66 targets, 14 files |
-| `space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=unsupported prefix shape` | 46 targets, 11 files |
+| `space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=unsupported prefix shape` | 248 targets, 14 files |
+| `space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=unsupported prefix shape` | 247 targets, 11 files |
 | Incomplete class prefix targets | 111 targets |
 
 ### Bounded implementation ranking
@@ -1101,6 +1101,9 @@ resolver_581_comparison:
     space=Prefix::prefix=trait TypeRef::target=Trait::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver=23
     space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver=248
     space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver=247
+  member_request_unknown_prefix_identity:
+    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver=248
+    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver=247
   member_request_outcomes:
     class member scope unavailable: incomplete class info=3721
     error=452
@@ -1120,8 +1123,8 @@ resolver_581_comparison:
     space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=other success=1::files=1
     space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=package type member unresolved=33::files=42
     space=Prefix::prefix=trait TypeRef::target=Trait::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=class member scope unavailable: incomplete class info=18::files=5
-    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=unsupported prefix shape=66::files=14
-    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=unsupported prefix shape=46::files=11
+    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=unsupported prefix shape=248::files=14
+    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=unsupported prefix shape=247::files=11
   unresolved_member_kinds:
     class member scope unavailable: incomplete class info=3721
     other resolver Ok(None)=60
@@ -1135,8 +1138,8 @@ resolver_581_comparison:
     space=Prefix::prefix=package TypeRef::target=Package::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver: requests=2716, distinct_keys=75, owners=30, names=68, files=115, repeated_hit_factor=36.213, outcomes={"package term member unsupported": 2716}
     space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=810, distinct_keys=85, owners=20, names=76, files=101, repeated_hit_factor=9.529, outcomes={"error": 452, "other success": 1, "package type member unresolved": 357}
     space=Prefix::prefix=trait TypeRef::target=Trait::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=23, distinct_keys=18, owners=6, names=17, files=5, repeated_hit_factor=1.278, outcomes={"class member scope unavailable: incomplete class info": 23}
-    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver: requests=248, distinct_keys=66, owners=1, names=66, files=14, repeated_hit_factor=3.758, outcomes={"unsupported prefix shape": 248}
-    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=247, distinct_keys=46, owners=1, names=46, files=11, repeated_hit_factor=5.370, outcomes={"unsupported prefix shape": 247}
+    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver: requests=248, distinct_keys=248, owners=0, names=66, files=14, repeated_hit_factor=1.000, outcomes={"unsupported prefix shape": 248}
+    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=247, distinct_keys=247, owners=0, names=46, files=11, repeated_hit_factor=1.000, outcomes={"unsupported prefix shape": 247}
   member_requests_by_enclosing_method:
     compiler/src/dotty/tools/MainGenericCompiler.scala#tree=243::dotty.tools.CompileSettings.withTargetScript: requests=1, distinct_request_outcomes=1
       prefix=scala.util::namespace=term::name=Try::space=Prefix::outcome=package term member unsupported=1
@@ -1799,7 +1802,7 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/jvm/CodeGen.scala#tree=564::dotty.tools.backend.jvm.CodeGen.genClass: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=SyncAndTryBuilder::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=SyncAndTryBuilder::space=Prefix::unknown-request=389::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/backend/jvm/GenBCode.scala#tree=118::dotty.tools.backend.jvm.GenBCode.frontendAccess: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/jvm/GenBCode.scala#tree=140::dotty.tools.backend.jvm.GenBCode.primitives: requests=1, distinct_request_outcomes=1
@@ -2300,17 +2303,17 @@ resolver_581_comparison:
     compiler/src/dotty/tools/backend/jvm/opt/MethodMax.scala#tree=549::dotty.tools.backend.jvm.opt.MethodMax$.setMaxsComputed: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=tools::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10067::dotty.tools.backend.sjs.JSCodeGen.genArrayOp: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=897::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10131::dotty.tools.backend.sjs.JSCodeGen.genSynchronized: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=901::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10160::dotty.tools.backend.sjs.JSCodeGen.genCoercion: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=905::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2319,47 +2322,47 @@ resolver_581_comparison:
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10306::dotty.tools.backend.sjs.JSCodeGen.genNewArray: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10456::dotty.tools.backend.sjs.JSCodeGen.genNormalApply: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=911::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10605::dotty.tools.backend.sjs.JSCodeGen.genApplyInline: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=DefDef::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=DefDef::space=Prefix::unknown-request=915::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=1072::dotty.tools.backend.sjs.JSCodeGen.collectValOrDefDefs: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=List::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=List::space=Prefix::unknown-request=720::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11017::dotty.tools.backend.sjs.JSCodeGen.genApplyJSMethodGeneric: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=919::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=1102::dotty.tools.backend.sjs.JSCodeGen.consumeDelambdafyTarget: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=ScopedVar::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ScopedVar::space=Prefix::unknown-request=724::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11061::dotty.tools.backend.sjs.JSCodeGen.extractFirstArg: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=923::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11070::dotty.tools.backend.sjs.JSCodeGen.genJSNativeMemberSelect: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=927::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11080::dotty.tools.backend.sjs.JSCodeGen.genJSNativeMemberCall: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=931::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11136::dotty.tools.backend.sjs.JSCodeGen.genJSNativeMemberSelectOrCall: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=935::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2368,32 +2371,32 @@ resolver_581_comparison:
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11451::dotty.tools.backend.sjs.JSCodeGen.genTypeApply: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11483::dotty.tools.backend.sjs.JSCodeGen.genJavaSeqLiteral: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=JavaSeqLiteral::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaSeqLiteral::space=Prefix::unknown-request=941::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11809::dotty.tools.backend.sjs.JSCodeGen.genMatch: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=945::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12472::dotty.tools.backend.sjs.JSCodeGen.genClosure: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Closure::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Closure::space=Prefix::unknown-request=949::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12556::dotty.tools.backend.sjs.JSCodeGen.genDynamicImportForwarder: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=953::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12609::dotty.tools.backend.sjs.JSCodeGen.box: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=957::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12683::dotty.tools.backend.sjs.JSCodeGen.unbox: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=961::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2402,188 +2405,188 @@ resolver_581_comparison:
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12761::dotty.tools.backend.sjs.JSCodeGen.genAsInstanceOf: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12784::dotty.tools.backend.sjs.JSCodeGen.genThrowClassCastException: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=967::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12884::dotty.tools.backend.sjs.JSCodeGen.genIsInstanceOf: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=971::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12919::dotty.tools.backend.sjs.JSCodeGen.genApplyMethodMaybeStatically: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=975::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12965::dotty.tools.backend.sjs.JSCodeGen.genApplyMethod: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=979::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=13019::dotty.tools.backend.sjs.JSCodeGen.genApplyMethodStatically: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=983::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=13058::dotty.tools.backend.sjs.JSCodeGen.genApplyStatic: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=987::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=13080::dotty.tools.backend.sjs.JSCodeGen.genApplyJSClassMethod: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=991::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=13101::dotty.tools.backend.sjs.JSCodeGen.genModuleApplyMethod: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=13163::dotty.tools.backend.sjs.JSCodeGen.makePrimitiveBox: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=toIRType::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=toIRType::space=Prefix::unknown-request=996::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=13191::dotty.tools.backend.sjs.JSCodeGen.makePrimitiveUnbox: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=toIRType::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=toIRType::space=Prefix::unknown-request=1000::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=14320::dotty.tools.backend.sjs.JSCodeGen.genJSPrimitive: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=JSPrimitives::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=JSPrimitives::space=Prefix::unknown-request=1004::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=14678::dotty.tools.backend.sjs.JSCodeGen.genLinkTimeExpr: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=1008::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=14911::dotty.tools.backend.sjs.JSCodeGen.genReflectiveCall: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=1012::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15071::dotty.tools.backend.sjs.JSCodeGen.genActualArgs: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=1016::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15193::dotty.tools.backend.sjs.JSCodeGen.genActualJSArgs: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=1020::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15263::dotty.tools.backend.sjs.JSCodeGen.genJSRepeatedParam: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15296::dotty.tools.backend.sjs.JSCodeGen.MaybeAsInstanceOf$.unapply: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=1025::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15520::dotty.tools.backend.sjs.JSCodeGen.WrapArray$.unapply: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=1029::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15539::dotty.tools.backend.sjs.JSCodeGen.genJSArrayToVarArgs: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1033::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15606::dotty.tools.backend.sjs.JSCodeGen.genCaptureValuesFromFakeNewInstance: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15624::dotty.tools.backend.sjs.JSCodeGen.genVarRef: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=1038::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15818::dotty.tools.backend.sjs.JSCodeGen.genAssignableField: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=1042::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15874::dotty.tools.backend.sjs.JSCodeGen.genLoadStaticField: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1046::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15884::dotty.tools.backend.sjs.JSCodeGen.genPrivateFieldsSymbol: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1050::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15896::dotty.tools.backend.sjs.JSCodeGen.genLoadModule: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::unknown-request=1054::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15957::dotty.tools.backend.sjs.JSCodeGen.genLoadModuleOrGlobalScope: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=require::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=require::space=Prefix::unknown-request=1058::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15987::dotty.tools.backend.sjs.JSCodeGen.genLoadJSConstructor: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1062::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16020::dotty.tools.backend.sjs.JSCodeGen.ruleOutGlobalScope: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::unknown-request=1066::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16038::dotty.tools.backend.sjs.JSCodeGen.reportErrorLoadGlobalScope: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=1070::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16143::dotty.tools.backend.sjs.JSCodeGen.genJSSelectOrGlobalRef: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::unknown-request=1074::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=1624::dotty.tools.backend.sjs.JSCodeGen.genScalaClass: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=TypeDef::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TypeDef::space=Prefix::unknown-request=728::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16255::dotty.tools.backend.sjs.JSCodeGen.genJSMethodApplyOrGlobalRefApply: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::unknown-request=1078::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16267::dotty.tools.backend.sjs.JSCodeGen.computeJSNativeLoadSpecOfValDef: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=atPhaseBeforeTransforms::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=atPhaseBeforeTransforms::space=Prefix::unknown-request=1082::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16304::dotty.tools.backend.sjs.JSCodeGen.computeJSNativeLoadSpecOfClass: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1086::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16592::dotty.tools.backend.sjs.JSCodeGen.computeJSNativeLoadSpecOfInPhase: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=1090::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16603::dotty.tools.backend.sjs.JSCodeGen.isMethodStaticInIR: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1094::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16616::dotty.tools.backend.sjs.JSCodeGen.genClassConstant: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=1098::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16627::dotty.tools.backend.sjs.JSCodeGen.isStaticModule: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1102::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16654::dotty.tools.backend.sjs.JSCodeGen.isPrimitiveValueType: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1106::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2592,12 +2595,12 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16727::dotty.tools.backend.sjs.JSCodeGen.hasDefaultCtorArgsAndJSModule: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1113::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16794::dotty.tools.backend.sjs.JSCodeGen.desugarIdent: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=java::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=java::space=Prefix::unknown-request=1117::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2612,107 +2615,107 @@ resolver_581_comparison:
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16999::dotty.tools.backend.sjs.JSCodeGen$.DefaultParamInfo.attachedMethod: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=2020::dotty.tools.backend.sjs.JSCodeGen.genNonNativeJSClass: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=TypeDef::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TypeDef::space=Prefix::unknown-request=732::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=2109::dotty.tools.backend.sjs.JSCodeGen.genRawJSClassData: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=TypeDef::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TypeDef::space=Prefix::unknown-request=736::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=2240::dotty.tools.backend.sjs.JSCodeGen.genInterface: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=TypeDef::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TypeDef::space=Prefix::unknown-request=740::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=2302::dotty.tools.backend.sjs.JSCodeGen.isCandidateForForwarders: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=744::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=2343::dotty.tools.backend.sjs.JSCodeGen.genStaticForwardersForClassOrInterface: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=748::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=2649::dotty.tools.backend.sjs.JSCodeGen.genStaticForwardersFromModuleClass: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=752::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=2928::dotty.tools.backend.sjs.JSCodeGen.genClassFields: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=TypeDef::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TypeDef::space=Prefix::unknown-request=756::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=2972::dotty.tools.backend.sjs.JSCodeGen.genExposedFieldIRType: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=atPhase::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=atPhase::space=Prefix::unknown-request=760::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=3009::dotty.tools.backend.sjs.JSCodeGen.genStaticConstructorWithStats: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=764::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=3049::dotty.tools.backend.sjs.JSCodeGen.genRegisterReflectiveInstantiation: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=768::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=308::dotty.tools.backend.sjs.JSCodeGen.resetAllScopedVars: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=withScopedVars::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=withScopedVars::space=Prefix::unknown-request=662::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=3111::dotty.tools.backend.sjs.JSCodeGen.genRegisterReflectiveInstantiationForModuleClass: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=772::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=3310::dotty.tools.backend.sjs.JSCodeGen.genRegisterReflectiveInstantiationForNormalClass: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=776::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=347::dotty.tools.backend.sjs.JSCodeGen.withPerMethodBodyState: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=withScopedVars::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=withScopedVars::space=Prefix::unknown-request=666::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=3608::dotty.tools.backend.sjs.JSCodeGen.genJSClassCapturesAndConstructor: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=unchecked::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=unchecked::space=Prefix::unknown-request=780::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=373::dotty.tools.backend.sjs.JSCodeGen.acquireContextualJSClassValue: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=ScopedVar::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ScopedVar::space=Prefix::unknown-request=670::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=3849::dotty.tools.backend.sjs.JSCodeGen.genPrimaryJSClassCtor: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=DefDef::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=DefDef::space=Prefix::unknown-request=784::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=392::dotty.tools.backend.sjs.JSCodeGen.withNewLocalNameScope: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=withScopedVars::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=withScopedVars::space=Prefix::unknown-request=674::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=396::dotty.tools.backend.sjs.JSCodeGen.implicitLocalNames: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=ScopedVar::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ScopedVar::space=Prefix::unknown-request=678::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=402::dotty.tools.backend.sjs.JSCodeGen.currentThisTypeNullable: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=encodeClassType::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=encodeClassType::space=Prefix::unknown-request=682::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=4052::dotty.tools.backend.sjs.JSCodeGen.genSecondaryJSClassCtor: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=DefDef::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=DefDef::space=Prefix::unknown-request=788::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2723,54 +2726,54 @@ resolver_581_comparison:
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=448::dotty.tools.backend.sjs.JSCodeGen.currentThisType: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=457::dotty.tools.backend.sjs.JSCodeGen.freshLocalIdent: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=ScopedVar::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ScopedVar::space=Prefix::unknown-request=687::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=4637::dotty.tools.backend.sjs.JSCodeGen.genJSClassCtorBody: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=4670::dotty.tools.backend.sjs.JSCodeGen.wrapJSCtorBody: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=795::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=469::dotty.tools.backend.sjs.JSCodeGen.freshLocalIdent: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=ScopedVar::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ScopedVar::space=Prefix::unknown-request=691::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=4807::dotty.tools.backend.sjs.JSCodeGen.genJSNativeMemberDef: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=ValOrDefDef::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ValOrDefDef::space=Prefix::unknown-request=799::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=481::dotty.tools.backend.sjs.JSCodeGen.freshLocalIdent: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=ScopedVar::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ScopedVar::space=Prefix::unknown-request=695::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=4828::dotty.tools.backend.sjs.JSCodeGen.genMethod: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=withScopedVars::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=withScopedVars::space=Prefix::unknown-request=803::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=515::dotty.tools.backend.sjs.JSCodeGen.consumeLazilyGeneratedAnonClass: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=MutableSymbolMap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=MutableSymbolMap::space=Prefix::unknown-request=699::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=5172::dotty.tools.backend.sjs.JSCodeGen.genMethodWithCurrentLocalNameScope: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=DefDef::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=DefDef::space=Prefix::unknown-request=807::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=5328::dotty.tools.backend.sjs.JSCodeGen.genMethodDef: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=811::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=5355::dotty.tools.backend.sjs.JSCodeGen.genParamDef: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=815::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2779,17 +2782,17 @@ resolver_581_comparison:
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=5417::dotty.tools.backend.sjs.JSCodeGen.exprToStat: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=5448::dotty.tools.backend.sjs.JSCodeGen.genExpr: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=821::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=5476::dotty.tools.backend.sjs.JSCodeGen.genExpr: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=JSName::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JSName::space=Prefix::unknown-request=825::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=5540::dotty.tools.backend.sjs.JSCodeGen.genComputedJSName: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=829::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2798,12 +2801,12 @@ resolver_581_comparison:
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=6447::dotty.tools.backend.sjs.JSCodeGen.genStatOrExpr: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=6502::dotty.tools.backend.sjs.JSCodeGen.qualifierOf: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=835::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=6531::dotty.tools.backend.sjs.JSCodeGen.genThis: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=ScopedVar::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ScopedVar::space=Prefix::unknown-request=839::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2812,92 +2815,92 @@ resolver_581_comparison:
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=6894::dotty.tools.backend.sjs.JSCodeGen.genTryCatch: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=7061::dotty.tools.backend.sjs.JSCodeGen.genApply: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=845::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=7150::dotty.tools.backend.sjs.JSCodeGen.genSuperCall: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=849::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=7256::dotty.tools.backend.sjs.JSCodeGen.genApplyNew: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=7321::dotty.tools.backend.sjs.JSCodeGen.genNewHijackedClass: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=encodeClassName::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=encodeClassName::space=Prefix::unknown-request=854::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=7491::dotty.tools.backend.sjs.JSCodeGen.genNewJSClass: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=8186::dotty.tools.backend.sjs.JSCodeGen.genNewAnonJSClass: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=859::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=8336::dotty.tools.backend.sjs.JSCodeGen.genPrimitiveOp: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=863::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=8381::dotty.tools.backend.sjs.JSCodeGen.genSimpleOp: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=867::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=8559::dotty.tools.backend.sjs.JSCodeGen.genSimpleUnaryOp: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=871::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=862::dotty.tools.backend.sjs.JSCodeGen.genCompilationUnit: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=703::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=896::dotty.tools.backend.sjs.JSCodeGen.genIRFile: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc::namespace=type::name=CompilationUnit::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=9232::dotty.tools.backend.sjs.JSCodeGen.genSimpleBinaryOp: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=875::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=9250::dotty.tools.backend.sjs.JSCodeGen.adaptPrimitive: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=948::dotty.tools.backend.sjs.JSCodeGen.getFileFor: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=708::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=9507::dotty.tools.backend.sjs.JSCodeGen.genConversion: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=880::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=9586::dotty.tools.backend.sjs.JSCodeGen.genUniversalEqualityOp: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=884::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=982::dotty.tools.backend.sjs.JSCodeGen.isDelambdafyTargetCandidate: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Name::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Name::space=Prefix::unknown-request=712::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=9855::dotty.tools.backend.sjs.JSCodeGen.genEqEqPrimitive: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=888::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=9884::dotty.tools.backend.sjs.JSCodeGen.genStringConcat: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=892::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=9909::dotty.tools.backend.sjs.JSCodeGen.genScalaHash: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=995::dotty.tools.backend.sjs.JSCodeGen.isDelambdafyTarget: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=716::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -3368,251 +3371,252 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/cc/Capability.scala#tree=1926::dotty.tools.dotc.cc.Capabilities$.Capability.hiddenSet: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=106::dotty.tools.dotc.cc.CaptureSet.isNotEmpty: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1367::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1274::dotty.tools.dotc.cc.CaptureSet.map: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1406::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=TypeMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1291::dotty.tools.dotc.cc.CaptureSet.substParams: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1408::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=TypeMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1299::dotty.tools.dotc.cc.CaptureSet.maybe: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1410::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=TypeMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1310::dotty.tools.dotc.cc.CaptureSet.restrict: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1412::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=TypeMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1331::dotty.tools.dotc.cc.CaptureSet.readOnly: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1414::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=TypeMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=134::dotty.tools.dotc.cc.CaptureSet.asConst: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Const::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Const::space=Prefix::unknown-request=1368::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1380::dotty.tools.dotc.cc.CaptureSet.tryClassifyAs: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1416::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1441::dotty.tools.dotc.cc.CaptureSet.freeInResult: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1418::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=scala::namespace=type::name=ContextFunction1::space=Prefix::outcome=package type member unresolved=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=146::dotty.tools.dotc.cc.CaptureSet.asVar: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1369::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=term::name=assert::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1483::dotty.tools.dotc.cc.CaptureSet.isBadRoot: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1420::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Symbol::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1507::dotty.tools.dotc.cc.CaptureSet.disallowBadRoots: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1526::dotty.tools.dotc.cc.CaptureSet.checkAddedElems: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1423::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1548::dotty.tools.dotc.cc.CaptureSet.ensureWellformed: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1424::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1593::dotty.tools.dotc.cc.CaptureSet.processElems: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=165::dotty.tools.dotc.cc.CaptureSet.toConst: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Const::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Const::space=Prefix::unknown-request=1371::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1738::dotty.tools.dotc.cc.CaptureSet$.universal: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::unknown-request=1426::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=173::dotty.tools.dotc.cc.CaptureSet.isUniversal: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1372::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1745::dotty.tools.dotc.cc.CaptureSet$.shared: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=GlobalAny::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=GlobalAny::space=Prefix::unknown-request=1427::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1848::dotty.tools.dotc.cc.CaptureSet$.Const.addThisElem: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=addIfHiddenOrFail::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=addIfHiddenOrFail::space=Prefix::unknown-request=1428::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1857::dotty.tools.dotc.cc.CaptureSet$.Const.toReader: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=failWith::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=failWith::space=Prefix::unknown-request=1429::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=185::dotty.tools.dotc.cc.CaptureSet.containsTerminalCapability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1373::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1881::dotty.tools.dotc.cc.CaptureSet$.Const.withDescription: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::unknown-request=1430::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1884::dotty.tools.dotc.cc.CaptureSet$.Const.owner: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=NoSymbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=NoSymbol::space=Prefix::unknown-request=1431::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1928::dotty.tools.dotc.cc.CaptureSet$.Const.description: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=descr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=descr::space=Prefix::unknown-request=1432::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1962::dotty.tools.dotc.cc.CaptureSet$.EmptyWithProvenance.optionalInfo: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1433::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=200::dotty.tools.dotc.cc.CaptureSet.containsResultCapability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1374::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2012::dotty.tools.dotc.cc.CaptureSet$.capImpliedByCapability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1434::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2116::dotty.tools.dotc.cc.CaptureSet$.Var.owner: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=initialOwner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=initialOwner::space=Prefix::unknown-request=1435::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2131::dotty.tools.dotc.cc.CaptureSet$.Var.maybeId: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1436::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2200::dotty.tools.dotc.cc.CaptureSet$.Var.associateWithStateful: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=mutability::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=mutability::space=Prefix::unknown-request=1437::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2208::dotty.tools.dotc.cc.CaptureSet$.Var.isConst: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=1438::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2216::dotty.tools.dotc.cc.CaptureSet$.Var.isAlwaysEmpty: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1439::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2228::dotty.tools.dotc.cc.CaptureSet$.Var.isProvisionallySolved: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=1440::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2267::dotty.tools.dotc.cc.CaptureSet$.Var.dropEmpties: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1441::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2291::dotty.tools.dotc.cc.CaptureSet$.Var.isBadRoot: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1442::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2298::dotty.tools.dotc.cc.CaptureSet$.Var.classifier: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=ClassSymbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ClassSymbol::space=Prefix::unknown-request=1443::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=232::dotty.tools.dotc.cc.CaptureSet.containsGlobalOrLocalCap: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1375::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2331::dotty.tools.dotc.cc.CaptureSet$.Var.narrowClassifier: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=leastClassifier::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=leastClassifier::space=Prefix::unknown-request=1444::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2353::dotty.tools.dotc.cc.CaptureSet$.Var.adoptClassifier: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=ClassSymbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ClassSymbol::space=Prefix::unknown-request=1445::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2375::dotty.tools.dotc.cc.CaptureSet$.Var.tryClassifyAs: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=ClassSymbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ClassSymbol::space=Prefix::unknown-request=1446::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=244::dotty.tools.dotc.cc.CaptureSet.isReadOnly: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1377::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=251::dotty.tools.dotc.cc.CaptureSet.isAlwaysReadOnly: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1378::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2682::dotty.tools.dotc.cc.CaptureSet$.Var.addThisElem: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1447::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2714::dotty.tools.dotc.cc.CaptureSet$.Var.toReader: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1448::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2831::dotty.tools.dotc.cc.CaptureSet$.Var.levelOK: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1449::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=286::dotty.tools.dotc.cc.CaptureSet.isExclusive: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=1380::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2879::dotty.tools.dotc.cc.CaptureSet$.Var.disallowBadRoots: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1450::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2900::dotty.tools.dotc.cc.CaptureSet$.Var.checkAddedElems: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=1451::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2976::dotty.tools.dotc.cc.CaptureSet$.Var.upperApprox: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1452::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3058::dotty.tools.dotc.cc.CaptureSet$.Var.solve: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=CCState::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=CCState::space=Prefix::unknown-request=1453::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3094::dotty.tools.dotc.cc.CaptureSet$.Var.markSolved: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=1454::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3112::dotty.tools.dotc.cc.CaptureSet$.Var.markIgnored: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1455::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=311::dotty.tools.dotc.cc.CaptureSet.maybeExclusive: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=reporting::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reporting::space=Prefix::unknown-request=1382::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=term::name=reporting::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3134::dotty.tools.dotc.cc.CaptureSet$.Var.withDescription: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=1456::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3143::dotty.tools.dotc.cc.CaptureSet$.Var.withElems: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=Var::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Var::space=Prefix::unknown-request=1457::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3220::dotty.tools.dotc.cc.CaptureSet$.Var.ids: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=getClass::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=getClass::space=Prefix::unknown-request=1458::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=330::dotty.tools.dotc.cc.CaptureSet.failWith: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=TypeComparer::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=TypeComparer::space=Prefix::unknown-request=1384::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=term::name=TypeComparer::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3436::dotty.tools.dotc.cc.CaptureSet$.VarInTypeTree.normalizeLocalCaps: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=1459::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3458::dotty.tools.dotc.cc.CaptureSet$.VarInTypeTree.disallowBadRoots: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=isRefining::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=isRefining::space=Prefix::unknown-request=1460::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3543::dotty.tools.dotc.cc.CaptureSet$.DerivedVar.summarize: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=getClass::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=getClass::space=Prefix::unknown-request=1461::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=360::dotty.tools.dotc.cc.CaptureSet.tryInclude: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=reporting::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reporting::space=Prefix::unknown-request=1386::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=term::name=reporting::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3774::dotty.tools.dotc.cc.CaptureSet$.BiMapped.isMaybeSet: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1462::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3790::dotty.tools.dotc.cc.CaptureSet$.BiMapped.summarize: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1463::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3867::dotty.tools.dotc.cc.CaptureSet$.Filtered.tryInclude: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=accountsFor::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=accountsFor::space=Prefix::unknown-request=1464::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=401::dotty.tools.dotc.cc.CaptureSet.tryInclude: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1388::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4042::dotty.tools.dotc.cc.CaptureSet$.Union.tryInclude: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=accountsFor::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=accountsFor::space=Prefix::unknown-request=1465::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4110::dotty.tools.dotc.cc.CaptureSet$.Union.propagateSolved: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=cs1::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=cs1::space=Prefix::unknown-request=1466::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=414::dotty.tools.dotc.cc.CaptureSet.mutableToReader: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1389::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4298::dotty.tools.dotc.cc.CaptureSet$.Intersection.propagateSolved: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=cs1::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=cs1::space=Prefix::unknown-request=1467::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4344::dotty.tools.dotc.cc.CaptureSet$.HiddenSet.owner: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1468::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4376::dotty.tools.dotc.cc.CaptureSet$.HiddenSet.add: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1469::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4398::dotty.tools.dotc.cc.CaptureSet$.HiddenSet.processElems: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=elems::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=elems::space=Prefix::unknown-request=1470::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4459::dotty.tools.dotc.cc.CaptureSet$.mappedSet: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1471::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4508::dotty.tools.dotc.cc.CaptureSet$.mapRefs: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4558::dotty.tools.dotc.cc.CaptureSet$.subCapturesRange: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=TypeBounds::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TypeBounds::space=Prefix::unknown-request=1473::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=457::dotty.tools.dotc.cc.CaptureSet.addNewElem: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1391::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Capability::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4584::dotty.tools.dotc.cc.CaptureSet$.IncludeFailure.trace: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=1474::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4604::dotty.tools.dotc.cc.CaptureSet$.IncludeFailure.addToTrace: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=IncludeFailure::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=IncludeFailure::space=Prefix::unknown-request=1475::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=501::dotty.tools.dotc.cc.CaptureSet.addIfHiddenOrFail: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1393::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5228::dotty.tools.dotc.cc.CaptureSet$.IncludeFailure.toText: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=inContext::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=inContext::space=Prefix::unknown-request=1476::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5272::dotty.tools.dotc.cc.CaptureSet$.MutAdaptFailure.render: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1477::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5334::dotty.tools.dotc.cc.CaptureSet$.VarState.addHidden: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1478::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5407::dotty.tools.dotc.cc.CaptureSet$.VarState.unify: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=ResultCap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ResultCap::space=Prefix::unknown-request=1479::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5435::dotty.tools.dotc.cc.CaptureSet$.VarState.ifNotSeen: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=util::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=util::space=Prefix::unknown-request=1480::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5482::dotty.tools.dotc.cc.CaptureSet$.VarState$.Separate: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1481::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5488::dotty.tools.dotc.cc.CaptureSet$.VarState$.HardSeparate: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1482::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5526::dotty.tools.dotc.cc.CaptureSet$.VarState$.Unrecorded: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1483::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5541::dotty.tools.dotc.cc.CaptureSet$.VarState$.ClosedUnrecorded: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1484::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5560::dotty.tools.dotc.cc.CaptureSet$.NarrowingCapabilityMap.apply: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=mapOver::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=mapOver::space=Prefix::unknown-request=1485::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5568::dotty.tools.dotc.cc.CaptureSet$.NarrowingCapabilityMap.isSameMap: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1486::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5605::dotty.tools.dotc.cc.CaptureSet$.NarrowingCapabilityMap.fuse: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1487::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5611::dotty.tools.dotc.cc.CaptureSet$.NarrowingCapabilityMap.Inverse.apply: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1488::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5618::dotty.tools.dotc.cc.CaptureSet$.NarrowingCapabilityMap.Inverse.mapCapability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1489::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5627::dotty.tools.dotc.cc.CaptureSet$.NarrowingCapabilityMap.Inverse.toString: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1490::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5662::dotty.tools.dotc.cc.CaptureSet$.NarrowingCapabilityMap.Inverse.fuse: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1491::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5685::dotty.tools.dotc.cc.CaptureSet$.MaybeMap.mapCapability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1492::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5703::dotty.tools.dotc.cc.CaptureSet$.ReadOnlyMap.mapCapability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1493::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5725::dotty.tools.dotc.cc.CaptureSet$.RestrictMap.mapCapability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1494::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5747::dotty.tools.dotc.cc.CaptureSet$.RestrictMap.isSameMap: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1495::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5862::dotty.tools.dotc.cc.CaptureSet$.ofInfo: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1496::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=6051::dotty.tools.dotc.cc.CaptureSet$.ofType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1497::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=6156::dotty.tools.dotc.cc.CaptureSet$.isAssumedPure: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1498::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=6185::dotty.tools.dotc.cc.CaptureSet$.assumedContains: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1499::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=631::dotty.tools.dotc.cc.CaptureSet.accountsFor: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1394::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=6353::dotty.tools.dotc.cc.CaptureSet$.withCaptureSetsExplained: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1500::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=704::dotty.tools.dotc.cc.CaptureSet.mightAccountFor: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=reporting::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reporting::space=Prefix::unknown-request=1396::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=term::name=reporting::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=71::dotty.tools.dotc.cc.CaptureSet.mutability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Mutability::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Mutability::space=Prefix::unknown-request=1366::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=723::dotty.tools.dotc.cc.CaptureSet.mightSubcapture: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1398::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=737::dotty.tools.dotc.cc.CaptureSet.subCaptures: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=type::name=VarState::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1400::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=VarState::space=Prefix::unknown-request=1399::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=822::dotty.tools.dotc.cc.CaptureSet.subCaptures: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=TypeComparer::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=TypeComparer::space=Prefix::unknown-request=1402::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=term::name=TypeComparer::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=944::dotty.tools.dotc.cc.CaptureSet.++: requests=2, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=944::dotty.tools.dotc.cc.CaptureSet.++: requests=2, distinct_request_outcomes=2
+      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::unknown-request=1404::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::unknown-request=1405::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala#tree=1330::dotty.tools.dotc.cc.CheckCaptures.CaptureChecker.interpolateIfInferred: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.cc.CheckCaptures$::namespace=type::name=Tree::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala#tree=1350::dotty.tools.dotc.cc.CheckCaptures.CaptureChecker.assertSub: requests=1, distinct_request_outcomes=1
@@ -3882,7 +3886,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=498::dotty.tools.dotc.config.CommandLineParser$.expandArg: requests=1, distinct_request_outcomes=1
       prefix=scala.jdk::namespace=term::name=CollectionConverters::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/config/PathResolver.scala#tree=689::dotty.tools.dotc.config.PathResolver.Calculated$.basis: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=Option::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Option::space=Prefix::unknown-request=1639::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/config/ScalaVersion.scala#tree=394::dotty.tools.dotc.config.ScalaVersion$.parse: requests=1, distinct_request_outcomes=1
       prefix=scala.util::namespace=term::name=Failure::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=2314::dotty.tools.dotc.config.Settings$.SettingGroup.publish: requests=1, distinct_request_outcomes=1
@@ -4303,29 +4307,29 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/MacroClassLoader.scala#tree=68::dotty.tools.dotc.core.MacroClassLoader$.init: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=128::dotty.tools.dotc.core.MatchTypeTrace$.record: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=inContext::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=inContext::space=Prefix::unknown-request=1850::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=137::dotty.tools.dotc.core.MatchTypeTrace$.isRecording: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1851::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=179::dotty.tools.dotc.core.MatchTypeTrace$.matchTypeFail: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1852::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=195::dotty.tools.dotc.core.MatchTypeTrace$.noMatches: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1853::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=214::dotty.tools.dotc.core.MatchTypeTrace$.stuck: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1854::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=235::dotty.tools.dotc.core.MatchTypeTrace$.noInstance: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1855::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=246::dotty.tools.dotc.core.MatchTypeTrace$.emptyScrutinee: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1856::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=301::dotty.tools.dotc.core.MatchTypeTrace$.recurseWith: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1857::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=311::dotty.tools.dotc.core.MatchTypeTrace$.caseText: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=MatchTypeCaseSpec::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=MatchTypeCaseSpec::space=Prefix::unknown-request=1858::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=363::dotty.tools.dotc.core.MatchTypeTrace$.caseText: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1859::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=520::dotty.tools.dotc.core.MatchTypeTrace$.explainEntry: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=TryReduce::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=TryReduce::space=Prefix::unknown-request=1860::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=573::dotty.tools.dotc.core.MatchTypeTrace$.illegalPatternText: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=MatchTypeCaseSpec::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=MatchTypeCaseSpec::space=Prefix::unknown-request=1861::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/Names.scala#tree=182::dotty.tools.dotc.core.Names$.Name.++: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/core/Names.scala#tree=198::dotty.tools.dotc.core.Names$.Name.replace: requests=1, distinct_request_outcomes=1
@@ -4803,7 +4807,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=7965::dotty.tools.dotc.core.TypeComparer.isMatchedByProto: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.TypeComparer$::namespace=type::name=Type::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=8050::dotty.tools.dotc.core.TypeComparer.narrowGADTBounds: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Repr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Repr::space=Prefix::unknown-request=2069::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=8178::dotty.tools.dotc.core.TypeComparer.matchesType: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.TypeComparer$::namespace=type::name=Type::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=8282::dotty.tools.dotc.core.TypeComparer.matchingMethodParams: requests=1, distinct_request_outcomes=1
@@ -4981,7 +4985,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/tasty/TastyClassName.scala#tree=216::dotty.tools.dotc.core.tasty.TastyClassName.TreeSectionUnpickler.readName: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.tasty::namespace=type::name=TastyReader::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyClassName.scala#tree=54::dotty.tools.dotc.core.tasty.TastyClassName.readName: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=unpickle::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=unpickle::space=Prefix::unknown-request=2189::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyPickler.scala#tree=326::dotty.tools.dotc.core.tasty.TastyPickler.assembleParts: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.tasty::namespace=type::name=TastyBuffer::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyPickler.scala#tree=74::dotty.tools.dotc.core.tasty.TastyPickler.newSection: requests=2, distinct_request_outcomes=2
@@ -4996,7 +5000,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/tasty/TastyPrinter.scala#tree=1525::dotty.tools.dotc.core.tasty.TastyPrinter.sectionHeader: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.tasty::namespace=type::name=TastyReader::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyPrinter.scala#tree=651::dotty.tools.dotc.core.tasty.TastyPrinter.unpickle0: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=unpickle::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=unpickle::space=Prefix::unknown-request=2195::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyPrinter.scala#tree=984::dotty.tools.dotc.core.tasty.TastyPrinter.TreeSectionUnpickler.unpickle0: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.tasty::namespace=type::name=TastyReader::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=117::dotty.tools.dotc.core.tasty.TastyUnpickler$.NameTable.add: requests=1, distinct_request_outcomes=1
@@ -5014,24 +5018,24 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=208::dotty.tools.dotc.core.tasty.TastyUnpickler$.Scala3CompilerConfig.upgradeAdditionalInfo: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.tasty::namespace=type::name=TastyVersion::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=285::dotty.tools.dotc.core.tasty.TastyUnpickler.readName: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=NameTable::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=NameTable::space=Prefix::unknown-request=2208::outcome=unsupported prefix shape=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=290::dotty.tools.dotc.core.tasty.TastyUnpickler.readString: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=311::dotty.tools.dotc.core.tasty.TastyUnpickler.readParamSig: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=readInt::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=readInt::space=Prefix::unknown-request=2211::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core.tasty.TastyUnpickler$::namespace=term::name=readInt::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=506::dotty.tools.dotc.core.tasty.TastyUnpickler.readNameContents: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=readByte::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=readByte::space=Prefix::unknown-request=2214::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core.tasty.TastyUnpickler$::namespace=term::name=readByte::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=546::dotty.tools.dotc.core.tasty.TastyUnpickler.readNames: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=until::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=until::space=Prefix::unknown-request=2217::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core.tasty.TastyUnpickler$::namespace=term::name=until::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=580::dotty.tools.dotc.core.tasty.TastyUnpickler.loadSections: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=isAtEnd::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=isAtEnd::space=Prefix::unknown-request=2220::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core.tasty.TastyUnpickler$::namespace=term::name=isAtEnd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=613::dotty.tools.dotc.core.tasty.TastyUnpickler.bytes: requests=1, distinct_request_outcomes=1
@@ -5117,129 +5121,130 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/tasty/TreePickler.scala#tree=673::dotty.tools.dotc.core.tasty.TreePickler.pickleType: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=1007::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.symbolAt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=symAtAddr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=symAtAddr::space=Prefix::unknown-request=2278::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=1053::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.symbolAtCurrent: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=symAtAddr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=symAtAddr::space=Prefix::unknown-request=2279::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=1946::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2280::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=1993::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readSymNameRef: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=2281::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2026::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readPackageRef: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=TermName::space=Prefix::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2032::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readTypeRef: requests=2, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=typeAtAddr::space=Prefix::outcome=unsupported prefix shape=2
+      prefix=<unsupported-prefix>::namespace=type::name=TermName::space=Prefix::unknown-request=2282::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2032::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readTypeRef: requests=2, distinct_request_outcomes=2
+      prefix=<unsupported-prefix>::namespace=term::name=typeAtAddr::space=Prefix::unknown-request=2283::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=typeAtAddr::space=Prefix::unknown-request=2284::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2041::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readTreeRef: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=2285::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2052::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.nothingButMods: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2286::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2063::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.localContext: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2287::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2203::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.normalizeFlags: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=2288::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2289::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.isAbstractType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2289::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2338::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.createSymbol: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2290::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2410::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.createBindSymbol: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2291::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2823::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.createMemberSymbol: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2292::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3175::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readModifiers: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=FlagSet::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=FlagSet::space=Prefix::unknown-request=2293::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3182::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readWithin: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=2294::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3310::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readAnnot: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=readByte::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=readByte::space=Prefix::unknown-request=2295::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3417::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.indexStats: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=NoInitsInterface::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=NoInitsInterface::space=Prefix::unknown-request=2296::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3473::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.processPackage: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2297::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3489::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.indexParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2298::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3508::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.indexTemplateParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=2299::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3560::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readIndexedDef: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=treeAtAddr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=treeAtAddr::space=Prefix::unknown-request=2300::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4181::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readNewDef: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2301::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4303::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readParentType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=readByte::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=readByte::space=Prefix::unknown-request=2302::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4353::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readParents: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::unknown-request=2303::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4871::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readTemplate: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2304::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4888::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipToplevel: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=isAtEnd::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=isAtEnd::space=Prefix::unknown-request=2305::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4899::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.isTopLevel: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2306::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5027::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readIndexedStat: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2307::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5060::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readImportOrExport: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2308::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=508::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.fork: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2264::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5160::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readSelectors: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2309::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=521::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipParentTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2265::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5269::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readStats: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2310::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5278::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.sameTrees: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2311::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=527::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipParentTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2266::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5301::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readIndexedParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::unknown-request=2312::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5325::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2313::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5339::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.ElidedTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=untpd::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=untpd::space=Prefix::unknown-request=2314::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=566::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2267::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=572::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2268::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=596::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2269::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7317::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2315::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7434::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readTpt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2316::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7478::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readCases: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::unknown-request=2317::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7536::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readCase: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2318::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7568::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readHole: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=readNat::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=readNat::space=Prefix::unknown-request=2319::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7593::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readLater: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=AnyRef::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=AnyRef::space=Prefix::unknown-request=2320::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7641::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readLaterWithOwner: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=goto::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=goto::space=Prefix::unknown-request=2321::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7671::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.spanAt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2322::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7694::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.coordAt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2323::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7724::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.sourcePathAt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2324::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7781::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.sourceChangeContext: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2325::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7810::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.setSpan: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2326::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=784::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.scanTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2270::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=814::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.scanTrees: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2271::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=845::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.nextUnsharedTag: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2272::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=851::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readName: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nameAtRef::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=nameAtRef::space=Prefix::unknown-request=2273::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=871::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.isCompactAnnotTypeTag: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2274::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=923::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readParamNamesAndMods: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::unknown-request=2275::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=956::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readParamTypes: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2276::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=964::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readSymRef: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2277::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala#tree=1014::dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler.isSymbolRef: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler$::namespace=term::name=bytes::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala#tree=1034::dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler.isNameEntry: requests=1, distinct_request_outcomes=1
@@ -5399,45 +5404,45 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3395::dotty.tools.dotc.inlines.Inliner.tryInlineArg: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=Tree::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3483::dotty.tools.dotc.inlines.Inliner.InlineTyper.ensureAccessible: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=2407::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=Type::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3588::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedIdent: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2409::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=term::name=ctx::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3683::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedSelect: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2411::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=term::name=ctx::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3794::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedIf: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=untpd::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=untpd::space=Prefix::unknown-request=2413::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=untpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3915::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedValDef: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=2415::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=Symbol::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3946::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedApply: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2417::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=term::name=ctx::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3962::dotty.tools.dotc.inlines.Inliner.InlineTyper.isAcceptedSpuriousApply: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=tpd::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=tpd::space=Prefix::unknown-request=2419::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=4006::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedTypeApply: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2421::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=term::name=ctx::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=4137::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedMatch: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=untpd::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=untpd::space=Prefix::unknown-request=2423::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=untpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=4605::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedMatchFinish: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=untpd::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=untpd::space=Prefix::unknown-request=2425::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=untpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=4615::dotty.tools.dotc.inlines.Inliner.InlineTyper.newLikeThis: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=ReTyper::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=4624::dotty.tools.dotc.inlines.Inliner.InlineTyper.hasInliningErrors: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2428::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=term::name=ctx::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=4667::dotty.tools.dotc.inlines.Inliner.InlineTyper.inlineIfNeeded: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2430::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=Tree::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=4786::dotty.tools.dotc.inlines.Inliner.InlineTyper.specializeEq: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2432::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=Tree::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=5330::dotty.tools.dotc.inlines.Inliner.dropUnusedDefs: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=List::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
@@ -5673,127 +5678,127 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/interactive/ParsedLogicalPackage.scala#tree=92::dotty.tools.dotc.interactive.ParsedLogicalPackage.fullName: requests=1, distinct_request_outcomes=1
       prefix=scala.jdk::namespace=term::name=CollectionConverters::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=1071::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.basicType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2587::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=109::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.parse: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2562::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=1193::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typ: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2588::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=1314::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeArgs: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2589::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=1752::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.annotation: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=RefTree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=RefTree::space=Prefix::unknown-request=2590::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=181::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.skip: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2563::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=193::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.syntaxError: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Message::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Message::space=Prefix::unknown-request=2564::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2029::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.modifiers: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Flags::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2067::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2592::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2111::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeParam: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2593::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2164::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.bound: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2594::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2192::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.formalParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2595::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=223::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.syntaxError: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2565::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2269::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.formalParam: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2596::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2288::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.optThrows: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2597::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2302::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.methodBody: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2598::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2313::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.definesInterface: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2599::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2332::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.adaptRecordIdentifier: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2600::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=236::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.errorTypeTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=TypeTree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=TypeTree::space=Prefix::unknown-request=2566::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=247::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.javaDot: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=Select::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Select::space=Prefix::unknown-request=2567::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=258::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.javaLangDot: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=Select::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Select::space=Prefix::unknown-request=2568::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=264::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.ObjectTpt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=TypeTree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=TypeTree::space=Prefix::unknown-request=2569::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2657::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.termDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2601::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=270::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.javaLangRecord: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Name::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Name::space=Prefix::unknown-request=2570::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2803::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.fieldDecls: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::unknown-request=2602::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=283::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.arrayOf: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=AppliedTypeTree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=AppliedTypeTree::space=Prefix::unknown-request=2571::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2993::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.varDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2603::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=300::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.classOf: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=TypeApply::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=TypeApply::space=Prefix::unknown-request=2572::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3024::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.memberDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2604::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3068::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.makeCompanionObject: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2605::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3085::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.addCompanionObject: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=List::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=List::space=Prefix::unknown-request=2606::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3246::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.importDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2607::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3268::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.interfacesOpt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2608::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3304::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.permittedSubclassesOpt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2609::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3395::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.classDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2610::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3609::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.recordDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2611::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3703::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.interfaceDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2612::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3729::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeBody: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2613::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3868::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeBodyDecls: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2614::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3884::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.annotationParents: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=List::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=List::space=Prefix::unknown-request=2615::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3991::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.annotationDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2616::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4213::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.enumDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2617::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4271::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.enumConst: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2618::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4289::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.isTypeDeclStart: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2619::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4352::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2620::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=443::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.makeTemplate: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2573::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4478::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.tryConstant: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2621::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=456::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.makeSyntheticParam: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=TermName::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TermName::space=Prefix::unknown-request=2574::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4706::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.compilationUnit: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::unknown-request=2622::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=474::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.makeParam: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ValDef::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ValDef::space=Prefix::unknown-request=2575::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=529::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.makeConstructor: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2576::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=596::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.skipAhead: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2577::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=696::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.accept: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2578::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=742::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.acceptClosingAngle: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=PartialFunction::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=PartialFunction::space=Prefix::unknown-request=2579::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=747::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.identForType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Name::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Name::space=Prefix::unknown-request=2580::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=771::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.ident: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2581::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=808::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.repsep: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::unknown-request=2582::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=855::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.convertToTypeId: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2583::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=891::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.convertToTypeName: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2584::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=938::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.qualId: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=RefTree::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=RefTree::space=Prefix::unknown-request=2585::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=976::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.optArrayBrackets: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2586::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/Parsers.scala#tree=12546::dotty.tools.dotc.parsing.Parsers$.Parser.caseClauses: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=type::name=ListBuffer::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/parsing/Parsers.scala#tree=13042::dotty.tools.dotc.parsing.Parsers$.Parser.pattern1: requests=1, distinct_request_outcomes=1
@@ -6298,20 +6303,25 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=267::dotty.tools.dotc.reporting.WConf.action: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=343::dotty.tools.dotc.reporting.WConf$.parseAction: requests=3, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=343::dotty.tools.dotc.reporting.WConf$.parseAction: requests=3, distinct_request_outcomes=3
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2936::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2937::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=428::dotty.tools.dotc.reporting.WConf$.parseFilters: requests=3, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=428::dotty.tools.dotc.reporting.WConf$.parseFilters: requests=3, distinct_request_outcomes=3
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2939::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2940::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=644::dotty.tools.dotc.reporting.WConf$.parseFilter: requests=3, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=644::dotty.tools.dotc.reporting.WConf$.parseFilter: requests=3, distinct_request_outcomes=3
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2942::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2943::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=730::dotty.tools.dotc.reporting.WConf$.parsed: requests=3, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=730::dotty.tools.dotc.reporting.WConf$.parsed: requests=3, distinct_request_outcomes=3
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2945::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2946::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=833::dotty.tools.dotc.reporting.WConf$.fromSettings: requests=3, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=833::dotty.tools.dotc.reporting.WConf$.fromSettings: requests=3, distinct_request_outcomes=3
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2948::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2949::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=933::dotty.tools.dotc.reporting.Suppression.matches: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -7695,64 +7705,78 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/transform/localopt/DropForMap.scala#tree=729::dotty.tools.dotc.transform.localopt.DropForMap$.Converted$.unapply: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1200::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.verify: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1200::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.verify: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3890::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3891::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=String::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1261::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.accepts: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=BooleanXn::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1261::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.accepts: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=term::name=BooleanXn::space=Prefix::unknown-request=3894::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=BooleanXn::space=Prefix::unknown-request=3895::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=BooleanXn::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1336::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.lintToString: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1336::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.lintToString: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=3898::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=3899::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=Type::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1441::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.acceptableVariants: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=StringXn::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1441::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.acceptableVariants: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=term::name=StringXn::space=Prefix::unknown-request=3902::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=StringXn::space=Prefix::unknown-request=3903::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=StringXn::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1463::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.okFlags: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=StringXn::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1463::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.okFlags: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=term::name=StringXn::space=Prefix::unknown-request=3906::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=StringXn::space=Prefix::unknown-request=3907::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=StringXn::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1471::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.hasFlag: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1471::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.hasFlag: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3910::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3911::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=String::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1479::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.hasAnyFlag: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1479::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.hasAnyFlag: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3914::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3915::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=String::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1507::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.badFlag: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1507::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.badFlag: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3918::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3919::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=String::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1530::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.errorAt: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1530::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.errorAt: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3922::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3923::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=report::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1553::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.warningAt: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1553::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.warningAt: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3926::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3927::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=report::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1680::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion$.apply: requests=1, distinct_request_outcomes=1
       prefix=scala.util.matching::namespace=term::name=Regex::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1696::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion$.stringXn: requests=1, distinct_request_outcomes=1
       prefix=scala.util.matching::namespace=term::name=Regex::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1759::dotty.tools.dotc.transform.localopt.TypedFormatChecker.partPosAt: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=partsElems::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1759::dotty.tools.dotc.transform.localopt.TypedFormatChecker.partPosAt: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=term::name=partsElems::space=Prefix::unknown-request=3932::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=partsElems::space=Prefix::unknown-request=3933::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=partsElems::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1786::dotty.tools.dotc.transform.localopt.TypedFormatChecker.argError: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1786::dotty.tools.dotc.transform.localopt.TypedFormatChecker.argError: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3936::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3937::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=report::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1816::dotty.tools.dotc.transform.localopt.TypedFormatChecker.partError: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1816::dotty.tools.dotc.transform.localopt.TypedFormatChecker.partError: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3940::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3941::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=report::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1837::dotty.tools.dotc.transform.localopt.TypedFormatChecker.partWarning: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1837::dotty.tools.dotc.transform.localopt.TypedFormatChecker.partWarning: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3944::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3945::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=report::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=207::dotty.tools.dotc.transform.localopt.TypedFormatChecker.argType: requests=1, distinct_request_outcomes=1
@@ -7764,7 +7788,7 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=typer::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=638::dotty.tools.dotc.transform.localopt.TypedFormatChecker.checked: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::unknown-request=3868::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=ListBuffer::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=649::dotty.tools.dotc.transform.localopt.TypedFormatChecker.at: requests=1, distinct_request_outcomes=1
@@ -7774,7 +7798,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=670::dotty.tools.dotc.transform.localopt.TypedFormatChecker.offset: requests=1, distinct_request_outcomes=1
       prefix=scala.util.matching::namespace=term::name=Regex::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=683::dotty.tools.dotc.transform.localopt.TypedFormatChecker.group: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=Option::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Option::space=Prefix::unknown-request=3874::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=Option::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=693::dotty.tools.dotc.transform.localopt.TypedFormatChecker.stringOf: requests=1, distinct_request_outcomes=1
@@ -7782,15 +7806,16 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=709::dotty.tools.dotc.transform.localopt.TypedFormatChecker.intOf: requests=1, distinct_request_outcomes=1
       prefix=scala.util.matching::namespace=term::name=Regex::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=722::dotty.tools.dotc.transform.localopt.TypedFormatChecker.or: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=3879::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=732::dotty.tools.dotc.transform.localopt.TypedFormatChecker.and: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=3882::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=852::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.isIndexed: requests=4, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=Option::space=Prefix::outcome=unsupported prefix shape=2
+    compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=852::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.isIndexed: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=type::name=Option::space=Prefix::unknown-request=3885::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Option::space=Prefix::unknown-request=3886::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=Option::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=870::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.isLeading: requests=1, distinct_request_outcomes=1
@@ -9050,69 +9075,69 @@ resolver_581_comparison:
     compiler/src/scala/quoted/runtime/impl/QuotesImpl.scala#tree=17282::scala.quoted.runtime.impl.QuotesImpl.reflect$.withDefaultPos: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=ContextFunction1::space=Prefix::outcome=package type member unresolved=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=1462::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4682::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=1604::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitConstant: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4683::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2008::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4684::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2039::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitSignature: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4685::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2099::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitSelector: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4686::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2167::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitSymbol: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4687::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2198::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitParamClause: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4688::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2209::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4689::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2220::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4690::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2231::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4691::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2242::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4692::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2253::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4693::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2264::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4694::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2275::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4695::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2286::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4696::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2297::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4697::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2310::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.++=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4698::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2335::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.StringOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4699::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2352::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.TreeOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4700::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2365::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.TreeOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4701::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2378::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.TreeOps.++=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4702::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2393::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.TreeOps.+++=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4703::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2410::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.ConstantOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4704::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2427::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.TypeOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4705::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2440::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.TypeOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4706::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2453::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.TypeOps.++=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4707::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2473::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.SignatureOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4708::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2493::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.SelectorOps.++=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4709::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2510::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.SymbolOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4710::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2530::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.ParamClauseOps.++=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4711::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2570::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitOption: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4712::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2635::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitList: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4713::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=30::scala.quoted.runtime.impl.printers.Extractors$.showTree: requests=1, distinct_request_outcomes=1
       prefix=scala.quoted::namespace=term::name=quotes::space=Prefix::outcome=package term member unsupported=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=50::scala.quoted.runtime.impl.printers.Extractors$.showType: requests=1, distinct_request_outcomes=1
@@ -9122,93 +9147,93 @@ resolver_581_comparison:
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=590::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.nextRecTypeId: requests=1, distinct_request_outcomes=1
       prefix=scala.quoted::namespace=type::name=Quotes::space=Prefix::outcome=error=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=595::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.result: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4681::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=70::scala.quoted.runtime.impl.printers.Extractors$.showConstant: requests=1, distinct_request_outcomes=1
       prefix=scala.quoted::namespace=term::name=quotes::space=Prefix::outcome=package term member unsupported=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=90::scala.quoted.runtime.impl.printers.Extractors$.showSymbol: requests=1, distinct_request_outcomes=1
       prefix=scala.quoted::namespace=term::name=quotes::space=Prefix::outcome=package term member unsupported=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=2756::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4715::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=2796::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printQualTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4716::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=2973::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.flatBlock: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4717::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3050::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printFlatBlock: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4718::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3231::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printStats: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4719::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3286::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printList: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4720::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3309::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTrees: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4721::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3333::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTypeTrees: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4722::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3385::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTypes: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4723::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3436::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printSelectors: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4724::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3484::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printCases: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4725::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3532::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTypeCases: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4726::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3580::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printPatterns: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4727::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3632::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTypesOrBounds: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4728::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3704::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTargsDefs: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4729::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3948::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printSeparatedParamDefs: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4730::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=4011::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printMethdArgsDefs: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4731::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=4063::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printLambdaArgsDefs: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4732::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=4113::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printAnnotations: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4733::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=4279::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printParamDef: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4734::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=4549::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printPattern: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4735::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=4698::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printConstant: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4736::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=4745::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTypeOrBoundsTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4737::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=5118::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTypeTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4738::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=5898::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4739::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=5960::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printSelector: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4740::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6020::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printDefinitionName: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4741::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6059::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printAnnotation: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4742::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=605::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.indented: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4714::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6125::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printDefAnnotations: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4743::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6304::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printRefinement: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4744::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6396::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printMethodicTypeParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4745::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6477::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printBoundsTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4746::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6620::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printProtectedOrPrivate: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4747::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6668::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printFullClassName: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4748::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6859::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.splicedName: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4749::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6922::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.SpecialOp$.unapply: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4750::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6987::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.Annotation$.unapply: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4751::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=7032::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.Types$.Sequence$.unapply: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4752::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=7069::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.Types$.Repeated$.unapply: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4753::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=7106::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.PackageObject$.unapply: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4754::outcome=unsupported prefix shape=1
     library/src/scala/Enumeration.scala#tree=1023::scala.Enumeration.ValueSet$.fromBitMask: requests=2, distinct_request_outcomes=2
       prefix=scala.collection::namespace=term::name=immutable::space=Prefix::outcome=package term member unsupported=1
       prefix=scala.reflect::namespace=term::name=NameTransformer::space=Prefix::outcome=package term member unsupported=1

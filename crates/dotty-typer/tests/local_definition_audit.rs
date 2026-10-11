@@ -45,6 +45,7 @@ struct ResolverMetrics {
     member_error_distinct_targets: BTreeMap<String, BTreeSet<String>>,
     member_error_files: BTreeMap<String, BTreeSet<String>>,
     member_request_shapes: BTreeMap<String, usize>,
+    member_request_unknown_identity_shapes: BTreeMap<String, usize>,
     member_request_targets: BTreeMap<String, RequestTargetMetrics>,
     member_requests_by_method: BTreeMap<String, BTreeMap<String, usize>>,
     member_request_outcome_targets: BTreeMap<String, BTreeSet<String>>,
@@ -72,11 +73,20 @@ struct ResolverMetrics {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RequestTargetMetrics {
     requests: usize,
-    family: String,
     files: BTreeSet<String>,
     owners: BTreeSet<String>,
     names: BTreeSet<String>,
     methods: BTreeSet<String>,
+    outcomes: BTreeMap<String, usize>,
+    families: BTreeMap<String, RequestFamilyMetrics>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RequestFamilyMetrics {
+    requests: usize,
+    files: BTreeSet<String>,
+    owners: BTreeSet<String>,
+    names: BTreeSet<String>,
     outcomes: BTreeMap<String, usize>,
 }
 
@@ -85,6 +95,7 @@ struct PrefixProfile {
     shape: &'static str,
     target_kind: &'static str,
     identity: String,
+    identity_known: bool,
     symbol: Option<SymbolId>,
 }
 
@@ -108,6 +119,48 @@ struct AuditResolver<E: ClassPathEntry> {
 
 #[derive(Clone)]
 struct SharedClassPath(Arc<CompositeClassPath>);
+
+struct RequestTargetObservation<'a> {
+    target_key: String,
+    shape: String,
+    owner: Option<&'a str>,
+    name: &'a str,
+    file: &'a str,
+    method: &'a str,
+    outcome: &'a str,
+}
+
+fn record_member_request_target(
+    metrics: &mut ResolverMetrics,
+    observation: RequestTargetObservation<'_>,
+) {
+    let target = metrics
+        .member_request_targets
+        .entry(observation.target_key)
+        .or_default();
+    target.requests += 1;
+    target.files.insert(observation.file.to_owned());
+    if let Some(owner) = observation.owner {
+        target.owners.insert(owner.to_owned());
+    }
+    target.names.insert(observation.name.to_owned());
+    target.methods.insert(observation.method.to_owned());
+    *target
+        .outcomes
+        .entry(observation.outcome.to_owned())
+        .or_default() += 1;
+    let family = target.families.entry(observation.shape).or_default();
+    family.requests += 1;
+    family.files.insert(observation.file.to_owned());
+    if let Some(owner) = observation.owner {
+        family.owners.insert(owner.to_owned());
+    }
+    family.names.insert(observation.name.to_owned());
+    *family
+        .outcomes
+        .entry(observation.outcome.to_owned())
+        .or_default() += 1;
+}
 
 impl ClassPathEntry for SharedClassPath {
     fn find_class(
@@ -256,6 +309,12 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             .member_request_shapes
             .entry(shape.clone())
             .or_default() += 1;
+        if !prefix.identity_known {
+            *metrics
+                .member_request_unknown_identity_shapes
+                .entry(shape.clone())
+                .or_default() += 1;
+        }
         let outcome = member_outcome(store, &result, request, &prefix);
         let current_file = metrics.current_file.clone();
         if let Ok(Some(symbol)) = &result {
@@ -270,19 +329,26 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             }
         }
         let method = metrics.current_method.clone();
-        {
-            let target = metrics
-                .member_request_targets
-                .entry(target_key.clone())
-                .or_default();
-            target.requests += 1;
-            target.family = shape.clone();
-            target.files.insert(current_file.clone());
-            target.owners.insert(prefix.identity.clone());
-            target.names.insert(name.clone());
-            target.methods.insert(method.clone());
-            *target.outcomes.entry(outcome.clone()).or_default() += 1;
-        }
+        let target_key = if prefix.identity_known {
+            target_key
+        } else {
+            format!(
+                "{target_key}::unknown-request={}",
+                metrics.resolver_member_requests
+            )
+        };
+        record_member_request_target(
+            &mut metrics,
+            RequestTargetObservation {
+                target_key: target_key.clone(),
+                shape: shape.clone(),
+                owner: prefix.identity_known.then_some(prefix.identity.as_str()),
+                name: &name,
+                file: &current_file,
+                method: &method,
+                outcome: &outcome,
+            },
+        );
         *metrics
             .member_requests_by_method
             .entry(method)
@@ -546,6 +612,7 @@ fn prefix_profile(store: &SemanticStore, ty: dotty_core::ids::TypeId) -> PrefixP
                 shape: "unsupported/other",
                 target_kind: "unsupported",
                 identity: "<unresolved-prefix>".to_owned(),
+                identity_known: false,
                 symbol: None,
             };
         }
@@ -585,6 +652,7 @@ fn prefix_profile(store: &SemanticStore, ty: dotty_core::ids::TypeId) -> PrefixP
                     shape,
                     target_kind,
                     identity: audit_symbol_path(store, *symbol),
+                    identity_known: true,
                     symbol: Some(*symbol),
                 }
             }
@@ -601,29 +669,59 @@ fn prefix_profile(store: &SemanticStore, ty: dotty_core::ids::TypeId) -> PrefixP
                     shape: if applied { "Applied" } else { "ThisType" },
                     target_kind,
                     identity: audit_symbol_path(store, *class),
+                    identity_known: true,
                     symbol: Some(*class),
                 }
             }
-            Type::TypeRef {
-                target: TypeRefTarget::Name(name),
-                ..
-            } => PrefixProfile {
-                shape: if applied {
-                    "Applied"
-                } else {
-                    "unsupported/other"
+            Type::TermRef { prefix, target } => match target {
+                dotty_core::types::TermRefTarget::Symbol(symbol) => PrefixProfile {
+                    shape: "unsupported/other",
+                    target_kind: "unsupported",
+                    identity: audit_symbol_path(store, *symbol),
+                    identity_known: true,
+                    symbol: Some(*symbol),
                 },
-                target_kind: "unsupported",
-                identity: format!(
-                    "<unresolved-type:{}>",
-                    store.names.resolve(name.as_name().text())
-                ),
-                symbol: None,
+                dotty_core::types::TermRefTarget::Name(name) => {
+                    let owner = profile(store, *prefix, false, depth + 1);
+                    PrefixProfile {
+                        shape: "unsupported/other",
+                        target_kind: "unsupported",
+                        identity: format!(
+                            "{}::term-ref:{}",
+                            owner.identity,
+                            store.names.resolve(name.as_name().text())
+                        ),
+                        identity_known: owner.identity_known,
+                        symbol: None,
+                    }
+                }
             },
+            Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Name(name),
+            } => {
+                let owner = profile(store, *prefix, false, depth + 1);
+                PrefixProfile {
+                    shape: if applied {
+                        "Applied"
+                    } else {
+                        "unsupported/other"
+                    },
+                    target_kind: "unsupported",
+                    identity: format!(
+                        "{}::unresolved-type:{}",
+                        owner.identity,
+                        store.names.resolve(name.as_name().text())
+                    ),
+                    identity_known: owner.identity_known,
+                    symbol: None,
+                }
+            }
             _ => PrefixProfile {
                 shape: "unsupported/other",
                 target_kind: "unsupported",
                 identity: "<unsupported-prefix>".to_owned(),
+                identity_known: false,
                 symbol: None,
             },
         }
@@ -658,29 +756,28 @@ fn normalized_error(error: &ResolutionError) -> (String, String, String) {
         ),
         ResolutionError::Malformed { reason } => {
             let lower = reason.to_ascii_lowercase();
-            let category = if lower.contains("unresolved type variable") {
+            let root_reason = deepest_dependency_cause(&lower);
+            let category = if root_reason.contains("unresolved type variable") {
                 "UnresolvedTypeVariable"
-            } else if lower.contains("unresolvedsupertype")
-                || lower.contains("unresolved supertype")
-                || lower.contains("supertype reference could not be resolved")
+            } else if root_reason.contains("unresolvedsupertype")
+                || root_reason.contains("unresolved supertype")
+                || root_reason.contains("supertype reference could not be resolved")
             {
                 "InvalidTastyFile::UnresolvedSupertype"
-            } else if lower.contains("invalid .tasty file") {
+            } else if root_reason.contains("invalid .tasty file") {
                 "InvalidTastyFile"
-            } else if lower.starts_with("class not found:") {
+            } else if root_reason.contains("class not found:") {
                 "unresolved class"
-            } else if lower.contains("malformed class file")
-                || lower.contains("malformed signature")
-                || lower.contains("invalid class file")
+            } else if root_reason.contains("malformed class file")
+                || root_reason.contains("malformed signature")
+                || root_reason.contains("invalid class file")
             {
                 "malformed classfile/signature"
-            } else if lower.contains("failed to load because") {
-                "dependency failure"
-            } else if lower.contains("circular inheritance") {
+            } else if root_reason.contains("circular inheritance") {
                 "circular inheritance"
-            } else if lower.contains("invalid declaration scope")
-                || lower.contains("invalid class info")
-                || lower.contains("prefix refers to unknown symbol")
+            } else if root_reason.contains("invalid declaration scope")
+                || root_reason.contains("invalid class info")
+                || root_reason.contains("prefix refers to unknown symbol")
             {
                 "invalid prefix/owner/class info"
             } else {
@@ -700,6 +797,12 @@ fn normalized_error(error: &ResolutionError) -> (String, String, String) {
             "<resolver>".to_owned(),
         ),
     }
+}
+
+fn deepest_dependency_cause(reason: &str) -> &str {
+    reason
+        .rsplit_once(" failed: ")
+        .map_or(reason, |(_, cause)| cause)
 }
 
 fn error_binary_names(reason: &str) -> Vec<String> {
@@ -6991,6 +7094,10 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     for (shape, count) in &metrics.member_request_shapes {
         println!("    {shape}={count}");
     }
+    println!("  member_request_unknown_prefix_identity:");
+    for (shape, count) in &metrics.member_request_unknown_identity_shapes {
+        println!("    {shape}={count}");
+    }
     println!("  member_request_outcomes:");
     let mut outcomes = BTreeMap::<String, usize>::new();
     for target in metrics.member_request_targets.values() {
@@ -7029,14 +7136,16 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         ),
     >::new();
     for (key, target) in &metrics.member_request_targets {
-        let summary = by_shape.entry(target.family.clone()).or_default();
-        summary.0 += target.requests;
-        summary.1.insert(key.clone());
-        summary.2.extend(target.owners.iter().cloned());
-        summary.3.extend(target.names.iter().cloned());
-        summary.4.extend(target.files.iter().cloned());
-        for (outcome, count) in &target.outcomes {
-            *summary.5.entry(outcome.clone()).or_default() += count;
+        for (shape, family) in &target.families {
+            let summary = by_shape.entry(shape.clone()).or_default();
+            summary.0 += family.requests;
+            summary.1.insert(key.clone());
+            summary.2.extend(family.owners.iter().cloned());
+            summary.3.extend(family.names.iter().cloned());
+            summary.4.extend(family.files.iter().cloned());
+            for (outcome, count) in &family.outcomes {
+                *summary.5.entry(outcome.clone()).or_default() += count;
+            }
         }
     }
     for (shape, summary) in by_shape {
@@ -11145,9 +11254,18 @@ mod resolver_profile_tests {
     fn nested_dependency_error_retains_top_and_root_classes() {
         let error = ResolutionError::Malformed { reason: "class sample/Outer failed to load because sample/Inner failed: class not found: java/lang/Object".to_owned() };
         let (category, requested, root) = normalized_error(&error);
-        assert_eq!(category, "dependency failure");
+        assert_eq!(category, "unresolved class");
         assert_eq!(requested, "sample/Outer");
         assert_eq!(root, "java/lang/Object");
+    }
+
+    #[test]
+    fn nested_circular_inheritance_is_classified_by_its_root_cause() {
+        let error = ResolutionError::Malformed { reason: "class sample/A failed to load because sample/B failed: circular inheritance involving sample/B".to_owned() };
+        let (category, requested, root) = normalized_error(&error);
+        assert_eq!(category, "circular inheritance");
+        assert_eq!(requested, "sample/A");
+        assert_eq!(root, "sample/B");
     }
 
     #[test]
@@ -11205,6 +11323,105 @@ mod resolver_profile_tests {
             assert_eq!(target.files.len(), 2);
         }
         assert_eq!(metrics.member_request_targets.len(), 1);
+    }
+
+    #[test]
+    fn request_shape_distribution_does_not_depend_on_arrival_order() {
+        fn profile(shapes: [&str; 2]) -> ResolverMetrics {
+            let mut metrics = ResolverMetrics::default();
+            for shape in shapes {
+                record_member_request_target(
+                    &mut metrics,
+                    RequestTargetObservation {
+                        target_key: "target=sample/Foo::name=bar".to_owned(),
+                        shape: shape.to_owned(),
+                        owner: Some("sample/Foo"),
+                        name: "bar",
+                        file: "Use.scala",
+                        method: "run",
+                        outcome: "external success",
+                    },
+                );
+            }
+            metrics
+        }
+
+        let forward = profile(["ThisType", "TypeRef"]);
+        let reverse = profile(["TypeRef", "ThisType"]);
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.member_request_targets.len(), 1);
+        let target = forward.member_request_targets.values().next().unwrap();
+        assert_eq!(target.requests, 2);
+        assert_eq!(target.families["ThisType"].requests, 1);
+        assert_eq!(target.families["TypeRef"].requests, 1);
+    }
+
+    #[test]
+    fn term_ref_prefixes_to_distinct_symbols_keep_distinct_identities() {
+        let mut store = SemanticStore::new();
+        let mut packages = Packages::new();
+        let owner = packages
+            .enter(&mut store, dotty_core::SymbolOrigin::Synthetic, &["sample"])
+            .last()
+            .expect("sample package exists")
+            .symbol;
+        let mut symbols = Vec::new();
+        for name in ["a", "b"] {
+            let name = dotty_core::Name::new(store.names.intern(name), Namespace::Term);
+            symbols.push(store.symbols.alloc(dotty_core::Symbol {
+                name,
+                owner: Some(owner),
+                kind: dotty_core::SymbolKind::Value,
+                flags: dotty_core::SymbolFlags::EMPTY,
+                visibility: dotty_core::Visibility::Public,
+                info: dotty_core::SymbolInfo::Missing,
+                origin: dotty_core::SymbolOrigin::Synthetic,
+                annotations: Vec::new(),
+                position: None,
+                links: dotty_core::SymbolLinks::default(),
+            }));
+        }
+        let no_prefix = store.types.alloc(Type::NoPrefix);
+        let prefixes = symbols
+            .into_iter()
+            .map(|symbol| {
+                store.types.alloc(Type::TermRef {
+                    prefix: no_prefix,
+                    target: dotty_core::types::TermRefTarget::Symbol(symbol),
+                })
+            })
+            .collect::<Vec<_>>();
+        let first = prefix_profile(&store, prefixes[0]);
+        let second = prefix_profile(&store, prefixes[1]);
+        assert!(first.identity_known && second.identity_known);
+        assert_ne!(first.identity, second.identity);
+        let mut metrics = ResolverMetrics::default();
+        for profile in [first, second] {
+            record_member_request_target(
+                &mut metrics,
+                RequestTargetObservation {
+                    target_key: format!(
+                        "prefix={}::namespace=term::name=Missing::space=Prefix",
+                        profile.identity
+                    ),
+                    shape: profile.shape.to_owned(),
+                    owner: Some(profile.identity.as_str()),
+                    name: "Missing",
+                    file: "Use.scala",
+                    method: "run",
+                    outcome: "unsupported prefix shape",
+                },
+            );
+        }
+        assert_eq!(metrics.member_request_targets.len(), 2);
+        assert_eq!(
+            metrics
+                .member_request_targets
+                .values()
+                .map(|target| target.requests)
+                .sum::<usize>(),
+            2
+        );
     }
 
     #[test]
