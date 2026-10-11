@@ -358,8 +358,16 @@ struct ImpureFunctionBaselineOutcome {
     source_kind: String,
     attribution: String,
     projection_completed: bool,
+    projection_error: Option<String>,
     first_blocker: String,
     method_typed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ImpureFunctionProjection {
+    completed: bool,
+    semantic_family: String,
+    error: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -1761,8 +1769,13 @@ fn pinned_scala39_local_definition_audit() {
         assert_eq!(row.modifiers, "Impure", "{row:?}");
         assert_eq!(row.erased_params, "ordinary", "{row:?}");
         assert_eq!(row.arity, 1, "{row:?}");
-        assert!(row.projection_completed, "{row:?}");
-        assert_eq!(row.semantic_family, "ImpureFunction1", "{row:?}");
+        if row.projection_completed {
+            assert!(row.projection_error.is_none(), "{row:?}");
+            assert_eq!(row.semantic_family, "ImpureFunction1", "{row:?}");
+        } else {
+            assert_eq!(row.semantic_family, "unselected", "{row:?}");
+            assert!(row.projection_error.is_some(), "{row:?}");
+        }
         assert_eq!(row.expected_semantic_family, "ImpureFunction1", "{row:?}");
         assert_eq!(row.first_blocker, "SymbolResolution", "{row:?}");
         assert!(!row.method_typed, "{row:?}");
@@ -5671,7 +5684,7 @@ fn print_impure_function_baseline_outcomes(rows: &BTreeSet<ImpureFunctionBaselin
             "deeper Typer semantic blocker"
         };
         println!(
-            "  path={} method={}#tree={} function_tree={} line={} span={} syntax={:?} modifiers=[{}] erased=[{}] arity={} kind={} semantic_family={} expected_family={} attribution={} projection={} first_blocker={} method_typed={} classification={}",
+            "  path={} method={}#tree={} function_tree={} line={} span={} syntax={:?} modifiers=[{}] erased=[{}] arity={} kind={} semantic_family={} expected_family={} attribution={} projection={} projection_error={:?} first_blocker={} method_typed={} classification={}",
             row.path,
             row.method,
             row.method_tree,
@@ -5691,6 +5704,7 @@ fn print_impure_function_baseline_outcomes(rows: &BTreeSet<ImpureFunctionBaselin
             } else {
                 "not_completed"
             },
+            row.projection_error,
             row.first_blocker,
             row.method_typed,
             classification
@@ -7194,7 +7208,7 @@ struct ImpureFunctionBaselineAuditContext<'ctx, 'store> {
     source_text: &'ctx str,
     path: &'ctx str,
     classpath: Option<SharedClassPath>,
-    projection_cache: &'ctx mut BTreeMap<u32, Option<String>>,
+    projection_cache: &'ctx mut BTreeMap<u32, ImpureFunctionProjection>,
     method_tree: TreeId<Untyped>,
     first_blocker: &'ctx str,
     method_typed: bool,
@@ -7284,7 +7298,6 @@ fn record_impure_function_baseline_outcome(
             isolated_impure_function_projection(source_text, path, function_tree.index(), classpath)
         })
         .clone();
-    let projection_completed = projection.is_some();
     audit
         .impure_function_baseline_outcomes
         .insert(ImpureFunctionBaselineOutcome {
@@ -7295,7 +7308,7 @@ fn record_impure_function_baseline_outcome(
             line,
             span: span_text,
             syntax: syntax.to_owned(),
-            semantic_family: projection.unwrap_or_else(|| "unselected".to_owned()),
+            semantic_family: projection.semantic_family,
             expected_semantic_family: semantic_family,
             modifiers: source_modifier_list(&function.modifiers),
             erased_params: function
@@ -7307,7 +7320,8 @@ fn record_impure_function_baseline_outcome(
             arity: function.params.len(),
             source_kind: source_kind.to_owned(),
             attribution: baseline.attribution.to_owned(),
-            projection_completed,
+            projection_completed: projection.completed,
+            projection_error: projection.error,
             first_blocker: first_blocker.to_owned(),
             method_typed,
         });
@@ -7318,34 +7332,45 @@ fn isolated_impure_function_projection(
     path: &str,
     function_tree_index: u32,
     classpath: Option<SharedClassPath>,
-) -> Option<String> {
+) -> ImpureFunctionProjection {
+    let failed = |error: String| ImpureFunctionProjection {
+        completed: false,
+        semantic_family: "unselected".to_owned(),
+        error: Some(error),
+    };
     let source = SourceId::from_index(0);
-    let scanner = ContextualScanner::new(source_text).ok()?;
+    let scanner = match ContextualScanner::new(source_text) {
+        Ok(scanner) => scanner,
+        Err(error) => return failed(format!("scanner: {error:?}")),
+    };
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
-    let parsed = parse_compilation_unit(
-        SourceText::new(source_text).ok()?,
-        source,
-        scanner,
-        &mut store.names,
-    );
+    let source_text = match SourceText::new(source_text) {
+        Ok(source_text) => source_text,
+        Err(error) => return failed(format!("source text: {error:?}")),
+    };
+    let parsed = parse_compilation_unit(source_text, source, scanner, &mut store.names);
     let mut packages = Packages::new();
-    let index = name_compilation_unit(
+    let index = match name_compilation_unit(
         &parsed.ast,
         parsed.root,
         source,
         path,
         &mut store,
         &mut packages,
-    )
-    .ok()?;
-    let (function_tree, function_span) = parsed.ast.iter().find_map(|(tree, node)| {
+    ) {
+        Ok(index) => index,
+        Err(error) => return failed(format!("namer: {error:?}")),
+    };
+    let Some((function_tree, function_span)) = parsed.ast.iter().find_map(|(tree, node)| {
         if tree.index() != function_tree_index {
             return None;
         }
         Some((tree, node.position?.span().range()))
-    })?;
-    let context = parsed
+    }) else {
+        return failed(format!("missing source tree index {function_tree_index}"));
+    };
+    let Some((_, context)) = parsed
         .ast
         .iter()
         .filter_map(|(tree, node)| {
@@ -7357,8 +7382,12 @@ fn isolated_impure_function_projection(
             let context = index.declaration_context_of(symbol)?;
             Some((span.end() - span.start(), context))
         })
-        .min_by_key(|(span_len, _)| *span_len)?
-        .1;
+        .min_by_key(|(span_len, _)| *span_len)
+    else {
+        return failed(format!(
+            "no declaration context contains source tree {function_tree_index}"
+        ));
+    };
     let (typer_packages, resolver_packages) = if classpath.is_some() {
         (Packages::new(), Some(packages))
     } else {
@@ -7383,23 +7412,38 @@ fn isolated_impure_function_projection(
             metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
         }));
     }
-    let projection = typer.type_of_tpt(function_tree, context).ok()?;
+    let projection = match typer.type_of_tpt(function_tree, context) {
+        Ok(projection) => projection,
+        Err(error) => return failed(format!("type projection: {error:?}")),
+    };
     let Type::Applied { tycon, .. } = typer.store().types.get(projection) else {
-        return Some("unexpected_non_applied_type".to_owned());
+        return ImpureFunctionProjection {
+            completed: true,
+            semantic_family: "unexpected_non_applied_type".to_owned(),
+            error: Some("projected root type is not Applied".to_owned()),
+        };
     };
     let Type::TypeRef {
         target: TypeRefTarget::Symbol(symbol),
         ..
     } = typer.store().types.get(*tycon)
     else {
-        return Some("unexpected_non_symbol_constructor".to_owned());
+        return ImpureFunctionProjection {
+            completed: true,
+            semantic_family: "unexpected_non_symbol_constructor".to_owned(),
+            error: Some("Applied type constructor is not a symbol TypeRef".to_owned()),
+        };
     };
     let constructor = typer
         .store()
         .names
         .resolve(typer.store().symbols.get(*symbol).name.text())
         .to_owned();
-    Some(constructor)
+    ImpureFunctionProjection {
+        completed: true,
+        semantic_family: constructor,
+        error: None,
+    }
 }
 
 struct SourceFunctionMethodAudit<'a, 'typer> {
