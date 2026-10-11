@@ -16,8 +16,8 @@ in `CapturesAndResult` metadata.
 | --- | --- | --- |
 | `A => B` | `FunctionWithMods [Impure]` | `scala.ImpureFunction1[A, B]` |
 | `A ?=> B` | `FunctionWithMods [Given, Impure]` | `scala.ImpureContextFunction1[A, B]` |
-| `A -> B` | `Function` (with capture/result metadata as applicable) | `scala.Function1[A, B]` with pure retention metadata |
-| `A ?-> B` | `FunctionWithMods [Given]` (with capture/result metadata as applicable) | `scala.ContextFunction1[A, B]` with pure retention metadata |
+| `A -> B` | `Function` (with capture/result metadata as applicable) | `scala.Function1[A, B]` |
+| `A ?-> B` | `FunctionWithMods [Given]` (with capture/result metadata as applicable) | `scala.ContextFunction1[A, B]` |
 
 Without capture checking / `pureFunsEnabled`, `=>` and `?=>` select the
 ordinary pure `FunctionN` and contextual pure `ContextFunctionN` families.
@@ -35,7 +35,8 @@ prefix is removed to find its target family (`FunctionN` or
 `ContextFunctionN`).
 
 For arity *N*, the alias has *N* contravariant input parameters followed by a
-covariant result parameter. Its exact semantic shape is:
+covariant result parameter; every parameter has `TypeBounds.empty`. Its exact
+semantic shape is:
 
 ```text
 SymbolKind::TypeAlias
@@ -62,11 +63,11 @@ The 13 current audit observations all have arity 1.
 
 Before alias expansion, a semantic type can retain an applied reference to the
 `Impure*FunctionN` alias symbol. After expansion, it is an annotated applied
-reference to the pure underlying function class. TASTy preserves the alias
-declaration and its type-lambda alias info; the target class identity and
-retaining-cap annotation distinguish its expansion from the corresponding
-pure function type. This is distinct from representing an impure alias as a
-class symbol.
+reference to the pure underlying function class. TASTy type references
+distinguish the `Impure*FunctionN` alias name from a pure class reference;
+when opened, the compiler's Scala package synthesizer reconstructs the alias
+info. The alias is not a library class-file artifact. This is distinct from
+representing an impure alias as a class symbol.
 
 ## Current audit evidence
 
@@ -139,6 +140,17 @@ function-type visibility, annotations, and modifier lists other than exactly
 contain none of those shapes. This issue records these boundaries and does not
 project impure aliases, normalize generic aliases, or type erased/capture-set
 function types.
+
+The parser regression tests for ordinary/contextual arrows, pure arrows,
+capture-set preservation, named and nested parameters, erased parameters, and
+modifier ordering include `capture_checking_marks_the_ordinary_function_arrow_as_impure`,
+`capture_checked_context_function_arrows_keep_distinct_modifiers`,
+`pure_function_type_keeps_its_capture_set_on_the_function_tree`,
+`pure_context_function_type_keeps_context_metadata_and_capture_set`,
+`parses_an_erased_named_function_parameter_when_enabled`, and
+`nested_named_function_types_are_parsed_recursively`. The profiler regression
+checks named and unnamed parameter source shapes; the pinned audit asserts that
+13 observations correspond to exactly 3 source trees.
 
 ## Pinned source references
 
