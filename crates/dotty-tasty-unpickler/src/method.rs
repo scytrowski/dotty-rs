@@ -119,10 +119,14 @@ pub(crate) fn clauses_of(
             DefDefHeaderItem::Parameter(parameter) => {
                 let tag = parameter.tag();
                 let Some((param_at, node_tag)) = next.next() else {
-                    return Err(malformed(crate::error::DefinitionReason::HeaderParametersExceedNodes));
+                    return Err(malformed(
+                        crate::error::DefinitionReason::HeaderParametersExceedNodes,
+                    ));
                 };
                 if *node_tag != tag {
-                    return Err(malformed(crate::error::DefinitionReason::HeaderParameterTagMismatch));
+                    return Err(malformed(
+                        crate::error::DefinitionReason::HeaderParameterTagMismatch,
+                    ));
                 }
                 match (open, clauses.last_mut()) {
                     (Some(current), Some(Clause::Type(group) | Clause::Term(group)))
@@ -146,7 +150,9 @@ pub(crate) fn clauses_of(
         }
     }
     if next.next().is_some() {
-        return Err(malformed(crate::error::DefinitionReason::ParameterNodesExceedHeader));
+        return Err(malformed(
+            crate::error::DefinitionReason::ParameterNodesExceedHeader,
+        ));
     }
     Ok(clauses)
 }

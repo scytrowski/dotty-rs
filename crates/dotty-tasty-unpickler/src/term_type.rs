@@ -89,7 +89,10 @@ impl TastyUnpickler<'_, '_, '_> {
                     wire_name(self.file.names(), value)?;
                 }
                 let [embedded] = children[..] else {
-                    return Err(malformed(at, crate::error::TypeReason::IdentifierTermTypeArity));
+                    return Err(malformed(
+                        at,
+                        crate::error::TypeReason::IdentifierTermTypeArity,
+                    ));
                 };
                 return self.type_at(ast, embedded, at, depth);
             }
@@ -100,7 +103,10 @@ impl TastyUnpickler<'_, '_, '_> {
                 // first overload.
                 let shape = ast.tree_at(at, from)?.decode_select()?;
                 let [qualifier] = children[..] else {
-                    return Err(malformed(at, crate::error::TypeReason::TermSelectionQualifierArity));
+                    return Err(malformed(
+                        at,
+                        crate::error::TypeReason::TermSelectionQualifierArity,
+                    ));
                 };
                 let qualifier = self.type_of_term(ast, qualifier, at, depth)?;
                 let selected =
@@ -125,7 +131,10 @@ impl TastyUnpickler<'_, '_, '_> {
         // names the class, as Dotty's `ThisType.raw(qual.tpe)`.
         ast.tree_at(at, from)?.decode_qual_this()?;
         let [qualifier] = children[..] else {
-            return Err(malformed(at, crate::error::TypeReason::QualifiedThisQualifierArity));
+            return Err(malformed(
+                at,
+                crate::error::TypeReason::QualifiedThisQualifierArity,
+            ));
         };
         if ast.tag_at(qualifier) != Some(IDENTTPT_TAG) {
             return Err(malformed(
@@ -138,7 +147,10 @@ impl TastyUnpickler<'_, '_, '_> {
             wire_name(self.file.names(), *value)?;
         }
         let RawTree::NatAst { child, .. } = &qualifier_tree else {
-            return Err(malformed(qualifier, crate::error::TypeReason::IdentifierTypeTreeArity));
+            return Err(malformed(
+                qualifier,
+                crate::error::TypeReason::IdentifierTypeTreeArity,
+            ));
         };
         let class = self.this_class(ast, child, depth)?;
         let ty = self.store.types.alloc(Type::ThisType { class });

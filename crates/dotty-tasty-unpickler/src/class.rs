@@ -221,7 +221,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let Some(first) = children.first().copied() else {
             return Err(UnpickleError::MalformedParentTree {
                 address: at,
-                reason: crate::error::ParentTreeReason::ConstructorHasNoFunction,
+                reason: crate::error::ParentTreeReason::ConstructorHasFunction,
             });
         };
         let ty = match tag {
@@ -260,7 +260,7 @@ impl TastyUnpickler<'_, '_, '_> {
                 let [new_tpt] = ast.children(first) else {
                     return Err(UnpickleError::MalformedParentTree {
                         address: first,
-                        reason: crate::error::ParentTreeReason::NewTypeTreeArity,
+                        reason: crate::error::ParentTreeReason::NewArity,
                     });
                 };
                 self.type_of_tpt(ast, address(new_tpt.offset), first, depth)?

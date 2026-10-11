@@ -125,7 +125,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let Some(tag) = ast.tag_at(annotation_at) else {
             return Err(UnpickleError::MalformedType {
                 address: at,
-                reason: crate::error::TypeReason::AnnotationAddressIsNotNode,
+                reason: crate::error::TypeReason::AnnotationOfAnnotatedTypeIsNotNode,
             });
         };
         if tag != SHAREDTERM_TAG {
@@ -221,7 +221,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let Some(annotation_tag) = ast.tag_at(annotation_at) else {
             return Err(UnpickleError::MalformedType {
                 address: at,
-                reason: crate::error::TypeReason::AnnotationAddressIsNotNode,
+                reason: crate::error::TypeReason::AnnotationPayloadIsNotNode,
             });
         };
         if is_compact_annot_type_tag(annotation_tag) {
@@ -357,7 +357,9 @@ impl TastyUnpickler<'_, '_, '_> {
                 (RawTree::LengthNode(node), APPLY_TAG) => {
                     let apply = node.decode_apply()?;
                     let [function, arguments @ ..] = &children[..] else {
-                        return Err(malformed(crate::error::TypeReason::AnnotationApplyFunctionMissing));
+                        return Err(malformed(
+                            crate::error::TypeReason::AnnotationApplyFunctionMissing,
+                        ));
                     };
                     if arguments.len() != apply.arguments.len() {
                         return Err(malformed(
@@ -370,7 +372,9 @@ impl TastyUnpickler<'_, '_, '_> {
                 (RawTree::LengthNode(node), TYPEAPPLY_TAG) => {
                     let apply = node.decode_type_apply()?;
                     let [function, arguments @ ..] = &children[..] else {
-                        return Err(malformed(crate::error::TypeReason::AnnotationTypeApplyFunctionMissing));
+                        return Err(malformed(
+                            crate::error::TypeReason::AnnotationTypeApplyFunctionMissing,
+                        ));
                     };
                     if arguments.len() != apply.type_arguments.len() {
                         return Err(malformed(
@@ -391,7 +395,9 @@ impl TastyUnpickler<'_, '_, '_> {
                         return Err(unsupported(tag));
                     }
                     let [qualifier, _owner] = children[..] else {
-                        return Err(malformed(crate::error::TypeReason::AnnotationSelectionShape));
+                        return Err(malformed(
+                            crate::error::TypeReason::AnnotationSelectionShape,
+                        ));
                     };
                     current = qualifier;
                 }

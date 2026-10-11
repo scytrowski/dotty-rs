@@ -95,14 +95,20 @@ impl TastyUnpickler<'_, '_, '_> {
                     wire_name(self.file.names(), value)?;
                 }
                 let [embedded] = children[..] else {
-                    return Err(malformed(at, crate::error::TypeReason::IdentifierTypeTreeArity));
+                    return Err(malformed(
+                        at,
+                        crate::error::TypeReason::IdentifierTypeTreeArity,
+                    ));
                 };
                 self.type_at(ast, embedded, at, depth)?
             }
             EXPLICITTPT_TAG => {
                 ast.tree_at(at, from)?.decode_explicit_tpt()?;
                 let [child] = children[..] else {
-                    return Err(malformed(at, crate::error::TypeReason::ExplicitTypeTreeArity));
+                    return Err(malformed(
+                        at,
+                        crate::error::TypeReason::ExplicitTypeTreeArity,
+                    ));
                 };
                 self.type_of_tpt(ast, child, at, depth)?
             }
@@ -117,7 +123,10 @@ impl TastyUnpickler<'_, '_, '_> {
             APPLIEDTPT_TAG => {
                 ast.node(at)?.decode_applied_type()?;
                 let [tycon, arguments @ ..] = &children[..] else {
-                    return Err(malformed(at, crate::error::TypeReason::AppliedTypeConstructorMissing));
+                    return Err(malformed(
+                        at,
+                        crate::error::TypeReason::AppliedTypeConstructorMissing,
+                    ));
                 };
                 let tycon = self.type_of_tpt(ast, *tycon, at, depth)?;
                 let mut args = Vec::with_capacity(arguments.len());
@@ -170,10 +179,7 @@ impl TastyUnpickler<'_, '_, '_> {
                         self.type_of_tpt(ast, alias, at, depth)?
                     }
                     _ => {
-                        return Err(malformed(
-                            at,
-                            crate::error::TypeReason::BoundsTypeTreeArity,
-                        ));
+                        return Err(malformed(at, crate::error::TypeReason::BoundsTypeTreeArity));
                     }
                 }
             }
@@ -183,7 +189,10 @@ impl TastyUnpickler<'_, '_, '_> {
                 // `TYPEREF` makes.
                 let shape = ast.tree_at(at, from)?.decode_select()?;
                 let [qualifier] = children[..] else {
-                    return Err(malformed(at, crate::error::TypeReason::TypeSelectionQualifierArity));
+                    return Err(malformed(
+                        at,
+                        crate::error::TypeReason::TypeSelectionQualifierArity,
+                    ));
                 };
                 let qualifier = self.type_of_term(ast, qualifier, at, depth)?;
                 let selected =
@@ -196,7 +205,10 @@ impl TastyUnpickler<'_, '_, '_> {
                 // already is a singleton. The reference must be one.
                 ast.tree_at(at, from)?.decode_singleton_tpt()?;
                 let [reference] = children[..] else {
-                    return Err(malformed(at, crate::error::TypeReason::SingletonTreeReferenceArity));
+                    return Err(malformed(
+                        at,
+                        crate::error::TypeReason::SingletonTreeReferenceArity,
+                    ));
                 };
                 let ty = self.type_of_term(ast, reference, at, depth)?;
                 if !is_singleton_type(self.store, ty) {
@@ -278,10 +290,7 @@ impl TastyUnpickler<'_, '_, '_> {
             .split_last()
             .filter(|(_, params)| !params.is_empty())
         else {
-            return Err(malformed(
-                at,
-                crate::error::TypeReason::LambdaTreeShape,
-            ));
+            return Err(malformed(at, crate::error::TypeReason::LambdaTreeShape));
         };
 
         let mut specs = Vec::with_capacity(params.len());

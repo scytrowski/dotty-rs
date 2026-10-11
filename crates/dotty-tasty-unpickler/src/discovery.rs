@@ -252,7 +252,10 @@ impl TastyUnpickler<'_, '_, '_> {
         depth: usize,
     ) -> Result<(), UnpickleError> {
         if depth > MAX_TREE_DEPTH {
-            return Err(malformed(tree, crate::error::TypeReason::TypeTreeDepthLimit));
+            return Err(malformed(
+                tree,
+                crate::error::TypeReason::TypeTreeDepthLimit,
+            ));
         }
         let Some(tag) = ast.tag_at(tree) else {
             return Err(UnpickleError::InvalidReferenceTarget {

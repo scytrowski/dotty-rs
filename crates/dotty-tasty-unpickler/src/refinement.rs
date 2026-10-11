@@ -76,7 +76,7 @@ impl TastyUnpickler<'_, '_, '_> {
         let Some((parent, stats)) = children.split_first() else {
             return Err(UnpickleError::MalformedRefinedTypeTree {
                 address: at,
-                reason: crate::error::RefinedTypeTreeReason::MissingParent,
+                reason: crate::error::RefinedTypeTreeReason::UnexpectedParent,
             });
         };
 

@@ -43,7 +43,7 @@ mod unpickler;
 pub mod tasty_unpickler {
     pub use crate::error::{
         DefinitionReason, ParentTreeReason, RefinedTypeTreeReason, SelfTypeTreeReason, TypeReason,
-        UnpickleError,
+        UnpickleError, UnpickleErrorCategory,
     };
     pub use crate::index::TastySemanticIndex;
     pub use crate::reachability::{IdentityNode, IdentityOutcome, identity_reachability};
