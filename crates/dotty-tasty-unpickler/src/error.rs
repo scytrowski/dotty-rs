@@ -996,10 +996,11 @@ impl UnpickleError {
             | Self::MissingRefinementClass { .. }
             | Self::InvalidRefinementClass { .. }
             | Self::MissingRefinementScope { .. }
-            | Self::CloseOverThis { .. }
-            | Self::ParameterAbstraction { .. }
             | Self::MissingEnteredSymbol { .. }
             | Self::SymbolInfoError { .. } => Category::InternalInvariant,
+            Self::CloseOverThis { error, .. }
+            | Self::ParameterAbstraction { error, .. }
+            | Self::RebindFailed { error, .. } => type_rebind_category(*error),
             Self::InvalidNameReference { .. }
             | Self::InvalidReferenceTarget { .. }
             | Self::ConstructorOwnerNotClassLike { .. }
@@ -1007,8 +1008,7 @@ impl UnpickleError {
             | Self::OpaqueAliasOwnerNotEntered { .. }
             | Self::UnsupportedType { .. }
             | Self::InvalidCompactAnnotationType { .. }
-            | Self::InvalidAnnotationType { .. }
-            | Self::RebindFailed { .. } => Category::Conditional,
+            | Self::InvalidAnnotationType { .. } => Category::Conditional,
             Self::UnsupportedName { .. }
             | Self::UnsupportedQualifier { .. }
             | Self::UnsupportedPackagePath { .. }
@@ -1055,6 +1055,17 @@ impl UnpickleError {
             | Self::BoundsVarianceTargetPending { .. } => Category::Deferred,
             Self::OpaqueAliasCycle { .. } => Category::MalformedInput,
         }
+    }
+}
+
+fn type_rebind_category(error: TypeRebindError) -> UnpickleErrorCategory {
+    match error {
+        TypeRebindError::TooDeep { .. } => UnpickleErrorCategory::UnsupportedFeature,
+        TypeRebindError::DuplicateParameterSymbol { .. }
+        | TypeRebindError::DuplicateSubstitutionSymbol { .. } => {
+            UnpickleErrorCategory::InternalInvariant
+        }
+        _ => UnpickleErrorCategory::Conditional,
     }
 }
 
@@ -1484,6 +1495,55 @@ mod tests {
             .category(),
             nested_term_limit.category()
         );
+    }
+
+    #[test]
+    fn nested_type_rebind_limits_and_invariants_keep_their_categories() {
+        let mut store = dotty_core::SemanticStore::new();
+        let type_id = store.types.alloc(dotty_core::Type::NoType);
+        let symbol = store.symbols.alloc(dotty_core::symbols::Symbol {
+            name: dotty_core::Name::new(
+                store.names.intern("parameter"),
+                dotty_core::Namespace::Term,
+            ),
+            owner: None,
+            kind: SymbolKind::Value,
+            flags: dotty_core::symbols::SymbolFlags::EMPTY,
+            visibility: dotty_core::symbols::Visibility::Public,
+            info: dotty_core::symbols::SymbolInfo::Missing,
+            origin: dotty_core::symbols::SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::symbols::SymbolLinks::default(),
+        });
+        let too_deep = TypeRebindError::TooDeep { id: type_id };
+        let duplicate_parameter = TypeRebindError::DuplicateParameterSymbol { symbol };
+
+        for error in [
+            UnpickleError::CloseOverThis {
+                address: 4,
+                error: too_deep,
+            },
+            UnpickleError::ParameterAbstraction {
+                address: 4,
+                error: too_deep,
+            },
+        ] {
+            assert_eq!(error.category(), UnpickleErrorCategory::UnsupportedFeature);
+        }
+
+        for error in [
+            UnpickleError::CloseOverThis {
+                address: 4,
+                error: duplicate_parameter,
+            },
+            UnpickleError::ParameterAbstraction {
+                address: 4,
+                error: duplicate_parameter,
+            },
+        ] {
+            assert_eq!(error.category(), UnpickleErrorCategory::InternalInvariant);
+        }
     }
 
     #[test]
