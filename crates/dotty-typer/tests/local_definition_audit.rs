@@ -320,7 +320,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 *metrics
                     .incomplete_prefix_states
                     .entry(format!(
-                        "state={state}::origin={origin}::binary={}",
+                        "state={state}::origin={origin}::identity={}",
                         prefix.identity
                     ))
                     .or_default() += 1;
