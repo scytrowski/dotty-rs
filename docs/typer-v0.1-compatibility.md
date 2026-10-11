@@ -1307,7 +1307,10 @@ the Scala 3.9 impure function identities. In capture-checking mode, ordinary
 `scala.ImpureFunctionN` / `scala.ImpureContextFunctionN` aliases, whose bodies
 are retaining-cap annotated applications of `FunctionN` / `ContextFunctionN`.
 The pre-#949 audit's 13 observations are 3 distinct one-argument ordinary
-`ImpureFunction1` source trees in 2 files. The identity API resolves or
+`ImpureFunction1` source trees in 2 files. The #950 audit freezes all 13 rows
+individually; after #949 the live `FunctionWithMods` first-blocker bucket is
+0 / 0 and all 13 enclosing methods stop at `SymbolResolution`. The corpus
+types 0 / 3,297 local methods. The identity API resolves or
 materializes these canonical aliases. The reference pins the exact alias representation,
 the generic-alias normalization prerequisite, and the boundaries around
 erased and capture-set function types: [impure function identity reference](../crates/dotty-typer/tests/fixtures/function-class-identities/ImpureFunctionTypeIdentities.oracle.md).
@@ -1362,8 +1365,9 @@ occurrences in 8 files at the #825 baseline to zero. The pre-#949 bucket
 `UnsupportedTypeTree::FunctionWithMods` had 13 occurrences in 2 files; #949
 adds support for the exact ordinary and contextual impure forms while keeping
 erasure, capture-set results, and unsupported modifier combinations deferred.
-The #949 corpus rerun is not recorded here. These counts measure first-blocker
-movement, not full source semantic parity. The audit used the pinned source revision
+The #950 corpus reran twice with byte-identical output: the live bucket is now
+0 / 0 and every frozen baseline row reaches `SymbolResolution`. These counts
+measure first-blocker movement, not full source semantic parity. The audit used the pinned source revision
 `777528f19a58e794c9954a42f433373472ec57f8` and JDK 21.
 See the [pinned function-type reference and typed-tree fixture](../crates/dotty-typer/tests/fixtures/function-type-projection/FunctionTypeProjection.oracle.md).
 
@@ -1401,8 +1405,9 @@ For the 13 old `UnsupportedExpression::Function` cases, 9 now stop at
 `UnsupportedFunctionLiteralParameter` in `Synthesizer.scala`; the other 4
 stop at `ImportQualifierNotFound` in `Scala2Unpickler.scala`. None fully typed.
 For the 12 old `UnsupportedTypeTree::Function` cases, all now stop at
-`SymbolResolution` across the same 8 files; none fully typed. The separate
-`UnsupportedTypeTree::FunctionWithMods` bucket remains 13 in 2 files. The
+`SymbolResolution` across the same 8 files; none fully typed. The frozen
+`UnsupportedTypeTree::FunctionWithMods` cohort was 13 in 2 files and now has
+zero current first blockers; all 13 rows are retained individually. The
 comparison records each method and its current first blocker in the [audit
 report](typer-classpath-corpus-audit-3.9.0.md#826-829-source-function-support).
 No local method fully typed in the full corpus run, and external member

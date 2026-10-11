@@ -4187,6 +4187,70 @@ mod tests {
     }
 
     #[test]
+    fn isolated_function_projection_survives_later_method_expression_error() {
+        let source_text = "class A; class B; def broken(value: A => B): Int = missing";
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_capture_checked_and_name(source_text);
+        enter_capture_checked_function_classes(&mut store, &mut packages, 0..=1);
+        let (method_tree, method) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "broken" =>
+                {
+                    Some((tree, definition))
+                }
+                _ => None,
+            })
+            .expect("method definition");
+        let function_tree = method.value_param_clauses[0][0];
+        let function_tpt = match &parsed.ast.get(function_tree).kind {
+            TreeKind::ValDef(parameter) => parameter.tpt,
+            _ => panic!("expected the method parameter definition"),
+        };
+        let method_symbol = index.symbol_at(source, method_tree).unwrap();
+        let declaration_context = index.declaration_context_of(method_symbol).unwrap();
+        let rhs = method.rhs.unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer
+            .type_of_tpt(function_tpt, declaration_context)
+            .expect("the function type projection should succeed independently");
+        let Type::Applied { tycon, args } = typer.store().types.get(projected) else {
+            panic!("the projected function type should be applied");
+        };
+        assert_eq!(args.len(), 2);
+        let Type::TypeRef {
+            target: TypeRefTarget::Symbol(alias),
+            ..
+        } = typer.store().types.get(*tycon)
+        else {
+            panic!("the function constructor should be a canonical alias");
+        };
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(*alias).name.text()),
+            "ImpureFunction1"
+        );
+
+        let expression_context = typer.expression_context_for(method_symbol).unwrap();
+        assert!(matches!(
+            typer.type_expression(rhs, expression_context),
+            Err(TyperError::TermNameNotFound { .. })
+        ));
+    }
+
+    #[test]
     fn failed_impure_function_projection_rolls_back_materialized_aliases() {
         let (parsed, mut store, mut packages, definitions, index, source) =
             parse_capture_checked_and_name("class B; type Broken = Missing => B");
