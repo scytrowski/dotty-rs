@@ -1,4 +1,4 @@
-//! JVM class file decoder and encoder.
+//! JVM class-file reading and low-level binary-writing APIs.
 //!
 //! Reference format: the class file format produced and consumed by JDK 26
 //! (class file major version 70), the current compatibility ceiling for
@@ -6,18 +6,21 @@
 //! and 26 corpora. See `docs/classfile-format-jdk25.md` for the wire-format
 //! reference and compatibility audit this type model follows.
 //!
-//! This is currently a type skeleton only: no decoder, encoder, or bounded
-//! reader exists yet.
+//! [`writer::Writer`] writes primitive JVM-format values and checked length
+//! prefixes. It does not encode [`class_file::ClassFile`] values yet, perform
+//! semantic JVM verification, or generate JVM code from Scala programs.
 
 pub mod access_flags;
 pub mod attribute;
 pub mod class_file;
 pub mod constant_pool;
 pub mod descriptor;
+pub mod encode_error;
 pub mod field;
 pub mod method;
 pub mod reader;
 pub mod signature;
+pub mod writer;
 
 /// JVM class file binary and structural APIs.
 pub mod classfile {
@@ -26,8 +29,10 @@ pub mod classfile {
     pub use super::class_file::*;
     pub use super::constant_pool::*;
     pub use super::descriptor::*;
+    pub use super::encode_error::*;
     pub use super::field::*;
     pub use super::method::*;
     pub use super::reader::*;
     pub use super::signature::*;
+    pub use super::writer::*;
 }
