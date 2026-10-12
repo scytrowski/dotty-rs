@@ -1,45 +1,52 @@
 //! Typed JVM instructions for the deliberately small, straight-line subset
 //! supported by this crate.
 //!
-//! This module describes instructions; it does not encode, decode, verify, or
-//! optimize bytecode. A method is represented as one ordered basic block with
+//! This module describes instructions; [`assembler::assemble`] encodes the
+//! supported subset, but this module does not decode, verify, or optimize
+//! bytecode. A method is represented as one ordered basic block with
 //! no branch targets or exception-control-flow edges. Constant-pool operands
 //! below contain already assigned [`ConstantPoolIndex`] values. Resolve and
-//! intern symbolic names before constructing instructions; these types do not
-//! mutate or inspect a constant pool. A future assembler is responsible for
-//! checking that each index exists and has the right constant-pool tag.
+//! intern symbolic names before constructing instructions; the assembler
+//! checks that each index exists and has the right constant-pool tag without
+//! mutating the pool.
 //!
 //! The stack column uses JVM stack values except where it explicitly says
 //! "slots". `getfield`, `putfield`, static fields, and calls depend on the
-//! referenced descriptor. Local-index width is selected by a future assembler:
+//! referenced descriptor. Local-index width is selected by the assembler:
 //! the short `_0` through `_3` form is available where applicable, an index up
 //! to 255 uses a one-byte operand, and larger indices use `wide` with a
 //! two-byte operand. Constant-pool widths are `u2`, except `ldc`, whose
 //! assembler may use a one-byte index when possible.
 //!
-//! | Family / variants | Explicit operand | Operand width | Stack effect |
+//! | Instruction | Opcode / JVMS §6.5 | Operand width | Stack effect |
 //! | --- | --- | --- | --- |
-//! | `AConstNull` | none | 0 | `[] -> [reference]` |
-//! | `IConst(MinusOne..Five)` | immediate selected by variant | 0 | `[] -> [int]` |
-//! | `Bipush(i8)` | signed byte | 1 | `[] -> [int]` |
-//! | `Sipush(i16)` | signed short | 2 | `[] -> [int]` |
-//! | `LConst(Zero..One)` | immediate selected by variant | 0 | `[] -> [long]` (2 slots) |
-//! | `Ldc(Integer/Reference)` | category-one CP index | 1 or 2 | `[] -> [int/reference]` |
-//! | `Ldc2(Long)` | category-two CP index | 2 | `[] -> [long]` (2 slots) |
-//! | `ILoad`, `LLoad`, `ALoad` | `LocalIndex` | 0, 1, or `wide` + 2 | `[] -> [int/long/reference]` |
-//! | `IStore`, `LStore`, `AStore` | `LocalIndex` | 0, 1, or `wide` + 2 | `[int/long/reference] -> []` |
-//! | `IAdd` | none | 0 | `[int, int] -> [int]` |
-//! | `Dup` | none | 0 | `[category-1] -> [category-1, category-1]` |
-//! | `GetField(FieldReference)` | field CP index | 2 | `[reference] -> [field value]` |
-//! | `PutField(FieldReference)` | field CP index | 2 | `[reference, field value] -> []` |
-//! | `GetStatic(FieldReference)` | field CP index | 2 | `[] -> [field value]` |
-//! | `PutStatic(FieldReference)` | field CP index | 2 | `[field value] -> []` |
-//! | `InvokeStatic(StaticMethodReference)` | method CP index | 2 | `[arguments] -> [result if non-void]` |
-//! | `InvokeVirtual(VirtualMethodReference)` | method CP index | 2 | `[receiver, arguments] -> [result if non-void]` |
-//! | `InvokeSpecial(SpecialMethodReference)` | method CP index | 2 | `[receiver, arguments] -> [result if non-void]` |
-//! | `New(ClassReference)` | class CP index | 2 | `[] -> [reference]` |
-//! | `Return` | none | 0 | `[] -> terminal` |
-//! | `IReturn`, `AReturn`, `LReturn` | none | 0 | `[int/reference/long] -> terminal` |
+//! | `AConstNull` | [`aconst_null`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.aconst_null) `0x01` | 0 | `[] -> [reference]` |
+//! | `IConst(MinusOne..Five)` | [`iconst_m1`..`iconst_5`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.iconst_i) `0x02`..`0x08` | 0 | `[] -> [int]` |
+//! | `Bipush(i8)` | [`bipush`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.bipush) `0x10` | 1 signed | `[] -> [int]` |
+//! | `Sipush(i16)` | [`sipush`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.sipush) `0x11` | 2 signed | `[] -> [int]` |
+//! | `LConst(Zero..One)` | [`lconst_0`..`lconst_1`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.lconst_i) `0x09`..`0x0a` | 0 | `[] -> [long]` (2 slots) |
+//! | `Ldc(Integer/Reference)` | [`ldc`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.ldc) `0x12` (u1 index), [`ldc_w`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.ldc_w) `0x13` (u2 index) | 1 or 2 | `[] -> [int/reference]` |
+//! | `Ldc2(Long)` | [`ldc2_w`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.ldc2_w) `0x14` | 2 | `[] -> [long]` (2 slots) |
+//! | `ILoad` | [`iload`, `iload_0`..`iload_3`, `wide iload`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.iload) `0x15`, `0x1a`..`0x1d`, `0xc4` | 0, 1, or `wide` + 2 | `[] -> [int]` |
+//! | `LLoad` | [`lload`, `lload_0`..`lload_3`, `wide lload`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.lload) `0x16`, `0x1e`..`0x21`, `0xc4` | 0, 1, or `wide` + 2 | `[] -> [long]` (2 slots) |
+//! | `ALoad` | [`aload`, `aload_0`..`aload_3`, `wide aload`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.aload) `0x19`, `0x2a`..`0x2d`, `0xc4` | 0, 1, or `wide` + 2 | `[] -> [reference]` |
+//! | `IStore` | [`istore`, `istore_0`..`istore_3`, `wide istore`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.istore) `0x36`, `0x3b`..`0x3e`, `0xc4` | 0, 1, or `wide` + 2 | `[int] -> []` |
+//! | `LStore` | [`lstore`, `lstore_0`..`lstore_3`, `wide lstore`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.lstore) `0x37`, `0x3f`..`0x42`, `0xc4` | 0, 1, or `wide` + 2 | `[long] -> []` |
+//! | `AStore` | [`astore`, `astore_0`..`astore_3`, `wide astore`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.astore) `0x3a`, `0x4b`..`0x4e`, `0xc4` | 0, 1, or `wide` + 2 | `[reference] -> []` |
+//! | `IAdd` | [`iadd`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.iadd) `0x60` | 0 | `[int, int] -> [int]` |
+//! | `Dup` | [`dup`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.dup) `0x59` | 0 | `[category-1] -> [category-1, category-1]` |
+//! | `GetField(FieldReference)` | [`getfield`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.getfield) `0xb4` | 2 | `[reference] -> [field value]` |
+//! | `PutField(FieldReference)` | [`putfield`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.putfield) `0xb5` | 2 | `[reference, field value] -> []` |
+//! | `GetStatic(FieldReference)` | [`getstatic`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.getstatic) `0xb2` | 2 | `[] -> [field value]` |
+//! | `PutStatic(FieldReference)` | [`putstatic`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.putstatic) `0xb3` | 2 | `[field value] -> []` |
+//! | `InvokeVirtual(VirtualMethodReference)` | [`invokevirtual`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.invokevirtual) `0xb6` | 2 | `[receiver, arguments] -> [result if non-void]` |
+//! | `InvokeSpecial(SpecialMethodReference)` | [`invokespecial`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.invokespecial) `0xb7` | 2 | `[receiver, arguments] -> [result if non-void]` |
+//! | `InvokeStatic(StaticMethodReference)` | [`invokestatic`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.invokestatic) `0xb8` | 2 | `[arguments] -> [result if non-void]` |
+//! | `New(ClassReference)` | [`new`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.new) `0xbb` | 2 | `[] -> [reference]` |
+//! | `Return` | [`return`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.return) `0xb1` | 0 | `[] -> terminal` |
+//! | `IReturn` | [`ireturn`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.ireturn) `0xac` | 0 | `[int] -> terminal` |
+//! | `AReturn` | [`areturn`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.areturn) `0xb0` | 0 | `[reference] -> terminal` |
+//! | `LReturn` | [`lreturn`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.lreturn) `0xad` | 0 | `[long] -> terminal` |
 //!
 //! The modeled families are exhaustive for this v1 API. Float and double
 //! instructions, `invokeinterface`, `invokedynamic`, branches, labels,
@@ -49,6 +56,10 @@
 //! variants, so unsupported instructions cannot silently enter the model.
 //!
 //! [`ConstantPoolIndex`]: crate::constant_pool::ConstantPoolIndex
+
+pub mod assembler;
+
+pub use assembler::{AssembleError, ConstantPoolOperandKind, assemble};
 
 use crate::constant_pool::ConstantPoolIndex;
 use std::fmt;
