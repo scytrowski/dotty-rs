@@ -295,6 +295,23 @@ fn validates_references_across_every_real_fixture() {
 }
 
 #[test]
+fn class_file_encode_round_trips_real_fixtures_structurally() {
+    for bytes in [
+        POOL_SAMPLE,
+        NESTED_SAMPLE,
+        NESTED_SAMPLE_INNER,
+        NESTED_SAMPLE_LOCAL_RUNNABLE,
+        SHAPE,
+        SHAPE_CIRCLE,
+    ] {
+        let original = decode(bytes);
+        let encoded = original.encode().unwrap();
+        let decoded = decode(&encoded);
+        assert_eq!(decoded, original);
+    }
+}
+
+#[test]
 fn resolves_and_parses_the_real_max_signature() {
     let class_file = decode(NESTED_SAMPLE);
     let pool = &class_file.constant_pool;

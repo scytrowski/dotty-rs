@@ -2,7 +2,9 @@ use crate::access_flags::FieldAccessFlags;
 use crate::attribute::{Attribute, AttributeError, decode_attributes, validate_attributes};
 use crate::constant_pool::{ConstantPool, ConstantPoolIndex, PoolRefError, read_index};
 use crate::descriptor::{FieldType, ResolveDescriptorError, resolve_field_type};
+use crate::encode_error::EncodeError;
 use crate::reader::Reader;
+use crate::writer::Writer;
 
 /// A `field_info` structure (JVMS §4.5).
 #[derive(Debug, Clone, PartialEq)]
@@ -14,6 +16,20 @@ pub struct FieldInfo<'a> {
 }
 
 impl<'a> FieldInfo<'a> {
+    /// Encodes this `field_info` structure (JVMS §4.5), preserving its flags,
+    /// constant-pool indices, and attribute order.
+    pub fn encode(&self, constant_pool: &ConstantPool) -> Result<Vec<u8>, EncodeError> {
+        validate_encode_references(self, constant_pool)?;
+
+        let attributes = crate::attribute::encode_attributes(&self.attributes, constant_pool)?;
+        let mut writer = Writer::new();
+        writer.write_u2(self.access_flags.0);
+        writer.write_u2(self.name_index.0);
+        writer.write_u2(self.descriptor_index.0);
+        writer.write_bytes(&attributes);
+        Ok(writer.into_bytes())
+    }
+
     pub fn decode(
         reader: &mut Reader<'a>,
         constant_pool: &ConstantPool,
@@ -46,6 +62,25 @@ impl<'a> FieldInfo<'a> {
         constant_pool.utf8(self.descriptor_index)?;
         validate_attributes(&self.attributes, constant_pool)
     }
+}
+
+fn validate_encode_references(
+    field: &FieldInfo<'_>,
+    constant_pool: &ConstantPool,
+) -> Result<(), EncodeError> {
+    field
+        .validate_references(constant_pool)
+        .map_err(|error| match error {
+            PoolRefError::InvalidIndex { index } => EncodeError::InvalidIndex {
+                index: usize::from(index.0),
+                count: constant_pool.entry_count(),
+            },
+            PoolRefError::WrongKind { index, .. } => EncodeError::InvalidReference {
+                index: usize::from(index.0),
+            },
+            PoolRefError::TooDeeplyNestedAttribute => EncodeError::TooDeeplyNestedAttribute,
+            PoolRefError::TooDeeplyNestedAnnotation => EncodeError::TooDeeplyNestedAnnotation,
+        })
 }
 
 #[cfg(test)]

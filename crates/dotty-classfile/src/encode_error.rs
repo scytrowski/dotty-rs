@@ -61,6 +61,13 @@ pub enum EncodeError {
     UnsupportedAttribute,
     /// The provided class-file model violates a structural requirement.
     InvalidModel,
+    /// The class-file version is outside the supported non-preview range.
+    UnsupportedVersion {
+        /// The class-file major version.
+        major: u16,
+        /// The class-file minor version.
+        minor: u16,
+    },
     /// A `Code` attribute has a code array length outside the JVMS range 1..=65535.
     InvalidCodeLength {
         /// The supplied bytecode length.
@@ -122,6 +129,10 @@ impl fmt::Display for EncodeError {
                 formatter.write_str("attribute variant is not supported by the encoder")
             }
             Self::InvalidModel => formatter.write_str("invalid class-file model"),
+            Self::UnsupportedVersion { major, minor } => write!(
+                formatter,
+                "class-file version {major}.{minor} is outside the supported non-preview range"
+            ),
             Self::InvalidCodeLength { length } => write!(
                 formatter,
                 "Code bytecode length {length} is outside the JVMS range 1..=65535"
