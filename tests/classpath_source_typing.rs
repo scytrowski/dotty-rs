@@ -701,11 +701,36 @@ fn generic_external_receiver_reports_the_current_signature_limitation() {
         &mut store,
         &mut packages,
     );
-    let resolver = ClasspathSymbolResolver::new(
+    let mut resolver = ClasspathSymbolResolver::new(
         class_path(&stubs),
         definitions,
         LoadingSession::with_packages(packages),
     );
+    let external = resolver
+        .resolve_package(&mut store, &["external"])
+        .unwrap()
+        .expect("the fixture has the external package");
+    let external_prefix = store
+        .types
+        .alloc(Type::type_ref(definitions.no_prefix, external));
+    let generic_name = Name::new(store.names.intern("GenericSample"), Namespace::Type);
+    let generic_class = resolver
+        .resolve_member(
+            &mut store,
+            &dotty_core::MemberRequest {
+                prefix: external_prefix,
+                name: generic_name,
+                selector: dotty_core::MemberSelector::Unique,
+                space: dotty_core::MemberSpace::Prefix,
+            },
+        )
+        .unwrap()
+        .expect("GenericSample should materialize before receiver adaptation");
+    assert_eq!(store.symbols.get(generic_class).owner, Some(external));
+    assert!(matches!(
+        store.symbols.get(generic_class).info,
+        SymbolInfo::Complete(info) if matches!(store.types.get(info), Type::ClassInfo(_))
+    ));
     let typer_packages = Packages::new();
     let mut typer = SourceTyper::new(
         &unit.parsed.ast,
