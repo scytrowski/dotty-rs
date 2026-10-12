@@ -301,6 +301,100 @@ fn source_member_selection_completes_shells_on_demand_and_rolls_back_in_place() 
     );
 }
 
+#[test]
+fn direct_import_member_completion_participates_in_expression_rollback() {
+    let files = TemporaryDirectory::new("direct-shell-import");
+    write_demand_class(files.path(), "External", None, &[("value", "I")]);
+    // A static final JVM field is a stable imported value in the existing typer model.
+    let bytes = fs::read(files.path().join("External.class")).unwrap();
+    let mut reader = dotty_classfile::reader::Reader::new(&bytes);
+    let mut class = dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
+    class.fields[0].access_flags = dotty_classfile::access_flags::FieldAccessFlags(0x0019);
+    fs::write(files.path().join("External.class"), class.encode().unwrap()).unwrap();
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "def broken(): Int = { import External.value; val x = value; missing }\ndef valid(): Int = { import External.value; value }",
+        SourceId::from_index(11),
+        &mut store,
+        &mut packages,
+    );
+    let reads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut loader = ClassLoader::with_definitions(
+        DemandClassPath {
+            root: files.path().to_owned(),
+            reads: reads.clone(),
+        },
+        &mut store,
+        definitions,
+        LoadingSession::with_packages(packages),
+    );
+    let external = loader
+        .ensure_class_identity(&BinaryName::from_internal("External"))
+        .unwrap();
+    let (path, session) = loader.into_parts();
+    let previous = store.symbols.get(external).clone();
+    let log = Rc::new(RefCell::new(ResolutionLog::default()));
+    let resolver = RecordingResolver::new(
+        ClasspathSymbolResolver::new(path, definitions, session),
+        log.clone(),
+    );
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        unit.source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let (method, rhs) = method_rhs(&unit, typer.store(), "broken");
+    let context = typer.expression_context_for(method).unwrap();
+    let checkpoint = typer.store().checkpoint();
+    let typed_count = typer.typed_ast().iter().count();
+    let mappings: Vec<_> = unit
+        .parsed
+        .ast
+        .iter()
+        .map(|(tree, _)| (tree, typer.source_typed_index().get(unit.source, tree)))
+        .collect();
+    let error = typer.type_expression(rhs, context).unwrap_err();
+    assert!(
+        matches!(error, TyperError::TermNameNotFound { .. }),
+        "{error:?}"
+    );
+    assert_eq!(typer.store().checkpoint(), checkpoint);
+    assert_eq!(typer.store().symbols.get(external), &previous);
+    assert_eq!(typer.typed_ast().iter().count(), typed_count);
+    for (tree, before) in mappings {
+        assert_eq!(typer.source_typed_index().get(unit.source, tree), before);
+    }
+    let member = class_id(&log.borrow(), "value");
+    assert!(!typer.store().symbols.contains(member));
+    assert!(
+        log.borrow().completions.is_empty(),
+        "this path uses direct resolve_member, not the completion port"
+    );
+    let (method, rhs) = method_rhs(&unit, typer.store(), "valid");
+    let context = typer.expression_context_for(method).unwrap();
+    typer.type_expression(rhs, context).unwrap();
+    let member = log
+        .borrow()
+        .members
+        .iter()
+        .rev()
+        .find_map(|(name, id)| (name == "value").then_some(*id))
+        .unwrap();
+    assert_eq!(typer.store().symbols.get(member).owner, Some(external));
+    assert_eq!(
+        typer.store().symbols.get(member).info,
+        SymbolInfo::Complete(definitions.int)
+    );
+    assert_eq!(*reads.lock().unwrap(), ["External", "External", "External"]);
+}
+
 fn replace_all(mut input: Vec<u8>, old: &[u8], new: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
     while let Some(offset) = input.windows(old.len()).position(|window| window == old) {

@@ -1035,6 +1035,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn direct_member_outer_rollback_removes_a_same_transaction_shell_and_member() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(member_class_path(), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(&mut store, &["sample"])
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let a_request = MemberRequest {
+            prefix: package_prefix,
+            name: Name::new(store.names.intern("A"), Namespace::Type),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let value = Name::new(store.names.intern("value"), Namespace::Term);
+        for _ in 0..2 {
+            let mark = resolver.checkpoint();
+            let store_mark = store.checkpoint();
+            resolver
+                .resolve_member(&mut store, &a_request)
+                .unwrap()
+                .unwrap();
+            let b = resolver.session.identified[&BinaryName::from_internal("sample/B")];
+            assert_eq!(store.symbols.get(b).info, SymbolInfo::Missing);
+            let prefix = store.types.alloc(Type::type_ref(definitions.no_prefix, b));
+            let member = resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix,
+                        name: value,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(store.symbols.get(member).owner, Some(b));
+            resolver.rollback_to(&mut store, mark);
+            store.rollback_to(store_mark);
+            assert!(!store.symbols.contains(b));
+            assert!(!store.symbols.contains(member));
+            assert!(resolver.session.identified.is_empty());
+            assert!(resolver.session.resolved.is_empty());
+            assert_eq!(store.checkpoint(), store_mark);
+        }
+    }
+
     impl CompletionClassPath {
         fn new() -> Self {
             Self {
@@ -2509,6 +2562,78 @@ mod tests {
             .expect("real scala.io.Source should expose getLines");
         assert_eq!(store.symbols.get(method).owner, Some(source));
         assert!(store.scopes.get(declarations).lookup(&get_lines).is_some());
+    }
+
+    #[test]
+    fn real_jdk_and_scala_methods_resolve_directly_from_identity_shells() {
+        let scala = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(fixture_path(
+                "../dotty-tasty/tests/fixtures/scala3-library",
+            ))),
+            Box::new(SyntheticTastyJdk),
+        ]);
+        let jdk = CompositeClassPath::new(vec![Box::new(JdkCorpusDayOfWeek)]);
+        for (name, member_name, path) in [
+            ("scala/io/Source", "getLines", scala),
+            ("java/time/DayOfWeek", "getValue", jdk),
+        ] {
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let mut loader =
+                ClassLoader::with_definitions(path, &mut store, definitions, LoadingSession::new());
+            let class = loader
+                .ensure_class_identity(&BinaryName::from_internal(name))
+                .unwrap();
+            let (path, session) = loader.into_parts();
+            assert_eq!(store.symbols.get(class).info, SymbolInfo::Missing);
+            let prefix = store.types.alloc(Type::ThisType { class });
+            let request = MemberRequest {
+                prefix,
+                name: Name::new(store.names.intern(member_name), Namespace::Term),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let mut resolver = ClasspathSymbolResolver::new(path, definitions, session);
+            let member = resolver
+                .resolve_member(&mut store, &request)
+                .unwrap()
+                .unwrap();
+            assert_eq!(store.symbols.get(member).owner, Some(class));
+            assert_eq!(store.symbols.get(member).kind, SymbolKind::Method);
+            let SymbolInfo::Complete(method_type) = store.symbols.get(member).info else {
+                panic!("method")
+            };
+            let Type::Method(method_info) = store.types.get(method_type) else {
+                panic!("Method")
+            };
+            assert!(method_info.params.is_empty());
+            if name == "java/time/DayOfWeek" {
+                assert_eq!(method_info.result, definitions.int);
+            }
+            let checkpoint = store.checkpoint();
+            assert_eq!(
+                resolver.resolve_member(&mut store, &request).unwrap(),
+                Some(member)
+            );
+            assert_eq!(store.checkpoint(), checkpoint);
+            if name == "java/time/DayOfWeek" {
+                let constructor_name = Name::new(store.names.intern("<init>"), Namespace::Term);
+                let constructor = resolver
+                    .resolve_member(
+                        &mut store,
+                        &MemberRequest {
+                            prefix,
+                            name: constructor_name,
+                            selector: MemberSelector::Unique,
+                            space: MemberSpace::Prefix,
+                        },
+                    )
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(store.symbols.get(constructor).kind, SymbolKind::Constructor);
+                assert_eq!(store.symbols.get(constructor).owner, Some(class));
+            }
+        }
     }
 
     #[test]
