@@ -686,10 +686,10 @@ fn validate_member_name(name: &str, method: bool) -> Result<(), ClassFileBuildEr
     if name.is_empty() || name.chars().any(|c| matches!(c, '.' | ';' | '[' | '/')) {
         return Err(ClassFileBuildError::InvalidMemberName);
     }
-    if !method && matches!(name, "<init>" | "<clinit>") {
-        return Err(ClassFileBuildError::InvalidMemberName);
-    }
-    if method && name.starts_with('<') && !matches!(name, "<init>" | "<clinit>") {
+    if method
+        && name.chars().any(|c| matches!(c, '<' | '>'))
+        && !matches!(name, "<init>" | "<clinit>")
+    {
         return Err(ClassFileBuildError::InvalidMemberName);
     }
     Ok(())
@@ -746,6 +746,7 @@ fn validate_class_flags(flags: ClassAccessFlags) -> Result<(), ClassFileBuildErr
         || visibility > 1
         || (flags.contains(ACC_FINAL) && flags.contains(ACC_ABSTRACT))
         || (flags.contains(ACC_INTERFACE) && !flags.contains(ACC_ABSTRACT))
+        || (flags.contains(ACC_INTERFACE) && flags.contains(ACC_SUPER))
         || (flags.contains(ACC_ANNOTATION) && !flags.contains(ACC_INTERFACE))
         || (flags.contains(ACC_ENUM) && flags.contains(ACC_INTERFACE))
         || flags.contains(ACC_MODULE)
@@ -809,6 +810,20 @@ fn validate_method_flags_for_class(
                 || (flags.contains(ACC_PRIVATE) && major_version < 53)))
     {
         return Err(ClassFileBuildError::InvalidAccessFlags);
+    }
+    if is_interface && name != "<clinit>" {
+        let required = if major_version < 52 {
+            ACC_PUBLIC | ACC_ABSTRACT
+        } else if major_version < 53 {
+            ACC_PUBLIC
+        } else {
+            0
+        };
+        if flags.0 & required != required
+            || (major_version >= 52 && (flags.contains(ACC_PUBLIC) == flags.contains(ACC_PRIVATE)))
+        {
+            return Err(ClassFileBuildError::InvalidAccessFlags);
+        }
     }
     Ok(())
 }

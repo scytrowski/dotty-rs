@@ -358,6 +358,44 @@ fn rejects_invalid_names_descriptors_flags_versions_and_duplicates() {
 }
 
 #[test]
+fn validates_jvm_angle_brackets_by_member_kind() {
+    let mut builder = ClassFileBuilder::new(
+        "example/Names",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+
+    for field_name in ["<init>", "<clinit>"] {
+        builder
+            .add_field(field_name, "I", FieldAccessFlags(ACC_PRIVATE))
+            .unwrap();
+    }
+    for method_name in ["m<suffix", "m>suffix", ">m", "<m", "m>"] {
+        assert_eq!(
+            builder
+                .add_method(method_name, "()V", MethodAccessFlags(ACC_PUBLIC))
+                .err(),
+            Some(ClassFileBuildError::InvalidMemberName)
+        );
+    }
+
+    builder
+        .add_method("<init>", "()V", MethodAccessFlags(ACC_PUBLIC))
+        .unwrap()
+        .code(0, 1, [0xb1])
+        .unwrap();
+    builder
+        .add_method("<clinit>", "()V", MethodAccessFlags(ACC_STATIC))
+        .unwrap()
+        .code(0, 0, [0xb1])
+        .unwrap();
+    assert!(builder.encode().is_ok());
+}
+
+#[test]
 fn code_rules_duplicates_and_failed_mutations_are_observable() {
     let mut builder = ClassFileBuilder::new(
         "example/C",
@@ -527,6 +565,123 @@ fn enforces_unambiguous_interface_and_abstract_class_rules() {
     .unwrap();
     late_interface
         .add_field("value", "I", FieldAccessFlags(ACC_PUBLIC))
+        .unwrap();
+    late_interface
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT))
+        .unwrap();
+    assert_eq!(
+        late_interface.encode(),
+        Err(ClassFileBuildError::InvalidAccessFlags)
+    );
+}
+
+#[test]
+fn enforces_versioned_interface_class_and_method_flags() {
+    let mut rejected_super = ClassFileBuilder::new(
+        "example/RejectedSuper",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        rejected_super
+            .set_access_flags(ClassAccessFlags(
+                ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT | ACC_SUPER,
+            ))
+            .err(),
+        Some(ClassFileBuildError::InvalidAccessFlags)
+    );
+    assert!(rejected_super.encode().is_ok());
+
+    let mut interface = ClassFileBuilder::new(
+        "example/ApiFlags",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        interface
+            .set_access_flags(ClassAccessFlags(
+                ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT | ACC_SUPER,
+            ))
+            .err(),
+        Some(ClassFileBuildError::InvalidAccessFlags)
+    );
+    interface
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT))
+        .unwrap();
+    assert_eq!(
+        interface
+            .add_method("packagePrivate", "()V", MethodAccessFlags(ACC_ABSTRACT))
+            .err(),
+        Some(ClassFileBuildError::InvalidAccessFlags)
+    );
+    interface
+        .add_method(
+            "publicAbstract",
+            "()V",
+            MethodAccessFlags(ACC_PUBLIC | ACC_ABSTRACT),
+        )
+        .unwrap();
+    interface
+        .add_method("privateConcrete", "()V", MethodAccessFlags(ACC_PRIVATE))
+        .unwrap()
+        .code(0, 1, [0xb1])
+        .unwrap();
+    assert!(interface.encode().is_ok());
+
+    let mut old_interface = ClassFileBuilder::new(
+        "example/OldApi",
+        ClassFileVersion {
+            major: 51,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    old_interface
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT))
+        .unwrap();
+    assert_eq!(
+        old_interface
+            .add_method(
+                "staticConcrete",
+                "()V",
+                MethodAccessFlags(ACC_PUBLIC | ACC_STATIC),
+            )
+            .err(),
+        Some(ClassFileBuildError::InvalidAccessFlags)
+    );
+    assert_eq!(
+        old_interface
+            .add_method("packagePrivate", "()V", MethodAccessFlags(ACC_ABSTRACT))
+            .err(),
+        Some(ClassFileBuildError::InvalidAccessFlags)
+    );
+    old_interface
+        .add_method(
+            "abstractMethod",
+            "()V",
+            MethodAccessFlags(ACC_PUBLIC | ACC_ABSTRACT),
+        )
+        .unwrap();
+    assert!(old_interface.encode().is_ok());
+
+    let mut late_interface = ClassFileBuilder::new(
+        "example/LateApiFlags",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    late_interface
+        .add_method("packagePrivate", "()V", MethodAccessFlags(0))
+        .unwrap()
+        .code(0, 1, [0xb1])
         .unwrap();
     late_interface
         .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_INTERFACE | ACC_ABSTRACT))
