@@ -48,6 +48,7 @@ struct ResolverMetrics {
     member_request_unknown_identity_shapes: BTreeMap<String, usize>,
     member_request_targets: BTreeMap<String, RequestTargetMetrics>,
     member_requests_by_method: BTreeMap<String, BTreeMap<String, usize>>,
+    resolver_requests_by_method: BTreeMap<String, Vec<ResolverRequestObservation>>,
     member_request_outcome_targets: BTreeMap<String, BTreeSet<String>>,
     member_request_outcome_files: BTreeMap<String, BTreeSet<String>>,
     member_error_roots: BTreeMap<String, usize>,
@@ -69,6 +70,40 @@ struct ResolverMetrics {
     package_type_class_resource: usize,
     package_type_class_targets: BTreeSet<String>,
     dependency_profiles: Vec<DependencyObservation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolverRequestObservation {
+    target: String,
+    outcome: String,
+    cause: Option<String>,
+    materialized_prefix: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ResolutionBlockerObservation {
+    blocker: String,
+    cause: String,
+    file: String,
+    method: String,
+    targets: BTreeSet<String>,
+    candidate_causes: BTreeSet<String>,
+    materialized_prefixes: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ResolutionBlockerProfile {
+    observations: BTreeSet<ResolutionBlockerObservation>,
+}
+
+#[derive(Default)]
+struct ResolverCauseGroup {
+    count: usize,
+    files: BTreeSet<String>,
+    methods_with_materialized_prefix: BTreeSet<String>,
+    targets: BTreeSet<String>,
+    candidate_causes: BTreeSet<String>,
+    materialized_prefixes: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -399,6 +434,22 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             }
         }
         let method = current_method;
+        let materialized_prefix = match &result {
+            Ok(Some(symbol)) => materialized_class_prefix(store, *symbol),
+            _ => None,
+        };
+        if !method.is_empty() {
+            metrics
+                .resolver_requests_by_method
+                .entry(method.clone())
+                .or_default()
+                .push(ResolverRequestObservation {
+                    target: target_key.clone(),
+                    outcome: outcome.clone(),
+                    cause: member_request_cause(&outcome, &prefix),
+                    materialized_prefix,
+                });
+        }
         let target_key = if prefix.identity_known {
             target_key
         } else {
@@ -571,6 +622,32 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let result = self.inner.resolve_package(store, path);
         let mut metrics = self.metrics.borrow_mut();
         metrics.resolver_package_requests += 1;
+        let (target, outcome, cause) = match &result {
+            Ok(Some(_)) => (path.join("."), "package success".to_owned(), None),
+            Ok(None) => {
+                let (cause, target) =
+                    unresolved_package_details(self.class_path_probe.as_ref(), path);
+                (target, "package unresolved".to_owned(), Some(cause))
+            }
+            Err(_) => (
+                path.join("."),
+                "package error".to_owned(),
+                Some("classloader error".to_owned()),
+            ),
+        };
+        if !metrics.current_method.is_empty() {
+            let method = metrics.current_method.clone();
+            metrics
+                .resolver_requests_by_method
+                .entry(method)
+                .or_default()
+                .push(ResolverRequestObservation {
+                    target,
+                    outcome,
+                    cause,
+                    materialized_prefix: None,
+                });
+        }
         match &result {
             Ok(Some(symbol)) => {
                 if matches!(
@@ -953,6 +1030,78 @@ fn member_outcome(
     }
 }
 
+fn member_request_cause(outcome: &str, prefix: &PrefixProfile) -> Option<String> {
+    match outcome {
+        "error" => Some("classloader error".to_owned()),
+        "package term member unsupported" => Some("term/object materialization gap".to_owned()),
+        "class member scope unavailable: incomplete class info" => {
+            Some("incomplete class identity".to_owned())
+        }
+        "package type member unresolved" => {
+            Some("package resolved but member unresolved".to_owned())
+        }
+        "other resolver Ok(None)" if prefix.target_kind == "Package" => {
+            Some("package resolved but member unresolved".to_owned())
+        }
+        "unsupported prefix shape" | "other resolver Ok(None)" => Some("other".to_owned()),
+        _ => None,
+    }
+}
+
+fn materialized_class_prefix(store: &SemanticStore, symbol: SymbolId) -> Option<String> {
+    let entry = store.symbols.get(symbol);
+    if !is_external_symbol(entry.origin)
+        || !matches!(
+            entry.kind,
+            dotty_core::SymbolKind::Class
+                | dotty_core::SymbolKind::Trait
+                | dotty_core::SymbolKind::Object
+                | dotty_core::SymbolKind::ModuleClass
+        )
+    {
+        return None;
+    }
+    let dotty_core::SymbolInfo::Complete(info) = entry.info else {
+        return None;
+    };
+    if !matches!(store.types.get(info), Type::ClassInfo(_)) {
+        return None;
+    }
+    audit_binary_candidate(store, symbol)
+}
+
+fn unresolved_package_details(
+    class_path: Option<&SharedClassPath>,
+    path: &[&str],
+) -> (String, String) {
+    let mut resolved = 0;
+    if let Some(class_path) = class_path {
+        for length in 1..=path.len() {
+            match class_path.contains_package(&path[..length]) {
+                Ok(true) => resolved = length,
+                Ok(false) => break,
+                Err(_) => return ("classloader error".to_owned(), path.join(".")),
+            }
+        }
+    }
+    if resolved == 0 {
+        (
+            "first segment/package unresolved".to_owned(),
+            format!("{}::<first-segment-unresolved>", path.join(".")),
+        )
+    } else {
+        (
+            "first segment/package unresolved".to_owned(),
+            format!(
+                "{}::resolved-prefix={}::first-missing={}",
+                path.join("."),
+                path[..resolved].join("."),
+                path.get(resolved).copied().unwrap_or("<unknown>")
+            ),
+        )
+    }
+}
+
 fn unresolved_member_kind(
     store: &SemanticStore,
     request: &MemberRequest,
@@ -1057,6 +1206,7 @@ struct Audit {
     function_with_mods_profile: FunctionWithModsProfile,
     function_with_mods_inventory: FunctionWithModsInventory,
     impure_function_baseline_outcomes: BTreeSet<ImpureFunctionBaselineOutcome>,
+    resolution_blocker_profile: ResolutionBlockerProfile,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1338,6 +1488,7 @@ impl Default for Audit {
             function_with_mods_profile: FunctionWithModsProfile::default(),
             function_with_mods_inventory: FunctionWithModsInventory::default(),
             impure_function_baseline_outcomes: BTreeSet::new(),
+            resolution_blocker_profile: ResolutionBlockerProfile::default(),
         }
     }
 }
@@ -2172,6 +2323,9 @@ impl Audit {
             .merge(other.missing_declared_type_profile);
         self.local_method_first_blockers
             .extend(other.local_method_first_blockers);
+        self.resolution_blocker_profile
+            .observations
+            .extend(other.resolution_blocker_profile.observations);
         self.local_value_blocker_profile
             .observations
             .extend(other.local_value_blocker_profile.observations);
@@ -2213,6 +2367,67 @@ impl Audit {
             .merge(other.function_with_mods_inventory);
         self.impure_function_baseline_outcomes
             .extend(other.impure_function_baseline_outcomes);
+    }
+}
+
+impl ResolutionBlockerProfile {
+    fn record_attempt(
+        &mut self,
+        blocker: &str,
+        file: &str,
+        method_tree: u32,
+        trace: &[ResolverRequestObservation],
+    ) {
+        if !matches!(
+            blocker,
+            "ImportQualifierNotFound"
+                | "SymbolResolution"
+                | "TypeNameNotFound"
+                | "MemberLookup"
+                | "TermNameNotFound"
+        ) {
+            return;
+        }
+
+        let failed = trace
+            .iter()
+            .filter_map(|request| {
+                request
+                    .cause
+                    .as_ref()
+                    .map(|cause| (cause.clone(), request.target.clone()))
+            })
+            .collect::<BTreeSet<_>>();
+        let candidate_causes = failed
+            .iter()
+            .map(|(cause, _)| cause.clone())
+            .collect::<BTreeSet<_>>();
+        let cause = match failed.len() {
+            1 => failed
+                .first()
+                .map(|(cause, _)| cause.clone())
+                .unwrap_or_else(|| "unknown: no failed resolver request".to_owned()),
+            0 => "unknown: no failed resolver request".to_owned(),
+            _ => "unknown: multiple failed resolver requests".to_owned(),
+        };
+        let targets = trace
+            .iter()
+            .map(|request| request.target.clone())
+            .filter(|target| !target.is_empty())
+            .collect();
+        let materialized_prefixes = trace
+            .iter()
+            .filter_map(|request| request.materialized_prefix.clone())
+            .collect();
+        self.observations.insert(ResolutionBlockerObservation {
+            blocker: blocker.to_owned(),
+            cause,
+            file: file.to_owned(),
+            method: format!("{file}#tree={method_tree}"),
+            targets,
+            candidate_causes,
+            materialized_prefixes,
+        });
     }
 }
 
@@ -3193,6 +3408,7 @@ fn pinned_scala39_local_definition_audit() {
         );
     }
     print_resolver_metrics(&resolver_metrics.borrow());
+    print_resolution_blocker_profile(&audit.resolution_blocker_profile);
     print_pinned_immutable_field_completion_outcomes(&root, classpath.clone());
     print_pinned_mutable_field_completion_outcomes(&root, classpath);
     print_pinned_immutable_field_method_outcomes(&audit.local_method_first_blockers);
@@ -5905,6 +6121,9 @@ fn audit_source_inner(
         let outcome = typer
             .expression_context_for(method)
             .and_then(|context| typer.type_expression(rhs, context));
+        if let Some(metrics) = &request_metrics {
+            metrics.borrow_mut().current_method.clear();
+        }
         if let Err(error) = outcome {
             let failure = classify_typer_error(
                 &error,
@@ -6215,6 +6434,25 @@ fn audit_source_inner(
                         singleton_reference_fallback_detail(path, tree, singleton_reference_tree)
                     });
                 audit.singleton_reference_profile.record(detail);
+            }
+            if let Some(metrics) = &request_metrics {
+                let request_method =
+                    blocker_method_tree.map(|method_tree| format!("{path}#tree={method_tree}::"));
+                let trace = request_method.map_or_else(Vec::new, |prefix| {
+                    metrics
+                        .borrow()
+                        .resolver_requests_by_method
+                        .iter()
+                        .filter(|(method, _)| method.starts_with(&prefix))
+                        .flat_map(|(_, requests)| requests.iter().cloned())
+                        .collect()
+                });
+                audit.resolution_blocker_profile.record_attempt(
+                    &kind.bucket,
+                    path,
+                    tree.index(),
+                    &trace,
+                );
             }
             audit
                 .local_method_first_blockers
@@ -7287,6 +7525,52 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     println!("  incomplete_prefix_classpath_binary_recovery:");
     for (key, count) in &metrics.incomplete_prefix_binary_resources {
         println!("    {key}={count}");
+    }
+}
+
+fn print_resolution_blocker_profile(profile: &ResolutionBlockerProfile) {
+    println!("resolution_blocker_attribution:");
+    println!("  observations={}", profile.observations.len());
+    let mut groups = BTreeMap::<(String, String), ResolverCauseGroup>::new();
+    for observation in &profile.observations {
+        let group = groups
+            .entry((observation.blocker.clone(), observation.cause.clone()))
+            .or_default();
+        group.count += 1;
+        group.files.insert(observation.file.clone());
+        group.targets.extend(observation.targets.iter().cloned());
+        group
+            .candidate_causes
+            .extend(observation.candidate_causes.iter().cloned());
+        group
+            .materialized_prefixes
+            .extend(observation.materialized_prefixes.iter().cloned());
+        if !observation.materialized_prefixes.is_empty() {
+            group
+                .methods_with_materialized_prefix
+                .insert(observation.method.clone());
+        }
+    }
+    for ((blocker, cause), group) in groups {
+        let targets = group.targets.iter().take(12).cloned().collect::<Vec<_>>();
+        let prefixes = group
+            .materialized_prefixes
+            .iter()
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>();
+        let candidates = group.candidate_causes.iter().cloned().collect::<Vec<_>>();
+        println!(
+            "  blocker={blocker}::cause={cause} count={} files={} distinct_targets={} targets=[{}] methods_with_materialized_prefix={} distinct_materialized_prefixes={} prefixes=[{}] candidate_causes=[{}]",
+            group.count,
+            group.files.len(),
+            group.targets.len(),
+            targets.join(", "),
+            group.methods_with_materialized_prefix.len(),
+            group.materialized_prefixes.len(),
+            prefixes.join(", "),
+            candidates.join(", ")
+        );
     }
 }
 
@@ -11665,5 +11949,73 @@ mod resolver_profile_tests {
         table.insert("zeta".to_owned(), 1);
         table.insert("alpha".to_owned(), 2);
         assert_eq!(table.keys().cloned().collect::<Vec<_>>(), ["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn import_qualifier_causes_follow_member_resolution_outcomes() {
+        let package = PrefixProfile {
+            shape: "package TypeRef",
+            target_kind: "Package",
+            identity: "scala.collection".to_owned(),
+            identity_known: true,
+            symbol: None,
+        };
+        let incomplete_class = PrefixProfile {
+            shape: "class TypeRef",
+            target_kind: "Class",
+            identity: "java.util.List".to_owned(),
+            identity_known: true,
+            symbol: None,
+        };
+
+        assert_eq!(
+            member_request_cause("package term member unsupported", &package).as_deref(),
+            Some("term/object materialization gap")
+        );
+        assert_eq!(
+            member_request_cause(
+                "class member scope unavailable: incomplete class info",
+                &incomplete_class
+            )
+            .as_deref(),
+            Some("incomplete class identity")
+        );
+        assert_eq!(
+            member_request_cause("error", &package).as_deref(),
+            Some("classloader error")
+        );
+        assert_eq!(
+            member_request_cause("package type member unresolved", &package).as_deref(),
+            Some("package resolved but member unresolved")
+        );
+    }
+
+    #[test]
+    fn blocker_attribution_marks_multiple_failed_targets_unknown() {
+        let mut profile = ResolutionBlockerProfile::default();
+        let trace = [
+            ResolverRequestObservation {
+                target: "scala.Option".to_owned(),
+                outcome: "package term member unsupported".to_owned(),
+                cause: Some("term/object materialization gap".to_owned()),
+                materialized_prefix: None,
+            },
+            ResolverRequestObservation {
+                target: "scala.collection.List".to_owned(),
+                outcome: "package type member unresolved".to_owned(),
+                cause: Some("package resolved but member unresolved".to_owned()),
+                materialized_prefix: None,
+            },
+        ];
+
+        profile.record_attempt("ImportQualifierNotFound", "Use.scala", 12, &trace);
+
+        let observation = profile.observations.first().unwrap();
+        assert_eq!(
+            observation.cause,
+            "unknown: multiple failed resolver requests"
+        );
+        assert_eq!(observation.candidate_causes.len(), 2);
+        assert_eq!(observation.targets.len(), 2);
     }
 }
