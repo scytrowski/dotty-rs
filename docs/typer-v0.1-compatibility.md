@@ -1041,7 +1041,28 @@ symbols are removed, and retry preserves canonical identities. Focused source
 fixtures select fields through member shells and inherited fields through a
 shell receiver, with exact byte-read order and rollback assertions. This hook
 is limited to resolver-owned external classes; direct resolver member-prefix
-completion (#1022) and the full CompletionId engine remain separate work.
+completion is documented in #1022 below; the full CompletionId engine remains
+separate work.
+
+### #1022 direct members through external shells
+
+Direct resolver requests now complete owned Missing class prefixes atomically
+before searching their declaration scopes. Applied and ThisType forms are
+supported, while Explicit requests target only their stated owner. Missing
+members and ambiguous Unique requests undo any completion caused by that call;
+errors retain focused resolution failures. Source-owned Missing prefixes stay
+unresolved and package-term/object materialization remains a separate boundary.
+Generic receiver substitution and overload ranking are unchanged.
+
+Source regression coverage uses local imports of a static JVM field through a
+pre-existing shell: a later expression error restores the shell and removes
+member symbols and typed mappings, and retry succeeds. Real checked-in JDK 26
+DayOfWeek and pinned Scala 3.9 Source fixtures cover direct member requests.
+Audit counters distinguish member declaration kinds, successful requests after
+shell completion, canonical prefix/member keys, and completed-prefix reuses.
+The [frozen #976 attribution](typer-deferred-prefix-cohort-3.9.0.md) finds no
+eligible external shells among its incomplete-prefix rows; it does not infer
+current corpus improvement or changes to all ImportQualifierNotFound rows.
 
 ### #976 classpath audit and transaction hardening
 

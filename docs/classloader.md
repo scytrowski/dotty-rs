@@ -416,8 +416,8 @@ The dependency policy is explicit:
 
 A completed `ClassInfo` can therefore contain member `TypeRef`s whose target
 class still has `SymbolInfo::Missing`. SourceTyper requests `SymbolResolver::complete_class` when member lookup
-needs an external shell's `ClassInfo` (#1021). Direct resolver member requests
-against incomplete prefixes remain the separate #1022 increment. This bounded
+needs an external shell's `ClassInfo` (#1021). Direct resolver member requests also complete owned Missing class prefixes
+before inspecting declarations (#1022). This bounded
 hook does not introduce the general `CompletionId`/completer engine. Non-static enclosing owners remain eager because the
 current #973 type-variable environment consumes their declaration scopes;
 identity alone cannot resolve an outer generic parameter. Static edges still
@@ -453,6 +453,28 @@ pre-existing shell's entire previous symbol and removes new members/scopes,
 metadata, and completed-cache entries. A shell introduced inside that caller
 transaction is removed by the matching store rollback instead. Session handoff
 between a loader and resolver preserves both forms of identity.
+
+Direct class-prefix requests accept `TypeRef`, `Applied` over a class reference,
+and `ThisType`. `MemberSpace::Explicit(owner)` completes and searches only the
+explicit owner, regardless of the displayed prefix, and never falls back.
+Returned symbols are declarations; receiver/generic adaptation stays with the
+caller. The declaration scope contains decoded fields/methods/constructors and
+supported type parameters. `InnerClasses` metadata does not manufacture nested
+class declarations; nested classes absent from an owner's semantic scope can
+be loaded via `ClassLoader::load_class` with their exact JVM binary name.
+The existing package/type policy is preserved, including its refusal to
+replace a pre-existing incomplete package entry.
+
+Prefix completion runs inside the member request's existing transaction,
+without creating a nested completion transaction. An absent member returns
+`Ok(None)` and undoes completion started solely by that call. A Unique request
+with several declarations returns `Ambiguous` and likewise restores the shell,
+new scopes, members, dependency identities, and positive caches. A missing or
+malformed artifact returns a focused resolver error, never member absence.
+Pre-existing complete prefixes remain complete on absent/ambiguous requests;
+repeated successful calls reuse member IDs without rereading class bytes.
+Package/type materialization, builtin aliases, and the package-term unresolved
+boundary keep their existing behavior.
 
 `ClassLoader::load_class(name)` follows that shape:
 
