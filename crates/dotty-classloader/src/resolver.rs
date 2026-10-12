@@ -132,6 +132,104 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         self.session.packages.scope_of(package)
     }
 
+    fn complete_class_inner(
+        &mut self,
+        store: &mut SemanticStore,
+        symbol: SymbolId,
+    ) -> Result<Option<bool>, ResolutionError> {
+        let names: Vec<_> = self
+            .session
+            .identified
+            .iter()
+            .filter(|(_, id)| **id == symbol)
+            .map(|(name, _)| name.clone())
+            .collect();
+        if names.is_empty() {
+            return Ok(None);
+        }
+        let malformed = |reason: &str| ResolutionError::Malformed {
+            reason: format!("cannot complete external class {symbol:?}: {reason}"),
+        };
+        if !store.symbols.contains(symbol) {
+            return Err(malformed("identified symbol no longer exists"));
+        }
+        let item = store.symbols.get(symbol);
+        if !matches!(
+            item.origin,
+            dotty_core::SymbolOrigin::Classfile(_) | dotty_core::SymbolOrigin::Tasty(_)
+        ) {
+            return Ok(None);
+        }
+        if !matches!(
+            item.kind,
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+        ) {
+            return Err(malformed("identified symbol is not class-like"));
+        }
+        let name = names
+            .into_iter()
+            .find(|name| {
+                if !item.name.is_type()
+                    || store.names.resolve(item.name.text()) != name.simple_name()
+                {
+                    return false;
+                }
+                let path: Vec<_> = name
+                    .package_path()
+                    .split('/')
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let Some(package) = self.session.packages.get(&path) else {
+                    return false;
+                };
+                let Some(scope) = self.package_scope(package) else {
+                    return false;
+                };
+                store.symbols.contains(package)
+                    && store.symbols.get(package).kind == SymbolKind::Package
+                    && store.scopes.contains(scope)
+                    && store.scopes.get(scope).owner == Some(package)
+                    && store.scopes.get(scope).lookup_all(&item.name) == [symbol]
+                    && (item.owner == Some(package)
+                        || is_nested_class_indexed_in_package(store, symbol, package))
+            })
+            .ok_or_else(|| malformed("identity does not match its canonical package/name"))?;
+
+        match item.info {
+            SymbolInfo::Missing => {
+                let loaded =
+                    self.load_class(store, &name)
+                        .map_err(|error| ResolutionError::Malformed {
+                            reason: format!("external class completion failed for {name}: {error}"),
+                        })?;
+                if loaded != symbol || self.session.identified.get(&name) != Some(&symbol) {
+                    return Err(malformed("loading changed the canonical symbol identity"));
+                }
+            }
+            SymbolInfo::Complete(_) => {}
+            SymbolInfo::Error => return Err(malformed("identified symbol has Error info")),
+            SymbolInfo::Deferred(_) => {
+                return Err(malformed("identified symbol has unsupported Deferred info"));
+            }
+        }
+        let SymbolInfo::Complete(info) = store.symbols.get(symbol).info else {
+            return Err(malformed("loading did not complete ClassInfo"));
+        };
+        let Some(Type::ClassInfo(info)) = store.types.try_get(info) else {
+            return Err(malformed("completed info is not a valid ClassInfo"));
+        };
+        if info.class != symbol
+            || !store.scopes.contains(info.declarations)
+            || store.scopes.get(info.declarations).owner != Some(symbol)
+        {
+            return Err(malformed(
+                "ClassInfo identity or declaration scope is invalid",
+            ));
+        }
+        self.session.cache_resolved(name, symbol);
+        Ok(Some(true))
+    }
+
     fn declaration_scope(
         &self,
         store: &SemanticStore,
@@ -426,6 +524,17 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
+    fn complete_class(
+        &mut self,
+        store: &mut SemanticStore,
+        symbol: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        self.transact(store, |resolver, store| {
+            resolver.complete_class_inner(store, symbol)
+        })
+        .map(|completed| completed.unwrap_or(false))
+    }
+
     fn checkpoint(&self) -> ResolverCheckpoint {
         ResolverCheckpoint::new(self.undo.len() as u64)
     }
@@ -524,13 +633,16 @@ fn is_nested_class_indexed_in_package(
     let mut current = member;
     let mut visited = std::collections::HashSet::new();
     for depth in 0..MAX_OWNER_DEPTH {
-        if !visited.insert(current) {
+        if !store.symbols.contains(current) || !visited.insert(current) {
             return false;
         }
         let symbol = store.symbols.get(current);
         let Some(owner) = symbol.owner else {
             return false;
         };
+        if !store.symbols.contains(owner) {
+            return false;
+        }
         let enclosing = store.symbols.get(owner);
         if enclosing.kind == SymbolKind::Package {
             return depth > 0 && owner == package;
@@ -604,6 +716,305 @@ mod tests {
     }
 
     struct EmptyCountingClassPath(Arc<AtomicUsize>);
+
+    #[derive(Clone)]
+    struct CompletionClassPath {
+        classes: Arc<Mutex<std::collections::HashMap<BinaryName, Vec<u8>>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CompletionClassPath {
+        fn new() -> Self {
+            Self {
+                classes: Arc::new(Mutex::new(std::collections::HashMap::from([
+                    (
+                        BinaryName::from_internal("sample/B"),
+                        test_class_stub("sample/B", 0x0021),
+                    ),
+                    (
+                        BinaryName::from_internal("sample/A"),
+                        test_class_with_object_fields("sample/A", None, &[("b", "sample/B")]),
+                    ),
+                ]))),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl ClassPathEntry for CompletionClassPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(self.classes.lock().unwrap().get(name).map(|bytes| {
+                ClassResource::new(
+                    bytes.clone(),
+                    crate::class_path::ClassFormat::Class,
+                    crate::class_path::ClassOrigin::Directory("<completion>".into()),
+                )
+            }))
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            let prefix = format!("{}/", package.join("/"));
+            Ok(self
+                .classes
+                .lock()
+                .unwrap()
+                .keys()
+                .any(|name| name.as_internal().starts_with(&prefix)))
+        }
+    }
+
+    #[test]
+    fn complete_class_outer_rollback_removes_shells_created_in_the_transaction() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            CompletionClassPath::new(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(&mut store, &["sample"])
+            .unwrap()
+            .unwrap();
+        let prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let request = MemberRequest {
+            prefix,
+            name: Name::new(store.names.intern("A"), Namespace::Type),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let mark = resolver.checkpoint();
+        let store_mark = store.checkpoint();
+        let a = resolver
+            .resolve_member(&mut store, &request)
+            .unwrap()
+            .unwrap();
+        let b_name = BinaryName::from_internal("sample/B");
+        let b = resolver.session.identified[&b_name];
+        assert_eq!(store.symbols.get(b).info, SymbolInfo::Missing);
+        assert_eq!(resolver.complete_class(&mut store, b), Ok(true));
+        resolver.rollback_to(&mut store, mark);
+        store.rollback_to(store_mark);
+        assert!(!store.symbols.contains(a));
+        assert!(!store.symbols.contains(b));
+        assert!(resolver.session.identified.is_empty());
+        assert!(resolver.session.resolved.is_empty());
+        assert_eq!(
+            resolver.resolve_member(&mut store, &request).unwrap(),
+            Some(a)
+        );
+        let again = resolver.session.identified[&b_name];
+        assert_eq!(resolver.complete_class(&mut store, again), Ok(true));
+    }
+
+    #[test]
+    fn complete_class_handoff_is_idempotent_and_outer_rollback_restores_shell() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let path = CompletionClassPath::new();
+        let c_name = BinaryName::from_internal("sample/C");
+        path.classes.lock().unwrap().extend([
+            (
+                BinaryName::from_internal("sample/B"),
+                test_class_with_object_fields("sample/B", None, &[("c", "sample/C")]),
+            ),
+            (c_name.clone(), test_class_stub("sample/C", 0x0021)),
+        ]);
+        let mut loader = ClassLoader::with_definitions(
+            path.clone(),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let b_name = BinaryName::from_internal("sample/B");
+        let b = loader.ensure_class_identity(&b_name).unwrap();
+        let session = loader.into_session();
+        let previous = store.symbols.get(b).clone();
+        let mut resolver = ClasspathSymbolResolver::new(path.clone(), definitions, session);
+        let mark = resolver.checkpoint();
+        let store_mark = store.checkpoint();
+        assert_eq!(resolver.complete_class(&mut store, b), Ok(true));
+        assert_eq!(resolver.session.resolved.get(&b_name), Some(&b));
+        let c = resolver.session.identified[&c_name];
+        assert_eq!(store.symbols.get(c).info, SymbolInfo::Missing);
+        let SymbolInfo::Complete(completed_info) = store.symbols.get(b).info else {
+            panic!("completed B")
+        };
+        let completed = store.checkpoint();
+        assert_eq!(resolver.complete_class(&mut store, b), Ok(true));
+        assert_eq!(store.checkpoint(), completed);
+        assert_eq!(path.calls.load(Ordering::Relaxed), 3);
+        let package = previous.owner.unwrap();
+        let scope = resolver.package_scope(package).unwrap();
+        assert_eq!(store.scopes.get(scope).lookup_all(&previous.name), &[b]);
+        resolver.rollback_to(&mut store, mark);
+        store.rollback_to(store_mark);
+        assert_eq!(store.symbols.get(b), &previous);
+        assert_eq!(resolver.session.identified.get(&b_name), Some(&b));
+        assert!(!resolver.session.resolved.contains_key(&b_name));
+        assert!(!resolver.session.metadata.contains_key(&b));
+        assert_eq!(store.checkpoint(), store_mark);
+        assert!(!store.symbols.contains(c));
+        assert!(!store.types.contains(completed_info));
+        assert!(!resolver.session.identified.contains_key(&c_name));
+        assert!(!resolver.session.origins.contains_key(&c));
+        let c_text = store.names.intern("C");
+        assert!(
+            store
+                .scopes
+                .get(scope)
+                .lookup_all(&Name::new(c_text, Namespace::Type))
+                .is_empty()
+        );
+        assert_eq!(resolver.complete_class(&mut store, b), Ok(true));
+        assert_eq!(path.calls.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn complete_class_refuses_unowned_symbols_and_failed_completion_is_atomic() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let path = CompletionClassPath::new();
+        let name = BinaryName::from_internal("sample/B");
+        let mut loader = ClassLoader::with_definitions(
+            path.clone(),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let b = loader.ensure_class_identity(&name).unwrap();
+        assert_eq!(
+            loader
+                .ensure_class_identity(&BinaryName::from_internal("java/lang/Object"))
+                .unwrap(),
+            definitions.object_class
+        );
+        let session = loader.into_session();
+        let previous = store.symbols.get(b).clone();
+        let foreign = store.symbols.alloc(previous.clone());
+        let mut resolver = ClasspathSymbolResolver::new(path.clone(), definitions, session);
+        let mark = store.checkpoint();
+        let session_mark = resolver.session.checkpoint();
+        for unowned in [foreign, definitions.object_class] {
+            assert_eq!(resolver.complete_class(&mut store, unowned), Ok(false));
+            assert_eq!(store.checkpoint(), mark);
+            assert_eq!(resolver.session.checkpoint(), session_mark);
+        }
+        path.classes
+            .lock()
+            .unwrap()
+            .insert(name.clone(), vec![0, 1, 2]);
+        assert!(
+            matches!(resolver.complete_class(&mut store, b), Err(ResolutionError::Malformed { reason })
+            if reason.contains("external class completion failed") && reason.contains("invalid class file"))
+        );
+        assert_eq!(store.symbols.get(b), &previous);
+        assert_eq!(store.checkpoint(), mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+        path.classes
+            .lock()
+            .unwrap()
+            .insert(name, test_class_stub("sample/B", 0x0021));
+        assert_eq!(resolver.complete_class(&mut store, b), Ok(true));
+    }
+
+    #[test]
+    fn complete_class_rejects_corrupt_owned_state_without_loading_or_mutation() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let path = CompletionClassPath::new();
+        let mut loader = ClassLoader::with_definitions(
+            path.clone(),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let b = loader
+            .ensure_class_identity(&BinaryName::from_internal("sample/B"))
+            .unwrap();
+        let session = loader.into_session();
+        let original = store.symbols.get(b).clone();
+        let mut resolver = ClasspathSymbolResolver::new(path.clone(), definitions, session);
+        for (info, expected) in [
+            (SymbolInfo::Error, "Error info"),
+            (
+                SymbolInfo::Complete(definitions.no_prefix),
+                "not a valid ClassInfo",
+            ),
+        ] {
+            store.symbols.get_mut(b).info = info;
+            let checkpoint = store.checkpoint();
+            let session_checkpoint = resolver.session.checkpoint();
+            assert!(
+                matches!(resolver.complete_class(&mut store, b), Err(ResolutionError::Malformed { reason }) if reason.contains(expected))
+            );
+            assert_eq!(store.symbols.get(b).info, info);
+            assert_eq!(store.checkpoint(), checkpoint);
+            assert_eq!(resolver.session.checkpoint(), session_checkpoint);
+        }
+        *store.symbols.get_mut(b) = original.clone();
+        let wrong_name = Name::new(store.names.intern("Wrong"), Namespace::Type);
+        store.symbols.get_mut(b).name = wrong_name;
+        assert!(
+            matches!(resolver.complete_class(&mut store, b), Err(ResolutionError::Malformed { reason }) if reason.contains("canonical package/name"))
+        );
+        assert_eq!(store.symbols.get(b).name, wrong_name);
+        *store.symbols.get_mut(b) = original;
+        assert_eq!(path.calls.load(Ordering::Relaxed), 1);
+        path.classes
+            .lock()
+            .unwrap()
+            .remove(&BinaryName::from_internal("sample/B"));
+        assert!(
+            matches!(resolver.complete_class(&mut store, b), Err(ResolutionError::Malformed { reason }) if reason.contains("class not found: sample/B"))
+        );
+        assert_eq!(store.symbols.get(b).info, SymbolInfo::Missing);
+        assert!(
+            !resolver
+                .session
+                .resolved
+                .contains_key(&BinaryName::from_internal("sample/B"))
+        );
+    }
+
+    #[test]
+    fn complete_class_rejects_invalid_owner_and_package_scope_without_panicking() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let path = CompletionClassPath::new();
+        let mut loader = ClassLoader::with_definitions(
+            path.clone(),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let b = loader
+            .ensure_class_identity(&BinaryName::from_internal("sample/B"))
+            .unwrap();
+        let session = loader.into_session();
+        let original = store.symbols.get(b).clone();
+        let mut resolver = ClasspathSymbolResolver::new(path.clone(), definitions, session);
+        let checkpoint = store.checkpoint();
+        let invalid_owner = store.symbols.alloc(original.clone());
+        store.rollback_to(checkpoint);
+        store.symbols.get_mut(b).owner = Some(invalid_owner);
+        assert!(
+            matches!(resolver.complete_class(&mut store, b), Err(ResolutionError::Malformed { reason }) if reason.contains("canonical package/name"))
+        );
+        assert_eq!(store.symbols.get(b).owner, Some(invalid_owner));
+        *store.symbols.get_mut(b) = original.clone();
+        let scope = resolver.package_scope(original.owner.unwrap()).unwrap();
+        store.scopes.get_mut(scope).owner = None;
+        assert!(
+            matches!(resolver.complete_class(&mut store, b), Err(ResolutionError::Malformed { reason }) if reason.contains("canonical package/name"))
+        );
+        assert_eq!(store.scopes.get(scope).owner, None);
+        assert_eq!(store.checkpoint(), checkpoint);
+        assert_eq!(path.calls.load(Ordering::Relaxed), 1);
+    }
 
     impl ClassPathEntry for EmptyCountingClassPath {
         fn find_class(&self, _name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
