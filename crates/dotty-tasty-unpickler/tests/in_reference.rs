@@ -36,7 +36,9 @@ use dotty_tasty::tasty::{
     TERMREFPKG_TAG, TYPEBOUNDS_TAG, TYPEDEF_TAG, TYPEREFDIRECT_TAG, TYPEREFIN_TAG, TYPEREFPKG_TAG,
     TastyFile, VALDEF_TAG,
 };
-use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
+use dotty_tasty_unpickler::tasty_unpickler::{
+    TastyUnpickler, UnpickleError, UnpickleErrorCategory,
+};
 
 // Name table indices.
 const N_P: u32 = 1;
@@ -749,10 +751,13 @@ fn a_resolver_that_does_not_know_the_declaration_leaves_it_unresolved_without_a_
 
     let (result, _) = decoder.run(|unpickler, _| unpickler.unpickle_type(at));
 
+    let error = result.expect_err("the absent declaration must remain unresolved");
     assert!(matches!(
-        result,
-        Err(UnpickleError::UnresolvedMember { space: Some(_), .. })
+        &error,
+        UnpickleError::UnresolvedMember { space: Some(_), .. }
     ));
+    assert_eq!(error.code(), "unpickler.unresolved_member");
+    assert_eq!(error.category(), UnpickleErrorCategory::ResolutionFailure);
     // One request, for the explicit space: the prefix was never searched.
     let script = decoder.script.borrow();
     assert_eq!(script.asked.len(), 1);

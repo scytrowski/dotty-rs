@@ -15,7 +15,9 @@ use dotty_core::types::{
     StructuralMemberLookup, TermRefTarget, Type, TypeRefTarget, lookup_structural_member,
 };
 use dotty_tasty::tasty::TastyFile;
-use dotty_tasty_unpickler::tasty_unpickler::{TastyUnpickler, UnpickleError};
+use dotty_tasty_unpickler::tasty_unpickler::{
+    TastyUnpickler, UnpickleError, UnpickleErrorCategory,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -431,13 +433,20 @@ fn a_rec_this_naming_no_node_is_an_invalid_reference() {
         let mut session = Session::new();
         let mut unpickler = unpickler_for(&file, &mut session);
 
+        let error = unpickler
+            .unpickle_type(REC_AT)
+            .expect_err("a non-node target must be rejected");
         assert_eq!(
-            unpickler.unpickle_type(REC_AT),
-            Err(UnpickleError::InvalidReferenceTarget {
+            error,
+            UnpickleError::InvalidReferenceTarget {
                 from: 2,
                 to: u32::from(target)
-            })
+            }
         );
+        assert_eq!(error.code(), "unpickler.invalid_reference_target");
+        // InvalidReferenceTarget also covers bounded cycles/depth failures,
+        // so the typed payload does not prove every case is malformed.
+        assert_eq!(error.category(), UnpickleErrorCategory::Conditional);
     }
 }
 
