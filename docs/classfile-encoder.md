@@ -83,7 +83,7 @@ The executable fixture covers the current straight-line generation subset:
 | --- | --- |
 | `Calculator` | `iload`, `iadd`, `ireturn` |
 | `Box` | `aload`, `iload`, `invokespecial`, `putfield`, `getfield`, `return`, `ireturn` |
-| `Caller` | integer constants, `invokestatic`, `ireturn` |
+| `Caller` | integer constants, `invokestatic`, `new`, `dup`, `iload`, `invokespecial`, `areturn`, `ireturn` |
 
 Every class is built with `ClassFileBuilder` and `CodeBuilder`; the fixture
 does not embed complete class bytes, constant-pool indices, or caller-provided
@@ -93,14 +93,18 @@ descriptors, flags, opcodes, and inferred `max_stack`/`max_locals`.
 
 `Box` exercises a generated constructor that calls `java/lang/Object.<init>`,
 stores its argument in an instance field, and reads it back. `Caller.answer`
-uses `invokestatic` to invoke the generated `Calculator.add` method.
+uses `invokestatic` to invoke the generated `Calculator.add` method. Its
+`makeBox(I)LBox;` factory exercises builder-generated allocation with
+`new`/`dup`/`invokespecial` and returns the new object.
 
 ## JVM execution gate
 
 `tests/classfile_jvm_encoder.rs` asks `javap -v` to parse all three generated
 classes, compiles a small Java caller, and executes it with
 `java -Xverify:all`. The Java assertions check that `Calculator.add(20, 22)`,
-`new Box(42).get()`, and `Caller.answer()` each return `42`.
+`new Box(42).get()`, `Caller.answer()`, and `Caller.makeBox(42).get()` each
+return `42`. The last scenario executes the generated allocation and
+constructor-call sequence rather than relying on javac to emit it.
 
 Run the structural and ordinary crate tests with:
 

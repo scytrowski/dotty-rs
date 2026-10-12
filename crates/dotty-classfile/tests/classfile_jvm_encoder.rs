@@ -221,6 +221,16 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
             Ok(())
         })
         .expect("typed caller method construction succeeds");
+    caller
+        .add_static_method("makeBox", "(I)LBox;", |code| {
+            code.new_object("Box")?;
+            code.dup()?;
+            code.iload(0)?;
+            code.invokespecial("Box", "<init>", "(I)V")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .expect("typed factory construction succeeds");
     let caller_bytes = caller
         .encode()
         .expect("Caller is generated through the typed builder");
@@ -304,7 +314,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     let caller = decode_and_validate(&caller_bytes);
     assert_eq!(caller.version, version);
     assert_eq!(caller.access_flags.0, ACC_PUBLIC | ACC_SUPER);
-    assert_eq!(caller.methods.len(), 1);
+    assert_eq!(caller.methods.len(), 2);
     let answer = &caller.methods[0];
     assert_eq!(caller.constant_pool.utf8(answer.name_index), Ok("answer"));
     assert_eq!(
@@ -328,6 +338,35 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     assert!(answer_code.exception_table.is_empty());
     assert!(answer_code.attributes.is_empty());
 
+    let factory = &caller.methods[1];
+    assert_eq!(caller.constant_pool.utf8(factory.name_index), Ok("makeBox"));
+    assert_eq!(
+        caller.constant_pool.utf8(factory.descriptor_index),
+        Ok("(I)LBox;")
+    );
+    assert_eq!(
+        factory.access_flags.0,
+        ACC_PUBLIC | dotty_classfile::classfile::ACC_STATIC
+    );
+    let factory_code = code(factory);
+    assert_eq!((factory_code.max_stack, factory_code.max_locals), (3, 1));
+    assert_eq!(factory_code.code.len(), 9);
+    assert_eq!(factory_code.code[0], 0xbb);
+    assert!(matches!(
+        caller.constant_pool.get(operand_index(factory_code, 1)),
+        Some(ConstantPoolEntry::Class { .. })
+    ));
+    assert_eq!(factory_code.code[3], 0x59);
+    assert_eq!(factory_code.code[4], 0x1a);
+    assert_eq!(factory_code.code[5], 0xb7);
+    assert!(matches!(
+        caller.constant_pool.get(operand_index(factory_code, 6)),
+        Some(ConstantPoolEntry::Methodref { .. })
+    ));
+    assert_eq!(factory_code.code[8], 0xb0);
+    assert!(factory_code.exception_table.is_empty());
+    assert!(factory_code.attributes.is_empty());
+
     if !require_jdk_or_skip() {
         return;
     }
@@ -335,7 +374,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     let harness_path = directory.path().join("GeneratedClassesHarness.java");
     fs::write(
         &harness_path,
-        "public final class GeneratedClassesHarness {\n    public static void main(String[] args) {\n        int calculator = Calculator.add(20, 22);\n        if (calculator != 42) throw new AssertionError(\"Calculator.add: \" + calculator);\n        int boxed = new Box(42).get();\n        if (boxed != 42) throw new AssertionError(\"Box.get: \" + boxed);\n        int caller = Caller.answer();\n        if (caller != 42) throw new AssertionError(\"Caller.answer: \" + caller);\n        System.out.println(\"Calculator.add=\" + calculator);\n        System.out.println(\"Box.get=\" + boxed);\n        System.out.println(\"Caller.answer=\" + caller);\n    }\n}\n",
+        "public final class GeneratedClassesHarness {\n    public static void main(String[] args) {\n        int calculator = Calculator.add(20, 22);\n        if (calculator != 42) throw new AssertionError(\"Calculator.add: \" + calculator);\n        int boxed = new Box(42).get();\n        if (boxed != 42) throw new AssertionError(\"Box.get: \" + boxed);\n        int caller = Caller.answer();\n        if (caller != 42) throw new AssertionError(\"Caller.answer: \" + caller);\n        int generated = Caller.makeBox(42).get();\n        if (generated != 42) throw new AssertionError(\"Caller.makeBox: \" + generated);\n        System.out.println(\"Calculator.add=\" + calculator);\n        System.out.println(\"Box.get=\" + boxed);\n        System.out.println(\"Caller.answer=\" + caller);\n        System.out.println(\"Caller.makeBox=\" + generated);\n    }\n}\n",
     )
     .unwrap_or_else(|error| panic!("write {}: {error}", harness_path.display()));
 
@@ -343,33 +382,38 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     for (class_name, expected) in [
         (
             "Calculator",
-            [
+            &[
                 "public static int add(int, int);",
                 "stack=2, locals=2",
                 "iload_0",
                 "iload_1",
                 "iadd",
-            ],
+            ][..],
         ),
         (
             "Box",
-            [
+            &[
                 "public Box(int);",
                 "stack=2, locals=2",
                 "stack=1, locals=1",
                 "putfield",
                 "getfield",
-            ],
+            ][..],
         ),
         (
             "Caller",
-            [
+            &[
                 "public static int answer();",
+                "public static Box makeBox(int);",
                 "invokestatic",
                 "stack=2, locals=0",
                 "bipush        20",
                 "bipush        22",
-            ],
+                "new           #",
+                "dup",
+                "invokespecial",
+                "stack=3, locals=1",
+            ][..],
         ),
     ] {
         let javap = run("javap", &["-v", "-classpath", &directory_arg, class_name]);
@@ -422,6 +466,6 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     );
     assert_eq!(
         String::from_utf8_lossy(&java.stdout).trim(),
-        "Calculator.add=42\nBox.get=42\nCaller.answer=42"
+        "Calculator.add=42\nBox.get=42\nCaller.answer=42\nCaller.makeBox=42"
     );
 }
