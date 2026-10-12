@@ -31,7 +31,7 @@ use dotty_core::{
     TypeParam, Visibility,
 };
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 const MAX_INHERITANCE_DEPTH: usize = 256;
@@ -266,6 +266,9 @@ pub struct ClassLoader<'store, E> {
     /// Inheritance-cycle detection can fail a class before its own load
     /// returns, so its selected resource must be available to that branch.
     loading_context: HashMap<BinaryName, (ClassOrigin, ClassFormat)>,
+    active_load_profile: Option<ActiveLoadProfile>,
+    load_profiles: Vec<ClassLoadProfile>,
+    collect_load_profiles: bool,
     /// The canonical `TypeId`/`SymbolId` every JVM primitive and
     /// `Object`/`Any`/`Nothing` reference lowers against — see
     /// [`Definitions::bootstrap`]. `definitions.no_prefix` is this
@@ -273,6 +276,29 @@ pub struct ClassLoader<'store, E> {
     /// there is no separate loader-owned copy, so every `ClassLoader`
     /// sharing one `Definitions` also agrees on prefix identity.
     definitions: Definitions,
+}
+
+/// Dependency work observed during one top-level class load.
+///
+/// `max_dependency_depth` is zero when the request only touches its root
+/// class. `classes` includes the root and every distinct class reached by
+/// superclass, interface, member-type, signature, or annotation loading.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClassLoadProfile {
+    /// Binary name requested at the root of this load operation.
+    pub root: String,
+    /// Greatest number of dependency edges traversed from the root.
+    pub max_dependency_depth: usize,
+    /// Sorted binary names of the root and every distinct class reached.
+    pub classes: BTreeSet<String>,
+}
+
+#[derive(Default)]
+struct ActiveLoadProfile {
+    root: String,
+    depth: usize,
+    max_dependency_depth: usize,
+    classes: BTreeSet<String>,
 }
 
 /// Reconstructs a [`ClassTypeSignature`]'s binary name (JVMS §4.2.1): its
@@ -384,6 +410,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             in_progress_classes: HashMap::new(),
             alias_failure_context: None,
             loading_context: HashMap::new(),
+            active_load_profile: None,
+            load_profiles: Vec::new(),
+            collect_load_profiles: false,
             definitions,
         }
     }
@@ -411,6 +440,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         (self.class_path, self.session)
     }
 
+    /// Returns and clears dependency profiles collected by this loader.
+    pub(crate) fn take_load_profiles(&mut self) -> Vec<ClassLoadProfile> {
+        std::mem::take(&mut self.load_profiles)
+    }
+
+    pub(crate) fn set_load_profile_collection(&mut self, enabled: bool) {
+        self.collect_load_profiles = enabled;
+    }
+
     /// JVM-specific metadata for a `.class`-backed symbol previously
     /// returned by [`Self::load_class`] — `None` for a `.tasty`-backed
     /// symbol (not yet reconstructed from `.tasty`, see
@@ -432,7 +470,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
     /// Loads (or returns the cached result for) the class named `name`.
     pub fn load_class(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadError> {
-        self.load_class_with_inheritance_ancestry(name, &mut Vec::new())
+        if self.collect_load_profiles {
+            self.profiled_load_class(name, &mut Vec::new())
+        } else {
+            self.load_class_with_inheritance_ancestry(name, &mut Vec::new())
+        }
     }
 
     /// Loads a class like [`Self::load_class`], retaining the selected
@@ -443,7 +485,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// dependency's context; absent classes and lookup errors have no
     /// resource context.
     pub fn load_class_detailed(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadFailure> {
-        match self.load_class_with_inheritance_ancestry(name, &mut Vec::new()) {
+        let result = if self.collect_load_profiles {
+            self.profiled_load_class(name, &mut Vec::new())
+        } else {
+            self.load_class_with_inheritance_ancestry(name, &mut Vec::new())
+        };
+        match result {
             Ok(symbol) => Ok(symbol),
             Err(error) => match self.repository.get(name) {
                 Some(ClassEntry::Failed(_, failure)) => Err(failure.clone()),
@@ -591,6 +638,47 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 Err(failure.error)
             }
         }
+    }
+
+    fn profiled_load_class(
+        &mut self,
+        name: &BinaryName,
+        inheritance_ancestry: &mut Vec<BinaryName>,
+    ) -> Result<SymbolId, ClassLoadError> {
+        let is_root = self.active_load_profile.is_none();
+        if is_root {
+            self.active_load_profile = Some(ActiveLoadProfile {
+                root: name.as_internal().to_owned(),
+                ..ActiveLoadProfile::default()
+            });
+        }
+        let profile = self
+            .active_load_profile
+            .as_mut()
+            .expect("profile is initialized for a top-level load");
+        profile.depth += 1;
+        profile.max_dependency_depth = profile.max_dependency_depth.max(profile.depth - 1);
+        profile.classes.insert(name.as_internal().to_owned());
+
+        let result = self.load_class_with_inheritance_ancestry(name, inheritance_ancestry);
+
+        let profile = self
+            .active_load_profile
+            .as_mut()
+            .expect("profile remains active until the top-level load returns");
+        profile.depth -= 1;
+        if is_root {
+            let profile = self
+                .active_load_profile
+                .take()
+                .expect("top-level profile was initialized above");
+            self.load_profiles.push(ClassLoadProfile {
+                root: profile.root,
+                max_dependency_depth: profile.max_dependency_depth,
+                classes: profile.classes,
+            });
+        }
+        result
     }
 
     fn load_uncached(
@@ -2015,12 +2103,16 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         dependency: BinaryName,
         inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
-        self.load_class_with_inheritance_ancestry(&dependency, inheritance_ancestry)
-            .map_err(|source| ClassLoadError::DependencyFailure {
-                owner: owner.clone(),
-                dependency,
-                source: Rc::new(source),
-            })
+        if self.collect_load_profiles {
+            self.profiled_load_class(&dependency, inheritance_ancestry)
+        } else {
+            self.load_class_with_inheritance_ancestry(&dependency, inheritance_ancestry)
+        }
+        .map_err(|source| ClassLoadError::DependencyFailure {
+            owner: owner.clone(),
+            dependency,
+            source: Rc::new(source),
+        })
     }
 
     /// Resolves a class referenced by a member's declared type (a field

@@ -118,10 +118,49 @@ if [[ "$verify_determinism" == 1 ]] \
     exit 1
 fi
 
+if [[ "$verify_determinism" == 1 ]]; then
+    audit_run_summary='two runs were compared byte-for-byte'
+else
+    audit_run_summary='one run was completed; determinism was not checked'
+fi
+
+report_field() {
+    awk -F= -v wanted="$1" '
+        {
+            key = $1
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+            if (key == wanted) {
+                value = substr($0, index($0, "=") + 1)
+                sub(/[[:space:]]+\(delta=.*/, "", value)
+                print value
+                exit
+            }
+        }
+    ' "$tmp_dir/first.report"
+}
+
+typed_methods="$(report_field typed_local_methods)"
+import_qualifier="$(sed -n 's/^  ImportQualifierNotFound \[[^]]*\]: \([^[]*\) \[.*/\1/p' "$tmp_dir/first.report" | head -1)"
+class_successes="$(report_field external_class_symbol_successes)"
+distinct_classes="$(report_field distinct_classes)"
+nonclass_successes="$(report_field external_non_class_member_successes)"
+member_unresolved="$(report_field external_member_unresolved)"
+member_errors="$(report_field external_member_errors)"
+package_term_requests="$(report_field package_term_requests_with_type_class_resource)"
+package_term_targets="$(report_field package_term_distinct_targets_with_type_class_resource)"
+companion_requests="$(report_field package_term_companion_object_resource_requests)"
+companion_targets="$(report_field package_term_distinct_targets_with_companion_object_resource)"
+top_loads="$(report_field top_level_class_loads)"
+median_depth="$(report_field median_dependency_depth)"
+p95_depth="$(report_field p95_dependency_depth)"
+max_depth="$(report_field max_dependency_depth)"
+max_fanout="$(report_field max_distinct_classes_touched_by_one_request)"
+largest_root="$(awk -F'::' '/^    root=/ { sub(/^[[:space:]]*root=/, "", $1); print $1; exit }' "$tmp_dir/first.report")"
+
 mkdir -p "$(dirname -- "$output_path")"
 {
     printf '# Typer classpath corpus audit: Scala 3.9.0\n\n'
-    printf 'The report is generated from the pinned Scala 3.9.0 audit, which runs once by default. Pass `--verify-determinism` to run it twice and compare normalized output byte-for-byte. It records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success. The source corpus, parser/namer setup, Scala revision, JDK feature release %s, and classpath remain pinned.\n\n' "$jdk_release"
+    printf 'The report is generated from the pinned Scala 3.9.0 audit, which runs once by default. Pass `--verify-determinism` to run it twice and compare normalized output byte-for-byte. It records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success. The source corpus, parser/namer setup, Scala revision, JDK %s (feature release %s), and classpath remain pinned.\n\n' "$jdk_version" "$jdk_release"
     printf 'Run `tools/typer-classpath-corpus-audit/run` with the environment documented in `docs/typer-v0.1-compatibility.md` to regenerate this report.\n\n'
 printf '## #946–#950 impure function hardening and next sprint\n\n'
 printf 'Historical #950 snapshot: the frozen #946 cohort retained all 13 method observations across 3 `FunctionWithMods` trees in 2 files, with the original one-argument `[Impure]` ordinary-arrow shape and 1 direct / 12 inherited attributions. The old first-blocker count was 13 / 2 files; after #949 it was 0 / 0. Per-row accounting in that snapshot showed all 13 stopping at `SymbolResolution`; none was fully typed. The source-type cache was rolled back with each enclosing failed method transaction, so the snapshot’s `projection=not_completed` column meant no projected root type was published after that method attempt. Focused source projection regressions verified that the impure alias was selected and preserved before normalization; the corpus result was bounded by symbol resolution. The figures and recommendation in this section record the #950 snapshot and are not recalculated by this script.\n\n'
@@ -665,6 +704,27 @@ printf 'The #950 snapshot recommended the import/classpath resolution sprint. It
     printf '### #974 TASTy parent-resolution result\n\n'
     printf 'The frozen #972 cohort had 342 `UnresolvedSupertype` errors across 33 requested classes and 79 files. After #974, 212 remain across 26 classes and 51 files; total member errors fall from 347 to 217 while requests rise from 7,895 to 8,070 as resolution proceeds deeper. The eight root families that no longer fail are `dotty/tools/io/AbstractFile`, `scala/Function1`, `scala/collection/AbstractIterator`, `scala/collection/IterableOnce`, `scala/collection/Iterator`, `scala/collection/SpecificIterableFactory`, `scala/concurrent/duration/Duration`, and `scala/math/Ordering`. Newly exposed failures include `dotty/tools/io/VirtualDirectory` and additional requests for `scala/annotation/retainsCap`; these are counted as remaining failures, not fixes. The 5 separate unresolved-class errors are also retained in the result.\n\n'
     printf 'The `tasty_unresolved_supertype_failures` rows below now include the parent index, structured shape, semantic-reference and explicit-prefix flags, visible name-table spellings, and compact raw-tree tag shape. A representative fixed row is `scala/Function1`: its `IDENTTPT` parent wraps a shared type reference whose target resolves through `scala.AnyRef`, still normalized to `java/lang/Object`. The real Scala 3.9 `Source.tasty` integration fixture covers an applied parent through the package-object alias path. Unresolved semantic references continue to fail without a same-package guess.\n\n'
+    sed \
+        -e "s|@TYPED_METHODS@|$typed_methods|g" \
+        -e "s|@IMPORT_COUNT_FILES@|$import_qualifier|g" \
+        -e "s|@CLASS_SUCCESSES@|$class_successes|g" \
+        -e "s|@DISTINCT_CLASSES@|$distinct_classes|g" \
+        -e "s|@NONCLASS_SUCCESSES@|$nonclass_successes|g" \
+        -e "s|@MEMBER_UNRESOLVED@|$member_unresolved|g" \
+        -e "s|@MEMBER_ERRORS@|$member_errors|g" \
+        -e "s|@PACKAGE_TERM_REQUESTS@|$package_term_requests|g" \
+        -e "s|@PACKAGE_TERM_TARGETS@|$package_term_targets|g" \
+        -e "s|@COMPANION_REQUESTS@|$companion_requests|g" \
+        -e "s|@COMPANION_TARGETS@|$companion_targets|g" \
+        -e "s|@TOP_LOADS@|$top_loads|g" \
+        -e "s|@MEDIAN_DEPTH@|$median_depth|g" \
+        -e "s|@P95_DEPTH@|$p95_depth|g" \
+        -e "s|@MAX_DEPTH@|$max_depth|g" \
+        -e "s|@MAX_FANOUT@|$max_fanout|g" \
+        -e "s|@LARGEST_ROOT@|$largest_root|g" \
+        -e "s|@JDK_VERSION@|$jdk_version|g" \
+        -e "s|@AUDIT_RUN_SUMMARY@|$audit_run_summary|g" \
+        "$script_dir/report-notes.md"
     printf '## Previous type projection snapshot\n\n'
     printf 'The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.\n\n'
     printf '## Full raw audit output (JDK feature release %s)\n\n' "$jdk_release"

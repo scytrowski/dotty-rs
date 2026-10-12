@@ -773,6 +773,11 @@ fn expression_failure_rolls_back_loaded_class_and_allows_a_later_resolution() {
         &mut store,
         &mut packages,
     );
+    let root_package = packages.symbol::<&str>(&[]).unwrap();
+    let root_scope = packages.scope_of(root_package).unwrap();
+    let external_package_name = Name::new(store.names.intern("external"), Namespace::Term);
+    let exchange_member_name = Name::new(store.names.intern("exchange"), Namespace::Term);
+    let ping_type_name = Name::new(store.names.intern("Ping"), Namespace::Type);
     let log = Rc::new(RefCell::new(ResolutionLog::default()));
     let resolver = RecordingResolver::new(
         ClasspathSymbolResolver::new(
@@ -795,10 +800,53 @@ fn expression_failure_rolls_back_loaded_class_and_allows_a_later_resolution() {
 
     let (broken_method, broken_rhs) = method_rhs(&unit, typer.store(), "broken");
     let broken_context = typer.expression_context_for(broken_method).unwrap();
+    let store_checkpoint = typer.store().checkpoint();
+    let typed_node_count = typer.typed_ast().iter().count();
+    let typed_mappings = unit
+        .parsed
+        .ast
+        .iter()
+        .map(|(tree, _)| (tree, typer.source_typed_index().get(unit.source, tree)))
+        .collect::<Vec<_>>();
+    let source_type_mappings = unit
+        .parsed
+        .ast
+        .iter()
+        .map(|(tree, _)| (tree, typer.source_type_index().type_at(unit.source, tree)))
+        .collect::<Vec<_>>();
     let error = typer
         .type_expression(broken_rhs, broken_context)
         .expect_err("a missing external member should fail typing");
     assert!(matches!(error, TyperError::MemberNotFound { .. }));
+    assert_eq!(typer.store().checkpoint(), store_checkpoint);
+    assert_eq!(typer.typed_ast().iter().count(), typed_node_count);
+    assert_eq!(
+        unit.parsed
+            .ast
+            .iter()
+            .map(|(tree, _)| (tree, typer.source_typed_index().get(unit.source, tree)))
+            .collect::<Vec<_>>(),
+        typed_mappings,
+        "a failed expression must not leave source-to-typed-tree mappings"
+    );
+    assert_eq!(
+        unit.parsed
+            .ast
+            .iter()
+            .map(|(tree, _)| (tree, typer.source_type_index().type_at(unit.source, tree)))
+            .collect::<Vec<_>>(),
+        source_type_mappings,
+        "a failed expression must restore source type projections"
+    );
+    assert!(
+        typer
+            .store()
+            .scopes
+            .get(root_scope)
+            .lookup_all(&external_package_name)
+            .is_empty(),
+        "the failed resolver transaction must remove its package link"
+    );
 
     let first_ping = log
         .borrow()
@@ -814,6 +862,11 @@ fn expression_failure_rolls_back_loaded_class_and_allows_a_later_resolution() {
     let (valid_method, valid_rhs) = method_rhs(&unit, typer.store(), "valid");
     let valid_context = typer.expression_context_for(valid_method).unwrap();
     let typed = typer.type_expression(valid_rhs, valid_context).unwrap();
+    assert_eq!(
+        typer.source_typed_index().get(unit.source, valid_rhs),
+        Some(typed),
+        "the successful retry must publish its typed source mapping"
+    );
     assert!(
         typer
             .store()
@@ -827,6 +880,48 @@ fn expression_failure_rolls_back_loaded_class_and_allows_a_later_resolution() {
             .filter(|(name, _)| name == "Ping")
             .all(|(_, symbol)| typer.store().symbols.contains(*symbol)),
         "the later successful resolution must not observe a stale cached SymbolId"
+    );
+    let ping = log
+        .borrow()
+        .members
+        .iter()
+        .rev()
+        .find_map(|(name, symbol)| {
+            (name == "Ping" && typer.store().symbols.contains(*symbol)).then_some(*symbol)
+        })
+        .expect("retry should leave a live external Ping symbol");
+    let ping_package = typer.store().symbols.get(ping).owner.unwrap();
+    let ping_scope = match typer.store().symbols.get(ping).info {
+        SymbolInfo::Complete(info) => match typer.store().types.get(info) {
+            Type::ClassInfo(class_info) => class_info.declarations,
+            other => panic!("Ping should have ClassInfo, found {other:?}"),
+        },
+        other => panic!("Ping should be complete after retry, found {other:?}"),
+    };
+    assert_eq!(typer.store().scopes.get(ping_scope).owner, Some(ping));
+    assert!(
+        typer
+            .store()
+            .scopes
+            .get(ping_scope)
+            .lookup(&exchange_member_name)
+            .is_some(),
+        "the retry should retain Ping's member declaration"
+    );
+    drop(typer);
+    let session = log
+        .borrow_mut()
+        .session
+        .take()
+        .expect("resolver session should survive the successful retry");
+    let shared_packages = session.into_packages();
+    let external_scope = shared_packages
+        .scope_of(ping_package)
+        .expect("external package should remain after successful retry");
+    assert_eq!(
+        store.scopes.get(external_scope).lookup(&ping_type_name),
+        Some(ping),
+        "package and class declaration scopes should agree on the retry identity"
     );
 }
 
