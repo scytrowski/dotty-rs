@@ -32,6 +32,40 @@ encoding is deterministic. Raw unknown attributes, including nested
 `StackMapTable` and `LineNumberTable` data, keep their original constant-pool
 name index and payload.
 
+## Owned class and typed method builder
+
+`ClassFileBuilder` creates new classes with owned names, descriptors, fields,
+and methods. Its raw `MethodBuilder::code` path remains available for callers
+that need to provide bytes and explicit `max_stack`/`max_locals`. For ordinary
+straight-line methods, `add_static_method`, `add_instance_method`, and
+`add_code_method` accept a closure over `CodeBuilder`:
+
+```rust
+use dotty_classfile::classfile::{ClassFileBuilder, ClassFileVersion};
+
+let mut class = ClassFileBuilder::new(
+    "example/Calculator",
+    ClassFileVersion { major: 65, minor: 0 },
+)?;
+class.add_static_method("add", "(II)I", |code| {
+    code.iload(0)?;
+    code.iload(1)?;
+    code.iadd()?;
+    code.ireturn()?;
+    Ok(())
+})?;
+let bytes = class.encode()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Symbolic class, field, and method references are interned into the shared pool
+before it is finalized. The builder assembles the typed instructions and uses
+the method descriptor and static flag to compute `max_stack` and `max_locals`.
+The supported bytecode instruction matrix documents the available operations.
+This analysis checks straight-line value categories and resource bounds, but
+does not prove initialization states or reference assignability, handle
+control flow, or synthesize stack-map frames.
+
 Structural equivalence does not promise byte-identical output for every
 arbitrary class file. A modeled attribute stores its semantic fields rather
 than its original `attribute_name_index`; encoding therefore uses the first
@@ -43,11 +77,11 @@ bytecode or synthesize stack maps.
 
 ## JVM execution gate
 
-`tests/classfile_jvm_encoder.rs` builds `Answer.class` using only the public
-structural model and `ClassFile::encode`. The Java 21 class contains a static
-`answer()I` method with the literal bytecode `bipush 42; ireturn`. The test
-asks `javap -v` to parse it, compiles a small Java caller, and invokes the class
-with `java -Xverify:all`, checking that the caller prints `42`.
+`tests/classfile_jvm_encoder.rs` builds `Answer.class` using the public
+`ClassFileBuilder` and typed `CodeBuilder` API. Its Java 21 static `answer()I`
+method is written without opcode bytes or explicit stack/local limits. The
+test asks `javap -v` to parse it, compiles a small Java caller, and invokes the
+class with `java -Xverify:all`, checking that the caller prints `42`.
 
 Run the structural and ordinary crate tests with:
 
@@ -70,6 +104,6 @@ and sets
 instead of silently passing. The JDK corpus itself is checked in, so the
 structural round-trip suite does not depend on an installed JDK.
 
-The gate verifies one deliberately small executable class. It does not add a
-class builder, assembler, general bytecode verifier, Scala compilation, or JVM
-backend; those remain separate future work.
+The gate verifies one deliberately small executable class. It does not provide
+a general bytecode verifier, Scala compilation, or a JVM backend; those remain
+separate future work.

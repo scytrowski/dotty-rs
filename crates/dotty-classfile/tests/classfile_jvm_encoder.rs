@@ -1,9 +1,4 @@
-use dotty_classfile::access_flags::{ClassAccessFlags, MethodAccessFlags};
-use dotty_classfile::attribute::{Attribute, CodeAttribute};
-use dotty_classfile::class_file::{ClassFile, ClassFileVersion};
-use dotty_classfile::constant_pool::{ConstantPool, ConstantPoolEntry, ConstantPoolIndex};
-use dotty_classfile::field::FieldInfo;
-use dotty_classfile::method::MethodInfo;
+use dotty_classfile::classfile::{ClassFileBuilder, ClassFileVersion};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -115,49 +110,6 @@ fn run(executable: &str, args: &[&str]) -> Output {
         .unwrap_or_else(|error| panic!("failed to start {executable}: {error}"))
 }
 
-fn answer_class_file() -> ClassFile<'static> {
-    let constant_pool = ConstantPool::from_entries(vec![
-        Some(ConstantPoolEntry::Utf8("Answer".to_owned())),
-        Some(ConstantPoolEntry::Class {
-            name_index: ConstantPoolIndex(1),
-        }),
-        Some(ConstantPoolEntry::Utf8("java/lang/Object".to_owned())),
-        Some(ConstantPoolEntry::Class {
-            name_index: ConstantPoolIndex(3),
-        }),
-        Some(ConstantPoolEntry::Utf8("answer".to_owned())),
-        Some(ConstantPoolEntry::Utf8("()I".to_owned())),
-        Some(ConstantPoolEntry::Utf8("Code".to_owned())),
-    ]);
-    let answer_method = MethodInfo {
-        access_flags: MethodAccessFlags(0x0009), // public static
-        name_index: ConstantPoolIndex(5),
-        descriptor_index: ConstantPoolIndex(6),
-        attributes: vec![Attribute::Code(CodeAttribute {
-            max_stack: 1,
-            max_locals: 0,
-            code: &[0x10, 42, 0xAC], // bipush 42; ireturn
-            exception_table: vec![],
-            attributes: vec![],
-        })],
-    };
-
-    ClassFile {
-        version: ClassFileVersion {
-            major: 65,
-            minor: 0,
-        }, // Java 21
-        constant_pool,
-        access_flags: ClassAccessFlags(0x0021), // public, super
-        this_class: ConstantPoolIndex(2),
-        super_class: Some(ConstantPoolIndex(4)),
-        interfaces: vec![],
-        fields: Vec::<FieldInfo<'static>>::new(),
-        methods: vec![answer_method],
-        attributes: vec![],
-    }
-}
-
 #[test]
 fn public_encoder_emits_a_class_accepted_and_executed_by_the_jvm() {
     if !require_jdk_or_skip() {
@@ -166,10 +118,24 @@ fn public_encoder_emits_a_class_accepted_and_executed_by_the_jvm() {
 
     let directory = TempDir::new();
     let answer_path = directory.path().join("Answer.class");
-    let class_file = answer_class_file();
-    let bytes = class_file
+    let mut class = ClassFileBuilder::new(
+        "Answer",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .expect("Java 21 class builder is supported");
+    class
+        .add_static_method("answer", "()I", |code| {
+            code.iconst(42)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .expect("typed method construction succeeds");
+    let bytes = class
         .encode()
-        .expect("the public structural model is a valid class file");
+        .expect("the typed class builder produces a valid class file");
     fs::write(&answer_path, bytes)
         .unwrap_or_else(|error| panic!("write {}: {error}", answer_path.display()));
 
