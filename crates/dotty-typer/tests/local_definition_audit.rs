@@ -8301,6 +8301,21 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
                 .map(String::as_str),
         );
     }
+    let mut demand_roots = BTreeMap::new();
+    for observation in &metrics.dependency_profiles {
+        if observation.profile.root_was_shell
+            && observation
+                .profile
+                .completed_classes
+                .contains(&observation.profile.root)
+        {
+            *demand_roots.entry(&observation.profile.root).or_insert(0) += 1;
+        }
+    }
+    println!("  on_demand_completion_roots:");
+    for (root, count) in demand_roots {
+        println!("    root={root}::completions={count}");
+    }
     println!("  lifecycle_observations_by_method:");
     for (method, (shells, completed)) in observed_by_method {
         println!(

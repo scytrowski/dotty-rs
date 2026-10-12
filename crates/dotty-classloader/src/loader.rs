@@ -969,13 +969,20 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     ) -> Result<SymbolId, ClassLoadError> {
         let is_root = self.active_load_profile.is_none();
         if is_root {
+            let root_was_shell = self
+                .session
+                .identified
+                .get(name)
+                .is_some_and(|id| self.store.symbols.get(*id).info == SymbolInfo::Missing);
+            let root = name.as_internal().to_owned();
             self.active_load_profile = Some(ActiveLoadProfile {
-                root: name.as_internal().to_owned(),
-                root_was_shell: self
-                    .session
-                    .identified
-                    .get(name)
-                    .is_some_and(|id| self.store.symbols.get(*id).info == SymbolInfo::Missing),
+                root: root.clone(),
+                root_was_shell,
+                identity_shells: if root_was_shell {
+                    BTreeSet::from([root])
+                } else {
+                    BTreeSet::new()
+                },
                 ..ActiveLoadProfile::default()
             });
         }
@@ -6589,6 +6596,7 @@ mod tests {
         ));
         let profile = second.take_load_profiles().pop().unwrap();
         assert!(profile.root_was_shell);
+        assert!(profile.identity_shells.contains("sample/Shared"));
         assert_eq!(
             profile.completed_classes,
             BTreeSet::from(["sample/Shared".to_owned()])
