@@ -126,6 +126,18 @@ impl std::error::Error for ResolutionError {}
 /// Supplies symbols an adapter did not enter itself. See the module docs for
 /// the contract.
 pub trait SymbolResolver {
+    /// Completes a class identity owned by this resolver in place.
+    /// `true` requires valid Complete(ClassInfo) for the same symbol;
+    /// `false` means unowned/unsupported. False and errors are atomic, and
+    /// successful in-place updates participate in caller checkpoints.
+    fn complete_class(
+        &mut self,
+        _store: &mut SemanticStore,
+        _symbol: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        Ok(false)
+    }
+
     /// Records resolver-local cache/session state before a caller transaction.
     fn checkpoint(&self) -> ResolverCheckpoint;
 
@@ -351,6 +363,12 @@ mod tests {
         let mut resolver: Box<dyn SymbolResolver> = Box::new(NoResolver);
 
         assert_eq!(resolver.resolve_member(&mut store, &request), Ok(None));
+        let checkpoint = store.checkpoint();
+        assert_eq!(
+            resolver.complete_class(&mut store, SymbolId::new(0)),
+            Ok(false)
+        );
+        assert_eq!(store.checkpoint(), checkpoint);
     }
 
     #[test]
