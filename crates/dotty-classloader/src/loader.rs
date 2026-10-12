@@ -11,7 +11,7 @@ use crate::session::LoadingSession;
 use crate::symbol::{ClassRef, ClassfileMetadata};
 use crate::tasty_symbol;
 use dotty_classfile::access_flags::{
-    ACC_STATIC, ClassAccessFlags, FieldAccessFlags, MethodAccessFlags,
+    ACC_PRIVATE, ACC_PROTECTED, ACC_STATIC, ClassAccessFlags, FieldAccessFlags, MethodAccessFlags,
 };
 use dotty_classfile::attribute::{Annotation, Attribute, ElementValue};
 use dotty_classfile::class_file::ClassFile;
@@ -555,33 +555,35 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .map_err(|error| ClassLoadError::Io(name.clone(), Rc::new(error)))?
             .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
         let origin = resource.origin().clone();
-        let (flags, declared_visibility, semantic_owner) = match resource.format() {
-            ClassFormat::Class => {
-                let mut reader = Reader::new(resource.bytes());
-                let class_file = ClassFile::decode(&mut reader)
-                    .map_err(|error| ClassLoadError::InvalidClassFile(name.clone(), error))?;
-                if !class_file.version.is_compatible() {
-                    return Err(ClassLoadError::UnsupportedClassVersion(
-                        name.clone(),
-                        class_file.version,
-                    ));
+        let (flags, tasty_visibility, classfile_visibility, semantic_owner) =
+            match resource.format() {
+                ClassFormat::Class => {
+                    let mut reader = Reader::new(resource.bytes());
+                    let class_file = ClassFile::decode(&mut reader)
+                        .map_err(|error| ClassLoadError::InvalidClassFile(name.clone(), error))?;
+                    if !class_file.version.is_compatible() {
+                        return Err(ClassLoadError::UnsupportedClassVersion(
+                            name.clone(),
+                            class_file.version,
+                        ));
+                    }
+                    let actual = self.resolve_name(name, &class_file, class_file.this_class)?;
+                    if actual != *name {
+                        return Err(ClassLoadError::NameMismatch {
+                            requested: name.clone(),
+                            actual,
+                        });
+                    }
+                    let owner = self.semantic_owner_name(name, &class_file)?;
+                    let visibility = self.semantic_class_visibility_flags(name, &class_file)?;
+                    (class_file.access_flags, None, visibility, owner)
                 }
-                let actual = self.resolve_name(name, &class_file, class_file.this_class)?;
-                if actual != *name {
-                    return Err(ClassLoadError::NameMismatch {
-                        requested: name.clone(),
-                        actual,
-                    });
+                ClassFormat::Tasty => {
+                    let identity = tasty_symbol::decode_identity(resource.bytes(), name)
+                        .map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
+                    (identity.flags, identity.visibility, None, None)
                 }
-                let owner = self.semantic_owner_name(name, &class_file)?;
-                (class_file.access_flags, None, owner)
-            }
-            ClassFormat::Tasty => {
-                let identity = tasty_symbol::decode_identity(resource.bytes(), name)
-                    .map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
-                (identity.flags, identity.visibility, None)
-            }
-        };
+            };
 
         let semantic_owner = semantic_owner
             .map(|owner| self.ensure_class_identity_inner(&owner, ancestry))
@@ -653,10 +655,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         } else {
             SymbolKind::Class
         };
-        let visibility = match declared_visibility {
+        let visibility = match tasty_visibility {
             Some(visibility) => self.tasty_visibility(name, &visibility),
-            None if flags.is_public() => Visibility::Public,
-            None => Visibility::Package(package),
+            None => match classfile_visibility.unwrap_or(flags) {
+                visibility if visibility.contains(ACC_PRIVATE) => Visibility::Private,
+                visibility if visibility.contains(ACC_PROTECTED) => Visibility::Protected,
+                visibility if visibility.is_public() => Visibility::Public,
+                _ => Visibility::Package(package),
+            },
         };
         let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
         if flags.is_abstract() {
@@ -2230,6 +2236,29 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// [`Self::resolve_dependency`]: an outer class referencing this
     /// class back (e.g. a member field typed as its own inner class) is a
     /// legitimate mutual reference, not a supertype cycle.
+    fn semantic_class_visibility_flags(
+        &self,
+        name: &BinaryName,
+        class_file: &ClassFile<'_>,
+    ) -> Result<Option<ClassAccessFlags>, ClassLoadError> {
+        let entries = class_file
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                Attribute::InnerClasses(entries) => Some(entries),
+                _ => None,
+            });
+        let Some(entries) = entries else {
+            return Ok(None);
+        };
+        for entry in entries {
+            if self.resolve_name(name, class_file, entry.inner_class_info_index)? == *name {
+                return Ok(Some(ClassAccessFlags(entry.inner_class_access_flags)));
+            }
+        }
+        Ok(None)
+    }
+
     fn resolve_semantic_owner(
         &mut self,
         name: &BinaryName,
@@ -5549,6 +5578,11 @@ mod tests {
             .expect("metadata should establish the enclosing class identity");
 
         assert_eq!(loader.store.symbols.get(inner).owner, Some(outer));
+        assert_eq!(
+            loader.store.symbols.get(inner).visibility,
+            Visibility::Public,
+            "nested class visibility comes from its InnerClasses self-entry"
+        );
         assert_eq!(loader.store.symbols.get(outer).info, SymbolInfo::Missing);
         assert_eq!(loader.store.symbols.get(inner).info, SymbolInfo::Missing);
         assert!(loader.session.resolved.is_empty());

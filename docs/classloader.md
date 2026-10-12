@@ -390,7 +390,8 @@ known, then `SymbolInfo::Complete(TypeId)` pointing at its
 
 Callers that only need a stable external class identity can use
 `ClassLoader::ensure_class_identity(name)`. It reads the selected resource
-and decodes only the class kind and visibility, enters the symbol in its
+and decodes only the class kind and visibility (including nested-class
+access from the `InnerClasses` self-entry), enters the symbol in its
 canonical package scope, and leaves `SymbolInfo::Missing`. It does not
 resolve supertypes, member types, or class members. JVM nested ownership is
 followed only when the class file's `InnerClasses` or `EnclosingMethod`
