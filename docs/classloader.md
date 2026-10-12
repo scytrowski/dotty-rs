@@ -317,6 +317,20 @@ never duplicates them there. See §3's "known gaps" for what's
 deliberately not reconstructed from `.tasty` yet (precise member types,
 generics, annotations).
 
+Parent-name recovery follows the compiled TASTy reference tree. Qualified,
+root-qualified, applied, shared, and direct symbol references retain the
+package or owner encoded by that tree; an applied parent's binary identity is
+read from its type constructor. Shared references are followed through their
+TASTy address with the same depth bound as other reference chains. Known
+Scala aliases such as `scala.AnyRef` still normalize to their canonical JVM
+identity. A semantic reference with an unreadable prefix remains
+`UnresolvedSupertype`, except for the separately validated Scala package-object
+alias path. For a parent tree with no semantic reference, the existing bounded
+classpath check considers the current package, `scala`, and `java.lang`, and
+accepts a result only when exactly one classpath resource matches. The pinned
+Scala 3.9.0 audit records each residual parent's reference flags, visible names,
+and compact raw-tree tag shape.
+
 ## 5. Loading algorithm (enter before complete)
 
 JVMS §5.4 explicitly allows deferring resolution: *"an implementation may

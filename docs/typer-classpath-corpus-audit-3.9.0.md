@@ -33,27 +33,28 @@ The pre-#826 baseline at `89d84f41444a2a03a6a5bd39cf45176ca894a03b` and the post
 | --- | --- | ---: | --- |
 | `UnsupportedExpression::Function` | `ImportQualifierNotFound` | 4 / 1 | compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:737:refersTo, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:752:removeSingleton, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:754:mapArg, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:758:elim |
 | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` | 9 / 1 | compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:710:factoryManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:718:singletonManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:721:synthArrayManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:727:synthWildcardManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:731:synthArgManifests |
-| `UnsupportedTypeTree::Function` | `ImportQualifierNotFound` | 1 / 1 | compiler/src/dotty/tools/dotc/typer/ProtoTypes.scala:409:isPoly |
-| `UnsupportedTypeTree::Function` | `SymbolResolution` | 11 / 7 | compiler/src/dotty/tools/backend/jvm/BTypes.scala:671:ifInit, compiler/src/dotty/tools/backend/jvm/BTypes.scala:673:isJLO, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2387:genArgs, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgsAsClassCaptures, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3386:genScalaArgs |
+| `UnsupportedTypeTree::Function` | `ImportQualifierNotFound` | 8 / 5 | compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2387:genArgs, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgsAsClassCaptures, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3386:genScalaArgs, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3387:genJSArgs, compiler/src/dotty/tools/dotc/core/Denotations.scala:310:argStr |
+| `UnsupportedTypeTree::Function` | `MemberLookup` | 1 / 1 | compiler/src/dotty/tools/dotc/core/Types.scala:3448:normalize |
+| `UnsupportedTypeTree::Function` | `TypeNameNotFound` | 3 / 2 | compiler/src/dotty/tools/backend/jvm/BTypes.scala:671:ifInit, compiler/src/dotty/tools/backend/jvm/BTypes.scala:673:isJLO, library/src/scala/util/control/Exception.scala:416:fun |
 
 ### Same-method comparison
 
 | Method from the pre-#826 first-blocker set | Baseline family | First blocker after #829 |
 | --- | --- | --- |
-| `compiler/src/dotty/tools/backend/jvm/BTypes.scala:671:ifInit` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/backend/jvm/BTypes.scala:673:isJLO` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2387:genArgs` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgsAsClassCaptures` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3386:genScalaArgs` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3387:genJSArgs` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/dotc/core/Denotations.scala:310:argStr` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/dotc/core/Types.scala:3448:normalize` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `compiler/src/dotty/tools/backend/jvm/BTypes.scala:671:ifInit` | `UnsupportedTypeTree::Function` | `TypeNameNotFound` |
+| `compiler/src/dotty/tools/backend/jvm/BTypes.scala:673:isJLO` | `UnsupportedTypeTree::Function` | `TypeNameNotFound` |
+| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2387:genArgs` | `UnsupportedTypeTree::Function` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgsAsClassCaptures` | `UnsupportedTypeTree::Function` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3386:genScalaArgs` | `UnsupportedTypeTree::Function` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3387:genJSArgs` | `UnsupportedTypeTree::Function` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/core/Denotations.scala:310:argStr` | `UnsupportedTypeTree::Function` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/core/Types.scala:3448:normalize` | `UnsupportedTypeTree::Function` | `MemberLookup` |
 | `compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:737:refersTo` | `UnsupportedExpression::Function` | `ImportQualifierNotFound` |
 | `compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:752:removeSingleton` | `UnsupportedExpression::Function` | `ImportQualifierNotFound` |
 | `compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:754:mapArg` | `UnsupportedExpression::Function` | `ImportQualifierNotFound` |
 | `compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:758:elim` | `UnsupportedExpression::Function` | `ImportQualifierNotFound` |
-| `compiler/src/dotty/tools/dotc/parsing/Parsers.scala:3395:maybeAscription` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
-| `compiler/src/dotty/tools/dotc/transform/PostTyper.scala:366:unusable` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `compiler/src/dotty/tools/dotc/parsing/Parsers.scala:3395:maybeAscription` | `UnsupportedTypeTree::Function` | `ImportQualifierNotFound` |
+| `compiler/src/dotty/tools/dotc/transform/PostTyper.scala:366:unusable` | `UnsupportedTypeTree::Function` | `ImportQualifierNotFound` |
 | `compiler/src/dotty/tools/dotc/typer/ProtoTypes.scala:409:isPoly` | `UnsupportedTypeTree::Function` | `ImportQualifierNotFound` |
 | `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:710:factoryManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
 | `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:718:singletonManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
@@ -64,7 +65,7 @@ The pre-#826 baseline at `89d84f41444a2a03a6a5bd39cf45176ca894a03b` and the post
 | `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:748:synthManifest` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
 | `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:770:manifestOfType` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
 | `compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:774:synthesize` | `UnsupportedExpression::Function` | `UnsupportedFunctionLiteralParameter` |
-| `library/src/scala/util/control/Exception.scala:416:fun` | `UnsupportedTypeTree::Function` | `SymbolResolution` |
+| `library/src/scala/util/control/Exception.scala:416:fun` | `UnsupportedTypeTree::Function` | `TypeNameNotFound` |
 
 The detailed rows are emitted from the same local-method attempts as the aggregate audit; the generated raw report below preserves all bucket counts and paths. `Typed` would mean the local method received a typed-tree mapping; none of these 25 rows did.
 
@@ -93,9 +94,9 @@ The ranked list below excludes parser/namer and classpath-resolution failures, a
 | 5 | `MissingDeclaredType` | 10 / 3 |
 | 6 | `LocalBlockDeclarationDeferred::module definition` | 9 / 2 |
 | 7 | `TypedPatternRuntimeTestDeferred` | 9 / 2 |
-| 8 | `UnsupportedFunctionLiteralParameter` | 9 / 1 |
-| 9 | `StringLiteralTypingDeferred` | 8 / 5 |
-| 10 | `UnsupportedExpression::ForDo` | 5 / 2 |
+| 8 | `UnstableSelectionPrefix` | 9 / 4 |
+| 9 | `UnsupportedFunctionLiteralParameter` | 9 / 1 |
+| 10 | `StringLiteralTypingDeferred` | 8 / 5 |
 
 ### #903 hardening and refreshed local-method profile
 
@@ -384,22 +385,18 @@ The raw profile below lists the current first blocker for each of the 22 pinned 
 
 This audit-only profile leaves resolver semantics unchanged. Request keys use stable semantic owner paths, namespace, member name, and member space, not per-store arena IDs. The raw report contains ordered per-method request keys and outcomes. The `SymbolResolver` contract does not carry subsystem/site tags, so the audit reports that attribution as unavailable rather than guessing.
 
-### #973 enclosing-generic result
-
-The frozen #972 cohort contained 163 `UnresolvedTypeVariable` errors across 30 requested roots. After adding nearest-first lookup through non-static enclosing class scopes, none remain in the refreshed audit. The focused JDK 21 regression confirms that `java/lang/invoke/ClassSpecializer$SpeciesData.key` points to the canonical `ClassSpecializer.K` symbol. Total resolver member errors fall from 452 to 347 (105 fewer); requests rise from 7,802 to 7,895 as resolution proceeds deeper. One ordinary function-type row moves from `SymbolResolution` to `ImportQualifierNotFound`, without becoming typed. The remaining 347 errors are dominated by 342 Scala TASTy unresolved supertypes; this issue does not address that cohort. These results show the nested-generic error family and its immediate class-load failures are removed, while the broader classpath gate remains blocked.
-
 The complete request-shape and outcome tables follow in the raw report. In brief, the profile separates package+type from package+term requests, records type-side `Foo` and object-side `Foo$` classpath resource hits without materializing them, and reports distinct keys alongside request volume and repeated-hit factor.
 
 | Normalized outcome / probe | Count |
 | --- | ---: |
-| External member requests | 7895 |
-| Resolver `Ok(None)` | 7424 |
-| Resolver errors | 347 |
-| Package+term requests with a type-side class resource | 2197 |
+| External member requests | 8070 |
+| Resolver `Ok(None)` | 7493 |
+| Resolver errors | 217 |
+| Package+term requests with a type-side class resource | 2212 |
 | Distinct package+term targets with a type-side class resource | 51 |
-| Package+type requests with a class resource | 470 |
-| Distinct package+type targets with a class resource | 56 |
-| Package+term requests with a `Foo$` resource | 2181 |
+| Package+type requests with a class resource | 575 |
+| Distinct package+type targets with a class resource | 57 |
+| Package+term requests with a `Foo$` resource | 2196 |
 | Distinct package+term targets with a `Foo$` resource | 46 |
 | Package-object / dollar-looking targets | 0 |
 
@@ -407,34 +404,39 @@ Distinct targets by request outcome and normalized error family:
 
 | Family / outcome | Distinct targets / files |
 | --- | --- |
-| Error `InvalidTastyFile::UnresolvedSupertype` | 33 targets, 79 files |
+| Error `InvalidTastyFile::UnresolvedSupertype` | 26 targets, 51 files |
 | Error `unresolved class` | 2 targets, 2 files |
 | `space=Prefix::prefix=ThisType::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=class member scope unavailable: incomplete class info` | 276 targets, 78 files |
 | `space=Prefix::prefix=ThisType::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=other resolver Ok(None)` | 13 targets, 5 files |
-| `space=Prefix::prefix=ThisType::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=class member scope unavailable: incomplete class info` | 366 targets, 60 files |
-| `space=Prefix::prefix=ThisType::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=other resolver Ok(None)` | 19 targets, 5 files |
+| `space=Prefix::prefix=ThisType::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=class member scope unavailable: incomplete class info` | 367 targets, 60 files |
+| `space=Prefix::prefix=ThisType::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=other resolver Ok(None)` | 20 targets, 5 files |
 | `space=Prefix::prefix=class TypeRef::target=Class::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=class member scope unavailable: incomplete class info` | 20 targets, 15 files |
+| `space=Prefix::prefix=package TypeRef::target=Package::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=other success` | 1 targets, 1 files |
 | `space=Prefix::prefix=package TypeRef::target=Package::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=package term member unsupported` | 80 targets, 115 files |
-| `space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=error` | 35 targets, 80 files |
-| `space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=external class success` | 21 targets, 39 files |
+| `space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=error` | 28 targets, 52 files |
+| `space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=external class success` | 29 targets, 75 files |
 | `space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=other success` | 1 targets, 1 files |
-| `space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=package type member unresolved` | 37 targets, 43 files |
+| `space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=package type member unresolved` | 41 targets, 43 files |
 | `space=Prefix::prefix=trait TypeRef::target=Trait::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=class member scope unavailable: incomplete class info` | 18 targets, 5 files |
 | Incomplete class prefix targets | 113 targets |
 
-### Bounded implementation ranking at the #972 baseline
-
-This recommendation records the pre-#973 baseline; it is retained as historical context.
+### Bounded implementation ranking
 
 | Rank | Slice | Measured reach | Expected reachability gain | Risk and reusable work |
 | ---: | --- | --- | --- | --- |
 | 1 | A. Nested-class generic environment | 163 errors / 30 requested roots; deepest root `java/lang/invoke/ClassSpecializer$SpeciesData` / `K` | Unlocks class loads currently failing through this repeated JDK dependency root. | Medium-high risk; reuse classfile signature decoding and dependency loading. |
-| 2 | B. Scala TASTy supertype reference resolution | 289 errors / 22 requested roots | Removes the largest normalized error cohort and may unlock its dependent Scala class loads. | High semantic risk; reuse TASTy address/reference decoding and pinned Scala 3.9.0 fixtures. |
+| 2 | B. Scala TASTy supertype reference resolution (completed in #974) | 342 errors / 33 requested roots / 79 files at the #972 baseline | Resolved the shared `scala/Function1` parent chain and unlocked dependent library classes. | High semantic risk; bounded by compiled TASTy references, with no current-package guessing. |
 | 3 | C. Package type-member materialization | 357 unresolved requests / 33 distinct target keys | Completes only candidates whose class resources are present; current package type loader path already exists. | Low-medium risk; reuse `package + type -> load_class` after A/B loader fixes. |
 | 4 | E. Completing a known incomplete class identity | 3,721 requests / 111 distinct incomplete prefix identities | Could unlock member lookup for repeated source/classloader class prefixes. | High identity/rollback risk; separate source and classpath origins, then reuse class completion transactions. |
 | 5 | D. Package term/object materialization | 2,716 requests / 75 distinct target keys; type-side resource on 2,180 requests / 46 keys and `Foo$` on 2,177 / 45 | Potentially broad term lookup gains where a matching companion/object resource exists. | High module/companion identity risk; keep separate from type loading. |
 
-Recommended order: A, then B, then re-run the profile before choosing C versus E. D remains a separate object/module design slice because a type-side class resource does not prove that a term request resolves to its companion. The TASTy error contract does not expose the unresolved parent wire/source shape; the raw profile marks it unavailable and does not invent a binary name.
+The #972 ranking is retained as historical context: A was completed in #973 and B in #974. D remains a separate object/module design slice because a type-side class resource does not prove that a term request resolves to its companion.
+
+### #974 TASTy parent-resolution result
+
+The frozen #972 cohort had 342 `UnresolvedSupertype` errors across 33 requested classes and 79 files. After #974, 212 remain across 26 classes and 51 files; total member errors fall from 347 to 217 while requests rise from 7,895 to 8,070 as resolution proceeds deeper. The eight root families that no longer fail are `dotty/tools/io/AbstractFile`, `scala/Function1`, `scala/collection/AbstractIterator`, `scala/collection/IterableOnce`, `scala/collection/Iterator`, `scala/collection/SpecificIterableFactory`, `scala/concurrent/duration/Duration`, and `scala/math/Ordering`. Newly exposed failures include `dotty/tools/io/VirtualDirectory` and additional requests for `scala/annotation/retainsCap`; these are counted as remaining failures, not fixes. The 5 separate unresolved-class errors are also retained in the result.
+
+The `tasty_unresolved_supertype_failures` rows below now include the parent index, structured shape, semantic-reference and explicit-prefix flags, visible name-table spellings, and compact raw-tree tag shape. A representative fixed row is `scala/Function1`: its `IDENTTPT` parent wraps a shared type reference whose target resolves through `scala.AnyRef`, still normalized to `java/lang/Object`. The real Scala 3.9 `Source.tasty` integration fixture covers an applied parent through the package-object alias path. Unresolved semantic references continue to fail without a same-package guess.
 
 ## Previous type projection snapshot
 
@@ -457,7 +459,7 @@ audit_v1_comparison:
   local_declarations=22713 (delta=-505)
   local_methods=3297 (delta=-481)
   typed_local_methods=0 (delta=+0)
-  ImportQualifierNotFound=2901 (delta=+855)
+  ImportQualifierNotFound=2908 (delta=+862)
   UnsupportedExpression_total=25 (delta=-547)
   LocalBlockDeclarationDeferred=21 (delta=-251)
   NoSuccessfulEnclosingMethodTyping=34 (delta=-449)
@@ -592,10 +594,10 @@ local_patdefs:
     failure::ApplicationCalleeNotMethod=1 files=1
     failure::ImportQualifierNotFound=86 files=49
     failure::LocalPatDefDeferred::multiple source patterns=23 files=13
-    failure::MemberLookup=1 files=1
+    failure::MemberLookup=2 files=2
     failure::MissingDeclaredType=2 files=1
     failure::OverloadedTypeApplicationDeferred=1 files=1
-    failure::SymbolResolution=3 files=3
+    failure::SymbolResolution=2 files=2
     failure::TermNameNotFound=3 files=3
     failure::TypeNameNotFound=26 files=7
     failure::UnsupportedTypeTree=7 files=5
@@ -622,10 +624,10 @@ local_patdefs:
     failure::LocalPatDefDeferred::multiple source patterns::var::binders=2::root=Ident::tpt=synthetic inferred TypeTree=11 files=6 [library/src/scala/collection/ArrayOps.scala, library/src/scala/collection/StringOps.scala, library/src/scala/collection/immutable/Map.scala, library/src/scala/collection/mutable/AnyRefMap.scala, library/src/scala/collection/mutable/Buffer.scala]
     failure::LocalPatDefDeferred::multiple source patterns::var::binders=3+::root=Ident::tpt=explicit PatDef-wide tpt=1 files=1 [library/src/scala/collection/immutable/Set.scala]
     failure::LocalPatDefDeferred::multiple source patterns::var::binders=3+::root=Ident::tpt=synthetic inferred TypeTree=2 files=2 [library/src/scala/collection/immutable/Map.scala, library/src/scala/util/hashing/MurmurHash3.scala]
-    failure::MemberLookup::val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/util/Spans.scala]
+    failure::MemberLookup::val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=2 files=2 [compiler/src/dotty/tools/dotc/util/Spans.scala, library/src/scala/collection/immutable/LazyList.scala]
     failure::MissingDeclaredType::val::binders=2::root=Apply / extractor-looking::tpt=synthetic inferred TypeTree=2 files=1 [compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala]
     failure::OverloadedTypeApplicationDeferred::val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/util/Store.scala]
-    failure::SymbolResolution::val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=2 files=2 [library/src/scala/collection/immutable/LazyList.scala, library/src/scala/collection/mutable/ListMap.scala]
+    failure::SymbolResolution::val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=1 files=1 [library/src/scala/collection/mutable/ListMap.scala]
     failure::SymbolResolution::val::binders=3+::root=Tuple::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/core/TyperState.scala]
     failure::TermNameNotFound::val::binders=1::root=Tuple::tpt=synthetic inferred TypeTree=1 files=1 [compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala]
     failure::TermNameNotFound::val::binders=2::root=Tuple::tpt=synthetic inferred TypeTree=2 files=2 [library/src/scala/collection/immutable/TreeMap.scala, library/src/scala/collection/immutable/TreeSet.scala]
@@ -716,8 +718,8 @@ expression_sprint_first_blockers:
   UnsupportedExpression::PrefixOp=0 files=0
   UnsupportedExpression::Annotated=0 files=0
   MemberNotFound=1 files=1
-  MemberLookup=61 files=28
-  TypeNameNotFound=80 files=30
+  MemberLookup=62 files=28
+  TypeNameNotFound=83 files=31
   SourceAnnotationClassDeferred=0 files=0
   SourceAnnotationNotAnnotationClass=0 files=0
   SourceAnnotationArgumentNotConstant=0 files=0
@@ -733,21 +735,21 @@ unsupported_type_tree_failures:
   UnsupportedTypeTree::Tuple: count=2, files=1 [compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala]
 local_block_declaration_deferred=21
 no_successful_enclosing_method_typing=34
-import_qualifier_not_found=2901
-external_name_or_member_resolution_failures=206
+import_qualifier_not_found=2908
+external_name_or_member_resolution_failures=193
 failure_families:
-  resolution/classpath environment=3108
+  resolution/classpath environment=3102
   other=128
   local declaration deferral=30
   unsupported expression syntax/semantics=25
-  type relation/inference/completion=6
+  type relation/inference/completion=12
 local_defdef_failures:
-  ImportQualifierNotFound [resolution/classpath environment]: 2901 (277 files) [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
-  TypeNameNotFound [resolution/classpath environment]: 80 (30 files) [compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/dotc/core/tasty/CommentPickler.scala, compiler/src/dotty/tools/dotc/core/tasty/TreeBuffer.scala, compiler/src/dotty/tools/dotc/coverage/Serializer.scala, compiler/src/dotty/tools/dotc/util/Chars.scala]
-  MemberLookup [resolution/classpath environment]: 61 (28 files) [compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/SymDenotations.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/core/classfile/ClassfileParser.scala]
-  SymbolResolution [resolution/classpath environment]: 44 (15 files) [compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/dotc/core/Decorators.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala]
+  ImportQualifierNotFound [resolution/classpath environment]: 2908 (277 files) [compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala]
+  TypeNameNotFound [resolution/classpath environment]: 83 (31 files) [compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/core/tasty/CommentPickler.scala, compiler/src/dotty/tools/dotc/core/tasty/TreeBuffer.scala, compiler/src/dotty/tools/dotc/coverage/Serializer.scala]
+  MemberLookup [resolution/classpath environment]: 62 (28 files) [compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/SymDenotations.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/core/classfile/ClassfileParser.scala]
   NoSuccessfulEnclosingMethodTyping [other]: 34 (15 files) [compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/classpath/DirectoryClassPath.scala, compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala]
   AnonymousClassInstantiationDeferred [other]: 32 (15 files) [compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/cc/Setup.scala, compiler/src/dotty/tools/dotc/core/Definitions.scala]
+  SymbolResolution [resolution/classpath environment]: 27 (7 files) [compiler/src/dotty/tools/dotc/core/Decorators.scala, compiler/src/dotty/tools/dotc/parsing/Parsers.scala, library/src/scala/collection/StringParsers.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala, library/src/scala/collection/mutable/ListBuffer.scala]
   TermNameNotFound [resolution/classpath environment]: 20 (12 files) [compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/backend/jvm/opt/MethodMax.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala, compiler/src/dotty/tools/dotc/util/ClasspathFromClassloader.scala, compiler/src/dotty/tools/dotc/util/WeakHashSet.scala]
   LocalBlockDeclarationDeferred::type definition [local declaration deferral]: 11 (4 files) [compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/typer/Checking.scala, compiler/src/dotty/tools/dotc/typer/Typer.scala]
   SymbolSourceKindMismatch [other]: 11 (3 files) [compiler/src/dotty/tools/dotc/parsing/Tokens.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala, library/src/scala/collection/immutable/Vector.scala]
@@ -755,6 +757,7 @@ local_defdef_failures:
   MissingDeclaredType [other]: 10 (3 files) [compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala]
   LocalBlockDeclarationDeferred::module definition [local declaration deferral]: 9 (2 files) [compiler/src/dotty/tools/dotc/ast/DesugarEnums.scala, compiler/src/dotty/tools/dotc/typer/Implicits.scala]
   TypedPatternRuntimeTestDeferred [other]: 9 (2 files) [compiler/src/dotty/tools/dotc/core/Types.scala, library/src/scala/collection/immutable/HashMap.scala]
+  UnstableSelectionPrefix [type relation/inference/completion]: 9 (4 files) [compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/core/Contexts.scala, compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala, compiler/src/dotty/tools/dotc/core/Types.scala]
   UnsupportedFunctionLiteralParameter [other]: 9 (1 files) [compiler/src/dotty/tools/dotc/typer/Synthesizer.scala]
   StringLiteralTypingDeferred [other]: 8 (5 files) [compiler/src/dotty/tools/dotc/core/NameOps.scala, compiler/src/dotty/tools/dotc/core/TypeErrors.scala, compiler/src/dotty/tools/dotc/core/tasty/TastyPrinter.scala, compiler/src/dotty/tools/dotc/reporting/messages.scala, library/src/scala/util/Random.scala]
   UnsupportedExpression::ForDo [unsupported expression syntax/semantics]: 5 (2 files) [compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/transform/LambdaLift.scala]
@@ -762,7 +765,6 @@ local_defdef_failures:
   UnsupportedTypeTree::Annotated [other]: 5 (3 files) [library/src/scala/collection/Iterator.scala, library/src/scala/collection/immutable/ArraySeq.scala, library/src/scala/collection/immutable/LazyListIterable.scala]
   LocalValueModifierDeferred::anonymous given has no local term identity [local declaration deferral]: 4 (2 files) [compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/opt/ClosureOptimizer.scala]
   MatchSelectorTypeCannotBeAdapted [other]: 4 (2 files) [compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/config/Settings.scala]
-  UnstableSelectionPrefix [type relation/inference/completion]: 4 (3 files) [compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/core/Contexts.scala, compiler/src/dotty/tools/dotc/core/Types.scala]
   LocalExtensionGroupShapeDeferred [local declaration deferral]: 3 (1 files) [compiler/src/dotty/tools/dotc/typer/Applications.scala]
   LocalPatDefDeferred::multiple source patterns [local declaration deferral]: 2 (1 files) [compiler/src/dotty/tools/dotc/transform/FirstTransform.scala]
   RightAssociativeInfixDeferred [other]: 2 (2 files) [compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/typer/ImportInfo.scala]
@@ -771,6 +773,7 @@ local_defdef_failures:
   UnsupportedTypeTree::Tuple [other]: 2 (1 files) [compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala]
   ApplicationCalleeNotMethod [type relation/inference/completion]: 1 (1 files) [compiler/src/dotty/tools/dotc/core/TypeErasure.scala]
   ExtractorQualifierNotValueLike [other]: 1 (1 files) [compiler/src/scala/quoted/runtime/impl/QuoteMatcher.scala]
+  IfConditionConformanceUnsupported [type relation/inference/completion]: 1 (1 files) [compiler/src/dotty/tools/io/FileWriters.scala]
   LocalBlockDeclarationDeferred::val/var definition [local declaration deferral]: 1 (1 files) [compiler/src/dotty/tools/dotc/core/NameOps.scala]
   LocalExtensionReceiverTypeNotFound [resolution/classpath environment]: 1 (1 files) [compiler/src/dotty/tools/dotc/core/Flags.scala]
   LocalExtensionSignatureDeferred::dependent result types [type relation/inference/completion]: 1 (1 files) [compiler/src/dotty/tools/dotc/reporting/MessageRendering.scala]
@@ -779,22 +782,23 @@ local_defdef_failures:
 source_function_method_outcomes:
   expression::Function::ImportQualifierNotFound: count=4, files=1, examples=[compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:737:refersTo, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:752:removeSingleton, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:754:mapArg, compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:758:elim]
   expression::Function::UnsupportedFunctionLiteralParameter: count=9, files=1, examples=[compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:710:factoryManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:718:singletonManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:721:synthArrayManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:727:synthWildcardManifest, compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:731:synthArgManifests]
-  type::Function::ImportQualifierNotFound: count=1, files=1, examples=[compiler/src/dotty/tools/dotc/typer/ProtoTypes.scala:409:isPoly]
-  type::Function::SymbolResolution: count=11, files=7, examples=[compiler/src/dotty/tools/backend/jvm/BTypes.scala:671:ifInit, compiler/src/dotty/tools/backend/jvm/BTypes.scala:673:isJLO, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2387:genArgs, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgsAsClassCaptures, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3386:genScalaArgs]
-  method=compiler/src/dotty/tools/backend/jvm/BTypes.scala:671:ifInit baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/backend/jvm/BTypes.scala:673:isJLO baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2387:genArgs baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgsAsClassCaptures baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3386:genScalaArgs baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3387:genJSArgs baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/dotc/core/Denotations.scala:310:argStr baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/dotc/core/Types.scala:3448:normalize baseline_form=type::Function first_blocker=SymbolResolution
+  type::Function::ImportQualifierNotFound: count=8, files=5, examples=[compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2387:genArgs, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgsAsClassCaptures, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3386:genScalaArgs, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3387:genJSArgs, compiler/src/dotty/tools/dotc/core/Denotations.scala:310:argStr]
+  type::Function::MemberLookup: count=1, files=1, examples=[compiler/src/dotty/tools/dotc/core/Types.scala:3448:normalize]
+  type::Function::TypeNameNotFound: count=3, files=2, examples=[compiler/src/dotty/tools/backend/jvm/BTypes.scala:671:ifInit, compiler/src/dotty/tools/backend/jvm/BTypes.scala:673:isJLO, library/src/scala/util/control/Exception.scala:416:fun]
+  method=compiler/src/dotty/tools/backend/jvm/BTypes.scala:671:ifInit baseline_form=type::Function first_blocker=TypeNameNotFound
+  method=compiler/src/dotty/tools/backend/jvm/BTypes.scala:673:isJLO baseline_form=type::Function first_blocker=TypeNameNotFound
+  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2387:genArgs baseline_form=type::Function first_blocker=ImportQualifierNotFound
+  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:2388:genArgsAsClassCaptures baseline_form=type::Function first_blocker=ImportQualifierNotFound
+  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3386:genScalaArgs baseline_form=type::Function first_blocker=ImportQualifierNotFound
+  method=compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala:3387:genJSArgs baseline_form=type::Function first_blocker=ImportQualifierNotFound
+  method=compiler/src/dotty/tools/dotc/core/Denotations.scala:310:argStr baseline_form=type::Function first_blocker=ImportQualifierNotFound
+  method=compiler/src/dotty/tools/dotc/core/Types.scala:3448:normalize baseline_form=type::Function first_blocker=MemberLookup
   method=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:737:refersTo baseline_form=expression::Function first_blocker=ImportQualifierNotFound
   method=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:752:removeSingleton baseline_form=expression::Function first_blocker=ImportQualifierNotFound
   method=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:754:mapArg baseline_form=expression::Function first_blocker=ImportQualifierNotFound
   method=compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala:758:elim baseline_form=expression::Function first_blocker=ImportQualifierNotFound
-  method=compiler/src/dotty/tools/dotc/parsing/Parsers.scala:3395:maybeAscription baseline_form=type::Function first_blocker=SymbolResolution
-  method=compiler/src/dotty/tools/dotc/transform/PostTyper.scala:366:unusable baseline_form=type::Function first_blocker=SymbolResolution
+  method=compiler/src/dotty/tools/dotc/parsing/Parsers.scala:3395:maybeAscription baseline_form=type::Function first_blocker=ImportQualifierNotFound
+  method=compiler/src/dotty/tools/dotc/transform/PostTyper.scala:366:unusable baseline_form=type::Function first_blocker=ImportQualifierNotFound
   method=compiler/src/dotty/tools/dotc/typer/ProtoTypes.scala:409:isPoly baseline_form=type::Function first_blocker=ImportQualifierNotFound
   method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:710:factoryManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
   method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:718:singletonManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
@@ -805,7 +809,7 @@ source_function_method_outcomes:
   method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:748:synthManifest baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
   method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:770:manifestOfType baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
   method=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala:774:synthesize baseline_form=expression::Function first_blocker=UnsupportedFunctionLiteralParameter
-  method=library/src/scala/util/control/Exception.scala:416:fun baseline_form=type::Function first_blocker=SymbolResolution
+  method=library/src/scala/util/control/Exception.scala:416:fun baseline_form=type::Function first_blocker=TypeNameNotFound
 function_with_mods_first_blocker_profile:
   observations:
 function_with_mods_structural_inventory:
@@ -823,19 +827,19 @@ function_with_mods_structural_inventory:
     contextual/pure=127 files=44
     ordinary/impure=929 files=96
 impure_function_baseline_before_after:
-  path=library/src/scala/collection/StringParsers.scala method=rec#tree=750 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/Function1: a supertype reference could not be resolved to a name\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
-  path=library/src/scala/collection/StringParsers.scala method=forAllBetween#tree=755 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=direct projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/Function1: a supertype reference could not be resolved to a name\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
-  path=library/src/scala/collection/StringParsers.scala method=rec#tree=799 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/Function1: a supertype reference could not be resolved to a name\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
-  path=library/src/scala/collection/StringParsers.scala method=skipIndexWhile#tree=804 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/Function1: a supertype reference could not be resolved to a name\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
-  path=library/src/scala/collection/StringParsers.scala method=isHexDigit#tree=840 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/Function1: a supertype reference could not be resolved to a name\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
-  path=library/src/scala/collection/StringParsers.scala method=prefixOK#tree=908 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/Function1: a supertype reference could not be resolved to a name\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
-  path=library/src/scala/collection/StringParsers.scala method=postfixOK#tree=957 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/Function1: a supertype reference could not be resolved to a name\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
-  path=library/src/scala/collection/StringParsers.scala method=isHexFloatLiteral#tree=991 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/Function1: a supertype reference could not be resolved to a name\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
-  path=library/src/scala/collection/StringParsers.scala method=isExp#tree=1007 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/Function1: a supertype reference could not be resolved to a name\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
-  path=library/src/scala/collection/StringParsers.scala method=expOK#tree=1058 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/Function1: a supertype reference could not be resolved to a name\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
-  path=library/src/scala/collection/StringParsers.scala method=isDecFloatLiteral#tree=1175 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/Function1: a supertype reference could not be resolved to a name\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
-  path=library/src/scala/collection/convert/JavaCollectionWrappers.scala method=remap#tree=1973 function_tree=1937 line=399 span=15034..15056 syntax="Option[V] => Option[V]" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 1937, error: Malformed { reason: \"invalid .tasty file for scala/Function1: a supertype reference could not be resolved to a name\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
-  path=library/src/scala/collection/convert/JavaCollectionWrappers.scala method=remap#tree=2559 function_tree=2523 line=510 span=19443..19465 syntax="Option[V] => Option[V]" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 2523, error: Malformed { reason: \"invalid .tasty file for scala/Function1: a supertype reference could not be resolved to a name\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
+  path=library/src/scala/collection/StringParsers.scala method=rec#tree=750 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/annotation/retainsCap: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\\\"Annotation\\\", \\\"scala/annotation\\\"], raw=LengthNode(tag=136)\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
+  path=library/src/scala/collection/StringParsers.scala method=forAllBetween#tree=755 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=direct projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/annotation/retainsCap: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\\\"Annotation\\\", \\\"scala/annotation\\\"], raw=LengthNode(tag=136)\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
+  path=library/src/scala/collection/StringParsers.scala method=rec#tree=799 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/annotation/retainsCap: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\\\"Annotation\\\", \\\"scala/annotation\\\"], raw=LengthNode(tag=136)\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
+  path=library/src/scala/collection/StringParsers.scala method=skipIndexWhile#tree=804 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/annotation/retainsCap: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\\\"Annotation\\\", \\\"scala/annotation\\\"], raw=LengthNode(tag=136)\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
+  path=library/src/scala/collection/StringParsers.scala method=isHexDigit#tree=840 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/annotation/retainsCap: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\\\"Annotation\\\", \\\"scala/annotation\\\"], raw=LengthNode(tag=136)\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
+  path=library/src/scala/collection/StringParsers.scala method=prefixOK#tree=908 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/annotation/retainsCap: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\\\"Annotation\\\", \\\"scala/annotation\\\"], raw=LengthNode(tag=136)\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
+  path=library/src/scala/collection/StringParsers.scala method=postfixOK#tree=957 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/annotation/retainsCap: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\\\"Annotation\\\", \\\"scala/annotation\\\"], raw=LengthNode(tag=136)\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
+  path=library/src/scala/collection/StringParsers.scala method=isHexFloatLiteral#tree=991 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/annotation/retainsCap: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\\\"Annotation\\\", \\\"scala/annotation\\\"], raw=LengthNode(tag=136)\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
+  path=library/src/scala/collection/StringParsers.scala method=isExp#tree=1007 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/annotation/retainsCap: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\\\"Annotation\\\", \\\"scala/annotation\\\"], raw=LengthNode(tag=136)\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
+  path=library/src/scala/collection/StringParsers.scala method=expOK#tree=1058 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/annotation/retainsCap: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\\\"Annotation\\\", \\\"scala/annotation\\\"], raw=LengthNode(tag=136)\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
+  path=library/src/scala/collection/StringParsers.scala method=isDecFloatLiteral#tree=1175 function_tree=724 line=185 span=5576..5591 syntax="Char => Boolean" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 724, error: Malformed { reason: \"invalid .tasty file for scala/annotation/retainsCap: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\\\"Annotation\\\", \\\"scala/annotation\\\"], raw=LengthNode(tag=136)\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
+  path=library/src/scala/collection/convert/JavaCollectionWrappers.scala method=remap#tree=1973 function_tree=1937 line=399 span=15034..15056 syntax="Option[V] => Option[V]" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 1937, error: Malformed { reason: \"invalid .tasty file for scala/annotation/retainsCap: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\\\"Annotation\\\", \\\"scala/annotation\\\"], raw=LengthNode(tag=136)\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
+  path=library/src/scala/collection/convert/JavaCollectionWrappers.scala method=remap#tree=2559 function_tree=2523 line=510 span=19443..19465 syntax="Option[V] => Option[V]" modifiers=[Impure] erased=[ordinary] arity=1 kind=ordinary/impure semantic_family=unselected expected_family=ImpureFunction1 attribution=sibling/inherited projection=not_completed projection_error=Some("type projection: SymbolResolution { source: SourceId(0), tree_index: 2523, error: Malformed { reason: \"invalid .tasty file for scala/annotation/retainsCap: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\\\"Annotation\\\", \\\"scala/annotation\\\"], raw=LengthNode(tag=136)\" } }") first_blocker=SymbolResolution method_typed=false classification=resolution/classpath blocker
 missing_declared_type_profile:
   first_blockers=10 distinct_declarations=3
   value::Field::owner=ModuleClass::synthetic inferred TypeTree::rhs=true::modifiers=::semantic_mutable=false: 6 (2 files) [compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala]
@@ -859,9 +863,9 @@ top_semantic_gaps:
   5. MissingDeclaredType: count=10, files=3, category=other, examples=compiler/src/dotty/tools/dotc/core/NamerOps.scala, compiler/src/dotty/tools/dotc/parsing/Scanners.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala
   6. LocalBlockDeclarationDeferred::module definition: count=9, files=2, category=local declaration support, examples=compiler/src/dotty/tools/dotc/ast/DesugarEnums.scala, compiler/src/dotty/tools/dotc/typer/Implicits.scala
   7. TypedPatternRuntimeTestDeferred: count=9, files=2, category=pattern typing, examples=compiler/src/dotty/tools/dotc/core/Types.scala, library/src/scala/collection/immutable/HashMap.scala
-  8. UnsupportedFunctionLiteralParameter: count=9, files=1, category=other, examples=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala
-  9. StringLiteralTypingDeferred: count=8, files=5, category=other, examples=compiler/src/dotty/tools/dotc/core/NameOps.scala, compiler/src/dotty/tools/dotc/core/TypeErrors.scala, compiler/src/dotty/tools/dotc/core/tasty/TastyPrinter.scala, compiler/src/dotty/tools/dotc/reporting/messages.scala, library/src/scala/util/Random.scala
-  10. UnsupportedExpression::ForDo: count=5, files=2, category=expression typing, examples=compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala, compiler/src/dotty/tools/dotc/transform/LambdaLift.scala
+  8. UnstableSelectionPrefix: count=9, files=4, category=other, examples=compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/core/Contexts.scala, compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala, compiler/src/dotty/tools/dotc/core/Types.scala
+  9. UnsupportedFunctionLiteralParameter: count=9, files=1, category=other, examples=compiler/src/dotty/tools/dotc/typer/Synthesizer.scala
+  10. StringLiteralTypingDeferred: count=8, files=5, category=other, examples=compiler/src/dotty/tools/dotc/core/NameOps.scala, compiler/src/dotty/tools/dotc/core/TypeErrors.scala, compiler/src/dotty/tools/dotc/core/tasty/TastyPrinter.scala, compiler/src/dotty/tools/dotc/reporting/messages.scala, library/src/scala/util/Random.scala
 top_gap_implementation_scope_notes:
   AnonymousClassInstantiationDeferred (32 occurrences, 15 files): first_slice=support one anonymous new with one concrete parent and explicit member ownership; owner=dotty-typer/src/typer/expression/new.rs; prerequisites=ordinary New typing, parent projection, and stable anonymous class identity; non_goals=closure capture, refinement synthesis, and general anonymous-class members
   LocalBlockDeclarationDeferred::type definition (11 occurrences, 4 files): first_slice=enter one local declaration kind transactionally in block typing; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=source symbol and scope metadata from dotty-core; non_goals=local classes, imports, or type definitions beyond the selected kind
@@ -870,16 +874,16 @@ top_gap_implementation_scope_notes:
   MissingDeclaredType (10 occurrences, 3 files): first_slice=infer one ordinary or inline inferred module-class field after source class val/var inference; the remaining bucket is 10 occurrences across 3 files; owner=dotty-typer/src/typer/completion/mod.rs, completion/declarations.rs, type_projection.rs, and existing expression typing; prerequisites=module initialization context, RHS typing and widening, cycle behavior, and completion rollback; non_goals=class fields, method results, local PatDef, and generalized expected-type inference
   LocalBlockDeclarationDeferred::module definition (9 occurrences, 2 files): first_slice=enter one local declaration kind transactionally in block typing; owner=dotty-typer/src/typer/expression/blocks.rs; prerequisites=source symbol and scope metadata from dotty-core; non_goals=local classes, imports, or type definitions beyond the selected kind
   TypedPatternRuntimeTestDeferred (9 occurrences, 2 files): first_slice=type one pattern form against an already known expected type; owner=dotty-typer/src/typer/patterns; prerequisites=the expected type and existing pattern AST shape; non_goals=exhaustivity analysis and match-result inference
+  UnstableSelectionPrefix (9 occurrences, 4 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
   UnsupportedFunctionLiteralParameter (9 occurrences, 1 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
   StringLiteralTypingDeferred (8 occurrences, 5 files): first_slice=reproduce the exact error bucket with a focused semantic fixture; owner=the narrow module producing that TyperError; prerequisites=the relevant source semantic metadata; non_goals=adjacent unsupported language features
-  UnsupportedExpression::ForDo (5 occurrences, 2 files): first_slice=lower one reported expression node through existing expression typing; owner=dotty-typer/src/typer/expression; prerequisites=the parsed AST node and its child typing rules; non_goals=control-flow or inference redesign
 highest_ranked_semantic_gap: AnonymousClassInstantiationDeferred (32 occurrences in 15 files); count ranks the audit only and does not select a sprint increment; keep classpath materialization as a separate gate because the pinned audit resolved no external members
 match_readiness:
-  first_blocker_methods=284
-  structural_matches_in_first_blocker_methods=315
-  cases_in_first_blocker_methods=875
-  guarded_cases=72
-  unguarded_cases=803
+  first_blocker_methods=286
+  structural_matches_in_first_blocker_methods=317
+  cases_in_first_blocker_methods=880
+  guarded_cases=73
+  unguarded_cases=807
   first_blocker_errors:
     ExtractorPatternConstraintDeferred=1 files=[library/src/scala/quoted/Quotes.scala]
     ExtractorQualifierMemberNotFound=26 files=[library/src/scala/collection/immutable/IntMap.scala, library/src/scala/collection/immutable/LongMap.scala]
@@ -891,15 +895,15 @@ match_readiness:
     stable identifier: PatternTypeRelationDeferred=9 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala, library/src/scala/collection/immutable/List.scala]
     stable selection: PatternTypeRelationDeferred=10 files=[library/src/scala/collection/immutable/IntMap.scala, library/src/scala/collection/immutable/LongMap.scala]
     typed pattern: TypedPatternRelationDeferred=31 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, library/src/scala/collection/immutable/ArraySeq.scala, library/src/scala/collection/immutable/Range.scala]
-    typed pattern: TypedPatternRuntimeTestDeferred=167 files=[compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/core/Annotations.scala]
+    typed pattern: TypedPatternRuntimeTestDeferred=169 files=[compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/core/Annotations.scala]
     unknown: PatternTypeRelationDeferred=1 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala]
   pattern_root_shapes:
     alternative=11 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/transform/init/Semantic.scala]
     extractor-looking Apply/TypeApply=119 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/ast/tpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala]
     literal=18 files=[library/src/scala/collection/immutable/Map.scala, library/src/scala/collection/immutable/Set.scala]
     other=51 files=[compiler/src/dotty/tools/dotc/config/Settings.scala, compiler/src/dotty/tools/dotc/core/Types.scala, library/src/scala/collection/immutable/HashMap.scala, library/src/scala/collection/immutable/IntMap.scala, library/src/scala/collection/immutable/List.scala]
-    typed pattern=378 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CaptureSet.scala]
-    wildcard/identifier/bind=298 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/ast/tpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala]
+    typed pattern=380 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CaptureSet.scala]
+    wildcard/identifier/bind=301 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/ast/tpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala]
 match_corpus_profile:
   matches=7444
   cases=21835
@@ -948,12 +952,12 @@ match_corpus_profile:
     ExtractorQualifierNotFound=42 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala, compiler/src/dotty/tools/dotc/util/DiffUtil.scala, compiler/src/dotty/tools/scripting/Main.scala]
     ExtractorQualifierNotValueLike=18 files=[compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/SepCheck.scala, compiler/src/dotty/tools/dotc/quoted/PickledQuotes.scala, compiler/src/dotty/tools/dotc/typer/Namer.scala]
     ExtractorUnapplyNotFound=52 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/Settings.scala, compiler/src/dotty/tools/dotc/core/Types.scala]
-    ImportQualifierNotFound=14516 files=[compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala]
+    ImportQualifierNotFound=14528 files=[compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeSyncAndTry.scala]
     InfixPatternDeferred=7 files=[compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/printing/PlainPrinter.scala, compiler/src/dotty/tools/dotc/typer/Applications.scala, compiler/src/dotty/tools/dotc/typer/Deriving.scala]
     MatchCaseResultTypeCannotBeWidened=1 files=[compiler/src/dotty/tools/dotc/core/Types.scala]
     MatchSelectorTypeCannotBeAdapted=65 files=[compiler/src/dotty/tools/dotc/ast/tpd.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/config/Settings.scala, compiler/src/dotty/tools/dotc/core/Contexts.scala]
     MemberLookup=257 files=[compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala, compiler/src/dotty/tools/backend/sjs/JSExportsGen.scala, compiler/src/dotty/tools/debug/ResolveReflectEval.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala]
-    MemberNotFound=51 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/cc/Mutability.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/transform/init/Objects.scala, compiler/src/dotty/tools/dotc/transform/init/Semantic.scala]
+    MemberNotFound=52 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/cc/Mutability.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala, compiler/src/dotty/tools/dotc/transform/init/Objects.scala, compiler/src/dotty/tools/dotc/transform/init/Semantic.scala]
     MissingDeclaredType=11 files=[compiler/src/dotty/tools/backend/jvm/opt/BCodeRepository.scala, compiler/src/dotty/tools/dotc/reporting/trace.scala, compiler/src/dotty/tools/dotc/typer/Implicits.scala, library/src/scala/collection/convert/JavaCollectionWrappers.scala]
     NullLiteralTypingDeferred=7 files=[compiler/src/dotty/tools/dotc/core/Types.scala, library/src/scala/collection/immutable/RedBlackTree.scala, library/src/scala/collection/mutable/CollisionProofHashMap.scala, library/src/scala/collection/mutable/RedBlackTree.scala, library/src/scala/runtime/ScalaRunTime.scala]
     ObjectTermReferenceDeferred=7 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/dotc/ast/Desugar.scala, compiler/src/dotty/tools/dotc/core/Types.scala, compiler/src/dotty/tools/dotc/semanticdb/PPrint.scala]
@@ -962,9 +966,9 @@ match_corpus_profile:
     PatternTypeRelationDeferred=111 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala, compiler/src/dotty/tools/dotc/core/Types.scala]
     RightAssociativeInfixDeferred=3 files=[compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/transform/Mixin.scala, compiler/src/dotty/tools/dotc/transform/PatternMatcher.scala]
     StringLiteralTypingDeferred=13 files=[compiler/src/dotty/tools/dotc/config/PathResolver.scala, compiler/src/dotty/tools/dotc/core/Denotations.scala, compiler/src/dotty/tools/dotc/core/Flags.scala, compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala, compiler/src/dotty/tools/scripting/Main.scala]
-    SymbolResolution=616 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala, compiler/src/dotty/tools/backend/jvm/analysis/AliasingAnalyzer.scala]
-    TermNameNotFound=313 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/MethodMax.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala]
-    TypeNameNotFound=770 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/dotc/ast/untpd.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala]
+    SymbolResolution=597 files=[compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/backend/jvm/BCodeUtils.scala, compiler/src/dotty/tools/backend/jvm/analysis/AliasingAnalyzer.scala]
+    TermNameNotFound=315 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/MethodMax.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala]
+    TypeNameNotFound=774 files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/jvm/BCodeIdiomatic.scala, compiler/src/dotty/tools/dotc/ast/untpd.scala, compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala, compiler/src/dotty/tools/dotc/config/ScalaVersion.scala]
     TypedPatternRelationDeferred=44 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala, compiler/src/dotty/tools/backend/jvm/opt/CopyProp.scala, compiler/src/dotty/tools/dotc/transform/patmat/Space.scala, library/src/scala/collection/immutable/ArraySeq.scala, library/src/scala/collection/immutable/Range.scala]
     TypedPatternRuntimeTestDeferred=484 files=[compiler/src/dotty/tools/backend/jvm/opt/BoxUnbox.scala, compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/cc/Capability.scala, compiler/src/dotty/tools/dotc/cc/CaptureSet.scala, compiler/src/dotty/tools/dotc/core/Annotations.scala]
     UnstableSelectionPrefix=2 files=[compiler/src/dotty/tools/backend/jvm/BTypes.scala]
@@ -975,12 +979,12 @@ match_corpus_profile:
     UnsupportedTypeTree::Annotated=150 files=[compiler/src/dotty/tools/dotc/ast/Trees.scala, compiler/src/dotty/tools/dotc/core/Symbols.scala, compiler/src/dotty/tools/dotc/transform/Erasure.scala, library/src/scala/collection/ArrayOps.scala, library/src/scala/collection/Iterable.scala]
     UnsupportedTypeTree::Tuple=62 files=[compiler/src/dotty/tools/backend/sjs/JSEncoding.scala, library/src/scala/collection/immutable/IntMap.scala, library/src/scala/collection/immutable/LongMap.scala, library/src/scala/collection/immutable/VectorMap.scala, library/src/scala/quoted/Quotes.scala]
   typed_case_first_failure_top_10:
-    ImportQualifierNotFound=14516
-    TypeNameNotFound=770
-    SymbolResolution=616
+    ImportQualifierNotFound=14528
+    TypeNameNotFound=774
+    SymbolResolution=597
     TypedPatternRuntimeTestDeferred=484
     UnsupportedExpression=370
-    TermNameNotFound=313
+    TermNameNotFound=315
     MemberLookup=257
     UnsupportedTypeTree::Annotated=150
     PatternTypeRelationDeferred=111
@@ -1035,119 +1039,120 @@ match_corpus_profile:
   infix_pattern_forms=781
   extractor_representative_files=[compiler/src/dotty/tools/MainGenericCompiler.scala, compiler/src/dotty/tools/backend/ScalaPrimitives.scala, compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala, compiler/src/dotty/tools/backend/jvm/BCodeHelpers.scala, compiler/src/dotty/tools/backend/jvm/BCodeSkelBuilder.scala]
 resolver_metrics:
-  resolver_package_requests=23569
-  external_package_requests=14370
-  external_package_successes=3692
-  external_package_unresolved=10678
+  resolver_package_requests=23873
+  external_package_requests=14547
+  external_package_successes=3810
+  external_package_unresolved=10737
   external_package_errors=0
-  source_package_reuse=9199
-  resolver_member_requests=7895
-  external_member_requests=7895
-  external_member_successes=123
-  external_member_first_seen_in_file_session=57
-  external_member_same_file_session_reuse=66
-  external_class_symbol_successes=123
+  source_package_reuse=9326
+  resolver_member_requests=8070
+  external_member_requests=8070
+  external_member_successes=358
+  external_member_first_seen_in_file_session=125
+  external_member_same_file_session_reuse=233
+  external_class_symbol_successes=358
   external_non_class_member_successes=0
   source_member_reuse=0
-  external_member_unresolved=7424
-  external_member_errors=347
-  package_term_requests_with_type_class_resource=2197
+  external_member_unresolved=7493
+  external_member_errors=217
+  package_term_requests_with_type_class_resource=2212
   package_term_distinct_targets_with_type_class_resource=51
   package_term_requests_without_type_class_resource=535
-  package_type_requests_with_class_resource=470
-  package_type_distinct_targets_with_class_resource=56
+  package_type_requests_with_class_resource=575
+  package_type_distinct_targets_with_class_resource=57
   package_classpath_probe_errors=9
-  package_term_companion_object_resource_requests=2181
+  package_term_companion_object_resource_requests=2196
   package_term_distinct_targets_with_companion_object_resource=46
   package_object_or_dollar_looking_distinct_targets=0
   distinct_packages=30
-  distinct_classes=21
+  distinct_classes=29
   distinct_members=0
   classloader_success_gate=BLOCKED: external members not materialized
 resolver_581_comparison:
-  external_package_successes=3692 (baseline=1965, delta=+1727)
-  external_package_unresolved=10678 (baseline=5816, delta=+4862)
+  external_package_successes=3810 (baseline=1965, delta=+1845)
+  external_package_unresolved=10737 (baseline=5816, delta=+4921)
   external_package_errors=0 (baseline=0, delta=+0)
-  external_class_materializations=21 (baseline=0, delta=+21)
+  external_class_materializations=29 (baseline=0, delta=+29)
   external_non_class_member_successes=0 (baseline=0, delta=+0)
-  external_member_unresolved=7424 (baseline=3884, delta=+3540)
-  external_member_errors=347 (baseline=91, delta=+256)
+  external_member_unresolved=7493 (baseline=3884, delta=+3609)
+  external_member_errors=217 (baseline=91, delta=+126)
   distinct_packages=30 (baseline=23, delta=+7)
   member_error_kinds:
-    InvalidTastyFile::UnresolvedSupertype=342
+    InvalidTastyFile::UnresolvedSupertype=212
     unresolved class=5
   member_error_distinct_targets:
-    InvalidTastyFile::UnresolvedSupertype=33::files=79
+    InvalidTastyFile::UnresolvedSupertype=26::files=51
     unresolved class=2::files=2
   most_requested_unresolved_member_names:
-    tpd=761
+    tpd=766
     scala=642
-    Contexts=549
+    Contexts=560
     Int=403
     core=274
     CollectionConverters=272
     ast=226
     Array=218
-    Type=151
-    Boolean=108
-    Symbol=106
-    Trees=98
+    Type=152
+    Boolean=110
+    Symbol=107
+    Trees=99
     Tree=94
-    Predef=91
+    Predef=92
+    String=90
     ImpureFunction1=89
-    String=88
     dotty=87
-    Context=76
+    Context=84
     reflect=74
     Types=70
   member_request_shapes:
-    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver=1867
-    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver=1891
+    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver=1869
+    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver=1905
     space=Prefix::prefix=class TypeRef::target=Class::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver=42
-    space=Prefix::prefix=package TypeRef::target=Package::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver=2735
-    space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver=839
+    space=Prefix::prefix=package TypeRef::target=Package::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver=2750
+    space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver=978
     space=Prefix::prefix=trait TypeRef::target=Trait::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver=23
     space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver=250
-    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver=248
+    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver=253
   member_request_unknown_prefix_identity:
     space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver=250
-    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver=248
+    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver=253
   member_request_outcomes:
-    class member scope unavailable: incomplete class info=3763
-    error=347
-    external class success=123
-    other resolver Ok(None)=60
-    other success=1
-    package term member unsupported=2735
-    package type member unresolved=368
-    unsupported prefix shape=498
+    class member scope unavailable: incomplete class info=3771
+    error=217
+    external class success=358
+    other resolver Ok(None)=68
+    other success=2
+    package term member unsupported=2749
+    package type member unresolved=402
+    unsupported prefix shape=503
   member_request_outcome_distinct_targets:
     space=Prefix::prefix=ThisType::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=class member scope unavailable: incomplete class info=276::files=78
     space=Prefix::prefix=ThisType::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=other resolver Ok(None)=13::files=5
-    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=class member scope unavailable: incomplete class info=366::files=60
-    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=other resolver Ok(None)=19::files=5
+    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=class member scope unavailable: incomplete class info=367::files=60
+    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=other resolver Ok(None)=20::files=5
     space=Prefix::prefix=class TypeRef::target=Class::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=class member scope unavailable: incomplete class info=20::files=15
+    space=Prefix::prefix=package TypeRef::target=Package::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=other success=1::files=1
     space=Prefix::prefix=package TypeRef::target=Package::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=package term member unsupported=80::files=115
-    space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=error=35::files=80
-    space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=external class success=21::files=39
+    space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=error=28::files=52
+    space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=external class success=29::files=75
     space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=other success=1::files=1
-    space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=package type member unresolved=37::files=43
+    space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=package type member unresolved=41::files=43
     space=Prefix::prefix=trait TypeRef::target=Trait::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver::outcome=class member scope unavailable: incomplete class info=18::files=5
   unresolved_member_kinds:
-    class member scope unavailable: incomplete class info=3763
-    other resolver Ok(None)=60
-    package term member unsupported=2735
-    package type member unresolved=368
-    unsupported prefix shape=498
+    class member scope unavailable: incomplete class info=3771
+    other resolver Ok(None)=68
+    package term member unsupported=2749
+    package type member unresolved=402
+    unsupported prefix shape=503
   member_request_key_summary:
-    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver: requests=1867, known_requests=1867, distinct_keys=285, unknown_identity_requests=0, owners=87, names=164, files=79, repeated_hit_factor=6.551, known_repeated_hit_factor=6.551, outcomes={"class member scope unavailable: incomplete class info": 1847, "other resolver Ok(None)": 20}
-    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=1891, known_requests=1891, distinct_keys=385, unknown_identity_requests=0, owners=70, names=132, files=64, repeated_hit_factor=4.912, known_repeated_hit_factor=4.912, outcomes={"class member scope unavailable: incomplete class info": 1851, "other resolver Ok(None)": 40}
+    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver: requests=1869, known_requests=1869, distinct_keys=285, unknown_identity_requests=0, owners=87, names=164, files=79, repeated_hit_factor=6.558, known_repeated_hit_factor=6.558, outcomes={"class member scope unavailable: incomplete class info": 1849, "other resolver Ok(None)": 20}
+    space=Prefix::prefix=ThisType::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=1905, known_requests=1905, distinct_keys=387, unknown_identity_requests=0, owners=70, names=132, files=64, repeated_hit_factor=4.922, known_repeated_hit_factor=4.922, outcomes={"class member scope unavailable: incomplete class info": 1857, "other resolver Ok(None)": 48}
     space=Prefix::prefix=class TypeRef::target=Class::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=42, known_requests=42, distinct_keys=20, unknown_identity_requests=0, owners=15, names=14, files=15, repeated_hit_factor=2.100, known_repeated_hit_factor=2.100, outcomes={"class member scope unavailable: incomplete class info": 42}
-    space=Prefix::prefix=package TypeRef::target=Package::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver: requests=2735, known_requests=2735, distinct_keys=80, unknown_identity_requests=0, owners=33, names=72, files=115, repeated_hit_factor=34.188, known_repeated_hit_factor=34.188, outcomes={"package term member unsupported": 2735}
-    space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=839, known_requests=839, distinct_keys=93, unknown_identity_requests=0, owners=21, names=83, files=101, repeated_hit_factor=9.022, known_repeated_hit_factor=9.022, outcomes={"error": 347, "external class success": 123, "other success": 1, "package type member unresolved": 368}
+    space=Prefix::prefix=package TypeRef::target=Package::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver: requests=2750, known_requests=2750, distinct_keys=80, unknown_identity_requests=0, owners=33, names=72, files=115, repeated_hit_factor=34.375, known_repeated_hit_factor=34.375, outcomes={"other success": 1, "package term member unsupported": 2749}
+    space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=978, known_requests=978, distinct_keys=98, unknown_identity_requests=0, owners=21, names=86, files=101, repeated_hit_factor=9.980, known_repeated_hit_factor=9.980, outcomes={"error": 217, "external class success": 358, "other success": 1, "package type member unresolved": 402}
     space=Prefix::prefix=trait TypeRef::target=Trait::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=23, known_requests=23, distinct_keys=18, unknown_identity_requests=0, owners=6, names=17, files=5, repeated_hit_factor=1.278, known_repeated_hit_factor=1.278, outcomes={"class member scope unavailable: incomplete class info": 23}
     space=Prefix::prefix=unsupported/other::target=unsupported::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver: requests=250, known_requests=0, distinct_keys=0, unknown_identity_requests=250, owners=0, names=68, files=14, repeated_hit_factor=unavailable (unknown identities included), known_repeated_hit_factor=unavailable, outcomes={"unsupported prefix shape": 250}
-    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=248, known_requests=0, distinct_keys=0, unknown_identity_requests=248, owners=0, names=46, files=12, repeated_hit_factor=unavailable (unknown identities included), known_repeated_hit_factor=unavailable, outcomes={"unsupported prefix shape": 248}
+    space=Prefix::prefix=unsupported/other::target=unsupported::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver: requests=253, known_requests=0, distinct_keys=0, unknown_identity_requests=253, owners=0, names=46, files=12, repeated_hit_factor=unavailable (unknown identities included), known_repeated_hit_factor=unavailable, outcomes={"unsupported prefix shape": 253}
   member_requests_by_enclosing_method:
     compiler/src/dotty/tools/MainGenericCompiler.scala#tree=243::dotty.tools.CompileSettings.withTargetScript: requests=1, distinct_request_outcomes=1
       prefix=scala.util::namespace=term::name=Try::space=Prefix::outcome=package term member unsupported=1
@@ -1685,7 +1690,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/backend/jvm/BTypeLoader.scala#tree=914::dotty.tools.backend.jvm.BTypeLoader.definedClasses: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Symbols::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/jvm/BTypes.scala#tree=1211::dotty.tools.backend.jvm.ClassBType.checkInfoConsistency: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/backend/jvm/BTypes.scala#tree=1377::dotty.tools.backend.jvm.ClassBType.inlineInfoAttribute: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.backend.jvm.opt::namespace=term::name=InlineInfoAttribute::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/jvm/BackendUtils.scala#tree=1002::dotty.tools.backend.jvm.BackendUtils.getBoxedUnit: requests=1, distinct_request_outcomes=1
@@ -2311,17 +2316,17 @@ resolver_581_comparison:
     compiler/src/dotty/tools/backend/jvm/opt/MethodMax.scala#tree=549::dotty.tools.backend.jvm.opt.MethodMax$.setMaxsComputed: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=tools::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10067::dotty.tools.backend.sjs.JSCodeGen.genArrayOp: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=898::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=902::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10131::dotty.tools.backend.sjs.JSCodeGen.genSynchronized: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=902::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=906::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10160::dotty.tools.backend.sjs.JSCodeGen.genCoercion: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=906::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=910::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2330,12 +2335,12 @@ resolver_581_comparison:
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10306::dotty.tools.backend.sjs.JSCodeGen.genNewArray: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10456::dotty.tools.backend.sjs.JSCodeGen.genNormalApply: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=912::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=916::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=10605::dotty.tools.backend.sjs.JSCodeGen.genApplyInline: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=DefDef::space=Prefix::unknown-request=916::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=DefDef::space=Prefix::unknown-request=920::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2345,7 +2350,7 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11017::dotty.tools.backend.sjs.JSCodeGen.genApplyJSMethodGeneric: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=920::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=924::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2355,56 +2360,60 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11061::dotty.tools.backend.sjs.JSCodeGen.extractFirstArg: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=924::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=928::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11070::dotty.tools.backend.sjs.JSCodeGen.genJSNativeMemberSelect: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=928::outcome=unsupported prefix shape=1
-      prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-      prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
-      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11080::dotty.tools.backend.sjs.JSCodeGen.genJSNativeMemberCall: requests=4, distinct_request_outcomes=4
       prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=932::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11136::dotty.tools.backend.sjs.JSCodeGen.genJSNativeMemberSelectOrCall: requests=4, distinct_request_outcomes=4
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11080::dotty.tools.backend.sjs.JSCodeGen.genJSNativeMemberCall: requests=4, distinct_request_outcomes=4
       prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=936::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11277::dotty.tools.backend.sjs.JSCodeGen.genJSSuperCall: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11136::dotty.tools.backend.sjs.JSCodeGen.genJSNativeMemberSelectOrCall: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=940::outcome=unsupported prefix shape=1
+      prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+      prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11277::dotty.tools.backend.sjs.JSCodeGen.genJSSuperCall: requests=5, distinct_request_outcomes=5
+      prefix=<unsupported-prefix>::namespace=type::name=Option::space=Prefix::unknown-request=945::outcome=unsupported prefix shape=1
+      prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+      prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11451::dotty.tools.backend.sjs.JSCodeGen.genTypeApply: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11483::dotty.tools.backend.sjs.JSCodeGen.genJavaSeqLiteral: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=JavaSeqLiteral::space=Prefix::unknown-request=942::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaSeqLiteral::space=Prefix::unknown-request=950::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=11809::dotty.tools.backend.sjs.JSCodeGen.genMatch: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=946::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=954::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12472::dotty.tools.backend.sjs.JSCodeGen.genClosure: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Closure::space=Prefix::unknown-request=950::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Closure::space=Prefix::unknown-request=958::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12556::dotty.tools.backend.sjs.JSCodeGen.genDynamicImportForwarder: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=954::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=962::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12609::dotty.tools.backend.sjs.JSCodeGen.box: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=958::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=966::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12683::dotty.tools.backend.sjs.JSCodeGen.unbox: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=962::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=970::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2413,143 +2422,143 @@ resolver_581_comparison:
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12761::dotty.tools.backend.sjs.JSCodeGen.genAsInstanceOf: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12784::dotty.tools.backend.sjs.JSCodeGen.genThrowClassCastException: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=968::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=976::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12884::dotty.tools.backend.sjs.JSCodeGen.genIsInstanceOf: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=972::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=980::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12919::dotty.tools.backend.sjs.JSCodeGen.genApplyMethodMaybeStatically: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=976::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=984::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=12965::dotty.tools.backend.sjs.JSCodeGen.genApplyMethod: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=980::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=988::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=13019::dotty.tools.backend.sjs.JSCodeGen.genApplyMethodStatically: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=984::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=992::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=13058::dotty.tools.backend.sjs.JSCodeGen.genApplyStatic: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=988::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=996::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=13080::dotty.tools.backend.sjs.JSCodeGen.genApplyJSClassMethod: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=992::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1000::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=13101::dotty.tools.backend.sjs.JSCodeGen.genModuleApplyMethod: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=13163::dotty.tools.backend.sjs.JSCodeGen.makePrimitiveBox: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=toIRType::space=Prefix::unknown-request=997::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=toIRType::space=Prefix::unknown-request=1005::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=13191::dotty.tools.backend.sjs.JSCodeGen.makePrimitiveUnbox: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=toIRType::space=Prefix::unknown-request=1001::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=toIRType::space=Prefix::unknown-request=1009::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=14320::dotty.tools.backend.sjs.JSCodeGen.genJSPrimitive: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=JSPrimitives::space=Prefix::unknown-request=1005::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=JSPrimitives::space=Prefix::unknown-request=1013::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=14678::dotty.tools.backend.sjs.JSCodeGen.genLinkTimeExpr: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=1009::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=1017::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=14911::dotty.tools.backend.sjs.JSCodeGen.genReflectiveCall: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=1013::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=1021::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15071::dotty.tools.backend.sjs.JSCodeGen.genActualArgs: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=1017::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=1025::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15193::dotty.tools.backend.sjs.JSCodeGen.genActualJSArgs: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=1021::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=1029::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15263::dotty.tools.backend.sjs.JSCodeGen.genJSRepeatedParam: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15296::dotty.tools.backend.sjs.JSCodeGen.MaybeAsInstanceOf$.unapply: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=1026::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=1034::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15520::dotty.tools.backend.sjs.JSCodeGen.WrapArray$.unapply: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=1030::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=1038::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15539::dotty.tools.backend.sjs.JSCodeGen.genJSArrayToVarArgs: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1034::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1042::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15606::dotty.tools.backend.sjs.JSCodeGen.genCaptureValuesFromFakeNewInstance: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15624::dotty.tools.backend.sjs.JSCodeGen.genVarRef: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=1039::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=1047::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15818::dotty.tools.backend.sjs.JSCodeGen.genAssignableField: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=1043::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=1051::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15874::dotty.tools.backend.sjs.JSCodeGen.genLoadStaticField: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1047::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1055::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15884::dotty.tools.backend.sjs.JSCodeGen.genPrivateFieldsSymbol: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1051::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1059::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15896::dotty.tools.backend.sjs.JSCodeGen.genLoadModule: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::unknown-request=1055::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::unknown-request=1063::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15957::dotty.tools.backend.sjs.JSCodeGen.genLoadModuleOrGlobalScope: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=require::space=Prefix::unknown-request=1059::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=require::space=Prefix::unknown-request=1067::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=15987::dotty.tools.backend.sjs.JSCodeGen.genLoadJSConstructor: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1063::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1071::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16020::dotty.tools.backend.sjs.JSCodeGen.ruleOutGlobalScope: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::unknown-request=1067::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::unknown-request=1075::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16038::dotty.tools.backend.sjs.JSCodeGen.reportErrorLoadGlobalScope: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=1071::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=1079::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16143::dotty.tools.backend.sjs.JSCodeGen.genJSSelectOrGlobalRef: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::unknown-request=1075::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::unknown-request=1083::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2559,42 +2568,42 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16255::dotty.tools.backend.sjs.JSCodeGen.genJSMethodApplyOrGlobalRefApply: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::unknown-request=1079::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=MaybeGlobalScope::space=Prefix::unknown-request=1087::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16267::dotty.tools.backend.sjs.JSCodeGen.computeJSNativeLoadSpecOfValDef: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=atPhaseBeforeTransforms::space=Prefix::unknown-request=1083::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=atPhaseBeforeTransforms::space=Prefix::unknown-request=1091::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16304::dotty.tools.backend.sjs.JSCodeGen.computeJSNativeLoadSpecOfClass: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1087::outcome=unsupported prefix shape=1
-      prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-      prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
-      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16592::dotty.tools.backend.sjs.JSCodeGen.computeJSNativeLoadSpecOfInPhase: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=1091::outcome=unsupported prefix shape=1
-      prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-      prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
-      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16603::dotty.tools.backend.sjs.JSCodeGen.isMethodStaticInIR: requests=4, distinct_request_outcomes=4
       prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1095::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16616::dotty.tools.backend.sjs.JSCodeGen.genClassConstant: requests=4, distinct_request_outcomes=4
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16592::dotty.tools.backend.sjs.JSCodeGen.computeJSNativeLoadSpecOfInPhase: requests=4, distinct_request_outcomes=4
       prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=1099::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16627::dotty.tools.backend.sjs.JSCodeGen.isStaticModule: requests=4, distinct_request_outcomes=4
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16603::dotty.tools.backend.sjs.JSCodeGen.isMethodStaticInIR: requests=4, distinct_request_outcomes=4
       prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1103::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16616::dotty.tools.backend.sjs.JSCodeGen.genClassConstant: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=1107::outcome=unsupported prefix shape=1
+      prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+      prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16627::dotty.tools.backend.sjs.JSCodeGen.isStaticModule: requests=4, distinct_request_outcomes=4
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1111::outcome=unsupported prefix shape=1
+      prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+      prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16654::dotty.tools.backend.sjs.JSCodeGen.isPrimitiveValueType: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1107::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1115::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2603,12 +2612,12 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16727::dotty.tools.backend.sjs.JSCodeGen.hasDefaultCtorArgsAndJSModule: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1114::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1122::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=16794::dotty.tools.backend.sjs.JSCodeGen.desugarIdent: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=java::space=Prefix::unknown-request=1118::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=java::space=Prefix::unknown-request=1126::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2839,25 +2848,29 @@ resolver_581_comparison:
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=7491::dotty.tools.backend.sjs.JSCodeGen.genNewJSClass: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=7491::dotty.tools.backend.sjs.JSCodeGen.genNewJSClass: requests=5, distinct_request_outcomes=5
+      prefix=<unsupported-prefix>::namespace=type::name=Option::space=Prefix::unknown-request=860::outcome=unsupported prefix shape=1
+      prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+      prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=8186::dotty.tools.backend.sjs.JSCodeGen.genNewAnonJSClass: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=860::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=864::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=8336::dotty.tools.backend.sjs.JSCodeGen.genPrimitiveOp: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=864::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=868::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=8381::dotty.tools.backend.sjs.JSCodeGen.genSimpleOp: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=868::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=872::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=8559::dotty.tools.backend.sjs.JSCodeGen.genSimpleUnaryOp: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=872::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=876::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2870,7 +2883,7 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc::namespace=type::name=CompilationUnit::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=9232::dotty.tools.backend.sjs.JSCodeGen.genSimpleBinaryOp: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=876::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=880::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2882,12 +2895,12 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=9507::dotty.tools.backend.sjs.JSCodeGen.genConversion: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=881::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=js::space=Prefix::unknown-request=885::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=9586::dotty.tools.backend.sjs.JSCodeGen.genUniversalEqualityOp: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=885::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=dotty::space=Prefix::unknown-request=889::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -2897,12 +2910,12 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=9855::dotty.tools.backend.sjs.JSCodeGen.genEqEqPrimitive: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=889::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=893::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/backend/sjs/JSCodeGen.scala#tree=9884::dotty.tools.backend.sjs.JSCodeGen.genStringConcat: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=893::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Apply::space=Prefix::unknown-request=897::outcome=unsupported prefix shape=1
       prefix=dotty.tools.backend.sjs.JSCodeGen$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -3332,7 +3345,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/ast/TreeMapWithTrackedStats.scala#tree=65::dotty.tools.dotc.ast.TreeMapWithTrackedStats.updateTracked: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.ast.TreeMapWithTrackedStats$::namespace=type::name=Tree::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/ast/TreeTypeMap.scala#tree=751::dotty.tools.dotc.ast.TreeTypeMap.transform: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/ast/Trees.scala#tree=1040::dotty.tools.dotc.ast.Trees$.WithEndMarker.endSpan: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.ast.Trees$.WithEndMarker$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/ast/Trees.scala#tree=1052::dotty.tools.dotc.ast.Trees$.WithEndMarker.withEndMarker: requests=1, distinct_request_outcomes=1
@@ -3344,9 +3357,9 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/ast/Trees.scala#tree=1081::dotty.tools.dotc.ast.Trees$.WithEndMarker.hasEndMarker: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.ast.Trees$.WithEndMarker$::namespace=term::name=self::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/ast/Trees.scala#tree=4135::dotty.tools.dotc.ast.Trees$.Thicket.withSpan: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/ast/Trees.scala#tree=453::dotty.tools.dotc.ast.Trees$.Tree.foreachInThicket: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/ast/tpd.scala#tree=4655::dotty.tools.dotc.ast.tpd$.TreeOps.isValue: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.ast.tpd$::namespace=type::name=Tree::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/ast/tpd.scala#tree=4664::dotty.tools.dotc.ast.tpd$.TreeOps.isValueOrPattern: requests=1, distinct_request_outcomes=1
@@ -3379,254 +3392,258 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/ast/untpd.scala#tree=842::dotty.tools.dotc.ast.untpd$.WildcardTypeBoundsTree$.unapply: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.ast.untpd$::namespace=type::name=Tree::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/Capability.scala#tree=1926::dotty.tools.dotc.cc.Capabilities$.Capability.hiddenSet: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=106::dotty.tools.dotc.cc.CaptureSet.isNotEmpty: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1369::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1377::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1274::dotty.tools.dotc.cc.CaptureSet.map: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1408::outcome=unsupported prefix shape=1
-      prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=TypeMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1291::dotty.tools.dotc.cc.CaptureSet.substParams: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1410::outcome=unsupported prefix shape=1
-      prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=TypeMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1299::dotty.tools.dotc.cc.CaptureSet.maybe: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1412::outcome=unsupported prefix shape=1
-      prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=TypeMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1310::dotty.tools.dotc.cc.CaptureSet.restrict: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1414::outcome=unsupported prefix shape=1
-      prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=TypeMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1331::dotty.tools.dotc.cc.CaptureSet.readOnly: requests=2, distinct_request_outcomes=2
       prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1416::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=TypeMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1291::dotty.tools.dotc.cc.CaptureSet.substParams: requests=2, distinct_request_outcomes=2
+      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1418::outcome=unsupported prefix shape=1
+      prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=TypeMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1299::dotty.tools.dotc.cc.CaptureSet.maybe: requests=2, distinct_request_outcomes=2
+      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1420::outcome=unsupported prefix shape=1
+      prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=TypeMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1310::dotty.tools.dotc.cc.CaptureSet.restrict: requests=2, distinct_request_outcomes=2
+      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1422::outcome=unsupported prefix shape=1
+      prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=TypeMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1331::dotty.tools.dotc.cc.CaptureSet.readOnly: requests=2, distinct_request_outcomes=2
+      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1424::outcome=unsupported prefix shape=1
+      prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=TypeMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=134::dotty.tools.dotc.cc.CaptureSet.asConst: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Const::space=Prefix::unknown-request=1370::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Const::space=Prefix::unknown-request=1378::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1380::dotty.tools.dotc.cc.CaptureSet.tryClassifyAs: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1418::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1426::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1441::dotty.tools.dotc.cc.CaptureSet.freeInResult: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1420::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1428::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=scala::namespace=type::name=ContextFunction1::space=Prefix::outcome=package type member unresolved=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=146::dotty.tools.dotc.cc.CaptureSet.asVar: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1371::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1379::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=term::name=assert::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1483::dotty.tools.dotc.cc.CaptureSet.isBadRoot: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1422::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1430::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Symbol::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1507::dotty.tools.dotc.cc.CaptureSet.disallowBadRoots: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1507::dotty.tools.dotc.cc.CaptureSet.disallowBadRoots: requests=3, distinct_request_outcomes=3
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1433::outcome=unsupported prefix shape=1
+      prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Capability::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1526::dotty.tools.dotc.cc.CaptureSet.checkAddedElems: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1425::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1435::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1548::dotty.tools.dotc.cc.CaptureSet.ensureWellformed: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1426::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1593::dotty.tools.dotc.cc.CaptureSet.processElems: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1436::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1593::dotty.tools.dotc.cc.CaptureSet.processElems: requests=2, distinct_request_outcomes=2
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1438::outcome=unsupported prefix shape=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=165::dotty.tools.dotc.cc.CaptureSet.toConst: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Const::space=Prefix::unknown-request=1373::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Const::space=Prefix::unknown-request=1381::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1738::dotty.tools.dotc.cc.CaptureSet$.universal: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::unknown-request=1428::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::unknown-request=1439::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=173::dotty.tools.dotc.cc.CaptureSet.isUniversal: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1374::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1382::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1745::dotty.tools.dotc.cc.CaptureSet$.shared: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=GlobalAny::space=Prefix::unknown-request=1429::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=GlobalAny::space=Prefix::unknown-request=1440::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1848::dotty.tools.dotc.cc.CaptureSet$.Const.addThisElem: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=addIfHiddenOrFail::space=Prefix::unknown-request=1430::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=addIfHiddenOrFail::space=Prefix::unknown-request=1441::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1857::dotty.tools.dotc.cc.CaptureSet$.Const.toReader: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=failWith::space=Prefix::unknown-request=1431::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=failWith::space=Prefix::unknown-request=1442::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=185::dotty.tools.dotc.cc.CaptureSet.containsTerminalCapability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1375::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1383::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1881::dotty.tools.dotc.cc.CaptureSet$.Const.withDescription: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::unknown-request=1432::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::unknown-request=1443::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1884::dotty.tools.dotc.cc.CaptureSet$.Const.owner: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=NoSymbol::space=Prefix::unknown-request=1433::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=NoSymbol::space=Prefix::unknown-request=1444::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1928::dotty.tools.dotc.cc.CaptureSet$.Const.description: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=descr::space=Prefix::unknown-request=1434::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=descr::space=Prefix::unknown-request=1445::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=1962::dotty.tools.dotc.cc.CaptureSet$.EmptyWithProvenance.optionalInfo: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1435::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1446::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=200::dotty.tools.dotc.cc.CaptureSet.containsResultCapability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1376::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1384::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2012::dotty.tools.dotc.cc.CaptureSet$.capImpliedByCapability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1436::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1447::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2116::dotty.tools.dotc.cc.CaptureSet$.Var.owner: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=initialOwner::space=Prefix::unknown-request=1437::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=initialOwner::space=Prefix::unknown-request=1448::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2131::dotty.tools.dotc.cc.CaptureSet$.Var.maybeId: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1438::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1449::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2200::dotty.tools.dotc.cc.CaptureSet$.Var.associateWithStateful: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=mutability::space=Prefix::unknown-request=1439::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=mutability::space=Prefix::unknown-request=1450::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2208::dotty.tools.dotc.cc.CaptureSet$.Var.isConst: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=1440::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=1451::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2216::dotty.tools.dotc.cc.CaptureSet$.Var.isAlwaysEmpty: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1441::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1452::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2228::dotty.tools.dotc.cc.CaptureSet$.Var.isProvisionallySolved: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=1442::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=1453::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2267::dotty.tools.dotc.cc.CaptureSet$.Var.dropEmpties: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1443::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1454::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2291::dotty.tools.dotc.cc.CaptureSet$.Var.isBadRoot: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1444::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1455::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2298::dotty.tools.dotc.cc.CaptureSet$.Var.classifier: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=ClassSymbol::space=Prefix::unknown-request=1445::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ClassSymbol::space=Prefix::unknown-request=1456::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=232::dotty.tools.dotc.cc.CaptureSet.containsGlobalOrLocalCap: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1377::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1385::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2331::dotty.tools.dotc.cc.CaptureSet$.Var.narrowClassifier: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=leastClassifier::space=Prefix::unknown-request=1446::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=leastClassifier::space=Prefix::unknown-request=1457::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2353::dotty.tools.dotc.cc.CaptureSet$.Var.adoptClassifier: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=ClassSymbol::space=Prefix::unknown-request=1447::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ClassSymbol::space=Prefix::unknown-request=1458::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2375::dotty.tools.dotc.cc.CaptureSet$.Var.tryClassifyAs: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=ClassSymbol::space=Prefix::unknown-request=1448::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ClassSymbol::space=Prefix::unknown-request=1459::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=244::dotty.tools.dotc.cc.CaptureSet.isReadOnly: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1379::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1387::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=251::dotty.tools.dotc.cc.CaptureSet.isAlwaysReadOnly: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1380::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1388::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2682::dotty.tools.dotc.cc.CaptureSet$.Var.addThisElem: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1449::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1460::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2714::dotty.tools.dotc.cc.CaptureSet$.Var.toReader: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1450::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1461::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2831::dotty.tools.dotc.cc.CaptureSet$.Var.levelOK: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1451::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1462::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=286::dotty.tools.dotc.cc.CaptureSet.isExclusive: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=1382::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=1390::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2879::dotty.tools.dotc.cc.CaptureSet$.Var.disallowBadRoots: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1452::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1463::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2900::dotty.tools.dotc.cc.CaptureSet$.Var.checkAddedElems: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=1453::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=1464::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=2976::dotty.tools.dotc.cc.CaptureSet$.Var.upperApprox: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1454::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1465::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3058::dotty.tools.dotc.cc.CaptureSet$.Var.solve: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=CCState::space=Prefix::unknown-request=1455::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=CCState::space=Prefix::unknown-request=1466::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3094::dotty.tools.dotc.cc.CaptureSet$.Var.markSolved: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=1456::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=1467::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3112::dotty.tools.dotc.cc.CaptureSet$.Var.markIgnored: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1457::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1468::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=311::dotty.tools.dotc.cc.CaptureSet.maybeExclusive: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=reporting::space=Prefix::unknown-request=1384::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reporting::space=Prefix::unknown-request=1392::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=term::name=reporting::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3134::dotty.tools.dotc.cc.CaptureSet$.Var.withDescription: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=1458::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=1469::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3143::dotty.tools.dotc.cc.CaptureSet$.Var.withElems: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=Var::space=Prefix::unknown-request=1459::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Var::space=Prefix::unknown-request=1470::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3220::dotty.tools.dotc.cc.CaptureSet$.Var.ids: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=getClass::space=Prefix::unknown-request=1460::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=getClass::space=Prefix::unknown-request=1471::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=330::dotty.tools.dotc.cc.CaptureSet.failWith: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=TypeComparer::space=Prefix::unknown-request=1386::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=TypeComparer::space=Prefix::unknown-request=1394::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=term::name=TypeComparer::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3436::dotty.tools.dotc.cc.CaptureSet$.VarInTypeTree.normalizeLocalCaps: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=1461::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=1472::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3458::dotty.tools.dotc.cc.CaptureSet$.VarInTypeTree.disallowBadRoots: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=isRefining::space=Prefix::unknown-request=1462::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=isRefining::space=Prefix::unknown-request=1473::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3543::dotty.tools.dotc.cc.CaptureSet$.DerivedVar.summarize: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=getClass::space=Prefix::unknown-request=1463::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=getClass::space=Prefix::unknown-request=1474::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=360::dotty.tools.dotc.cc.CaptureSet.tryInclude: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=reporting::space=Prefix::unknown-request=1388::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reporting::space=Prefix::unknown-request=1396::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=term::name=reporting::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3774::dotty.tools.dotc.cc.CaptureSet$.BiMapped.isMaybeSet: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1464::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1475::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3790::dotty.tools.dotc.cc.CaptureSet$.BiMapped.summarize: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1465::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1476::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=3867::dotty.tools.dotc.cc.CaptureSet$.Filtered.tryInclude: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=accountsFor::space=Prefix::unknown-request=1466::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=accountsFor::space=Prefix::unknown-request=1477::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=401::dotty.tools.dotc.cc.CaptureSet.tryInclude: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1390::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1398::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4042::dotty.tools.dotc.cc.CaptureSet$.Union.tryInclude: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=accountsFor::space=Prefix::unknown-request=1467::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=accountsFor::space=Prefix::unknown-request=1478::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4110::dotty.tools.dotc.cc.CaptureSet$.Union.propagateSolved: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=cs1::space=Prefix::unknown-request=1468::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=cs1::space=Prefix::unknown-request=1479::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=414::dotty.tools.dotc.cc.CaptureSet.mutableToReader: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1391::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1399::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4298::dotty.tools.dotc.cc.CaptureSet$.Intersection.propagateSolved: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=cs1::space=Prefix::unknown-request=1469::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=cs1::space=Prefix::unknown-request=1480::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4344::dotty.tools.dotc.cc.CaptureSet$.HiddenSet.owner: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1470::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1481::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4376::dotty.tools.dotc.cc.CaptureSet$.HiddenSet.add: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1471::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=1482::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4398::dotty.tools.dotc.cc.CaptureSet$.HiddenSet.processElems: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=elems::space=Prefix::unknown-request=1472::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=elems::space=Prefix::unknown-request=1483::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4459::dotty.tools.dotc.cc.CaptureSet$.mappedSet: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1473::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4508::dotty.tools.dotc.cc.CaptureSet$.mapRefs: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=<unsupported-prefix>::namespace=type::name=TypeMap::space=Prefix::unknown-request=1484::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4508::dotty.tools.dotc.cc.CaptureSet$.mapRefs: requests=2, distinct_request_outcomes=2
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1486::outcome=unsupported prefix shape=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4558::dotty.tools.dotc.cc.CaptureSet$.subCapturesRange: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=TypeBounds::space=Prefix::unknown-request=1475::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TypeBounds::space=Prefix::unknown-request=1487::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=457::dotty.tools.dotc.cc.CaptureSet.addNewElem: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1393::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1401::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Capability::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4584::dotty.tools.dotc.cc.CaptureSet$.IncludeFailure.trace: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=1476::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=1488::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=4604::dotty.tools.dotc.cc.CaptureSet$.IncludeFailure.addToTrace: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=IncludeFailure::space=Prefix::unknown-request=1477::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=IncludeFailure::space=Prefix::unknown-request=1489::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=501::dotty.tools.dotc.cc.CaptureSet.addIfHiddenOrFail: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1395::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1403::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5228::dotty.tools.dotc.cc.CaptureSet$.IncludeFailure.toText: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=inContext::space=Prefix::unknown-request=1478::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=inContext::space=Prefix::unknown-request=1490::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5272::dotty.tools.dotc.cc.CaptureSet$.MutAdaptFailure.render: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1479::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1491::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5334::dotty.tools.dotc.cc.CaptureSet$.VarState.addHidden: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1480::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1492::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5407::dotty.tools.dotc.cc.CaptureSet$.VarState.unify: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=ResultCap::space=Prefix::unknown-request=1481::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=ResultCap::space=Prefix::unknown-request=1493::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5435::dotty.tools.dotc.cc.CaptureSet$.VarState.ifNotSeen: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=util::space=Prefix::unknown-request=1482::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=util::space=Prefix::unknown-request=1494::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5482::dotty.tools.dotc.cc.CaptureSet$.VarState$.Separate: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1483::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1495::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5488::dotty.tools.dotc.cc.CaptureSet$.VarState$.HardSeparate: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1484::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1496::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5526::dotty.tools.dotc.cc.CaptureSet$.VarState$.Unrecorded: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1485::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1497::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5541::dotty.tools.dotc.cc.CaptureSet$.VarState$.ClosedUnrecorded: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1486::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ccState::space=Prefix::unknown-request=1498::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5560::dotty.tools.dotc.cc.CaptureSet$.NarrowingCapabilityMap.apply: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=mapOver::space=Prefix::unknown-request=1487::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=mapOver::space=Prefix::unknown-request=1499::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5568::dotty.tools.dotc.cc.CaptureSet$.NarrowingCapabilityMap.isSameMap: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1488::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1500::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5605::dotty.tools.dotc.cc.CaptureSet$.NarrowingCapabilityMap.fuse: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1489::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1501::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5611::dotty.tools.dotc.cc.CaptureSet$.NarrowingCapabilityMap.Inverse.apply: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1490::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1502::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5618::dotty.tools.dotc.cc.CaptureSet$.NarrowingCapabilityMap.Inverse.mapCapability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1491::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1503::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5627::dotty.tools.dotc.cc.CaptureSet$.NarrowingCapabilityMap.Inverse.toString: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1492::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1504::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5662::dotty.tools.dotc.cc.CaptureSet$.NarrowingCapabilityMap.Inverse.fuse: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1493::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1505::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5685::dotty.tools.dotc.cc.CaptureSet$.MaybeMap.mapCapability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1494::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1506::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5703::dotty.tools.dotc.cc.CaptureSet$.ReadOnlyMap.mapCapability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1495::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1507::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5725::dotty.tools.dotc.cc.CaptureSet$.RestrictMap.mapCapability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1496::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1508::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5747::dotty.tools.dotc.cc.CaptureSet$.RestrictMap.isSameMap: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1497::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=BiTypeMap::space=Prefix::unknown-request=1509::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=5862::dotty.tools.dotc.cc.CaptureSet$.ofInfo: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1498::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Capability::space=Prefix::unknown-request=1510::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=6051::dotty.tools.dotc.cc.CaptureSet$.ofType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1499::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1511::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=6156::dotty.tools.dotc.cc.CaptureSet$.isAssumedPure: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1500::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=1512::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=6185::dotty.tools.dotc.cc.CaptureSet$.assumedContains: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1501::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1513::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=631::dotty.tools.dotc.cc.CaptureSet.accountsFor: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1396::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1404::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=6353::dotty.tools.dotc.cc.CaptureSet$.withCaptureSetsExplained: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1502::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1514::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=704::dotty.tools.dotc.cc.CaptureSet.mightAccountFor: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=reporting::space=Prefix::unknown-request=1398::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reporting::space=Prefix::unknown-request=1406::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=term::name=reporting::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=71::dotty.tools.dotc.cc.CaptureSet.mutability: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Mutability::space=Prefix::unknown-request=1368::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Mutability::space=Prefix::unknown-request=1376::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=723::dotty.tools.dotc.cc.CaptureSet.mightSubcapture: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1400::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Refs::space=Prefix::unknown-request=1408::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=737::dotty.tools.dotc.cc.CaptureSet.subCaptures: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1402::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=type::name=VarState::space=Prefix::unknown-request=1401::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1410::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=VarState::space=Prefix::unknown-request=1409::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=822::dotty.tools.dotc.cc.CaptureSet.subCaptures: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=TypeComparer::space=Prefix::unknown-request=1404::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=TypeComparer::space=Prefix::unknown-request=1412::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.cc.CaptureSet$::namespace=term::name=TypeComparer::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CaptureSet.scala#tree=944::dotty.tools.dotc.cc.CaptureSet.++: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::unknown-request=1406::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::unknown-request=1407::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::unknown-request=1414::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Const::space=Prefix::unknown-request=1415::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala#tree=1330::dotty.tools.dotc.cc.CheckCaptures.CaptureChecker.interpolateIfInferred: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.cc.CheckCaptures$::namespace=type::name=Tree::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/cc/CheckCaptures.scala#tree=1350::dotty.tools.dotc.cc.CheckCaptures.CaptureChecker.assertSub: requests=1, distinct_request_outcomes=1
@@ -3831,12 +3848,14 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.cc.Setup$::namespace=type::name=Type::space=Prefix::outcome=other resolver Ok(None)=1
     compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala#tree=151::dotty.tools.dotc.classpath.AggregateClassPath.asSourcePathString: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.io::namespace=term::name=ClassPath::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala#tree=187::dotty.tools.dotc.classpath.AggregateClassPath.classes: requests=2, distinct_request_outcomes=2
+    compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala#tree=187::dotty.tools.dotc.classpath.AggregateClassPath.classes: requests=3, distinct_request_outcomes=3
+      prefix=dotty.tools.io::namespace=type::name=ClassPath::space=Prefix::outcome=external class success=1
       prefix=dotty.tools.io::namespace=type::name=ClassRepresentation::space=Prefix::outcome=external class success=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala#tree=202::dotty.tools.dotc.classpath.AggregateClassPath.sources: requests=2, distinct_request_outcomes=2
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
+    compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala#tree=202::dotty.tools.dotc.classpath.AggregateClassPath.sources: requests=3, distinct_request_outcomes=3
+      prefix=dotty.tools.io::namespace=type::name=ClassPath::space=Prefix::outcome=external class success=1
       prefix=dotty.tools.io::namespace=type::name=ClassRepresentation::space=Prefix::outcome=external class success=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala#tree=516::dotty.tools.dotc.classpath.AggregateClassPath.mergeClassesAndSources: requests=3, distinct_request_outcomes=1
       prefix=dotty.tools.dotc::namespace=term::name=util::space=Prefix::outcome=package term member unsupported=3
     compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala#tree=571::dotty.tools.dotc.classpath.AggregateClassPath.getDistinctEntries: requests=3, distinct_request_outcomes=1
@@ -3844,11 +3863,12 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/classpath/AggregateClassPath.scala#tree=619::dotty.tools.dotc.classpath.AggregateClassPath$.createAggregate: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=type::name=ArrayBuffer::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/classpath/ClassPathFactory.scala#tree=359::dotty.tools.dotc.classpath.ClassPathFactory.createSourcePath: requests=1, distinct_request_outcomes=1
-      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=error=1
-    compiler/src/dotty/tools/dotc/classpath/ClassPathFactory.scala#tree=408::dotty.tools.dotc.classpath.ClassPathFactory$.newClassPath: requests=1, distinct_request_outcomes=1
-      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=error=1
+      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=external class success=1
+    compiler/src/dotty/tools/dotc/classpath/ClassPathFactory.scala#tree=408::dotty.tools.dotc.classpath.ClassPathFactory$.newClassPath: requests=2, distinct_request_outcomes=2
+      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=external class success=1
+      prefix=dotty.tools.io::namespace=type::name=VirtualDirectory::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/classpath/ClassPathFactory.scala#tree=53::dotty.tools.dotc.classpath.ClassPathFactory.newClassPath: requests=1, distinct_request_outcomes=1
-      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=error=1
+      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=190::dotty.tools.dotc.classpath.ZipAndJarClassPathFactory$.ZipArchiveClassPath.findClassFileAndModuleFile: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=199::dotty.tools.dotc.classpath.ZipAndJarClassPathFactory$.ZipArchiveClassPath.classes: requests=1, distinct_request_outcomes=1
@@ -3856,7 +3876,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=207::dotty.tools.dotc.classpath.ZipAndJarClassPathFactory$.ZipArchiveClassPath.createFileEntry: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=221::dotty.tools.dotc.classpath.ZipAndJarClassPathFactory$.ZipArchiveClassPath.isRequiredFileType: requests=1, distinct_request_outcomes=1
-      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=error=1
+      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=297::dotty.tools.dotc.classpath.ZipAndJarClassPathFactory$.ManifestResourcesClassPath.findClassFileAndModuleFile: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=305::dotty.tools.dotc.classpath.ZipAndJarClassPathFactory$.ManifestResourcesClassPath.asClassPathStrings: requests=1, distinct_request_outcomes=1
@@ -3871,8 +3891,9 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=549::dotty.tools.dotc.classpath.ZipAndJarClassPathFactory$.ManifestResourcesClassPath.list: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=630::dotty.tools.dotc.classpath.ZipAndJarClassPathFactory$.createWithoutUnderlyingFile: requests=1, distinct_request_outcomes=1
-      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=error=1
+    compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=630::dotty.tools.dotc.classpath.ZipAndJarClassPathFactory$.createWithoutUnderlyingFile: requests=2, distinct_request_outcomes=2
+      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=external class success=1
+      prefix=dotty.tools.io::namespace=type::name=ManifestResources::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=646::dotty.tools.dotc.classpath.ZipAndJarSourcePathFactory$.ZipArchiveSourcePath.release: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=649::dotty.tools.dotc.classpath.ZipAndJarSourcePathFactory$.ZipArchiveSourcePath.asSourcePathString: requests=1, distinct_request_outcomes=1
@@ -3882,7 +3903,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=666::dotty.tools.dotc.classpath.ZipAndJarSourcePathFactory$.ZipArchiveSourcePath.createFileEntry: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=672::dotty.tools.dotc.classpath.ZipAndJarSourcePathFactory$.ZipArchiveSourcePath.isRequiredFileType: requests=1, distinct_request_outcomes=1
-      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=error=1
+      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=698::dotty.tools.dotc.classpath.ZipAndJarSourcePathFactory$.createForZipFile: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/classpath/ZipAndJarFileLookupFactory.scala#tree=796::dotty.tools.dotc.classpath.FileBasedCache.getOrCreate: requests=1, distinct_request_outcomes=1
@@ -3898,37 +3919,37 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=498::dotty.tools.dotc.config.CommandLineParser$.expandArg: requests=1, distinct_request_outcomes=1
       prefix=scala.jdk::namespace=term::name=CollectionConverters::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/config/PathResolver.scala#tree=689::dotty.tools.dotc.config.PathResolver.Calculated$.basis: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=Option::space=Prefix::unknown-request=1643::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Option::space=Prefix::unknown-request=1659::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/config/ScalaVersion.scala#tree=394::dotty.tools.dotc.config.ScalaVersion$.parse: requests=1, distinct_request_outcomes=1
       prefix=scala.util::namespace=term::name=Failure::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=2314::dotty.tools.dotc.config.Settings$.SettingGroup.publish: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=2388::dotty.tools.dotc.config.Settings$.SettingGroup.BooleanSetting: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=2438::dotty.tools.dotc.config.Settings$.SettingGroup.StringSetting: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=2495::dotty.tools.dotc.config.Settings$.SettingGroup.ChoiceSetting: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=2561::dotty.tools.dotc.config.Settings$.SettingGroup.MultiChoiceSetting: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=2632::dotty.tools.dotc.config.Settings$.SettingGroup.MultiChoiceHelpSetting: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=2672::dotty.tools.dotc.config.Settings$.SettingGroup.IntSetting: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=2713::dotty.tools.dotc.config.Settings$.SettingGroup.IntChoiceSetting: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=2761::dotty.tools.dotc.config.Settings$.SettingGroup.MultiStringSetting: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=2818::dotty.tools.dotc.config.Settings$.SettingGroup.OutputSetting: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=2858::dotty.tools.dotc.config.Settings$.SettingGroup.PathSetting: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=2915::dotty.tools.dotc.config.Settings$.SettingGroup.PhasesSetting: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=3006::dotty.tools.dotc.config.Settings$.SettingGroup.VersionSetting: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/config/Settings.scala#tree=3062::dotty.tools.dotc.config.Settings$.SettingGroup.OptionSetting: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Annotations.scala#tree=1481::dotty.tools.dotc.core.Annotations$.Annotation$.Child$.apply: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=ContextFunction1::space=Prefix::outcome=package type member unresolved=1
     compiler/src/dotty/tools/dotc/core/CheckRealizable.scala#tree=281::dotty.tools.dotc.core.CheckRealizable.isLateInitialized: requests=1, distinct_request_outcomes=1
@@ -3940,7 +3961,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/CheckRealizable.scala#tree=652::dotty.tools.dotc.core.CheckRealizable.boundsRealizability: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.CheckRealizable$::namespace=term::name=withMode::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/Comments.scala#tree=192::dotty.tools.dotc.core.Comments$.Comment.expand: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Contexts.scala#tree=258::dotty.tools.dotc.core.Contexts$.inContext: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=ContextFunction1::space=Prefix::outcome=package type member unresolved=1
     compiler/src/dotty/tools/dotc/core/Contexts.scala#tree=2696::dotty.tools.dotc.core.Contexts$.explore: requests=2, distinct_request_outcomes=2
@@ -3959,7 +3980,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/Contexts.scala#tree=427::dotty.tools.dotc.core.Contexts$.withModeBits: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=ContextFunction1::space=Prefix::outcome=package type member unresolved=1
     compiler/src/dotty/tools/dotc/core/Contexts.scala#tree=661::dotty.tools.dotc.core.Contexts$.Context.printer: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Decorators.scala#tree=548::dotty.tools.dotc.core.Decorators$.mapconserve: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=type::name=ListBuffer::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/core/Decorators.scala#tree=742::dotty.tools.dotc.core.Decorators$.filterConserve: requests=1, distinct_request_outcomes=1
@@ -4301,17 +4322,17 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/Definitions.scala#tree=9996::dotty.tools.dotc.core.Definitions.isJavaContext: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.Definitions$::namespace=term::name=ctx::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/Denotations.scala#tree=3150::dotty.tools.dotc.core.Denotations$.SingleDenotation.filterWithPredicate: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Denotations.scala#tree=3241::dotty.tools.dotc.core.Denotations$.SingleDenotation.aggregate: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Denotations.scala#tree=339::dotty.tools.dotc.core.Denotations$.Denotation.alternatives: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Denotations.scala#tree=368::dotty.tools.dotc.core.Denotations$.Denotation.checkUnique: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Denotations.scala#tree=3879::dotty.tools.dotc.core.Denotations$.MultiPreDenotation.aggregate: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=Function2::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Denotations.scala#tree=555::dotty.tools.dotc.core.Denotations$.Denotation.requiredSymbol: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/MacroClassLoader.scala#tree=165::dotty.tools.dotc.core.MacroClassLoader$.makeMacroClassLoader: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/MacroClassLoader.scala#tree=56::dotty.tools.dotc.core.MacroClassLoader$.fromContext: requests=1, distinct_request_outcomes=1
@@ -4319,39 +4340,39 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/MacroClassLoader.scala#tree=68::dotty.tools.dotc.core.MacroClassLoader$.init: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=128::dotty.tools.dotc.core.MatchTypeTrace$.record: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=inContext::space=Prefix::unknown-request=1854::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=inContext::space=Prefix::unknown-request=1870::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=137::dotty.tools.dotc.core.MatchTypeTrace$.isRecording: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1855::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1871::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=179::dotty.tools.dotc.core.MatchTypeTrace$.matchTypeFail: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1856::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1872::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=195::dotty.tools.dotc.core.MatchTypeTrace$.noMatches: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1857::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1873::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=214::dotty.tools.dotc.core.MatchTypeTrace$.stuck: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1858::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1874::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=235::dotty.tools.dotc.core.MatchTypeTrace$.noInstance: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1859::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1875::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=246::dotty.tools.dotc.core.MatchTypeTrace$.emptyScrutinee: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1860::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=1876::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=301::dotty.tools.dotc.core.MatchTypeTrace$.recurseWith: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1861::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=1877::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=311::dotty.tools.dotc.core.MatchTypeTrace$.caseText: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=MatchTypeCaseSpec::space=Prefix::unknown-request=1862::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=MatchTypeCaseSpec::space=Prefix::unknown-request=1878::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=363::dotty.tools.dotc.core.MatchTypeTrace$.caseText: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1863::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=1879::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=520::dotty.tools.dotc.core.MatchTypeTrace$.explainEntry: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=TryReduce::space=Prefix::unknown-request=1864::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=TryReduce::space=Prefix::unknown-request=1880::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/MatchTypeTrace.scala#tree=573::dotty.tools.dotc.core.MatchTypeTrace$.illegalPatternText: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=MatchTypeCaseSpec::space=Prefix::unknown-request=1865::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=MatchTypeCaseSpec::space=Prefix::unknown-request=1881::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/Names.scala#tree=182::dotty.tools.dotc.core.Names$.Name.++: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Names.scala#tree=198::dotty.tools.dotc.core.Names$.Name.replace: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Names.scala#tree=703::dotty.tools.dotc.core.Names$.SimpleName.forall: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Names.scala#tree=956::dotty.tools.dotc.core.Names$.SimpleName.mapLast: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Names.scala#tree=965::dotty.tools.dotc.core.Names$.SimpleName.mapParts: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/OrderingConstraint.scala#tree=1023::dotty.tools.dotc.core.OrderingConstraint.dependsOn: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.OrderingConstraint$::namespace=term::name=UnificationDirection::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/OrderingConstraint.scala#tree=1038::dotty.tools.dotc.core.OrderingConstraint.ConstraintAwareTraversal.hasBounds: requests=1, distinct_request_outcomes=1
@@ -4437,9 +4458,9 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/OrderingConstraint.scala#tree=868::dotty.tools.dotc.core.OrderingConstraint.nonParamBounds: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.OrderingConstraint$::namespace=term::name=UnificationDirection::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/Scopes.scala#tree=181::dotty.tools.dotc.core.Scopes$.Scope.exists: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Scopes.scala#tree=203::dotty.tools.dotc.core.Scopes$.Scope.find: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Signature.scala#tree=197::dotty.tools.dotc.core.Signature.matchDegree: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.Signature$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/Signature.scala#tree=208::dotty.tools.dotc.core.Signature.clashes: requests=1, distinct_request_outcomes=1
@@ -4593,19 +4614,19 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala#tree=1588::dotty.tools.dotc.core.SymbolLoaders$.mergeNewEntries: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.io::namespace=type::name=ClassPath::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala#tree=2052::dotty.tools.dotc.core.TastyLoader.description: requests=1, distinct_request_outcomes=1
-      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=error=1
+      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala#tree=2266::dotty.tools.dotc.core.TastyLoader.checkTastyUUID: requests=1, distinct_request_outcomes=1
-      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=error=1
+      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala#tree=739::dotty.tools.dotc.core.SymbolLoaders$.enterToplevelsFromSource: requests=1, distinct_request_outcomes=1
-      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=error=1
+      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala#tree=899::dotty.tools.dotc.core.SymbolLoaders$.initializeFromClassPath: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.io::namespace=type::name=ClassRepresentation::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala#tree=910::dotty.tools.dotc.core.SymbolLoaders$.needCompile: requests=1, distinct_request_outcomes=1
-      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=error=1
+      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/SymbolLoaders.scala#tree=923::dotty.tools.dotc.core.SymbolLoaders$.nameOf: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.io::namespace=type::name=ClassRepresentation::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Symbols.scala#tree=735::dotty.tools.dotc.core.Symbols$.Symbol.filter: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/TypeApplications.scala#tree=1070::dotty.tools.dotc.core.TypeApplications.hasSameKindAs: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.TypeApplications$::namespace=type::name=Type::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/TypeApplications.scala#tree=1101::dotty.tools.dotc.core.TypeApplications.safeDealias: requests=1, distinct_request_outcomes=1
@@ -4700,12 +4721,13 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.core.TypeComparer$::namespace=term::name=ExplainingTypeComparer::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=11709::dotty.tools.dotc.core.TypeComparer.matchReducer: requests=2, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.TypeComparer$::namespace=term::name=MatchReducer::space=Prefix::outcome=class member scope unavailable: incomplete class info=2
-    compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=11765::dotty.tools.dotc.core.TypeComparer.explained: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=11765::dotty.tools.dotc.core.TypeComparer.explained: requests=2, distinct_request_outcomes=2
+      prefix=dotty.tools.dotc.core.TypeComparer$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=11784::dotty.tools.dotc.core.TypeComparer.explaining: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=11799::dotty.tools.dotc.core.TypeComparer.reduceMatchWith: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=11846::dotty.tools.dotc.core.TypeComparer.addErrorNote: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.TypeComparer$::namespace=type::name=List::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=11882::dotty.tools.dotc.core.TypeComparer.isolated: requests=1, distinct_request_outcomes=1
@@ -4819,7 +4841,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=7965::dotty.tools.dotc.core.TypeComparer.isMatchedByProto: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.TypeComparer$::namespace=type::name=Type::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=8050::dotty.tools.dotc.core.TypeComparer.narrowGADTBounds: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Repr::space=Prefix::unknown-request=2073::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Repr::space=Prefix::unknown-request=2089::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=8178::dotty.tools.dotc.core.TypeComparer.matchesType: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.TypeComparer$::namespace=type::name=Type::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/TypeComparer.scala#tree=8282::dotty.tools.dotc.core.TypeComparer.matchingMethodParams: requests=1, distinct_request_outcomes=1
@@ -4886,8 +4908,8 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.core.TypeErasure$::namespace=term::name=semiEraseVCs::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/TyperState.scala#tree=134::dotty.tools.dotc.core.TyperState$.resetTo: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=Tuple3::space=Prefix::outcome=error=1
-    compiler/src/dotty/tools/dotc/core/Types.scala#tree=11823::dotty.tools.dotc.core.Types$.RecType$.apply: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    compiler/src/dotty/tools/dotc/core/Types.scala#tree=11823::dotty.tools.dotc.core.Types$.RecType$.apply: requests=2, distinct_request_outcomes=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=2
     compiler/src/dotty/tools/dotc/core/Types.scala#tree=14427::dotty.tools.dotc.core.Types$.TermLambda.resultType: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.Types$.DepStatus$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/Types.scala#tree=14850::dotty.tools.dotc.core.Types$.TermLambda.isResultDependent: requests=1, distinct_request_outcomes=1
@@ -4903,15 +4925,15 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/Types.scala#tree=15043::dotty.tools.dotc.core.Types$.TermLambda.allParamNamesSynthetic: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.Types$.DepStatus$::namespace=term::name=paramNames::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/Types.scala#tree=2096::dotty.tools.dotc.core.Types$.Type.containsWildcardTypes: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Types.scala#tree=2140::dotty.tools.dotc.core.Types$.Type.forallParts: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Types.scala#tree=24088::dotty.tools.dotc.core.Types$.TypeMap.mapClassInfo: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Types.scala#tree=2566::dotty.tools.dotc.core.Types$.Type.classSymbols: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/Types.scala#tree=4944::dotty.tools.dotc.core.Types$.Type.stripAnnots: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/classfile/ClassfileParser.scala#tree=1274::dotty.tools.dotc.core.classfile.ClassfileParser.currentIsTopLevel: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.classfile.ClassfileParser$::namespace=term::name=classRoot::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/classfile/ClassfileParser.scala#tree=1539::dotty.tools.dotc.core.classfile.ClassfileParser.classNameToSymbol: requests=1, distinct_request_outcomes=1
@@ -4993,12 +5015,12 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.core::namespace=term::name=Annotations::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyBuffer::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyClassName.scala#tree=201::dotty.tools.dotc.core.tasty.TastyClassName.TreeSectionUnpickler.unpickle: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=TermName::space=Prefix::unknown-request=2195::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TermName::space=Prefix::unknown-request=2213::outcome=unsupported prefix shape=1
       prefix=dotty.tools.tasty::namespace=type::name=TastyReader::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyClassName.scala#tree=216::dotty.tools.dotc.core.tasty.TastyClassName.TreeSectionUnpickler.readName: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.tasty::namespace=type::name=TastyReader::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyClassName.scala#tree=54::dotty.tools.dotc.core.tasty.TastyClassName.readName: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=unpickle::space=Prefix::unknown-request=2193::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=unpickle::space=Prefix::unknown-request=2211::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyPickler.scala#tree=326::dotty.tools.dotc.core.tasty.TastyPickler.assembleParts: requests=3, distinct_request_outcomes=3
       prefix=dotty.tools.tasty::namespace=term::name=TastyBuffer::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
@@ -5011,14 +5033,14 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/tasty/TastyPrinter.scala#tree=1262::dotty.tools.dotc.core.tasty.TastyPrinter.CommentSectionUnpickler.unpickle0: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.tasty::namespace=type::name=TastyReader::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyPrinter.scala#tree=1354::dotty.tools.dotc.core.tasty.TastyPrinter.AttributesSectionUnpickler.unpickle0: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=sb::space=Prefix::unknown-request=2208::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=sb::space=Prefix::unknown-request=2226::outcome=unsupported prefix shape=1
       prefix=dotty.tools.tasty::namespace=type::name=TastyReader::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyPrinter.scala#tree=1525::dotty.tools.dotc.core.tasty.TastyPrinter.sectionHeader: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.tasty::namespace=type::name=TastyReader::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyPrinter.scala#tree=651::dotty.tools.dotc.core.tasty.TastyPrinter.unpickle0: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=unpickle::space=Prefix::unknown-request=2202::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=unpickle::space=Prefix::unknown-request=2220::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyPrinter.scala#tree=984::dotty.tools.dotc.core.tasty.TastyPrinter.TreeSectionUnpickler.unpickle0: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=treeStr::space=Prefix::unknown-request=2204::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=treeStr::space=Prefix::unknown-request=2222::outcome=unsupported prefix shape=1
       prefix=dotty.tools.tasty::namespace=type::name=TastyReader::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=117::dotty.tools.dotc.core.tasty.TastyUnpickler$.NameTable.add: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
@@ -5035,24 +5057,24 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=208::dotty.tools.dotc.core.tasty.TastyUnpickler$.Scala3CompilerConfig.upgradeAdditionalInfo: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.tasty::namespace=type::name=TastyVersion::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=285::dotty.tools.dotc.core.tasty.TastyUnpickler.readName: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=NameTable::space=Prefix::unknown-request=2217::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=NameTable::space=Prefix::unknown-request=2235::outcome=unsupported prefix shape=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=290::dotty.tools.dotc.core.tasty.TastyUnpickler.readString: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=311::dotty.tools.dotc.core.tasty.TastyUnpickler.readParamSig: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=readInt::space=Prefix::unknown-request=2220::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=readInt::space=Prefix::unknown-request=2238::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core.tasty.TastyUnpickler$::namespace=term::name=readInt::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=506::dotty.tools.dotc.core.tasty.TastyUnpickler.readNameContents: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=readByte::space=Prefix::unknown-request=2223::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=readByte::space=Prefix::unknown-request=2241::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core.tasty.TastyUnpickler$::namespace=term::name=readByte::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=546::dotty.tools.dotc.core.tasty.TastyUnpickler.readNames: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=until::space=Prefix::unknown-request=2226::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=until::space=Prefix::unknown-request=2244::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core.tasty.TastyUnpickler$::namespace=term::name=until::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=580::dotty.tools.dotc.core.tasty.TastyUnpickler.loadSections: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=isAtEnd::space=Prefix::unknown-request=2229::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=isAtEnd::space=Prefix::unknown-request=2247::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core.tasty.TastyUnpickler$::namespace=term::name=isAtEnd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TastyUnpickler.scala#tree=613::dotty.tools.dotc.core.tasty.TastyUnpickler.bytes: requests=1, distinct_request_outcomes=1
@@ -5138,130 +5160,130 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/core/tasty/TreePickler.scala#tree=673::dotty.tools.dotc.core.tasty.TreePickler.pickleType: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.tasty::namespace=term::name=TastyFormat::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=1007::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.symbolAt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=symAtAddr::space=Prefix::unknown-request=2287::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=symAtAddr::space=Prefix::unknown-request=2305::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=1053::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.symbolAtCurrent: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=symAtAddr::space=Prefix::unknown-request=2288::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=symAtAddr::space=Prefix::unknown-request=2306::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=1946::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2289::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2307::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=1993::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readSymNameRef: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=2290::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=2308::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2026::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readPackageRef: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=TermName::space=Prefix::unknown-request=2291::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=TermName::space=Prefix::unknown-request=2309::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2032::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readTypeRef: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=typeAtAddr::space=Prefix::unknown-request=2292::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=term::name=typeAtAddr::space=Prefix::unknown-request=2293::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=typeAtAddr::space=Prefix::unknown-request=2310::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=typeAtAddr::space=Prefix::unknown-request=2311::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2041::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readTreeRef: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=2294::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=2312::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2052::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.nothingButMods: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2295::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2063::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.localContext: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2296::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2203::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.normalizeFlags: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=2297::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2289::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.isAbstractType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2298::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2338::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.createSymbol: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2299::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2410::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.createBindSymbol: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2300::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2823::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.createMemberSymbol: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2301::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3175::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readModifiers: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=FlagSet::space=Prefix::unknown-request=2302::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3182::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readWithin: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=2303::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3310::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readAnnot: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=readByte::space=Prefix::unknown-request=2304::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3417::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.indexStats: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=NoInitsInterface::space=Prefix::unknown-request=2305::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3473::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.processPackage: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2306::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3489::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.indexParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2307::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3508::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.indexTemplateParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=2308::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3560::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readIndexedDef: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=treeAtAddr::space=Prefix::unknown-request=2309::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4181::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readNewDef: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2310::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4303::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readParentType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=readByte::space=Prefix::unknown-request=2311::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4353::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readParents: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::unknown-request=2312::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4871::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readTemplate: requests=1, distinct_request_outcomes=1
       prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2313::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4888::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipToplevel: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=isAtEnd::space=Prefix::unknown-request=2314::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4899::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.isTopLevel: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2315::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5027::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readIndexedStat: requests=1, distinct_request_outcomes=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2063::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.localContext: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2314::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2203::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.normalizeFlags: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=2315::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2289::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.isAbstractType: requests=1, distinct_request_outcomes=1
       prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2316::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5060::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readImportOrExport: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2317::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=508::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.fork: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2273::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5160::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readSelectors: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2318::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=521::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipParentTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2274::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5269::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readStats: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2319::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5278::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.sameTrees: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2320::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=527::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipParentTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2275::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5301::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readIndexedParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::unknown-request=2321::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5325::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2322::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5339::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.ElidedTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=untpd::space=Prefix::unknown-request=2323::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=566::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2276::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=572::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2277::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=596::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2278::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7317::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readTree: requests=1, distinct_request_outcomes=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2338::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.createSymbol: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2317::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2410::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.createBindSymbol: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2318::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=2823::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.createMemberSymbol: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2319::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3175::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readModifiers: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=FlagSet::space=Prefix::unknown-request=2320::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3182::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readWithin: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Context::space=Prefix::unknown-request=2321::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3310::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readAnnot: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=readByte::space=Prefix::unknown-request=2322::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3417::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.indexStats: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=NoInitsInterface::space=Prefix::unknown-request=2323::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3473::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.processPackage: requests=1, distinct_request_outcomes=1
       prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2324::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3489::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.indexParams: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2325::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3508::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.indexTemplateParams: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=assert::space=Prefix::unknown-request=2326::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=3560::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readIndexedDef: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=treeAtAddr::space=Prefix::unknown-request=2327::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4181::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readNewDef: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2328::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4303::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readParentType: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=readByte::space=Prefix::unknown-request=2329::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4353::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readParents: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::unknown-request=2330::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4871::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readTemplate: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2331::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4888::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipToplevel: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=isAtEnd::space=Prefix::unknown-request=2332::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=4899::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.isTopLevel: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2333::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5027::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readIndexedStat: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2334::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5060::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readImportOrExport: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2335::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=508::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.fork: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2291::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5160::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readSelectors: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2336::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=521::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipParentTree: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2292::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5269::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readStats: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2337::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5278::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.sameTrees: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2338::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=527::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipParentTree: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2293::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5301::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readIndexedParams: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::unknown-request=2339::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5325::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readParams: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2340::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=5339::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.ElidedTree: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=untpd::space=Prefix::unknown-request=2341::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=566::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipTree: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2294::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=572::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipTree: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2295::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=596::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.skipParams: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2296::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7317::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readTree: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2342::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7434::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readTpt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2325::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2343::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7478::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readCases: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::unknown-request=2326::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::unknown-request=2344::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7536::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readCase: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2327::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2345::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7568::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readHole: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=readNat::space=Prefix::unknown-request=2328::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=readNat::space=Prefix::unknown-request=2346::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7593::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readLater: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=AnyRef::space=Prefix::unknown-request=2329::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=AnyRef::space=Prefix::unknown-request=2347::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7641::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readLaterWithOwner: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=goto::space=Prefix::unknown-request=2330::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=goto::space=Prefix::unknown-request=2348::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7671::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.spanAt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2331::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2349::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7694::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.coordAt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2332::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2350::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7724::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.sourcePathAt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2333::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2351::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7781::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.sourceChangeContext: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2334::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2352::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=7810::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.setSpan: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2335::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2353::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=784::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.scanTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2279::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2297::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=814::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.scanTrees: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2280::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=currentAddr::space=Prefix::unknown-request=2298::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=845::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.nextUnsharedTag: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2281::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=nextByte::space=Prefix::unknown-request=2299::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=851::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readName: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=nameAtRef::space=Prefix::unknown-request=2282::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=nameAtRef::space=Prefix::unknown-request=2300::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=871::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.isCompactAnnotTypeTag: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2283::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2301::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=923::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readParamNamesAndMods: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::unknown-request=2284::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=collectWhile::space=Prefix::unknown-request=2302::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=956::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readParamTypes: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2285::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2303::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/tasty/TreeUnpickler.scala#tree=964::dotty.tools.dotc.core.tasty.TreeUnpickler.TreeReader.readSymRef: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2286::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Addr::space=Prefix::unknown-request=2304::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala#tree=1014::dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler.isSymbolRef: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler$::namespace=term::name=bytes::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala#tree=1034::dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler.isNameEntry: requests=1, distinct_request_outcomes=1
@@ -5288,8 +5310,9 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala#tree=1272::dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler.readTypeName: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler$::namespace=type::name=Context::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala#tree=1280::dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler.readSymbol: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala#tree=1280::dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler.readSymbol: requests=2, distinct_request_outcomes=2
+      prefix=dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler$::namespace=type::name=Symbol::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala#tree=2302::dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler.readDisambiguatedSymbol: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler$::namespace=term::name=indexCoord::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler.scala#tree=2310::dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler.LocalUnpickler.startCoord: requests=1, distinct_request_outcomes=1
@@ -5398,8 +5421,9 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=Type::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=1481::dotty.tools.dotc.inlines.Inliner.classNestingLevel: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=Symbol::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=1929::dotty.tools.dotc.inlines.Inliner.addOpaqueProxies: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=1929::dotty.tools.dotc.inlines.Inliner.addOpaqueProxies: requests=2, distinct_request_outcomes=2
+      prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=Type::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=2056::dotty.tools.dotc.inlines.Inliner.accountForOpaques: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=Type::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=2101::dotty.tools.dotc.inlines.Inliner.mapOpaquesInValueArg: requests=1, distinct_request_outcomes=1
@@ -5421,45 +5445,45 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3395::dotty.tools.dotc.inlines.Inliner.tryInlineArg: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=Tree::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3483::dotty.tools.dotc.inlines.Inliner.InlineTyper.ensureAccessible: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=2416::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=2436::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=Type::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3588::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedIdent: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2418::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2438::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=term::name=ctx::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3683::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedSelect: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2420::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2440::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=term::name=ctx::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3794::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedIf: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=untpd::space=Prefix::unknown-request=2422::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=untpd::space=Prefix::unknown-request=2442::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=untpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3915::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedValDef: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=2424::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Symbol::space=Prefix::unknown-request=2444::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=Symbol::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3946::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedApply: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2426::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2446::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=term::name=ctx::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=3962::dotty.tools.dotc.inlines.Inliner.InlineTyper.isAcceptedSpuriousApply: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=tpd::space=Prefix::unknown-request=2428::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=tpd::space=Prefix::unknown-request=2448::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=term::name=tpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=4006::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedTypeApply: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2430::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2450::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=term::name=ctx::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=4137::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedMatch: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=untpd::space=Prefix::unknown-request=2432::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=untpd::space=Prefix::unknown-request=2452::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=untpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=4605::dotty.tools.dotc.inlines.Inliner.InlineTyper.typedMatchFinish: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=untpd::space=Prefix::unknown-request=2434::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=untpd::space=Prefix::unknown-request=2454::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=untpd::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=4615::dotty.tools.dotc.inlines.Inliner.InlineTyper.newLikeThis: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=ReTyper::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=4624::dotty.tools.dotc.inlines.Inliner.InlineTyper.hasInliningErrors: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2437::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2457::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=term::name=ctx::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=4667::dotty.tools.dotc.inlines.Inliner.InlineTyper.inlineIfNeeded: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2439::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2459::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=Tree::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=4786::dotty.tools.dotc.inlines.Inliner.InlineTyper.specializeEq: requests=2, distinct_request_outcomes=2
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2441::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2461::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=Tree::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/inlines/Inliner.scala#tree=5330::dotty.tools.dotc.inlines.Inliner.dropUnusedDefs: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.inlines.Inliner$::namespace=type::name=List::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
@@ -5695,131 +5719,131 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/interactive/ParsedLogicalPackage.scala#tree=92::dotty.tools.dotc.interactive.ParsedLogicalPackage.fullName: requests=1, distinct_request_outcomes=1
       prefix=scala.jdk::namespace=term::name=CollectionConverters::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=1071::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.basicType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2596::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2616::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=109::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.parse: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2571::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2591::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=1193::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typ: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2597::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2617::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=1314::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeArgs: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2598::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2618::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=1752::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.annotation: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=RefTree::space=Prefix::unknown-request=2599::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=RefTree::space=Prefix::unknown-request=2619::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=181::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.skip: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2572::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2592::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=193::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.syntaxError: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Message::space=Prefix::unknown-request=2573::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Message::space=Prefix::unknown-request=2593::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2029::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.modifiers: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Flags::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2067::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2601::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2621::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2111::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeParam: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2602::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2622::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2164::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.bound: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2603::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2623::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2192::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.formalParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2604::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2624::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=223::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.syntaxError: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2574::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2594::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2269::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.formalParam: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2605::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2625::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2288::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.optThrows: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2606::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2626::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2302::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.methodBody: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2607::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2627::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2313::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.definesInterface: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2608::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2628::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2332::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.adaptRecordIdentifier: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2609::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=236::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.errorTypeTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=TypeTree::space=Prefix::unknown-request=2575::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=247::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.javaDot: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=Select::space=Prefix::unknown-request=2576::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=258::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.javaLangDot: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=Select::space=Prefix::unknown-request=2577::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=264::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.ObjectTpt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=TypeTree::space=Prefix::unknown-request=2578::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2657::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.termDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2610::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=270::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.javaLangRecord: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Name::space=Prefix::unknown-request=2579::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2803::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.fieldDecls: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::unknown-request=2611::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=283::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.arrayOf: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=AppliedTypeTree::space=Prefix::unknown-request=2580::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2993::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.varDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2612::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=300::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.classOf: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=TypeApply::space=Prefix::unknown-request=2581::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3024::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.memberDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2613::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3068::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.makeCompanionObject: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2614::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3085::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.addCompanionObject: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=List::space=Prefix::unknown-request=2615::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3246::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.importDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2616::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3268::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.interfacesOpt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2617::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3304::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.permittedSubclassesOpt: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2618::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3395::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.classDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2619::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3609::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.recordDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2620::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3703::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.interfaceDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2621::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3729::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeBody: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2622::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3868::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeBodyDecls: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2623::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3884::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.annotationParents: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=List::space=Prefix::unknown-request=2624::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3991::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.annotationDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2625::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4213::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.enumDecl: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2626::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4271::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.enumConst: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2627::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4289::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.isTypeDeclStart: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2628::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4352::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeDecl: requests=1, distinct_request_outcomes=1
       prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2629::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=443::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.makeTemplate: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2582::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4478::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.tryConstant: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2630::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=456::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.makeSyntheticParam: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=TermName::space=Prefix::unknown-request=2583::outcome=unsupported prefix shape=1
-    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4706::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.compilationUnit: requests=1, distinct_request_outcomes=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=236::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.errorTypeTree: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=TypeTree::space=Prefix::unknown-request=2595::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=247::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.javaDot: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=Select::space=Prefix::unknown-request=2596::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=258::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.javaLangDot: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=Select::space=Prefix::unknown-request=2597::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=264::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.ObjectTpt: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=TypeTree::space=Prefix::unknown-request=2598::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2657::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.termDecl: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2630::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=270::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.javaLangRecord: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Name::space=Prefix::unknown-request=2599::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2803::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.fieldDecls: requests=1, distinct_request_outcomes=1
       prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::unknown-request=2631::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=283::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.arrayOf: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=AppliedTypeTree::space=Prefix::unknown-request=2600::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=2993::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.varDecl: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2632::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=300::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.classOf: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=TypeApply::space=Prefix::unknown-request=2601::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3024::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.memberDecl: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2633::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3068::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.makeCompanionObject: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=atSpan::space=Prefix::unknown-request=2634::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3085::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.addCompanionObject: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=List::space=Prefix::unknown-request=2635::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3246::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.importDecl: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2636::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3268::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.interfacesOpt: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2637::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3304::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.permittedSubclassesOpt: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2638::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3395::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.classDecl: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2639::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3609::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.recordDecl: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2640::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3703::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.interfaceDecl: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2641::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3729::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeBody: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2642::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3868::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeBodyDecls: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2643::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3884::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.annotationParents: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=List::space=Prefix::unknown-request=2644::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=3991::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.annotationDecl: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2645::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4213::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.enumDecl: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Int::space=Prefix::unknown-request=2646::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4271::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.enumConst: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2647::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4289::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.isTypeDeclStart: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2648::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4352::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.typeDecl: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2649::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=443::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.makeTemplate: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2602::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4478::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.tryConstant: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2650::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=456::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.makeSyntheticParam: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=type::name=TermName::space=Prefix::unknown-request=2603::outcome=unsupported prefix shape=1
+    compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=4706::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.compilationUnit: requests=1, distinct_request_outcomes=1
+      prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::unknown-request=2651::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=474::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.makeParam: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ValDef::space=Prefix::unknown-request=2584::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ValDef::space=Prefix::unknown-request=2604::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=529::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.makeConstructor: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2585::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2605::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=596::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.skipAhead: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2586::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2606::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=696::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.accept: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2587::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2607::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=742::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.acceptClosingAngle: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=PartialFunction::space=Prefix::unknown-request=2588::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=PartialFunction::space=Prefix::unknown-request=2608::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=747::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.identForType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Name::space=Prefix::unknown-request=2589::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Name::space=Prefix::unknown-request=2609::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=771::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.ident: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2590::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=JavaScanner::space=Prefix::unknown-request=2610::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=808::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.repsep: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::unknown-request=2591::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::unknown-request=2611::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=855::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.convertToTypeId: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2592::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2612::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=891::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.convertToTypeName: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2593::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Tree::space=Prefix::unknown-request=2613::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=938::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.qualId: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=RefTree::space=Prefix::unknown-request=2594::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=RefTree::space=Prefix::unknown-request=2614::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/JavaParsers.scala#tree=976::dotty.tools.dotc.parsing.JavaParsers$.JavaParser.optArrayBrackets: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2595::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2615::outcome=unsupported prefix shape=1
     compiler/src/dotty/tools/dotc/parsing/Parsers.scala#tree=12546::dotty.tools.dotc.parsing.Parsers$.Parser.caseClauses: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=type::name=ListBuffer::space=Prefix::outcome=error=1
     compiler/src/dotty/tools/dotc/parsing/Parsers.scala#tree=13042::dotty.tools.dotc.parsing.Parsers$.Parser.pattern1: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/parsing/Parsers.scala#tree=13507::dotty.tools.dotc.parsing.Parsers$.Parser.patterns: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=Function0::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/parsing/Parsers.scala#tree=14138::dotty.tools.dotc.parsing.Parsers$.Parser.defAnnotsMods: requests=1, distinct_request_outcomes=1
@@ -5855,7 +5879,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/parsing/Parsers.scala#tree=9555::dotty.tools.dotc.parsing.Parsers$.Parser.subExpr: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=Function0::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/parsing/Scanners.scala#tree=1153::dotty.tools.dotc.parsing.Scanners$.Scanner.dropUntil: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/parsing/xml/MarkupParsers.scala#tree=1061::dotty.tools.dotc.parsing.xml.MarkupParsers$.MarkupParser.xLiteral: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=Function0::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/parsing/xml/MarkupParsers.scala#tree=1106::dotty.tools.dotc.parsing.xml.MarkupParsers$.MarkupParser.xLiteralPattern: requests=1, distinct_request_outcomes=1
@@ -6192,10 +6216,12 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.reporting.Message$::namespace=type::name=String::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/reporting/Message.scala#tree=1492::dotty.tools.dotc.reporting.Message.inMessageContext: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.reporting.Message$::namespace=term::name=ctx::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    compiler/src/dotty/tools/dotc/reporting/Message.scala#tree=1576::dotty.tools.dotc.reporting.Message.append: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    compiler/src/dotty/tools/dotc/reporting/Message.scala#tree=1589::dotty.tools.dotc.reporting.Message.prepend: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    compiler/src/dotty/tools/dotc/reporting/Message.scala#tree=1576::dotty.tools.dotc.reporting.Message.append: requests=2, distinct_request_outcomes=2
+      prefix=dotty.tools.dotc.reporting.Message$::namespace=type::name=String::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
+    compiler/src/dotty/tools/dotc/reporting/Message.scala#tree=1589::dotty.tools.dotc.reporting.Message.prepend: requests=2, distinct_request_outcomes=2
+      prefix=dotty.tools.dotc.reporting.Message$::namespace=type::name=String::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/reporting/Message.scala#tree=1684::dotty.tools.dotc.reporting.Message.actions: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.reporting.Message$::namespace=term::name=List::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/reporting/Message.scala#tree=1687::dotty.tools.dotc.reporting.Message.toString: requests=1, distinct_request_outcomes=1
@@ -6321,24 +6347,24 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=267::dotty.tools.dotc.reporting.WConf.action: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=343::dotty.tools.dotc.reporting.WConf$.parseAction: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2945::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2946::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2967::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2968::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=428::dotty.tools.dotc.reporting.WConf$.parseFilters: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2948::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2949::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2970::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2971::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=644::dotty.tools.dotc.reporting.WConf$.parseFilter: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2951::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2952::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2973::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=2974::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=730::dotty.tools.dotc.reporting.WConf$.parsed: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2954::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2955::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2976::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ctx::space=Prefix::unknown-request=2977::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=833::dotty.tools.dotc.reporting.WConf$.fromSettings: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2957::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2958::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2979::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=List::space=Prefix::unknown-request=2980::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/reporting/WConf.scala#tree=933::dotty.tools.dotc.reporting.Suppression.matches: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -6745,26 +6771,42 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=125::dotty.tools.dotc.transform.CheckShadowing.isEnabled: requests=2, distinct_request_outcomes=2
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.CheckShadowing$::namespace=term::name=ctx::space=Prefix::outcome=other resolver Ok(None)=1
-    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=190::dotty.tools.dotc.transform.CheckShadowing.transformUnit: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=207::dotty.tools.dotc.transform.CheckShadowing.prepareForPackageDef: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=224::dotty.tools.dotc.transform.CheckShadowing.prepareForTemplate: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=241::dotty.tools.dotc.transform.CheckShadowing.prepareForBlock: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=270::dotty.tools.dotc.transform.CheckShadowing.prepareForValDef: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=190::dotty.tools.dotc.transform.CheckShadowing.transformUnit: requests=3, distinct_request_outcomes=3
+      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.dotc.transform.CheckShadowing$::namespace=type::name=Context::space=Prefix::outcome=other resolver Ok(None)=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
+    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=207::dotty.tools.dotc.transform.CheckShadowing.prepareForPackageDef: requests=3, distinct_request_outcomes=3
+      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.dotc.transform.CheckShadowing$::namespace=type::name=Context::space=Prefix::outcome=other resolver Ok(None)=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
+    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=224::dotty.tools.dotc.transform.CheckShadowing.prepareForTemplate: requests=3, distinct_request_outcomes=3
+      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.dotc.transform.CheckShadowing$::namespace=type::name=Context::space=Prefix::outcome=other resolver Ok(None)=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
+    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=241::dotty.tools.dotc.transform.CheckShadowing.prepareForBlock: requests=3, distinct_request_outcomes=3
+      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.dotc.transform.CheckShadowing$::namespace=type::name=Context::space=Prefix::outcome=other resolver Ok(None)=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
+    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=270::dotty.tools.dotc.transform.CheckShadowing.prepareForValDef: requests=3, distinct_request_outcomes=3
+      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.dotc.transform.CheckShadowing$::namespace=type::name=Context::space=Prefix::outcome=other resolver Ok(None)=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=340::dotty.tools.dotc.transform.CheckShadowing.prepareForTypeDef: requests=3, distinct_request_outcomes=3
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.CheckShadowing$::namespace=type::name=tpd::space=Prefix::outcome=other resolver Ok(None)=1
-    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=358::dotty.tools.dotc.transform.CheckShadowing.transformPackageDef: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=376::dotty.tools.dotc.transform.CheckShadowing.transformBlock: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=394::dotty.tools.dotc.transform.CheckShadowing.transformTemplate: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=358::dotty.tools.dotc.transform.CheckShadowing.transformPackageDef: requests=3, distinct_request_outcomes=3
+      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.dotc.transform.CheckShadowing$::namespace=type::name=Context::space=Prefix::outcome=other resolver Ok(None)=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
+    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=376::dotty.tools.dotc.transform.CheckShadowing.transformBlock: requests=3, distinct_request_outcomes=3
+      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.dotc.transform.CheckShadowing$::namespace=type::name=Context::space=Prefix::outcome=other resolver Ok(None)=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
+    compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=394::dotty.tools.dotc.transform.CheckShadowing.transformTemplate: requests=3, distinct_request_outcomes=3
+      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.dotc.transform.CheckShadowing$::namespace=type::name=Context::space=Prefix::outcome=other resolver Ok(None)=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/transform/CheckShadowing.scala#tree=448::dotty.tools.dotc.transform.CheckShadowing.transformTypeDef: requests=3, distinct_request_outcomes=3
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
@@ -7297,8 +7339,10 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/transform/PostTyper.scala#tree=1320::dotty.tools.dotc.transform.PostTyper.PostTyperTransformer.markInferred: requests=2, distinct_request_outcomes=2
       prefix=dotty.tools.dotc.ast::namespace=term::name=Trees::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
-    compiler/src/dotty/tools/dotc/transform/PostTyper.scala#tree=1379::dotty.tools.dotc.transform.PostTyper.PostTyperTransformer.checkUsableAsValue: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    compiler/src/dotty/tools/dotc/transform/PostTyper.scala#tree=1379::dotty.tools.dotc.transform.PostTyper.PostTyperTransformer.checkUsableAsValue: requests=3, distinct_request_outcomes=3
+      prefix=dotty.tools.dotc.ast::namespace=term::name=Trees::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/transform/PostTyper.scala#tree=1418::dotty.tools.dotc.transform.PostTyper.PostTyperTransformer.checkStableSelection: requests=2, distinct_request_outcomes=2
       prefix=dotty.tools.dotc.ast::namespace=term::name=Trees::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
@@ -7723,53 +7767,53 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/transform/localopt/DropForMap.scala#tree=729::dotty.tools.dotc.transform.localopt.DropForMap$.Converted$.unapply: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1200::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.verify: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3899::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3900::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3939::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3940::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=String::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1261::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.accepts: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=BooleanXn::space=Prefix::unknown-request=3903::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=term::name=BooleanXn::space=Prefix::unknown-request=3904::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=BooleanXn::space=Prefix::unknown-request=3943::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=BooleanXn::space=Prefix::unknown-request=3944::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=BooleanXn::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1336::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.lintToString: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=3907::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=3908::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=3947::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Type::space=Prefix::unknown-request=3948::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=Type::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1441::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.acceptableVariants: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=StringXn::space=Prefix::unknown-request=3911::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=term::name=StringXn::space=Prefix::unknown-request=3912::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=StringXn::space=Prefix::unknown-request=3951::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=StringXn::space=Prefix::unknown-request=3952::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=StringXn::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1463::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.okFlags: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=StringXn::space=Prefix::unknown-request=3915::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=term::name=StringXn::space=Prefix::unknown-request=3916::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=StringXn::space=Prefix::unknown-request=3955::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=StringXn::space=Prefix::unknown-request=3956::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=StringXn::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1471::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.hasFlag: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3919::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3920::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3959::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3960::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=String::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1479::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.hasAnyFlag: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3923::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3924::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3963::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3964::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=String::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1507::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.badFlag: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3927::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3928::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3967::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=String::space=Prefix::unknown-request=3968::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=String::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1530::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.errorAt: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3931::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3932::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3971::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3972::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=report::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1553::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.warningAt: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3935::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3936::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3975::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3976::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=report::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1680::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion$.apply: requests=1, distinct_request_outcomes=1
@@ -7777,23 +7821,23 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1696::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion$.stringXn: requests=1, distinct_request_outcomes=1
       prefix=scala.util.matching::namespace=term::name=Regex::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1759::dotty.tools.dotc.transform.localopt.TypedFormatChecker.partPosAt: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=partsElems::space=Prefix::unknown-request=3941::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=term::name=partsElems::space=Prefix::unknown-request=3942::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=partsElems::space=Prefix::unknown-request=3981::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=partsElems::space=Prefix::unknown-request=3982::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=partsElems::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1786::dotty.tools.dotc.transform.localopt.TypedFormatChecker.argError: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3945::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3946::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3985::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3986::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=report::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1816::dotty.tools.dotc.transform.localopt.TypedFormatChecker.partError: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3949::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3950::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3989::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3990::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=report::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=1837::dotty.tools.dotc.transform.localopt.TypedFormatChecker.partWarning: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3953::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3954::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3993::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=report::space=Prefix::unknown-request=3994::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=report::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=207::dotty.tools.dotc.transform.localopt.TypedFormatChecker.argType: requests=1, distinct_request_outcomes=1
@@ -7805,7 +7849,7 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=typer::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=638::dotty.tools.dotc.transform.localopt.TypedFormatChecker.checked: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::unknown-request=3877::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=ListBuffer::space=Prefix::unknown-request=3917::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=ListBuffer::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=649::dotty.tools.dotc.transform.localopt.TypedFormatChecker.at: requests=1, distinct_request_outcomes=1
@@ -7815,7 +7859,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=670::dotty.tools.dotc.transform.localopt.TypedFormatChecker.offset: requests=1, distinct_request_outcomes=1
       prefix=scala.util.matching::namespace=term::name=Regex::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=683::dotty.tools.dotc.transform.localopt.TypedFormatChecker.group: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=term::name=Option::space=Prefix::unknown-request=3883::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=Option::space=Prefix::unknown-request=3923::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=term::name=Option::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=693::dotty.tools.dotc.transform.localopt.TypedFormatChecker.stringOf: requests=1, distinct_request_outcomes=1
@@ -7823,16 +7867,16 @@ resolver_581_comparison:
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=709::dotty.tools.dotc.transform.localopt.TypedFormatChecker.intOf: requests=1, distinct_request_outcomes=1
       prefix=scala.util.matching::namespace=term::name=Regex::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=722::dotty.tools.dotc.transform.localopt.TypedFormatChecker.or: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=3888::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=3928::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=732::dotty.tools.dotc.transform.localopt.TypedFormatChecker.and: requests=3, distinct_request_outcomes=3
-      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=3891::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Boolean::space=Prefix::unknown-request=3931::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=852::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.isIndexed: requests=4, distinct_request_outcomes=4
-      prefix=<unsupported-prefix>::namespace=type::name=Option::space=Prefix::unknown-request=3894::outcome=unsupported prefix shape=1
-      prefix=<unsupported-prefix>::namespace=type::name=Option::space=Prefix::unknown-request=3895::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Option::space=Prefix::unknown-request=3934::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=type::name=Option::space=Prefix::unknown-request=3935::outcome=unsupported prefix shape=1
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.transform.localopt.TypedFormatChecker.formattableTypes$::namespace=type::name=Option::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/transform/localopt/FormatChecker.scala#tree=870::dotty.tools.dotc.transform.localopt.TypedFormatChecker.Conversion.isLeading: requests=1, distinct_request_outcomes=1
@@ -8109,7 +8153,7 @@ resolver_581_comparison:
       prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix::outcome=package term member unsupported=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/dotc/typer/Checking.scala#tree=6525::dotty.tools.dotc.typer.Checking.checkMembersOK: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/dotc/typer/CrossVersionChecks.scala#tree=101::dotty.tools.dotc.transform.CrossVersionChecks.checkExperimentalAnnots: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.transform.CrossVersionChecks$::namespace=type::name=Symbol::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     compiler/src/dotty/tools/dotc/typer/CrossVersionChecks.scala#tree=126::dotty.tools.dotc.transform.CrossVersionChecks.checkDeprecatedAnnots: requests=1, distinct_request_outcomes=1
@@ -9029,9 +9073,10 @@ resolver_581_comparison:
     compiler/src/dotty/tools/io/FileWriters.scala#tree=1455::dotty.tools.io.FileWriters$.DirEntryWriter.writeFile: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/io/FileWriters.scala#tree=1536::dotty.tools.io.FileWriters$.VirtualFileWriter.getFile: requests=1, distinct_request_outcomes=1
-      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=error=1
-    compiler/src/dotty/tools/io/FileWriters.scala#tree=1586::dotty.tools.io.FileWriters$.VirtualFileWriter.writeFile: requests=1, distinct_request_outcomes=1
-      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=error=1
+      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=external class success=1
+    compiler/src/dotty/tools/io/FileWriters.scala#tree=1586::dotty.tools.io.FileWriters$.VirtualFileWriter.writeFile: requests=2, distinct_request_outcomes=2
+      prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
+      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/io/FileWriters.scala#tree=189::dotty.tools.io.FileWriters$.DelayedReporter.error: requests=2, distinct_request_outcomes=2
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
       prefix=scala::namespace=type::name=ContextFunction1::space=Prefix::outcome=package type member unresolved=1
@@ -9080,7 +9125,7 @@ resolver_581_comparison:
     compiler/src/dotty/tools/io/FileWriters.scala#tree=786::dotty.tools.io.FileWriters$.ClassfileWriter$.DebugClassWriter.close: requests=1, distinct_request_outcomes=1
       prefix=dotty.tools.dotc.core::namespace=term::name=Contexts::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/io/FileWriters.scala#tree=894::dotty.tools.io.FileWriters$.FileWriter$.apply: requests=1, distinct_request_outcomes=1
-      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=error=1
+      prefix=dotty.tools.io::namespace=type::name=AbstractFile::space=Prefix::outcome=external class success=1
     compiler/src/dotty/tools/io/Streamable.scala#tree=186::dotty.tools.io.Streamable$.Chars.chars: requests=1, distinct_request_outcomes=1
       prefix=scala.io::namespace=term::name=Source::space=Prefix::outcome=package term member unsupported=1
     compiler/src/dotty/tools/io/Streamable.scala#tree=204::dotty.tools.io.Streamable$.Chars.lines: requests=2, distinct_request_outcomes=2
@@ -9094,69 +9139,69 @@ resolver_581_comparison:
     compiler/src/scala/quoted/runtime/impl/QuotesImpl.scala#tree=17282::scala.quoted.runtime.impl.QuotesImpl.reflect$.withDefaultPos: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=ContextFunction1::space=Prefix::outcome=package type member unresolved=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=1462::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4695::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4736::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=1604::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitConstant: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4696::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4737::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2008::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4697::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4738::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2039::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitSignature: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4698::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4739::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2099::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitSelector: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4699::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4740::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2167::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitSymbol: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4700::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4741::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2198::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitParamClause: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4701::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4742::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2209::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4702::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4743::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2220::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4703::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4744::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2231::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4704::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4745::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2242::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4705::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4746::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2253::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4706::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4747::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2264::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4707::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4748::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2275::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4708::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4749::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2286::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4709::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4750::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2297::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4710::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4751::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2310::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.++=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4711::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4752::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2335::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.StringOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4712::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4753::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2352::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.TreeOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4713::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4754::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2365::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.TreeOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4714::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4755::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2378::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.TreeOps.++=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4715::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4756::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2393::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.TreeOps.+++=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4716::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4757::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2410::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.ConstantOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4717::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4758::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2427::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.TypeOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4718::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4759::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2440::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.TypeOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4719::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4760::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2453::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.TypeOps.++=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4720::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4761::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2473::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.SignatureOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4721::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4762::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2493::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.SelectorOps.++=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4722::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4763::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2510::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.SymbolOps.+=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4723::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4764::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2530::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.ParamClauseOps.++=: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4724::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4765::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2570::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitOption: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4725::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4766::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=2635::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.visitList: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4726::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4767::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=30::scala.quoted.runtime.impl.printers.Extractors$.showTree: requests=1, distinct_request_outcomes=1
       prefix=scala.quoted::namespace=term::name=quotes::space=Prefix::outcome=package term member unsupported=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=50::scala.quoted.runtime.impl.printers.Extractors$.showType: requests=1, distinct_request_outcomes=1
@@ -9167,99 +9212,99 @@ resolver_581_comparison:
       prefix=scala.quoted::namespace=type::name=Quotes::space=Prefix::outcome=external class success=1
       prefix=scala.quoted::namespace=type::name=Singleton::space=Prefix::outcome=package type member unresolved=2
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=595::scala.quoted.runtime.impl.printers.Extractors$.ExtractorsPrinter.result: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4694::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4735::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=70::scala.quoted.runtime.impl.printers.Extractors$.showConstant: requests=1, distinct_request_outcomes=1
       prefix=scala.quoted::namespace=term::name=quotes::space=Prefix::outcome=package term member unsupported=1
     compiler/src/scala/quoted/runtime/impl/printers/Extractors.scala#tree=90::scala.quoted.runtime.impl.printers.Extractors$.showSymbol: requests=1, distinct_request_outcomes=1
       prefix=scala.quoted::namespace=term::name=quotes::space=Prefix::outcome=package term member unsupported=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=2756::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4728::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4769::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=2796::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printQualTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4729::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4770::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=2973::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.flatBlock: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4730::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4771::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3050::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printFlatBlock: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4731::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4772::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3231::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printStats: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4732::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4773::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3286::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printList: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4733::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4774::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3309::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTrees: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4734::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4775::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3333::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTypeTrees: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4735::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4776::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3385::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTypes: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4736::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4777::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3436::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printSelectors: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4737::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4778::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3484::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printCases: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4738::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4779::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3532::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTypeCases: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4739::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4780::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3580::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printPatterns: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4740::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4781::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3632::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTypesOrBounds: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4741::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4782::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3704::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTargsDefs: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4742::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4783::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=3948::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printSeparatedParamDefs: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4743::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4784::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=4011::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printMethdArgsDefs: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4744::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4785::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=4063::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printLambdaArgsDefs: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4745::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4786::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=4113::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printAnnotations: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4746::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4787::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=4279::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printParamDef: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4747::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4788::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=4549::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printPattern: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4748::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4789::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=4698::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printConstant: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4749::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4790::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=4745::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTypeOrBoundsTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4750::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4791::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=5118::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printTypeTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4751::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4792::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=5898::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printType: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4752::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4793::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=5960::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printSelector: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4753::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4794::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6020::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printDefinitionName: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4754::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4795::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6059::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printAnnotation: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4755::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4796::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=605::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.indented: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4727::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4768::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6125::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printDefAnnotations: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4756::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4797::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6304::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printRefinement: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4757::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4798::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6396::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printMethodicTypeParams: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4758::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4799::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6477::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printBoundsTree: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4759::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4800::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6620::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printProtectedOrPrivate: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4760::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4801::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6668::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.printFullClassName: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4761::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4802::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6859::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.splicedName: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4762::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4803::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6922::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.SpecialOp$.unapply: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4763::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4804::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=6987::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.Annotation$.unapply: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4764::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4805::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=7032::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.Types$.Sequence$.unapply: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4765::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4806::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=7069::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.Types$.Repeated$.unapply: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4766::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4807::outcome=unsupported prefix shape=1
     compiler/src/scala/quoted/runtime/impl/printers/SourceCode.scala#tree=7106::scala.quoted.runtime.impl.printers.SourceCode$.SourceCodePrinter.PackageObject$.unapply: requests=1, distinct_request_outcomes=1
-      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4767::outcome=unsupported prefix shape=1
+      prefix=<unsupported-prefix>::namespace=term::name=reflect::space=Prefix::unknown-request=4808::outcome=unsupported prefix shape=1
     library/src/scala/Enumeration.scala#tree=1023::scala.Enumeration.ValueSet$.fromBitMask: requests=2, distinct_request_outcomes=2
       prefix=scala.collection::namespace=term::name=immutable::space=Prefix::outcome=package term member unsupported=1
       prefix=scala.reflect::namespace=term::name=NameTransformer::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/Enumeration.scala#tree=1083::scala.Enumeration.ValueSet$.fromSpecific: requests=2, distinct_request_outcomes=2
-      prefix=scala.collection::namespace=term::name=mutable::space=Prefix::outcome=package term member unsupported=1
-      prefix=scala.reflect::namespace=term::name=NameTransformer::space=Prefix::outcome=package term member unsupported=1
+      prefix=scala.collection.mutable::namespace=type::name=Builder::space=Prefix::outcome=external class success=1
+      prefix=scala.collection::namespace=term::name=mutable::space=Prefix::outcome=other success=1
     library/src/scala/Enumeration.scala#tree=132::scala.Enumeration.values: requests=1, distinct_request_outcomes=1
       prefix=scala.reflect::namespace=term::name=NameTransformer::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/Enumeration.scala#tree=157::scala.Enumeration.nextNameOrNull: requests=1, distinct_request_outcomes=1
@@ -9297,7 +9342,7 @@ resolver_581_comparison:
       prefix=scala.collection::namespace=term::name=immutable::space=Prefix::outcome=package term member unsupported=1
       prefix=scala.reflect::namespace=term::name=NameTransformer::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/Enumeration.scala#tree=696::scala.Enumeration.ValueSet.empty: requests=1, distinct_request_outcomes=1
-      prefix=scala.collection::namespace=type::name=SpecificIterableFactory::space=Prefix::outcome=error=1
+      prefix=scala.collection::namespace=type::name=SpecificIterableFactory::space=Prefix::outcome=external class success=1
     library/src/scala/Enumeration.scala#tree=700::scala.Enumeration.ValueSet.knownSize: requests=2, distinct_request_outcomes=2
       prefix=scala.collection::namespace=term::name=immutable::space=Prefix::outcome=package term member unsupported=1
       prefix=scala.reflect::namespace=term::name=NameTransformer::space=Prefix::outcome=package term member unsupported=1
@@ -9322,10 +9367,6 @@ resolver_581_comparison:
     library/src/scala/Enumeration.scala#tree=795::scala.Enumeration.ValueSet.toBitMask: requests=2, distinct_request_outcomes=2
       prefix=scala.collection::namespace=term::name=immutable::space=Prefix::outcome=package term member unsupported=1
       prefix=scala.reflect::namespace=term::name=NameTransformer::space=Prefix::outcome=package term member unsupported=1
-    library/src/scala/Enumeration.scala#tree=805::scala.Enumeration.ValueSet.fromSpecific: requests=1, distinct_request_outcomes=1
-      prefix=scala.collection::namespace=type::name=SpecificIterableFactory::space=Prefix::outcome=error=1
-    library/src/scala/Enumeration.scala#tree=809::scala.Enumeration.ValueSet.newSpecificBuilder: requests=1, distinct_request_outcomes=1
-      prefix=scala.collection::namespace=type::name=SpecificIterableFactory::space=Prefix::outcome=error=1
     library/src/scala/Enumeration.scala#tree=824::scala.Enumeration.ValueSet.map: requests=1, distinct_request_outcomes=1
       prefix=scala.reflect::namespace=term::name=NameTransformer::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/Enumeration.scala#tree=841::scala.Enumeration.ValueSet.flatMap: requests=1, distinct_request_outcomes=1
@@ -9335,7 +9376,7 @@ resolver_581_comparison:
     library/src/scala/StringContext.scala#tree=39::scala.StringContext.checkLengths: requests=1, distinct_request_outcomes=1
       prefix=scala.collection::namespace=type::name=Seq::space=Prefix::outcome=error=1
     library/src/scala/StringContext.scala#tree=93::scala.StringContext.standardInterpolator: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/collection/ArrayOps.scala#tree=1035::scala.collection.ArrayOps.iterateUntilEmpty: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/collection/ArrayOps.scala#tree=103::scala.collection.ArrayOps$.ArrayView.toString: requests=1, distinct_request_outcomes=1
@@ -9348,11 +9389,13 @@ resolver_581_comparison:
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/collection/ArrayOps.scala#tree=1086::scala.collection.ArrayOps.dropRight: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
-    library/src/scala/collection/ArrayOps.scala#tree=1120::scala.collection.ArrayOps.takeWhile: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/ArrayOps.scala#tree=1120::scala.collection.ArrayOps.takeWhile: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/ArrayOps.scala#tree=1155::scala.collection.ArrayOps.dropWhile: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/ArrayOps.scala#tree=1155::scala.collection.ArrayOps.dropWhile: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/ArrayOps.scala#tree=1509::scala.collection.ArrayOps.stepper: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
@@ -9360,8 +9403,9 @@ resolver_581_comparison:
       prefix=scala.collection.ArrayOps::namespace=type::name=GroupedIterator::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/ArrayOps.scala#tree=156::scala.collection.ArrayOps$.WithFilter.foreach: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
-    library/src/scala/collection/ArrayOps.scala#tree=1570::scala.collection.ArrayOps.span: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/ArrayOps.scala#tree=1570::scala.collection.ArrayOps.span: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/ArrayOps.scala#tree=1723::scala.collection.ArrayOps.partitionMap: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
@@ -9369,8 +9413,9 @@ resolver_581_comparison:
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/collection/ArrayOps.scala#tree=1972::scala.collection.ArrayOps.filter: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
-    library/src/scala/collection/ArrayOps.scala#tree=1989::scala.collection.ArrayOps.filterNot: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/ArrayOps.scala#tree=1989::scala.collection.ArrayOps.filterNot: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/ArrayOps.scala#tree=210::scala.collection.ArrayOps$.WithFilter.map: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
@@ -9386,11 +9431,13 @@ resolver_581_comparison:
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/collection/ArrayOps.scala#tree=2494::scala.collection.ArrayOps.lastIndexWhere: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
-    library/src/scala/collection/ArrayOps.scala#tree=2525::scala.collection.ArrayOps.find: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/ArrayOps.scala#tree=2525::scala.collection.ArrayOps.find: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/ArrayOps.scala#tree=2542::scala.collection.ArrayOps.exists: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/ArrayOps.scala#tree=2542::scala.collection.ArrayOps.exists: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/ArrayOps.scala#tree=271::scala.collection.ArrayOps$.WithFilter.flatMap: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
@@ -9410,8 +9457,9 @@ resolver_581_comparison:
       prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
       prefix=scala::namespace=type::name=Function2::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction2::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/ArrayOps.scala#tree=343::scala.collection.ArrayOps$.WithFilter.withFilter: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/ArrayOps.scala#tree=343::scala.collection.ArrayOps$.WithFilter.withFilter: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/ArrayOps.scala#tree=3624::scala.collection.ArrayOps.map: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
@@ -9423,11 +9471,13 @@ resolver_581_comparison:
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/collection/ArrayOps.scala#tree=3865::scala.collection.ArrayOps.flatten: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
-    library/src/scala/collection/ArrayOps.scala#tree=3938::scala.collection.ArrayOps.collect: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/ArrayOps.scala#tree=3938::scala.collection.ArrayOps.collect: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/ArrayOps.scala#tree=4006::scala.collection.ArrayOps.collectFirst: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/ArrayOps.scala#tree=4006::scala.collection.ArrayOps.collectFirst: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/ArrayOps.scala#tree=4087::scala.collection.ArrayOps.zip: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
@@ -9459,8 +9509,9 @@ resolver_581_comparison:
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/collection/ArrayOps.scala#tree=477::scala.collection.ArrayOps$.ReverseIterator.hasNext: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
-    library/src/scala/collection/ArrayOps.scala#tree=4791::scala.collection.ArrayOps.contains: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/ArrayOps.scala#tree=4791::scala.collection.ArrayOps.contains: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/ArrayOps.scala#tree=4903::scala.collection.ArrayOps.patch: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
@@ -9476,8 +9527,9 @@ resolver_581_comparison:
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/collection/ArrayOps.scala#tree=5477::scala.collection.ArrayOps.foreach: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
-    library/src/scala/collection/ArrayOps.scala#tree=5484::scala.collection.ArrayOps.distinct: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/ArrayOps.scala#tree=5484::scala.collection.ArrayOps.distinct: requests=2, distinct_request_outcomes=2
+      prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/collection/ArrayOps.scala#tree=5506::scala.collection.ArrayOps.distinctBy: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/collection/ArrayOps.scala#tree=554::scala.collection.ArrayOps$.GroupedIterator.hasNext: requests=1, distinct_request_outcomes=1
@@ -9564,11 +9616,13 @@ resolver_581_comparison:
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/collection/ArrayOps.scala#tree=956::scala.collection.ArrayOps.init: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=term::name=Predef::space=Prefix::outcome=package term member unsupported=1
-    library/src/scala/collection/ArrayOps.scala#tree=973::scala.collection.ArrayOps.tails: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/ArrayOps.scala#tree=973::scala.collection.ArrayOps.tails: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/ArrayOps.scala#tree=990::scala.collection.ArrayOps.inits: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/ArrayOps.scala#tree=990::scala.collection.ArrayOps.inits: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/IndexedSeqView.scala#tree=122::scala.collection.IndexedSeqView.appended: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.IndexedSeqView::namespace=type::name=Appended::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
@@ -9604,14 +9658,17 @@ resolver_581_comparison:
       prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
       prefix=scala::namespace=type::name=Function2::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction2::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/Iterable.scala#tree=1742::scala.collection.IterableOps.flatten: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/Iterable.scala#tree=1742::scala.collection.IterableOps.flatten: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/Iterable.scala#tree=2395::scala.collection.IterableOps.tails: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/Iterable.scala#tree=2395::scala.collection.IterableOps.tails: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/Iterable.scala#tree=2422::scala.collection.IterableOps.inits: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/Iterable.scala#tree=2422::scala.collection.IterableOps.inits: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/Iterable.scala#tree=3862::scala.collection.SortedMapFactoryDefaults.withFilter: requests=1, distinct_request_outcomes=1
       prefix=scala.collection::namespace=type::name=SortedMapOps::space=Prefix::outcome=error=1
@@ -9654,7 +9711,7 @@ resolver_581_comparison:
     library/src/scala/collection/IterableOnce.scala#tree=3264::scala.collection.IterableOnceOps.Maximized.apply: requests=1, distinct_request_outcomes=1
       prefix=scala.runtime::namespace=type::name=AbstractFunction2::space=Prefix::outcome=external class success=1
     library/src/scala/collection/IterableOnce.scala#tree=3491::scala.collection.IterableOnceOps.collectFirst: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/collection/IterableOnce.scala#tree=3521::scala.collection.IterableOnceOps.aggregate: requests=3, distinct_request_outcomes=3
       prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
       prefix=scala::namespace=type::name=Function2::space=Prefix::outcome=external class success=1
@@ -9665,19 +9722,23 @@ resolver_581_comparison:
       prefix=scala.collection.mutable::namespace=type::name=StringBuilder::space=Prefix::outcome=error=1
     library/src/scala/collection/IterableOnce.scala#tree=3730::scala.collection.IterableOnceOps.addString: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=type::name=StringBuilder::space=Prefix::outcome=error=1
-    library/src/scala/collection/Iterator.scala#tree=1075::scala.collection.Iterator.filter: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/Iterator.scala#tree=1075::scala.collection.Iterator.filter: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/Iterator.scala#tree=1103::scala.collection.Iterator.filterNot: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/Iterator.scala#tree=1103::scala.collection.Iterator.filterNot: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/Iterator.scala#tree=1221::scala.collection.Iterator.withFilter: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/Iterator.scala#tree=1221::scala.collection.Iterator.withFilter: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/Iterator.scala#tree=1358::scala.collection.Iterator.distinct: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    library/src/scala/collection/Iterator.scala#tree=1639::scala.collection.Iterator.flatten: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
+    library/src/scala/collection/Iterator.scala#tree=1639::scala.collection.Iterator.flatten: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/Iterator.scala#tree=1680::scala.collection.Iterator.concat: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.Iterator::namespace=type::name=ConcatIterator::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
@@ -9689,8 +9750,9 @@ resolver_581_comparison:
       prefix=scala.collection.mutable::namespace=type::name=Queue::space=Prefix::outcome=error=1
     library/src/scala/collection/Iterator.scala#tree=300::scala.collection.Iterator.GroupedIterator.withPadding: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=Function0::space=Prefix::outcome=external class success=1
-    library/src/scala/collection/Iterator.scala#tree=3609::scala.collection.Iterator$.unfold: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/Iterator.scala#tree=3609::scala.collection.Iterator$.unfold: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/Iterator.scala#tree=455::scala.collection.Iterator.GroupedIterator.fulfill: requests=3, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=term::name=ArrayBuilder::space=Prefix::outcome=package term member unsupported=3
@@ -9699,34 +9761,42 @@ resolver_581_comparison:
     library/src/scala/collection/Seq.scala#tree=2049::scala.collection.SeqOps.indices: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable::namespace=term::name=Range::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/collection/Seq.scala#tree=543::scala.collection.SeqOps.distinct: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    library/src/scala/collection/Seq.scala#tree=751::scala.collection.SeqOps.segmentLength: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
+    library/src/scala/collection/Seq.scala#tree=751::scala.collection.SeqOps.segmentLength: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/Seq.scala#tree=803::scala.collection.SeqOps.prefixLength: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/Seq.scala#tree=803::scala.collection.SeqOps.prefixLength: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/Seq.scala#tree=832::scala.collection.SeqOps.indexWhere: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/Seq.scala#tree=832::scala.collection.SeqOps.indexWhere: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/Seq.scala#tree=850::scala.collection.SeqOps.indexOf: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/Seq.scala#tree=850::scala.collection.SeqOps.indexOf: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/Seq.scala#tree=888::scala.collection.SeqOps.lastIndexOf: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/Seq.scala#tree=888::scala.collection.SeqOps.lastIndexOf: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/Seq.scala#tree=946::scala.collection.SeqOps.lastIndexWhere: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/Seq.scala#tree=946::scala.collection.SeqOps.lastIndexWhere: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/Seq.scala#tree=97::scala.collection.Seq.hashCode: requests=1, distinct_request_outcomes=1
       prefix=scala.util.hashing::namespace=term::name=MurmurHash3::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/collection/StrictOptimizedIterableOps.scala#tree=540::scala.collection.StrictOptimizedIterableOps.strictOptimizedCollect: requests=3, distinct_request_outcomes=1
       prefix=scala.runtime::namespace=term::name=Statics::space=Prefix::outcome=package term member unsupported=3
-    library/src/scala/collection/StrictOptimizedIterableOps.scala#tree=804::scala.collection.StrictOptimizedIterableOps.filter: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/StrictOptimizedIterableOps.scala#tree=804::scala.collection.StrictOptimizedIterableOps.filter: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/StrictOptimizedIterableOps.scala#tree=817::scala.collection.StrictOptimizedIterableOps.filterNot: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/StrictOptimizedIterableOps.scala#tree=817::scala.collection.StrictOptimizedIterableOps.filterNot: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/StringOps.scala#tree=1052::scala.collection.StringOps.++: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.StringOps$::namespace=type::name=Char::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
@@ -9875,16 +9945,19 @@ resolver_581_comparison:
     library/src/scala/collection/StringOps.scala#tree=3275::scala.collection.StringOps.dropRight: requests=3, distinct_request_outcomes=2
       prefix=scala.collection.StringOps$::namespace=type::name=Int::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=scala.collection.StringOps$::namespace=type::name=String::space=Prefix::outcome=class member scope unavailable: incomplete class info=2
-    library/src/scala/collection/StringOps.scala#tree=3286::scala.collection.StringOps.tails: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/StringOps.scala#tree=3286::scala.collection.StringOps.tails: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/StringOps.scala#tree=3297::scala.collection.StringOps.inits: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/StringOps.scala#tree=3297::scala.collection.StringOps.inits: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/StringOps.scala#tree=3332::scala.collection.StringOps.iterateUntilEmpty: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.StringOps$::namespace=term::name=Iterator::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    library/src/scala/collection/StringOps.scala#tree=3407::scala.collection.StringOps.filterNot: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/StringOps.scala#tree=3407::scala.collection.StringOps.filterNot: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/StringOps.scala#tree=3423::scala.collection.StringOps.copyToArray: requests=2, distinct_request_outcomes=1
       prefix=scala.collection.StringOps$::namespace=type::name=Array::space=Prefix::outcome=class member scope unavailable: incomplete class info=2
@@ -9892,20 +9965,25 @@ resolver_581_comparison:
       prefix=scala.collection.StringOps$::namespace=type::name=Array::space=Prefix::outcome=class member scope unavailable: incomplete class info=2
     library/src/scala/collection/StringOps.scala#tree=3478::scala.collection.StringOps.copyToArray: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.StringOps$::namespace=term::name=IterableOnce::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    library/src/scala/collection/StringOps.scala#tree=3571::scala.collection.StringOps.exists: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/StringOps.scala#tree=3571::scala.collection.StringOps.exists: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/StringOps.scala#tree=3596::scala.collection.StringOps.find: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/StringOps.scala#tree=3596::scala.collection.StringOps.find: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/StringOps.scala#tree=3623::scala.collection.StringOps.dropWhile: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/StringOps.scala#tree=3623::scala.collection.StringOps.dropWhile: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/StringOps.scala#tree=3651::scala.collection.StringOps.takeWhile: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/StringOps.scala#tree=3651::scala.collection.StringOps.takeWhile: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/StringOps.scala#tree=3701::scala.collection.StringOps.span: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/StringOps.scala#tree=3701::scala.collection.StringOps.span: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/StringOps.scala#tree=3714::scala.collection.StringOps.grouped: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.StringOps::namespace=type::name=GroupedIterator::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
@@ -9933,23 +10011,27 @@ resolver_581_comparison:
       prefix=scala.collection.immutable::namespace=type::name=WrappedString::space=Prefix::outcome=error=1
     library/src/scala/collection/StringOps.scala#tree=4083::scala.collection.StringOps.permutations: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable::namespace=type::name=WrappedString::space=Prefix::outcome=error=1
-    library/src/scala/collection/StringOps.scala#tree=478::scala.collection.StringOps$.WithFilter.withFilter: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/StringOps.scala#tree=478::scala.collection.StringOps$.WithFilter.withFilter: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/StringOps.scala#tree=550::scala.collection.StringOps.sizeCompare: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.StringOps$::namespace=term::name=Integer::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/StringOps.scala#tree=560::scala.collection.StringOps.lengthCompare: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.StringOps$::namespace=term::name=Integer::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    library/src/scala/collection/StringOps.scala#tree=838::scala.collection.StringOps.collect: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/StringOps.scala#tree=838::scala.collection.StringOps.collect: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/StringOps.scala#tree=911::scala.collection.StringOps.collect: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/StringOps.scala#tree=911::scala.collection.StringOps.collect: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/StringOps.scala#tree=969::scala.collection.StringOps.concat: requests=3, distinct_request_outcomes=1
       prefix=scala.collection.StringOps$::namespace=term::name=immutable::space=Prefix::outcome=class member scope unavailable: incomplete class info=3
-    library/src/scala/collection/StringParsers.scala#tree=1361::scala.collection.StringParsers$.checkFloatFormat: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/StringParsers.scala#tree=1361::scala.collection.StringParsers$.checkFloatFormat: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/View.scala#tree=2459::scala.collection.View$.TakeRightIterator.init: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=type::name=ArrayBuffer::space=Prefix::outcome=error=1
@@ -9959,8 +10041,9 @@ resolver_581_comparison:
       prefix=scala.collection.mutable::namespace=type::name=ArrayBuffer::space=Prefix::outcome=error=1
     library/src/scala/collection/concurrent/Map.scala#tree=109::scala.collection.concurrent.Map.removeRefEq: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=type::name=Map::space=Prefix::outcome=error=1
-    library/src/scala/collection/concurrent/Map.scala#tree=141::scala.collection.concurrent.Map.updateWith: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/concurrent/Map.scala#tree=141::scala.collection.concurrent.Map.updateWith: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/convert/JavaCollectionWrappers.scala#tree=1054::scala.collection.convert.JavaCollectionWrappers$.MutableSetWrapper.add: requests=1, distinct_request_outcomes=1
       prefix=scala.jdk::namespace=term::name=CollectionConverters::space=Prefix::outcome=package term member unsupported=1
@@ -9982,8 +10065,9 @@ resolver_581_comparison:
       prefix=scala.jdk::namespace=term::name=CollectionConverters::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/collection/convert/JavaCollectionWrappers.scala#tree=167::scala.collection.convert.JavaCollectionWrappers$.JIteratorWrapper.equals: requests=1, distinct_request_outcomes=1
       prefix=scala.jdk::namespace=term::name=CollectionConverters::space=Prefix::outcome=package term member unsupported=1
-    library/src/scala/collection/convert/JavaCollectionWrappers.scala#tree=2001::scala.collection.convert.JavaCollectionWrappers$.JMapWrapperLike.updateWith: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/convert/JavaCollectionWrappers.scala#tree=2001::scala.collection.convert.JavaCollectionWrappers$.JMapWrapperLike.updateWith: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/convert/JavaCollectionWrappers.scala#tree=2055::scala.collection.convert.JavaCollectionWrappers$.JMapWrapperLike.remove: requests=1, distinct_request_outcomes=1
       prefix=scala.jdk::namespace=term::name=CollectionConverters::space=Prefix::outcome=package term member unsupported=1
@@ -10007,8 +10091,9 @@ resolver_581_comparison:
       prefix=scala.jdk::namespace=term::name=CollectionConverters::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/collection/convert/JavaCollectionWrappers.scala#tree=2448::scala.collection.convert.JavaCollectionWrappers$.JConcurrentMapWrapper.replace: requests=1, distinct_request_outcomes=1
       prefix=scala.jdk::namespace=term::name=CollectionConverters::space=Prefix::outcome=package term member unsupported=1
-    library/src/scala/collection/convert/JavaCollectionWrappers.scala#tree=2581::scala.collection.convert.JavaCollectionWrappers$.JConcurrentMapWrapper.updateWith: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/convert/JavaCollectionWrappers.scala#tree=2581::scala.collection.convert.JavaCollectionWrappers$.JConcurrentMapWrapper.updateWith: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/convert/JavaCollectionWrappers.scala#tree=2610::scala.collection.convert.JavaCollectionWrappers$.DictionaryWrapper.size: requests=1, distinct_request_outcomes=1
       prefix=scala.jdk::namespace=term::name=CollectionConverters::space=Prefix::outcome=package term member unsupported=1
@@ -10110,9 +10195,10 @@ resolver_581_comparison:
     library/src/scala/collection/immutable/ArraySeq.scala#tree=1217::scala.collection.immutable.ArraySeq$.newBuilder: requests=6, distinct_request_outcomes=2
       prefix=scala.collection.convert.impl::namespace=term::name=ArrayBuffer::space=Prefix::outcome=package term member unsupported=3
       prefix=scala.collection.mutable::namespace=term::name=ArrayBuffer::space=Prefix::outcome=package term member unsupported=3
-    library/src/scala/collection/immutable/ArraySeq.scala#tree=1239::scala.collection.immutable.ArraySeq$.fill: requests=3, distinct_request_outcomes=3
+    library/src/scala/collection/immutable/ArraySeq.scala#tree=1239::scala.collection.immutable.ArraySeq$.fill: requests=4, distinct_request_outcomes=4
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
       prefix=scala.collection.convert.impl::namespace=type::name=Int::space=Prefix::outcome=package type member unresolved=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/immutable/ArraySeq.scala#tree=1294::scala.collection.immutable.ArraySeq$.tabulate: requests=3, distinct_request_outcomes=1
       prefix=scala.collection.convert.impl::namespace=term::name=Array::space=Prefix::outcome=package term member unsupported=3
@@ -10413,9 +10499,9 @@ resolver_581_comparison:
     library/src/scala/collection/immutable/HashMap.scala#tree=10449::scala.collection.immutable.HashMapBuilder.clear: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.MapNode$::namespace=term::name=Node::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/HashMap.scala#tree=1341::scala.collection.immutable.HashMap.head: requests=1, distinct_request_outcomes=1
-      prefix=scala.collection::namespace=type::name=Iterator::space=Prefix::outcome=error=1
+      prefix=scala.collection::namespace=type::name=Iterator::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/HashMap.scala#tree=1348::scala.collection.immutable.HashMap.last: requests=1, distinct_request_outcomes=1
-      prefix=scala.collection::namespace=type::name=Iterator::space=Prefix::outcome=error=1
+      prefix=scala.collection::namespace=type::name=Iterator::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/HashMap.scala#tree=1729::scala.collection.immutable.HashMap.merged: requests=3, distinct_request_outcomes=3
       prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
       prefix=scala::namespace=type::name=Function2::space=Prefix::outcome=external class success=1
@@ -10515,9 +10601,9 @@ resolver_581_comparison:
     library/src/scala/collection/immutable/IntMap.scala#tree=2591::scala.collection.immutable.IntMap.++: requests=4, distinct_request_outcomes=2
       prefix=scala.collection.immutable.IntMap$::namespace=type::name=AbstractMap::space=Prefix::outcome=other resolver Ok(None)=2
       prefix=scala.collection.immutable.IntMapUtils$::namespace=type::name=AbstractMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=2
-    library/src/scala/collection/immutable/IntMap.scala#tree=2674::scala.collection.immutable.IntMap.writeReplace: requests=3, distinct_request_outcomes=2
+    library/src/scala/collection/immutable/IntMap.scala#tree=2674::scala.collection.immutable.IntMap.writeReplace: requests=2, distinct_request_outcomes=2
       prefix=scala.collection.generic::namespace=type::name=DefaultSerializationProxy::space=Prefix::outcome=external class success=1
-      prefix=scala.collection.immutable.IntMapUtils$::namespace=type::name=Factory::space=Prefix::outcome=class member scope unavailable: incomplete class info=2
+      prefix=scala.collection.immutable.IntMapUtils$::namespace=type::name=Factory::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/IntMap.scala#tree=362::scala.collection.immutable.IntMap$.Bin.bin: requests=4, distinct_request_outcomes=2
       prefix=scala.collection.immutable.IntMap$::namespace=type::name=AbstractMap::space=Prefix::outcome=other resolver Ok(None)=2
       prefix=scala.collection.immutable.IntMapUtils$::namespace=type::name=AbstractMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=2
@@ -10551,8 +10637,9 @@ resolver_581_comparison:
       prefix=scala.collection.immutable.IntMap$::namespace=type::name=scala::space=Prefix::outcome=other resolver Ok(None)=1
       prefix=scala.collection.immutable.IntMapUtils$::namespace=type::name=scala::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=scala.collection.mutable::namespace=type::name=ListBuffer::space=Prefix::outcome=error=1
-    library/src/scala/collection/immutable/LazyList.scala#tree=1007::scala.collection.immutable.LazyList.flatten: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/LazyList.scala#tree=1007::scala.collection.immutable.LazyList.flatten: requests=3, distinct_request_outcomes=2
+      prefix=scala.collection.immutable.LazyList$::namespace=type::name=IterableOnce::space=Prefix::outcome=class member scope unavailable: incomplete class info=2
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/LazyList.scala#tree=1035::scala.collection.immutable.LazyList.zip: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.LazyList$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/LazyList.scala#tree=104::scala.collection.immutable.LazyList.rawHead: requests=1, distinct_request_outcomes=1
@@ -10616,14 +10703,14 @@ resolver_581_comparison:
     library/src/scala/collection/immutable/LazyList.scala#tree=274::scala.collection.immutable.LazyList.knownNonEmpty: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.LazyList$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/LazyList.scala#tree=2977::scala.collection.immutable.LazyList$.from: requests=1, distinct_request_outcomes=1
-      prefix=scala.collection::namespace=type::name=IterableOnce::space=Prefix::outcome=error=1
+      prefix=scala.collection::namespace=type::name=IterableOnce::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/LazyList.scala#tree=3153::scala.collection.immutable.LazyList$.from: requests=1, distinct_request_outcomes=1
-      prefix=scala.collection::namespace=type::name=IterableOnce::space=Prefix::outcome=error=1
+      prefix=scala.collection::namespace=type::name=IterableOnce::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/LazyList.scala#tree=3299::scala.collection.immutable.LazyList$.newBuilder: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=type::name=ReusableBuilder::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/LazyList.scala#tree=3487::scala.collection.immutable.LazyList$.WithFilter.withFilter: requests=2, distinct_request_outcomes=2
       prefix=scala.collection::namespace=type::name=WithFilter::space=Prefix::outcome=external class success=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/LazyList.scala#tree=351::scala.collection.immutable.LazyList.iterator: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.LazyList$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/LazyList.scala#tree=3536::scala.collection.immutable.LazyList$.LazyBuilder.clear: requests=2, distinct_request_outcomes=1
@@ -10658,7 +10745,7 @@ resolver_581_comparison:
     library/src/scala/collection/immutable/LazyList.scala#tree=622::scala.collection.immutable.LazyList.reduceLeft: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.LazyList$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/LazyList.scala#tree=705::scala.collection.immutable.LazyList.partitionMap: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/LazyList.scala#tree=725::scala.collection.immutable.LazyList.filter: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.LazyList$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/LazyList.scala#tree=745::scala.collection.immutable.LazyList.filterNot: requests=1, distinct_request_outcomes=1
@@ -10670,7 +10757,7 @@ resolver_581_comparison:
     library/src/scala/collection/immutable/LazyList.scala#tree=826::scala.collection.immutable.LazyList.map: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.LazyList$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/LazyList.scala#tree=847::scala.collection.immutable.LazyList.tapEach: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/LazyList.scala#tree=892::scala.collection.immutable.LazyList.collect: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.LazyList$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/LazyList.scala#tree=940::scala.collection.immutable.LazyList.collectFirst: requests=1, distinct_request_outcomes=1
@@ -10689,8 +10776,9 @@ resolver_581_comparison:
       prefix=scala.collection.immutable.LazyListIterable$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/LazyListIterable.scala#tree=1247::scala.collection.immutable.LazyListIterable.map: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.LazyListIterable$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    library/src/scala/collection/immutable/LazyListIterable.scala#tree=1281::scala.collection.immutable.LazyListIterable.tapEach: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/LazyListIterable.scala#tree=1281::scala.collection.immutable.LazyListIterable.tapEach: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/immutable/LazyListIterable.scala#tree=1357::scala.collection.immutable.LazyListIterable.collect: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.LazyListIterable$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
@@ -10702,8 +10790,9 @@ resolver_581_comparison:
       prefix=scala.collection.immutable.LazyListIterable$::namespace=type::name=Any::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/LazyListIterable.scala#tree=1480::scala.collection.immutable.LazyListIterable.flatMap: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.LazyListIterable$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    library/src/scala/collection/immutable/LazyListIterable.scala#tree=1503::scala.collection.immutable.LazyListIterable.flatten: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/LazyListIterable.scala#tree=1503::scala.collection.immutable.LazyListIterable.flatten: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/immutable/LazyListIterable.scala#tree=1549::scala.collection.immutable.LazyListIterable.zip: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.LazyListIterable$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
@@ -10785,11 +10874,13 @@ resolver_581_comparison:
       prefix=scala.collection.immutable.LazyListIterable$::namespace=type::name=Boolean::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/List.scala#tree=1459::scala.collection.immutable.List.corresponds: requests=1, distinct_request_outcomes=1
       prefix=scala.collection::namespace=type::name=Seq::space=Prefix::outcome=error=1
-    library/src/scala/collection/immutable/List.scala#tree=1683::scala.collection.immutable.List.filter: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/List.scala#tree=1683::scala.collection.immutable.List.filter: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/List.scala#tree=1698::scala.collection.immutable.List.filterNot: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/List.scala#tree=1698::scala.collection.immutable.List.filterNot: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/immutable/ListMap.scala#tree=99::scala.collection.immutable.ListMap.updated: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.ListMap::namespace=type::name=Node::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
@@ -10809,9 +10900,9 @@ resolver_581_comparison:
       prefix=scala.collection.immutable.LongMapUtils$::namespace=type::name=AbstractMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=2
     library/src/scala/collection/immutable/LongMap.scala#tree=2641::scala.collection.immutable.LongMap.collect: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.LongMapUtils$::namespace=term::name=strictOptimizedCollect::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    library/src/scala/collection/immutable/LongMap.scala#tree=2654::scala.collection.immutable.LongMap.writeReplace: requests=3, distinct_request_outcomes=2
+    library/src/scala/collection/immutable/LongMap.scala#tree=2654::scala.collection.immutable.LongMap.writeReplace: requests=2, distinct_request_outcomes=2
       prefix=scala.collection.generic::namespace=type::name=DefaultSerializationProxy::space=Prefix::outcome=external class success=1
-      prefix=scala.collection.immutable.LongMapUtils$::namespace=type::name=Factory::space=Prefix::outcome=class member scope unavailable: incomplete class info=2
+      prefix=scala.collection.immutable.LongMapUtils$::namespace=type::name=Factory::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/LongMap.scala#tree=299::scala.collection.immutable.LongMap$.Nil$.equals: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.LongMapUtils$::namespace=type::name=Any::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/LongMap.scala#tree=406::scala.collection.immutable.LongMap$.Bin.bin: requests=2, distinct_request_outcomes=1
@@ -10848,56 +10939,69 @@ resolver_581_comparison:
       prefix=scala.collection.immutable.Map::namespace=type::name=WithDefault::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/Map.scala#tree=135::scala.collection.immutable.Map.withDefaultValue: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.Map::namespace=type::name=WithDefault::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    library/src/scala/collection/immutable/Map.scala#tree=1389::scala.collection.immutable.Map$.Map1.foreach: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Map.scala#tree=1389::scala.collection.immutable.Map$.Map1.foreach: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Map.scala#tree=1403::scala.collection.immutable.Map$.Map1.exists: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Map.scala#tree=1403::scala.collection.immutable.Map$.Map1.exists: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Map.scala#tree=1417::scala.collection.immutable.Map$.Map1.forall: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Map.scala#tree=1417::scala.collection.immutable.Map$.Map1.forall: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Map.scala#tree=1443::scala.collection.immutable.Map$.Map1.filterImpl: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Map.scala#tree=1443::scala.collection.immutable.Map$.Map1.filterImpl: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/immutable/Map.scala#tree=1487::scala.collection.immutable.Map$.Map1.transform: requests=3, distinct_request_outcomes=3
       prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
       prefix=scala::namespace=type::name=Function2::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction2::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Map.scala#tree=1914::scala.collection.immutable.Map$.Map2.foreach: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Map.scala#tree=1914::scala.collection.immutable.Map$.Map2.foreach: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Map.scala#tree=1934::scala.collection.immutable.Map$.Map2.exists: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Map.scala#tree=1934::scala.collection.immutable.Map$.Map2.exists: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Map.scala#tree=1954::scala.collection.immutable.Map$.Map2.forall: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Map.scala#tree=1954::scala.collection.immutable.Map$.Map2.forall: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/immutable/Map.scala#tree=2116::scala.collection.immutable.Map$.Map2.transform: requests=3, distinct_request_outcomes=3
       prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
       prefix=scala::namespace=type::name=Function2::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction2::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Map.scala#tree=2640::scala.collection.immutable.Map$.Map3.foreach: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Map.scala#tree=2640::scala.collection.immutable.Map$.Map3.foreach: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Map.scala#tree=2666::scala.collection.immutable.Map$.Map3.exists: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Map.scala#tree=2666::scala.collection.immutable.Map$.Map3.exists: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Map.scala#tree=2692::scala.collection.immutable.Map$.Map3.forall: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Map.scala#tree=2692::scala.collection.immutable.Map$.Map3.forall: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/immutable/Map.scala#tree=2933::scala.collection.immutable.Map$.Map3.transform: requests=3, distinct_request_outcomes=3
       prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
       prefix=scala::namespace=type::name=Function2::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction2::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Map.scala#tree=3573::scala.collection.immutable.Map$.Map4.foreach: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Map.scala#tree=3573::scala.collection.immutable.Map$.Map4.foreach: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Map.scala#tree=3605::scala.collection.immutable.Map$.Map4.exists: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Map.scala#tree=3605::scala.collection.immutable.Map$.Map4.exists: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Map.scala#tree=3637::scala.collection.immutable.Map$.Map4.forall: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Map.scala#tree=3637::scala.collection.immutable.Map$.Map4.forall: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/immutable/Map.scala#tree=3969::scala.collection.immutable.Map$.Map4.transform: requests=3, distinct_request_outcomes=3
       prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
@@ -10914,21 +11018,24 @@ resolver_581_comparison:
     library/src/scala/collection/immutable/Map.scala#tree=4349::scala.collection.immutable.MapBuilderImpl.addAll: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=type::name=ReusableBuilder::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/Map.scala#tree=677::scala.collection.immutable.Map$.WithDefault.default: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/NumericRange.scala#tree=165::scala.collection.immutable.NumericRange.stepper: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.convert::namespace=term::name=impl::space=Prefix::outcome=package term member unsupported=1
-    library/src/scala/collection/immutable/NumericRange.scala#tree=418::scala.collection.immutable.NumericRange.foreach$mVc$sp: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/NumericRange.scala#tree=418::scala.collection.immutable.NumericRange.foreach$mVc$sp: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/immutable/NumericRange.scala#tree=79::scala.collection.immutable.NumericRange.iterator: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.NumericRange::namespace=type::name=NumericRangeIterator::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/Queue.scala#tree=576::scala.collection.immutable.Queue$.newBuilder: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=type::name=ListBuffer::space=Prefix::outcome=error=1
-    library/src/scala/collection/immutable/Range.scala#tree=1002::scala.collection.immutable.Range.dropWhile: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Range.scala#tree=1002::scala.collection.immutable.Range.dropWhile: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Range.scala#tree=1059::scala.collection.immutable.Range.span: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Range.scala#tree=1059::scala.collection.immutable.Range.span: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/immutable/Range.scala#tree=1138::scala.collection.immutable.Range.newEmptyRange: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.Range::namespace=type::name=Exclusive::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
@@ -10942,81 +11049,100 @@ resolver_581_comparison:
       prefix=scala.collection.immutable.Range::namespace=type::name=Inclusive::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/Range.scala#tree=1937::scala.collection.immutable.Range$.inclusive: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.Range::namespace=type::name=Inclusive::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    library/src/scala/collection/immutable/Range.scala#tree=2129::scala.collection.immutable.Range$.Partial.by: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Range.scala#tree=2129::scala.collection.immutable.Range$.Partial.by: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/immutable/Range.scala#tree=2228::scala.collection.immutable.RangeIterator.knownSize: requests=1, distinct_request_outcomes=1
-      prefix=scala.collection::namespace=type::name=AbstractIterator::space=Prefix::outcome=error=1
+      prefix=scala.collection::namespace=type::name=AbstractIterator::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/Range.scala#tree=2263::scala.collection.immutable.RangeIterator.next: requests=1, distinct_request_outcomes=1
-      prefix=scala.collection::namespace=type::name=AbstractIterator::space=Prefix::outcome=error=1
+      prefix=scala.collection::namespace=type::name=AbstractIterator::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/Range.scala#tree=413::scala.collection.immutable.Range.copy: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable.Range::namespace=type::name=Inclusive::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/immutable/Range.scala#tree=78::scala.collection.immutable.Range.iterator: requests=1, distinct_request_outcomes=1
-      prefix=scala.collection::namespace=type::name=AbstractIterator::space=Prefix::outcome=error=1
-    library/src/scala/collection/immutable/Range.scala#tree=960::scala.collection.immutable.Range.takeWhile: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala.collection::namespace=type::name=AbstractIterator::space=Prefix::outcome=external class success=1
+    library/src/scala/collection/immutable/Range.scala#tree=960::scala.collection.immutable.Range.takeWhile: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=1029::scala.collection.immutable.Set$.Set2.find: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=1029::scala.collection.immutable.Set$.Set2.find: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=1211::scala.collection.immutable.Set$.Set3.foreach: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=1211::scala.collection.immutable.Set$.Set3.foreach: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=1229::scala.collection.immutable.Set$.Set3.exists: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=1229::scala.collection.immutable.Set$.Set3.exists: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=1247::scala.collection.immutable.Set$.Set3.forall: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=1247::scala.collection.immutable.Set$.Set3.forall: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=1398::scala.collection.immutable.Set$.Set3.find: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=1398::scala.collection.immutable.Set$.Set3.find: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=1615::scala.collection.immutable.Set$.Set4.foreach: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=1615::scala.collection.immutable.Set$.Set4.foreach: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=1637::scala.collection.immutable.Set$.Set4.exists: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=1637::scala.collection.immutable.Set$.Set4.exists: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=1659::scala.collection.immutable.Set$.Set4.forall: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=1659::scala.collection.immutable.Set$.Set4.forall: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=1868::scala.collection.immutable.Set$.Set4.find: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=1868::scala.collection.immutable.Set$.Set4.find: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/immutable/Set.scala#tree=1905::scala.collection.immutable.Set$.Set4.buildTo: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=type::name=Builder::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/Set.scala#tree=391::scala.collection.immutable.Set$.newBuilder: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=type::name=ReusableBuilder::space=Prefix::outcome=external class success=1
-    library/src/scala/collection/immutable/Set.scala#tree=693::scala.collection.immutable.Set$.Set1.foreach: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=693::scala.collection.immutable.Set$.Set1.foreach: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=702::scala.collection.immutable.Set$.Set1.exists: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=702::scala.collection.immutable.Set$.Set1.exists: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=711::scala.collection.immutable.Set$.Set1.forall: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=711::scala.collection.immutable.Set$.Set1.forall: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=731::scala.collection.immutable.Set$.Set1.filterImpl: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=731::scala.collection.immutable.Set$.Set1.filterImpl: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=748::scala.collection.immutable.Set$.Set1.find: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=748::scala.collection.immutable.Set$.Set1.find: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=900::scala.collection.immutable.Set$.Set2.foreach: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=900::scala.collection.immutable.Set$.Set2.foreach: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=914::scala.collection.immutable.Set$.Set2.exists: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=914::scala.collection.immutable.Set$.Set2.exists: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/immutable/Set.scala#tree=928::scala.collection.immutable.Set$.Set2.forall: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/immutable/Set.scala#tree=928::scala.collection.immutable.Set$.Set2.forall: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/immutable/Stream.scala#tree=1297::scala.collection.immutable.Stream$.Cons.tailDefined: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=Function0::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/Stream.scala#tree=1434::scala.collection.immutable.Stream$.Deferrer.#::: requests=1, distinct_request_outcomes=1
       prefix=scala::namespace=type::name=Function0::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/Stream.scala#tree=1511::scala.collection.immutable.Stream$.from: requests=1, distinct_request_outcomes=1
-      prefix=scala.collection::namespace=type::name=IterableOnce::space=Prefix::outcome=error=1
+      prefix=scala.collection::namespace=type::name=IterableOnce::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/Stream.scala#tree=1568::scala.collection.immutable.Stream$.newBuilder: requests=3, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=term::name=ArrayBuffer::space=Prefix::outcome=package term member unsupported=3
     library/src/scala/collection/immutable/Stream.scala#tree=1597::scala.collection.immutable.Stream$.withFilter: requests=1, distinct_request_outcomes=1
@@ -11030,13 +11156,13 @@ resolver_581_comparison:
     library/src/scala/collection/immutable/Stream.scala#tree=1699::scala.collection.immutable.Stream$.WithFilter.withFilter: requests=1, distinct_request_outcomes=1
       prefix=scala.collection::namespace=type::name=WithFilter::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/Stream.scala#tree=1753::scala.collection.immutable.Stream$.from: requests=1, distinct_request_outcomes=1
-      prefix=scala.collection::namespace=type::name=IterableOnce::space=Prefix::outcome=error=1
+      prefix=scala.collection::namespace=type::name=IterableOnce::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/Stream.scala#tree=233::scala.collection.immutable.Stream.append: requests=1, distinct_request_outcomes=1
-      prefix=scala.collection::namespace=type::name=IterableOnce::space=Prefix::outcome=error=1
+      prefix=scala.collection::namespace=type::name=IterableOnce::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/Stream.scala#tree=462::scala.collection.immutable.Stream.filter: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/Stream.scala#tree=477::scala.collection.immutable.Stream.filterNot: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/collection/immutable/TreeMap.scala#tree=1003::scala.collection.immutable.TreeMap.lastKey: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.immutable::namespace=term::name=RedBlackTree::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/collection/immutable/TreeMap.scala#tree=1019::scala.collection.immutable.TreeMap.head: requests=1, distinct_request_outcomes=1
@@ -11648,10 +11774,11 @@ resolver_581_comparison:
       prefix=scala.collection.immutable.VectorInline$::namespace=term::name=prefix1::space=Prefix::outcome=class member scope unavailable: incomplete class info=3
       prefix=scala.collection.immutable.VectorInline$::namespace=term::name=scala::space=Prefix::outcome=class member scope unavailable: incomplete class info=3
       prefix=scala.collection.immutable.VectorStatics$::namespace=term::name=prefix1::space=Prefix::outcome=class member scope unavailable: incomplete class info=3
-    library/src/scala/collection/immutable/Vector.scala#tree=2010::scala.collection.immutable.Vector1.map: requests=8, distinct_request_outcomes=4
+    library/src/scala/collection/immutable/Vector.scala#tree=2010::scala.collection.immutable.Vector1.map: requests=9, distinct_request_outcomes=5
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
       prefix=scala.collection.immutable.VectorInline$::namespace=term::name=scala::space=Prefix::outcome=class member scope unavailable: incomplete class info=4
       prefix=scala.collection.immutable.VectorStatics$::namespace=type::name=Arr1::space=Prefix::outcome=class member scope unavailable: incomplete class info=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/immutable/Vector.scala#tree=2027::scala.collection.immutable.Vector1.slice0: requests=6, distinct_request_outcomes=5
       prefix=java.util::namespace=term::name=Arrays::space=Prefix::outcome=package term member unsupported=1
@@ -12081,8 +12208,9 @@ resolver_581_comparison:
       prefix=scala.collection.mutable.AnyRefMap$::namespace=type::name=Array::space=Prefix::outcome=class member scope unavailable: incomplete class info=2
     library/src/scala/collection/mutable/AnyRefMap.scala#tree=2026::scala.collection.mutable.AnyRefMap.foreachValue: requests=2, distinct_request_outcomes=1
       prefix=scala.collection.mutable.AnyRefMap$::namespace=type::name=Array::space=Prefix::outcome=class member scope unavailable: incomplete class info=2
-    library/src/scala/collection/mutable/AnyRefMap.scala#tree=2167::scala.collection.mutable.AnyRefMap.transformValues: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/mutable/AnyRefMap.scala#tree=2167::scala.collection.mutable.AnyRefMap.transformValues: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/mutable/AnyRefMap.scala#tree=2258::scala.collection.mutable.AnyRefMap.map: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable.AnyRefMap$::namespace=term::name=AnyRefMap::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
@@ -12133,21 +12261,24 @@ resolver_581_comparison:
     library/src/scala/collection/mutable/CollisionProofHashMap.scala#tree=1872::scala.collection.mutable.CollisionProofHashMap.writeReplace: requests=2, distinct_request_outcomes=2
       prefix=scala.collection.generic::namespace=type::name=DefaultSerializationProxy::space=Prefix::outcome=external class success=1
       prefix=scala.collection.mutable.CollisionProofHashMap::namespace=type::name=DeserializationFactory::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    library/src/scala/collection/mutable/CollisionProofHashMap.scala#tree=4555::scala.collection.mutable.CollisionProofHashMap$.LLNode.foreach: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/mutable/CollisionProofHashMap.scala#tree=4555::scala.collection.mutable.CollisionProofHashMap$.LLNode.foreach: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/mutable/CollisionProofHashMap.scala#tree=4584::scala.collection.mutable.CollisionProofHashMap$.LLNode.foreachEntry: requests=3, distinct_request_outcomes=3
       prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
       prefix=scala::namespace=type::name=Function2::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction2::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/collection/mutable/CollisionProofHashMap.scala#tree=4613::scala.collection.mutable.CollisionProofHashMap$.LLNode.foreachNode: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/mutable/CollisionProofHashMap.scala#tree=4613::scala.collection.mutable.CollisionProofHashMap$.LLNode.foreachNode: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/mutable/HashMap.scala#tree=2388::scala.collection.mutable.HashMap.writeReplace: requests=2, distinct_request_outcomes=2
       prefix=scala.collection.generic::namespace=type::name=DefaultSerializationProxy::space=Prefix::outcome=external class success=1
       prefix=scala.collection.mutable.HashMap::namespace=type::name=DeserializationFactory::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    library/src/scala/collection/mutable/HashMap.scala#tree=2968::scala.collection.mutable.HashMap$.Node.foreach: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/mutable/HashMap.scala#tree=2968::scala.collection.mutable.HashMap$.Node.foreach: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/mutable/HashMap.scala#tree=2997::scala.collection.mutable.HashMap$.Node.foreachEntry: requests=3, distinct_request_outcomes=3
       prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
@@ -12224,8 +12355,9 @@ resolver_581_comparison:
       prefix=scala.collection.mutable.LongMap$::namespace=type::name=Int::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/mutable/LongMap.scala#tree=2453::scala.collection.mutable.LongMap.mapValuesNow: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable.LongMap$::namespace=type::name=Int::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
-    library/src/scala/collection/mutable/LongMap.scala#tree=2473::scala.collection.mutable.LongMap.transformValues: requests=2, distinct_request_outcomes=2
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/collection/mutable/LongMap.scala#tree=2473::scala.collection.mutable.LongMap.transformValues: requests=3, distinct_request_outcomes=3
+      prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/mutable/LongMap.scala#tree=2578::scala.collection.mutable.LongMap.transformValuesInPlace: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable.LongMap$::namespace=type::name=Int::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
@@ -12270,7 +12402,7 @@ resolver_581_comparison:
       prefix=scala::namespace=type::name=Function2::space=Prefix::outcome=external class success=1
       prefix=scala::namespace=type::name=ImpureFunction2::space=Prefix::outcome=package type member unresolved=1
     library/src/scala/collection/mutable/Map.scala#tree=682::scala.collection.mutable.Map$.WithDefault.default: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/collection/mutable/Map.scala#tree=71::scala.collection.mutable.Map.withDefault: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable.Map::namespace=type::name=WithDefault::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/collection/mutable/Map.scala#tree=91::scala.collection.mutable.Map.withDefaultValue: requests=1, distinct_request_outcomes=1
@@ -12279,12 +12411,14 @@ resolver_581_comparison:
       prefix=scala.collection::namespace=type::name=LinearSeq::space=Prefix::outcome=error=1
     library/src/scala/concurrent/Future.scala#tree=1115::scala.concurrent.Future$.never$.ready: requests=2, distinct_request_outcomes=1
       prefix=scala.concurrent.duration::namespace=term::name=Duration::space=Prefix::outcome=package term member unsupported=2
-    library/src/scala/concurrent/Future.scala#tree=1140::scala.concurrent.Future$.never$.result: requests=1, distinct_request_outcomes=1
-      prefix=scala.concurrent.duration::namespace=type::name=Duration::space=Prefix::outcome=error=1
+    library/src/scala/concurrent/Future.scala#tree=1140::scala.concurrent.Future$.never$.result: requests=3, distinct_request_outcomes=2
+      prefix=scala.concurrent.duration::namespace=type::name=CanAwait::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala.concurrent.duration::namespace=type::name=Duration::space=Prefix::outcome=external class success=1
     library/src/scala/concurrent/Future.scala#tree=1163::scala.concurrent.Future$.never$.value: requests=1, distinct_request_outcomes=1
       prefix=scala.concurrent.duration::namespace=term::name=None::space=Prefix::outcome=package term member unsupported=1
-    library/src/scala/concurrent/Future.scala#tree=141::scala.concurrent.Future.transform: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/concurrent/Future.scala#tree=141::scala.concurrent.Future.transform: requests=4, distinct_request_outcomes=2
+      prefix=scala.concurrent.duration::namespace=type::name=Throwable::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=2
     library/src/scala/concurrent/Future.scala#tree=1430::scala.concurrent.Future$.failed: requests=1, distinct_request_outcomes=1
       prefix=scala.concurrent.duration::namespace=term::name=Promise::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/concurrent/Future.scala#tree=1443::scala.concurrent.Future$.successful: requests=1, distinct_request_outcomes=1
@@ -12305,8 +12439,9 @@ resolver_581_comparison:
       prefix=scala.concurrent.duration::namespace=type::name=Iterator::space=Prefix::outcome=package type member unresolved=2
     library/src/scala/concurrent/Future.scala#tree=1883::scala.concurrent.Future$.foldNext: requests=2, distinct_request_outcomes=1
       prefix=scala.concurrent.duration::namespace=type::name=Iterator::space=Prefix::outcome=package type member unresolved=2
-    library/src/scala/concurrent/Future.scala#tree=193::scala.concurrent.Future.map: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/concurrent/Future.scala#tree=193::scala.concurrent.Future.map: requests=4, distinct_request_outcomes=2
+      prefix=scala.concurrent.duration::namespace=type::name=Throwable::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=2
     library/src/scala/concurrent/Future.scala#tree=1942::scala.concurrent.Future$.fold: requests=2, distinct_request_outcomes=1
       prefix=scala.concurrent.duration::namespace=type::name=IterableOnce::space=Prefix::outcome=package type member unresolved=2
     library/src/scala/concurrent/Future.scala#tree=1996::scala.concurrent.Future$.reduce: requests=2, distinct_request_outcomes=1
@@ -12314,38 +12449,55 @@ resolver_581_comparison:
     library/src/scala/concurrent/Future.scala#tree=2053::scala.concurrent.Future$.reduceLeft: requests=2, distinct_request_outcomes=2
       prefix=scala.collection.immutable::namespace=type::name=Iterable::space=Prefix::outcome=error=1
       prefix=scala.concurrent.duration::namespace=type::name=scala::space=Prefix::outcome=package type member unresolved=1
-    library/src/scala/concurrent/Future.scala#tree=236::scala.concurrent.Future.flatMap: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    library/src/scala/concurrent/Future.scala#tree=253::scala.concurrent.Future.flatten: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    library/src/scala/concurrent/Future.scala#tree=293::scala.concurrent.Future.filter: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    library/src/scala/concurrent/Future.scala#tree=308::scala.concurrent.Future.withFilter: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    library/src/scala/concurrent/Future.scala#tree=355::scala.concurrent.Future.collect: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    library/src/scala/concurrent/Future.scala#tree=378::scala.concurrent.Future.recover: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    library/src/scala/concurrent/Future.scala#tree=432::scala.concurrent.Future.recoverWith: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/concurrent/Future.scala#tree=236::scala.concurrent.Future.flatMap: requests=4, distinct_request_outcomes=3
+      prefix=scala.concurrent.duration::namespace=type::name=ExecutionContext::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala.util::namespace=type::name=Try::space=Prefix::outcome=external class success=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
+    library/src/scala/concurrent/Future.scala#tree=253::scala.concurrent.Future.flatten: requests=3, distinct_request_outcomes=2
+      prefix=scala.concurrent.duration::namespace=type::name=ExecutionContext::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
+    library/src/scala/concurrent/Future.scala#tree=293::scala.concurrent.Future.filter: requests=4, distinct_request_outcomes=2
+      prefix=scala.concurrent.duration::namespace=type::name=Throwable::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=2
+    library/src/scala/concurrent/Future.scala#tree=308::scala.concurrent.Future.withFilter: requests=4, distinct_request_outcomes=3
+      prefix=scala.concurrent.duration::namespace=type::name=Boolean::space=Prefix::outcome=package type member unresolved=1
+      prefix=scala.concurrent.duration::namespace=type::name=ExecutionContext::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
+    library/src/scala/concurrent/Future.scala#tree=355::scala.concurrent.Future.collect: requests=4, distinct_request_outcomes=2
+      prefix=scala.concurrent.duration::namespace=type::name=Throwable::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=2
+    library/src/scala/concurrent/Future.scala#tree=378::scala.concurrent.Future.recover: requests=4, distinct_request_outcomes=2
+      prefix=scala.concurrent.duration::namespace=type::name=Throwable::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=2
+    library/src/scala/concurrent/Future.scala#tree=432::scala.concurrent.Future.recoverWith: requests=4, distinct_request_outcomes=3
+      prefix=scala.concurrent.duration::namespace=type::name=ExecutionContext::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala.util::namespace=type::name=Try::space=Prefix::outcome=external class success=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/concurrent/Future.scala#tree=452::scala.concurrent.Future.zip: requests=3, distinct_request_outcomes=2
       prefix=scala.concurrent.duration::namespace=type::name=ExecutionContext::space=Prefix::outcome=package type member unresolved=2
       prefix=scala::namespace=type::name=Function2::space=Prefix::outcome=external class success=1
-    library/src/scala/concurrent/Future.scala#tree=497::scala.concurrent.Future.zipWith: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/concurrent/Future.scala#tree=497::scala.concurrent.Future.zipWith: requests=3, distinct_request_outcomes=2
+      prefix=scala.concurrent.duration::namespace=type::name=ExecutionContext::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/concurrent/Future.scala#tree=550::scala.concurrent.Future.fallbackTo: requests=2, distinct_request_outcomes=1
       prefix=scala.concurrent.duration::namespace=type::name=Awaitable::space=Prefix::outcome=package type member unresolved=2
     library/src/scala/concurrent/Future.scala#tree=597::scala.concurrent.Future.mapTo: requests=2, distinct_request_outcomes=2
       prefix=scala.concurrent.duration::namespace=term::name=scala::space=Prefix::outcome=package term member unsupported=1
       prefix=scala.concurrent::namespace=term::name=ExecutionContext::space=Prefix::outcome=package term member unsupported=1
-    library/src/scala/concurrent/Future.scala#tree=648::scala.concurrent.Future.andThen: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    library/src/scala/concurrent/Future.scala#tree=762::scala.concurrent.Future$.id: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    library/src/scala/concurrent/Future.scala#tree=79::scala.concurrent.Future.failed: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
-    library/src/scala/concurrent/Future.scala#tree=873::scala.concurrent.Future$.failedFun: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/concurrent/Future.scala#tree=648::scala.concurrent.Future.andThen: requests=4, distinct_request_outcomes=2
+      prefix=scala.concurrent.duration::namespace=type::name=Throwable::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=2
+    library/src/scala/concurrent/Future.scala#tree=762::scala.concurrent.Future$.id: requests=3, distinct_request_outcomes=2
+      prefix=scala.concurrent.duration::namespace=type::name=AnyRef::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
+    library/src/scala/concurrent/Future.scala#tree=79::scala.concurrent.Future.failed: requests=4, distinct_request_outcomes=2
+      prefix=scala.concurrent.duration::namespace=type::name=Throwable::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=2
+    library/src/scala/concurrent/Future.scala#tree=873::scala.concurrent.Future$.failedFun: requests=6, distinct_request_outcomes=4
+      prefix=scala.concurrent.duration::namespace=type::name=Any::space=Prefix::outcome=package type member unresolved=1
+      prefix=scala.concurrent.duration::namespace=type::name=Throwable::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala.util::namespace=type::name=Try::space=Prefix::outcome=external class success=2
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/concurrent/Future.scala#tree=920::scala.concurrent.Future$.zipWithTuple2Fun: requests=3, distinct_request_outcomes=2
       prefix=scala.concurrent.duration::namespace=type::name=Any::space=Prefix::outcome=package type member unresolved=2
       prefix=scala::namespace=type::name=Function2::space=Prefix::outcome=external class success=1
@@ -12355,8 +12507,10 @@ resolver_581_comparison:
       prefix=scala.concurrent.duration::namespace=type::name=Any::space=Prefix::outcome=package type member unresolved=3
       prefix=scala.concurrent.duration::namespace=type::name=Nothing::space=Prefix::outcome=package type member unresolved=2
       prefix=scala::namespace=type::name=Function2::space=Prefix::outcome=external class success=1
-    library/src/scala/concurrent/Future.scala#tree=98::scala.concurrent.Future.foreach: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+    library/src/scala/concurrent/Future.scala#tree=98::scala.concurrent.Future.foreach: requests=4, distinct_request_outcomes=3
+      prefix=scala.concurrent.duration::namespace=type::name=ExecutionContext::space=Prefix::outcome=package type member unresolved=2
+      prefix=scala.util::namespace=type::name=Try::space=Prefix::outcome=external class success=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/concurrent/duration/Duration.scala#tree=1131::scala.concurrent.duration.FiniteDuration.bounded: requests=2, distinct_request_outcomes=2
       prefix=scala.concurrent.duration.Duration$::namespace=type::name=Long::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=scala.concurrent.duration.FiniteDuration$::namespace=type::name=Long::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
@@ -12411,7 +12565,7 @@ resolver_581_comparison:
       prefix=scala.concurrent.duration.Duration$::namespace=type::name=Long::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
       prefix=scala.concurrent.duration.FiniteDuration$::namespace=type::name=Long::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/concurrent/impl/ExecutionContextImpl.scala#tree=43::scala.concurrent.impl.ExecutionContextImpl.reportFailure: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/reflect/ClassManifestDeprecatedApis.scala#tree=555::scala.reflect.ClassManifestDeprecatedApis.newWrappedArray: requests=1, distinct_request_outcomes=1
       prefix=scala.collection.mutable::namespace=term::name=ArraySeq::space=Prefix::outcome=package term member unsupported=1
     library/src/scala/reflect/ClassManifestDeprecatedApis.scala#tree=588::scala.reflect.ClassManifestDeprecatedApis.newArrayBuilder: requests=1, distinct_request_outcomes=1
@@ -12441,31 +12595,31 @@ resolver_581_comparison:
     library/src/scala/util/Sorting.scala#tree=1471::scala.util.Sorting$.stableSort: requests=1, distinct_request_outcomes=1
       prefix=scala.collection::namespace=type::name=Seq::space=Prefix::outcome=error=1
     library/src/scala/util/Sorting.scala#tree=918::scala.util.Sorting$.mergeSorted: requests=1, distinct_request_outcomes=1
-      prefix=scala.math::namespace=type::name=Ordering::space=Prefix::outcome=error=1
+      prefix=scala.math::namespace=type::name=Ordering::space=Prefix::outcome=external class success=1
     library/src/scala/util/Using.scala#tree=206::scala.util.Using$.Manager.manage: requests=2, distinct_request_outcomes=1
       prefix=scala.util.Using$.Manager$::namespace=type::name=Throwable::space=Prefix::outcome=class member scope unavailable: incomplete class info=2
     library/src/scala/util/Using.scala#tree=474::scala.util.Using$.resources: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/util/Using.scala#tree=537::scala.util.Using$.resources: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/util/Using.scala#tree=618::scala.util.Using$.resources: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/util/Using.scala#tree=66::scala.util.Using$.Manager.apply: requests=1, distinct_request_outcomes=1
       prefix=scala.util.Using$.Manager$::namespace=type::name=Unit::space=Prefix::outcome=class member scope unavailable: incomplete class info=1
     library/src/scala/util/control/Exception.scala#tree=392::scala.util.control.Exception$.Catch.withTry: requests=1, distinct_request_outcomes=1
       prefix=scala.util::namespace=type::name=Try::space=Prefix::outcome=external class success=1
     library/src/scala/util/control/Exception.scala#tree=445::scala.util.control.Exception$.Catch.toOption: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/util/control/Exception.scala#tree=460::scala.util.control.Exception$.Catch.toEither: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/util/control/Exception.scala#tree=476::scala.util.control.Exception$.Catch.toTry: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/util/control/Exception.scala#tree=520::scala.util.control.Exception$.nonFatalCatcher: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/util/control/Exception.scala#tree=537::scala.util.control.Exception$.allCatcher: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/util/control/Exception.scala#tree=795::scala.util.control.Exception$.handling: requests=1, distinct_request_outcomes=1
-      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=error=1
+      prefix=scala::namespace=type::name=Function1::space=Prefix::outcome=external class success=1
     library/src/scala/util/control/Exception.scala#tree=880::scala.util.control.Exception$.wouldMatch: requests=1, distinct_request_outcomes=1
       prefix=scala.collection::namespace=type::name=Seq::space=Prefix::outcome=error=1
     library/src/scala/util/hashing/MurmurHash3.scala#tree=1046::scala.util.hashing.MurmurHash3.indexedSeqHash: requests=1, distinct_request_outcomes=1
@@ -12477,23 +12631,18 @@ resolver_581_comparison:
     library/src/scala/util/hashing/MurmurHash3.scala#tree=1470::scala.util.hashing.MurmurHash3$.mapHash: requests=1, distinct_request_outcomes=1
       prefix=scala.collection::namespace=type::name=Map::space=Prefix::outcome=error=1
   normalized_member_error_roots:
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=dotty/tools/io/AbstractFile::root=scala/collection/IterableOnce=13
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=dotty/tools/io/ManifestResources::root=dotty/tools/io/ManifestResources=1
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/Function1::root=scala/Function1=193
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=dotty/tools/io/ManifestResources::root=dotty/tools/io/ManifestResources=2
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=dotty/tools/io/VirtualDirectory::root=dotty/tools/io/VirtualDirectory=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/Tuple2::root=scala/Tuple2=2
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/Tuple3::root=scala/Tuple3=1
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/annotation/retainsCap::root=scala/annotation/retainsCap=21
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/annotation/retainsCap::root=scala/annotation/retainsCap=110
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/annotation/switch::root=scala/annotation/switch=19
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/AbstractIterator::root=scala/collection/IterableOnce=3
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/IndexedSeq::root=scala/collection/Seq=1
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/IterableOnce::root=scala/collection/IterableOnce=5
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/Iterator::root=scala/collection/IterableOnce=2
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/LinearSeq::root=scala/collection/Seq=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/Map::root=scala/collection/Map=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/Seq::root=scala/collection/Seq=9
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/Set::root=scala/collection/Set=2
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/SortedMapOps::root=scala/collection/SortedMapOps=1
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/SpecificIterableFactory::root=scala/collection/Factory=3
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/convert/impl/BoxedBooleanArrayStepper::root=scala/collection/convert/impl/BoxedBooleanArrayStepper=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/convert/impl/CharStringStepper::root=scala/collection/convert/impl/CharStringStepper=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/convert/impl/ObjectArrayStepper::root=scala/collection/convert/impl/ObjectArrayStepper=1
@@ -12507,59 +12656,44 @@ resolver_581_comparison:
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/mutable/Map::root=scala/collection/mutable/Iterable=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/mutable/Queue::root=scala/collection/mutable/Queue=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/mutable/StringBuilder::root=scala/collection/mutable/StringBuilder=7
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/concurrent/duration/Duration::root=scala/math/Ordered=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/io/BufferedSource::root=scala/io/BufferedSource=2
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/math/Ordering::root=scala/math/Equiv=1
     root_cause=unresolved class::requested=dotty/tools/tasty/TastyVersion::root=scala/Serializable=4
     root_cause=unresolved class::requested=scala/collection/convert/impl/CodePointStringStepper::root=scala/collection/Stepper/EfficientSplit=1
   member_error_wrappers:
-    DependencyFailure=31
+    DependencyFailure=8
   dependency_failure_chains:
-    requested=dotty/tools/io/AbstractFile::root=scala/collection/IterableOnce::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=2::distinct_dependencies=2=13
     requested=dotty/tools/tasty/TastyVersion::root=scala/Serializable::root_cause=unresolved class::depth=1::distinct_dependencies=1=4
-    requested=scala/collection/AbstractIterator::root=scala/collection/IterableOnce::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=2::distinct_dependencies=2=3
     requested=scala/collection/IndexedSeq::root=scala/collection/Seq::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=1::distinct_dependencies=1=1
-    requested=scala/collection/Iterator::root=scala/collection/IterableOnce::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=1::distinct_dependencies=1=2
     requested=scala/collection/LinearSeq::root=scala/collection/Seq::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=1::distinct_dependencies=1=1
-    requested=scala/collection/SpecificIterableFactory::root=scala/collection/Factory::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=1::distinct_dependencies=1=3
     requested=scala/collection/convert/impl/CodePointStringStepper::root=scala/collection/Stepper/EfficientSplit::root_cause=unresolved class::depth=1::distinct_dependencies=1=1
     requested=scala/collection/mutable/Map::root=scala/collection/mutable/Iterable::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=1::distinct_dependencies=1=1
-    requested=scala/concurrent/duration/Duration::root=scala/math/Ordered::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=1::distinct_dependencies=1=1
-    requested=scala/math/Ordering::root=scala/math/Equiv::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=2::distinct_dependencies=2=1
   tasty_unresolved_supertype_failures:
-    requested=dotty/tools/io/AbstractFile::source_package=dotty/tools/io::parent_shape=not-exposed-by-ClassLoadError=13
-    requested=dotty/tools/io/ManifestResources::source_package=dotty/tools/io::parent_shape=not-exposed-by-ClassLoadError=1
-    requested=scala/Function1::source_package=scala::parent_shape=not-exposed-by-ClassLoadError=193
-    requested=scala/Tuple2::source_package=scala::parent_shape=not-exposed-by-ClassLoadError=2
-    requested=scala/Tuple3::source_package=scala::parent_shape=not-exposed-by-ClassLoadError=1
-    requested=scala/annotation/retainsCap::source_package=scala/annotation::parent_shape=not-exposed-by-ClassLoadError=21
-    requested=scala/annotation/switch::source_package=scala/annotation::parent_shape=not-exposed-by-ClassLoadError=19
-    requested=scala/collection/AbstractIterator::source_package=scala/collection::parent_shape=not-exposed-by-ClassLoadError=3
-    requested=scala/collection/IndexedSeq::source_package=scala/collection::parent_shape=not-exposed-by-ClassLoadError=1
-    requested=scala/collection/IterableOnce::source_package=scala/collection::parent_shape=not-exposed-by-ClassLoadError=5
-    requested=scala/collection/Iterator::source_package=scala/collection::parent_shape=not-exposed-by-ClassLoadError=2
-    requested=scala/collection/LinearSeq::source_package=scala/collection::parent_shape=not-exposed-by-ClassLoadError=1
-    requested=scala/collection/Map::source_package=scala/collection::parent_shape=not-exposed-by-ClassLoadError=1
-    requested=scala/collection/Seq::source_package=scala/collection::parent_shape=not-exposed-by-ClassLoadError=9
-    requested=scala/collection/Set::source_package=scala/collection::parent_shape=not-exposed-by-ClassLoadError=2
-    requested=scala/collection/SortedMapOps::source_package=scala/collection::parent_shape=not-exposed-by-ClassLoadError=1
-    requested=scala/collection/SpecificIterableFactory::source_package=scala/collection::parent_shape=not-exposed-by-ClassLoadError=3
-    requested=scala/collection/convert/impl/BoxedBooleanArrayStepper::source_package=scala/collection/convert/impl::parent_shape=not-exposed-by-ClassLoadError=1
-    requested=scala/collection/convert/impl/CharStringStepper::source_package=scala/collection/convert/impl::parent_shape=not-exposed-by-ClassLoadError=1
-    requested=scala/collection/convert/impl/ObjectArrayStepper::source_package=scala/collection/convert/impl::parent_shape=not-exposed-by-ClassLoadError=1
-    requested=scala/collection/convert/impl/RangeStepper::source_package=scala/collection/convert/impl::parent_shape=not-exposed-by-ClassLoadError=1
-    requested=scala/collection/immutable/BitSet::source_package=scala/collection/immutable::parent_shape=not-exposed-by-ClassLoadError=5
-    requested=scala/collection/immutable/Iterable::source_package=scala/collection/immutable::parent_shape=not-exposed-by-ClassLoadError=1
-    requested=scala/collection/immutable/List::source_package=scala/collection/immutable::parent_shape=not-exposed-by-ClassLoadError=10
-    requested=scala/collection/immutable/WrappedString::source_package=scala/collection/immutable::parent_shape=not-exposed-by-ClassLoadError=11
-    requested=scala/collection/mutable/ArrayBuffer::source_package=scala/collection/mutable::parent_shape=not-exposed-by-ClassLoadError=4
-    requested=scala/collection/mutable/ListBuffer::source_package=scala/collection/mutable::parent_shape=not-exposed-by-ClassLoadError=16
-    requested=scala/collection/mutable/Map::source_package=scala/collection/mutable::parent_shape=not-exposed-by-ClassLoadError=1
-    requested=scala/collection/mutable/Queue::source_package=scala/collection/mutable::parent_shape=not-exposed-by-ClassLoadError=1
-    requested=scala/collection/mutable/StringBuilder::source_package=scala/collection/mutable::parent_shape=not-exposed-by-ClassLoadError=7
-    requested=scala/concurrent/duration/Duration::source_package=scala/concurrent/duration::parent_shape=not-exposed-by-ClassLoadError=1
-    requested=scala/io/BufferedSource::source_package=scala/io::parent_shape=not-exposed-by-ClassLoadError=2
-    requested=scala/math/Ordering::source_package=scala/math::parent_shape=not-exposed-by-ClassLoadError=1
+    requested=dotty/tools/io/ManifestResources::source_package=dotty/tools/io::parent_index=0::parent_shape=package-qualified::semantic_reference=true::reference_prefix=true::visible_names=["ZipArchive", "dotty/tools/io"]::raw_shape=LengthNode(tag=136)=2
+    requested=dotty/tools/io/VirtualDirectory::source_package=dotty/tools/io::parent_index=0::parent_shape=package-qualified::semantic_reference=true::reference_prefix=true::visible_names=["AbstractFile", "dotty/tools/io"]::raw_shape=LengthNode(tag=136)=1
+    requested=scala/Tuple2::source_package=scala::parent_index=0::parent_shape=other::semantic_reference=false::reference_prefix=false::visible_names=[]::raw_shape=LengthNode(tag=136)=2
+    requested=scala/Tuple3::source_package=scala::parent_index=0::parent_shape=other::semantic_reference=false::reference_prefix=false::visible_names=[]::raw_shape=LengthNode(tag=136)=1
+    requested=scala/annotation/retainsCap::source_package=scala/annotation::parent_index=0::parent_shape=package-qualified::semantic_reference=true::reference_prefix=true::visible_names=["Annotation", "scala/annotation"]::raw_shape=LengthNode(tag=136)=110
+    requested=scala/annotation/switch::source_package=scala/annotation::parent_index=0::parent_shape=package-qualified::semantic_reference=true::reference_prefix=true::visible_names=["Annotation", "scala/annotation"]::raw_shape=LengthNode(tag=136)=19
+    requested=scala/collection/IndexedSeq::source_package=scala/collection::parent_index=6::parent_shape=selected-qualified::semantic_reference=true::reference_prefix=true::visible_names=["Pure", "scala/caps"]::raw_shape=NatAst(tag=113, child=Leaf(tag=64))=1
+    requested=scala/collection/LinearSeq::source_package=scala/collection::parent_index=6::parent_shape=selected-qualified::semantic_reference=true::reference_prefix=true::visible_names=["Pure", "scala/caps"]::raw_shape=NatAst(tag=113, child=Leaf(tag=64))=1
+    requested=scala/collection/Map::source_package=scala/collection::parent_index=5::parent_shape=selected-qualified::semantic_reference=true::reference_prefix=true::visible_names=["Pure", "scala/caps"]::raw_shape=NatAst(tag=113, child=Leaf(tag=64))=1
+    requested=scala/collection/Seq::source_package=scala/collection::parent_index=6::parent_shape=selected-qualified::semantic_reference=true::reference_prefix=true::visible_names=["Pure", "scala/caps"]::raw_shape=NatAst(tag=113, child=Leaf(tag=64))=9
+    requested=scala/collection/Set::source_package=scala/collection::parent_index=5::parent_shape=selected-qualified::semantic_reference=true::reference_prefix=true::visible_names=["Pure", "scala/caps"]::raw_shape=NatAst(tag=113, child=Leaf(tag=64))=2
+    requested=scala/collection/SortedMapOps::source_package=scala/collection::parent_index=3::parent_shape=selected-qualified::semantic_reference=true::reference_prefix=true::visible_names=["Pure", "scala/caps"]::raw_shape=NatAst(tag=113, child=Leaf(tag=61))=1
+    requested=scala/collection/convert/impl/BoxedBooleanArrayStepper::source_package=scala/collection/convert/impl::parent_index=0::parent_shape=other::semantic_reference=false::reference_prefix=false::visible_names=[]::raw_shape=LengthNode(tag=136)=1
+    requested=scala/collection/convert/impl/CharStringStepper::source_package=scala/collection/convert/impl::parent_index=0::parent_shape=other::semantic_reference=false::reference_prefix=false::visible_names=[]::raw_shape=LengthNode(tag=136)=1
+    requested=scala/collection/convert/impl/ObjectArrayStepper::source_package=scala/collection/convert/impl::parent_index=0::parent_shape=other::semantic_reference=false::reference_prefix=false::visible_names=[]::raw_shape=LengthNode(tag=136)=1
+    requested=scala/collection/convert/impl/RangeStepper::source_package=scala/collection/convert/impl::parent_index=0::parent_shape=other::semantic_reference=false::reference_prefix=false::visible_names=[]::raw_shape=LengthNode(tag=136)=1
+    requested=scala/collection/immutable/BitSet::source_package=scala/collection/immutable::parent_index=0::parent_shape=other::semantic_reference=false::reference_prefix=false::visible_names=[]::raw_shape=LengthNode(tag=136)=5
+    requested=scala/collection/immutable/Iterable::source_package=scala/collection/immutable::parent_index=1::parent_shape=applied::semantic_reference=true::reference_prefix=true::visible_names=["Iterable", "scala/collection"]::raw_shape=LengthNode(tag=162)=1
+    requested=scala/collection/immutable/List::source_package=scala/collection/immutable::parent_index=0::parent_shape=other::semantic_reference=false::reference_prefix=false::visible_names=[]::raw_shape=LengthNode(tag=136)=10
+    requested=scala/collection/immutable/WrappedString::source_package=scala/collection/immutable::parent_index=0::parent_shape=other::semantic_reference=false::reference_prefix=false::visible_names=[]::raw_shape=LengthNode(tag=136)=11
+    requested=scala/collection/mutable/ArrayBuffer::source_package=scala/collection/mutable::parent_index=0::parent_shape=other::semantic_reference=false::reference_prefix=false::visible_names=[]::raw_shape=LengthNode(tag=136)=4
+    requested=scala/collection/mutable/ListBuffer::source_package=scala/collection/mutable::parent_index=0::parent_shape=other::semantic_reference=false::reference_prefix=false::visible_names=[]::raw_shape=LengthNode(tag=136)=16
+    requested=scala/collection/mutable/Map::source_package=scala/collection/mutable::parent_index=1::parent_shape=applied::semantic_reference=true::reference_prefix=true::visible_names=["Iterable", "scala/collection"]::raw_shape=LengthNode(tag=162)=1
+    requested=scala/collection/mutable/Queue::source_package=scala/collection/mutable::parent_index=0::parent_shape=other::semantic_reference=false::reference_prefix=false::visible_names=[]::raw_shape=LengthNode(tag=136)=1
+    requested=scala/collection/mutable/StringBuilder::source_package=scala/collection/mutable::parent_index=0::parent_shape=other::semantic_reference=false::reference_prefix=false::visible_names=[]::raw_shape=LengthNode(tag=136)=7
+    requested=scala/io/BufferedSource::source_package=scala/io::parent_index=0::parent_shape=package-qualified::semantic_reference=true::reference_prefix=true::visible_names=["Source", "scala/io"]::raw_shape=LengthNode(tag=136)=2
   incomplete_prefix_member_requests:
     distinct_incomplete_prefix_targets=113
     state=Missing::origin=source::identity=dotty.tools.backend.jvm.analysis.AliasSet=1
@@ -12570,7 +12704,7 @@ resolver_581_comparison:
     state=Missing::origin=source::identity=dotty.tools.backend.jvm.opt.ClosureOptimizer$=12
     state=Missing::origin=source::identity=dotty.tools.backend.jvm.opt.InlineLog$=9
     state=Missing::origin=source::identity=dotty.tools.backend.jvm.opt.LocalOptImpls$=6
-    state=Missing::origin=source::identity=dotty.tools.backend.sjs.JSCodeGen$=109
+    state=Missing::origin=source::identity=dotty.tools.backend.sjs.JSCodeGen$=111
     state=Missing::origin=source::identity=dotty.tools.backend.sjs.JSEncoding$.LocalNameGenerator$=9
     state=Missing::origin=source::identity=dotty.tools.backend.sjs.JSPrimitives$=1
     state=Missing::origin=source::identity=dotty.tools.dotc.ast.TreeInfo$=52
@@ -12578,7 +12712,7 @@ resolver_581_comparison:
     state=Missing::origin=source::identity=dotty.tools.dotc.ast.Trees$.WithEndMarker$=5
     state=Missing::origin=source::identity=dotty.tools.dotc.ast.tpd$=14
     state=Missing::origin=source::identity=dotty.tools.dotc.ast.untpd$=1
-    state=Missing::origin=source::identity=dotty.tools.dotc.cc.CaptureSet$=20
+    state=Missing::origin=source::identity=dotty.tools.dotc.cc.CaptureSet$=21
     state=Missing::origin=source::identity=dotty.tools.dotc.cc.CheckCaptures$=68
     state=Missing::origin=source::identity=dotty.tools.dotc.cc.SepCheck$=20
     state=Missing::origin=source::identity=dotty.tools.dotc.core.CheckRealizable$=4
@@ -12587,18 +12721,18 @@ resolver_581_comparison:
     state=Missing::origin=source::identity=dotty.tools.dotc.core.OrderingConstraint$=42
     state=Missing::origin=source::identity=dotty.tools.dotc.core.Signature$=6
     state=Missing::origin=source::identity=dotty.tools.dotc.core.TypeApplications$=32
-    state=Missing::origin=source::identity=dotty.tools.dotc.core.TypeComparer$=95
+    state=Missing::origin=source::identity=dotty.tools.dotc.core.TypeComparer$=96
     state=Missing::origin=source::identity=dotty.tools.dotc.core.TypeErasure$=8
     state=Missing::origin=source::identity=dotty.tools.dotc.core.Types$.DepStatus$=7
     state=Missing::origin=source::identity=dotty.tools.dotc.core.classfile.ClassfileParser$=32
     state=Missing::origin=source::identity=dotty.tools.dotc.core.tasty.TastyUnpickler$=4
-    state=Missing::origin=source::identity=dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler$=62
-    state=Missing::origin=source::identity=dotty.tools.dotc.inlines.Inliner$=30
+    state=Missing::origin=source::identity=dotty.tools.dotc.core.unpickleScala2.Scala2Unpickler$=63
+    state=Missing::origin=source::identity=dotty.tools.dotc.inlines.Inliner$=31
     state=Missing::origin=source::identity=dotty.tools.dotc.inlines.Inlines$=1
     state=Missing::origin=source::identity=dotty.tools.dotc.quoted.Interpreter$=12
     state=Missing::origin=source::identity=dotty.tools.dotc.reporting.CannotHaveSameNameAs$=1
     state=Missing::origin=source::identity=dotty.tools.dotc.reporting.Highlight$=9
-    state=Missing::origin=source::identity=dotty.tools.dotc.reporting.Message$=7
+    state=Missing::origin=source::identity=dotty.tools.dotc.reporting.Message$=9
     state=Missing::origin=source::identity=dotty.tools.dotc.reporting.Offsets$=9
     state=Missing::origin=source::identity=dotty.tools.dotc.reporting.Reporter$=25
     state=Missing::origin=source::identity=dotty.tools.dotc.sbt.ExtractDependencies$=2
@@ -12646,15 +12780,15 @@ resolver_581_comparison:
     state=Missing::origin=source::identity=scala.collection.StringOps=2
     state=Missing::origin=source::identity=scala.collection.StringOps$=122
     state=Missing::origin=source::identity=scala.collection.immutable.IntMap=2
-    state=Missing::origin=source::identity=scala.collection.immutable.IntMapUtils$=34
+    state=Missing::origin=source::identity=scala.collection.immutable.IntMapUtils$=33
     state=Missing::origin=source::identity=scala.collection.immutable.LazyList=1
-    state=Missing::origin=source::identity=scala.collection.immutable.LazyList$=49
+    state=Missing::origin=source::identity=scala.collection.immutable.LazyList$=51
     state=Missing::origin=source::identity=scala.collection.immutable.LazyList$.LazyBuilder$=7
     state=Missing::origin=source::identity=scala.collection.immutable.LazyListIterable=1
     state=Missing::origin=source::identity=scala.collection.immutable.LazyListIterable$=46
     state=Missing::origin=source::identity=scala.collection.immutable.ListMap=1
     state=Missing::origin=source::identity=scala.collection.immutable.LongMap=2
-    state=Missing::origin=source::identity=scala.collection.immutable.LongMapUtils$=33
+    state=Missing::origin=source::identity=scala.collection.immutable.LongMapUtils$=32
     state=Missing::origin=source::identity=scala.collection.immutable.Map=2
     state=Missing::origin=source::identity=scala.collection.immutable.MapNode$=35
     state=Missing::origin=source::identity=scala.collection.immutable.MapOps=1
@@ -12684,7 +12818,7 @@ resolver_581_comparison:
     state=Missing::origin=source::candidate=dotty/tools/backend/jvm/opt/ClosureOptimizer$::status=resource-found=12
     state=Missing::origin=source::candidate=dotty/tools/backend/jvm/opt/InlineLog$::status=resource-found=9
     state=Missing::origin=source::candidate=dotty/tools/backend/jvm/opt/LocalOptImpls$::status=resource-found=6
-    state=Missing::origin=source::candidate=dotty/tools/backend/sjs/JSCodeGen$::status=resource-found=109
+    state=Missing::origin=source::candidate=dotty/tools/backend/sjs/JSCodeGen$::status=resource-found=111
     state=Missing::origin=source::candidate=dotty/tools/backend/sjs/JSEncoding$$LocalNameGenerator$::status=resource-absent=9
     state=Missing::origin=source::candidate=dotty/tools/backend/sjs/JSPrimitives$::status=resource-found=1
     state=Missing::origin=source::candidate=dotty/tools/dotc/ast/TreeInfo$::status=resource-found=52
@@ -12692,7 +12826,7 @@ resolver_581_comparison:
     state=Missing::origin=source::candidate=dotty/tools/dotc/ast/Trees$$WithEndMarker$::status=resource-absent=5
     state=Missing::origin=source::candidate=dotty/tools/dotc/ast/tpd$::status=resource-found=14
     state=Missing::origin=source::candidate=dotty/tools/dotc/ast/untpd$::status=resource-found=1
-    state=Missing::origin=source::candidate=dotty/tools/dotc/cc/CaptureSet$::status=resource-found=20
+    state=Missing::origin=source::candidate=dotty/tools/dotc/cc/CaptureSet$::status=resource-found=21
     state=Missing::origin=source::candidate=dotty/tools/dotc/cc/CheckCaptures$::status=resource-found=68
     state=Missing::origin=source::candidate=dotty/tools/dotc/cc/SepCheck$::status=resource-found=20
     state=Missing::origin=source::candidate=dotty/tools/dotc/core/CheckRealizable$::status=resource-found=4
@@ -12701,18 +12835,18 @@ resolver_581_comparison:
     state=Missing::origin=source::candidate=dotty/tools/dotc/core/OrderingConstraint$::status=resource-found=42
     state=Missing::origin=source::candidate=dotty/tools/dotc/core/Signature$::status=resource-found=6
     state=Missing::origin=source::candidate=dotty/tools/dotc/core/TypeApplications$::status=resource-found=32
-    state=Missing::origin=source::candidate=dotty/tools/dotc/core/TypeComparer$::status=resource-found=95
+    state=Missing::origin=source::candidate=dotty/tools/dotc/core/TypeComparer$::status=resource-found=96
     state=Missing::origin=source::candidate=dotty/tools/dotc/core/TypeErasure$::status=resource-found=8
     state=Missing::origin=source::candidate=dotty/tools/dotc/core/Types$$DepStatus$::status=resource-absent=7
     state=Missing::origin=source::candidate=dotty/tools/dotc/core/classfile/ClassfileParser$::status=resource-found=32
     state=Missing::origin=source::candidate=dotty/tools/dotc/core/tasty/TastyUnpickler$::status=resource-found=4
-    state=Missing::origin=source::candidate=dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler$::status=resource-found=62
-    state=Missing::origin=source::candidate=dotty/tools/dotc/inlines/Inliner$::status=resource-found=30
+    state=Missing::origin=source::candidate=dotty/tools/dotc/core/unpickleScala2/Scala2Unpickler$::status=resource-found=63
+    state=Missing::origin=source::candidate=dotty/tools/dotc/inlines/Inliner$::status=resource-found=31
     state=Missing::origin=source::candidate=dotty/tools/dotc/inlines/Inlines$::status=resource-found=1
     state=Missing::origin=source::candidate=dotty/tools/dotc/quoted/Interpreter$::status=resource-found=12
     state=Missing::origin=source::candidate=dotty/tools/dotc/reporting/CannotHaveSameNameAs$::status=resource-found=1
     state=Missing::origin=source::candidate=dotty/tools/dotc/reporting/Highlight$::status=resource-found=9
-    state=Missing::origin=source::candidate=dotty/tools/dotc/reporting/Message$::status=resource-found=7
+    state=Missing::origin=source::candidate=dotty/tools/dotc/reporting/Message$::status=resource-found=9
     state=Missing::origin=source::candidate=dotty/tools/dotc/reporting/Offsets$::status=resource-found=9
     state=Missing::origin=source::candidate=dotty/tools/dotc/reporting/Reporter$::status=resource-found=25
     state=Missing::origin=source::candidate=dotty/tools/dotc/sbt/ExtractDependencies$::status=resource-found=2
@@ -12760,15 +12894,15 @@ resolver_581_comparison:
     state=Missing::origin=source::candidate=scala/collection/StringOps$::status=resource-found=122
     state=Missing::origin=source::candidate=scala/collection/StringOps::status=resource-found=2
     state=Missing::origin=source::candidate=scala/collection/immutable/IntMap::status=resource-found=2
-    state=Missing::origin=source::candidate=scala/collection/immutable/IntMapUtils$::status=resource-found=34
+    state=Missing::origin=source::candidate=scala/collection/immutable/IntMapUtils$::status=resource-found=33
     state=Missing::origin=source::candidate=scala/collection/immutable/LazyList$$LazyBuilder$::status=resource-absent=7
-    state=Missing::origin=source::candidate=scala/collection/immutable/LazyList$::status=resource-found=49
+    state=Missing::origin=source::candidate=scala/collection/immutable/LazyList$::status=resource-found=51
     state=Missing::origin=source::candidate=scala/collection/immutable/LazyList::status=resource-found=1
     state=Missing::origin=source::candidate=scala/collection/immutable/LazyListIterable$::status=resource-found=46
     state=Missing::origin=source::candidate=scala/collection/immutable/LazyListIterable::status=resource-found=1
     state=Missing::origin=source::candidate=scala/collection/immutable/ListMap::status=resource-found=1
     state=Missing::origin=source::candidate=scala/collection/immutable/LongMap::status=resource-found=2
-    state=Missing::origin=source::candidate=scala/collection/immutable/LongMapUtils$::status=resource-found=33
+    state=Missing::origin=source::candidate=scala/collection/immutable/LongMapUtils$::status=resource-found=32
     state=Missing::origin=source::candidate=scala/collection/immutable/Map::status=resource-found=2
     state=Missing::origin=source::candidate=scala/collection/immutable/MapNode$::status=resource-found=35
     state=Missing::origin=source::candidate=scala/collection/immutable/MapOps::status=resource-found=1
