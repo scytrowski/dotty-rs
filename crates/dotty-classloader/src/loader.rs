@@ -1099,6 +1099,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 existing_symbol.origin
             };
             let semantic_owner = existing_symbol.owner.unwrap_or(owner);
+            let visibility = if builtin_object {
+                visibility
+            } else {
+                existing_symbol.visibility
+            };
             self.session.record_symbol_update(self.store, symbol);
             *self.store.symbols.get_mut(symbol) = Symbol {
                 name: symbol_name,
@@ -5732,6 +5737,45 @@ mod tests {
         assert_eq!(loader.store.symbols.get(outer).info, SymbolInfo::Missing);
         assert_eq!(loader.store.symbols.get(inner).info, SymbolInfo::Missing);
         assert!(loader.session.resolved.is_empty());
+    }
+
+    #[test]
+    fn shell_upgrade_preserves_private_and_protected_nested_visibility() {
+        use dotty_classfile::access_flags::ACC_PUBLIC;
+        for (access, expected) in [
+            (ACC_PRIVATE, Visibility::Private),
+            (ACC_PROTECTED, Visibility::Protected),
+        ] {
+            let name = BinaryName::from_internal("NestedSample$Inner");
+            let mut classes = nested_sample_classpath();
+            let bytes = classes.get(&name).unwrap();
+            let mut reader = Reader::new(bytes);
+            let mut class_file = ClassFile::decode(&mut reader).unwrap();
+            class_file.access_flags.0 &= !ACC_PUBLIC;
+            for attribute in &mut class_file.attributes {
+                if let Attribute::InnerClasses(entries) = attribute {
+                    for entry in entries {
+                        if entry.inner_class_info_index == class_file.this_class {
+                            entry.inner_class_access_flags = (entry.inner_class_access_flags
+                                & !(ACC_PUBLIC | ACC_PRIVATE | ACC_PROTECTED))
+                                | access;
+                        }
+                    }
+                }
+            }
+            let bytes = class_file.encode().unwrap();
+            classes.insert(name.clone(), bytes);
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+            let identity = loader.ensure_class_identity(&name).unwrap();
+            assert_eq!(loader.store.symbols.get(identity).visibility, expected);
+            assert_eq!(loader.load_class(&name).unwrap(), identity);
+            assert_eq!(loader.store.symbols.get(identity).visibility, expected);
+            assert!(matches!(
+                loader.store.symbols.get(identity).info,
+                SymbolInfo::Complete(_)
+            ));
+        }
     }
 
     #[test]
