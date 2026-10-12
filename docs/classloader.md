@@ -330,14 +330,16 @@ drain observations with `take_load_profiles()`. Profiles describe attempted
 work, including a load later rolled back by an enclosing typer transaction,
 and are kept separate from semantic session state.
 
-In the pinned Scala 3.9/JDK 21 source audit, 958 top-level class loads had a
+In the frozen #976 Scala 3.9/JDK 21 source audit, 958 top-level class loads had a
 median dependency depth of 0, p95 of 140, and maximum of 141. One request
 touched 1,048 distinct classes; the largest roots were repeated
 `dotty/tools/io/AbstractFile` requests from classpath and TASTy code. The
 distribution is strongly skewed: most roots did no nested loading, while a
-small tail eagerly traversed large dependency graphs. The next classloader
-increment should investigate lazy/deferred dependency completion and retain
-these profiles as a bounded before/after measure. Package term/object
+small tail eagerly traversed large dependency graphs. #1019–#1023 reduced
+p95 completion depth to 3, maximum depth to 4, and maximum completed fanout
+to 8, while retaining 358 external class successes on 29 canonical keys.
+The [hardening report](typer-deferred-classpath-hardening-3.9.0.md) retains
+separate shell and completion measurements. Package term/object
 materialization remains a separate identity boundary; a discovered `Foo$`
 resource is not itself sufficient to construct a canonical module symbol.
 The full measurements and the single next-sprint recommendation are recorded
@@ -401,6 +403,10 @@ classes. A later `load_class` reuses and completes the same `SymbolId`.
 Failed identity establishment rolls back newly entered symbols, packages,
 and session metadata.
 
+The [#1023 hardening report](typer-deferred-classpath-hardening-3.9.0.md)
+freezes lifecycle states, permanent regression coverage, metric definitions,
+and the measured before/after dependency gate.
+
 The dependency policy is explicit:
 
 | Reference role | Policy |
@@ -434,7 +440,10 @@ context with no freed symbol IDs; a new loader sharing the session can retry.
 
 Opt-in `ClassLoadProfile` records distinct touched identities and eager load
 depth, plus `full_completions`, `shells_created`, `shells_reused`,
-`member_type_references`, and `hierarchy_loads`. Completions exclude cache hits;
+`member_type_references`, and `hierarchy_loads`. `completed_classes` records
+successful full loads, `identity_shells` records incomplete identities observed,
+`completed_cache_hits` counts completed-session reuse, and `root_was_shell`
+identifies later on-demand root completion. Completions exclude cache hits;
 shell reuse counts incomplete external identities, not completed classes or
 builtins. Member references count successful descriptor/signature/annotation
 identity requests; hierarchy loads count superclass/interface requests,
@@ -473,8 +482,9 @@ new scopes, members, dependency identities, and positive caches. A missing or
 malformed artifact returns a focused resolver error, never member absence.
 Pre-existing complete prefixes remain complete on absent/ambiguous requests;
 repeated successful calls reuse member IDs without rereading class bytes.
-Package/type materialization, builtin aliases, and the package-term unresolved
-boundary keep their existing behavior.
+Package type requests also complete an existing owned external shell before
+returning its canonical class symbol (#1023). Unowned/source Missing classes,
+builtin aliases, and the package-term unresolved boundary retain their contracts.
 
 `ClassLoader::load_class(name)` follows that shape:
 

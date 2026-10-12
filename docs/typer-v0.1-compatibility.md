@@ -1585,3 +1585,19 @@ inferred `Class` field slice scoped in
 [#825](typer-classpath-corpus-audit-3.9.0.md#recommended-next-sprint). That
 slice is implemented in #856; the audit counts remain the baseline taken
 before field inference was added.
+
+
+### #1023 deferred classpath hardening gate
+
+The [hardening report](typer-deferred-classpath-hardening-3.9.0.md) documents
+lifecycle/regression policy, before/after dependency metrics, frozen cohort
+accounting, and exactly one current next-sprint recommendation. The unchanged
+[#976 baseline](typer-classpath-corpus-audit-976-3.9.0.md) is retained separately
+from the [current audit](typer-classpath-corpus-audit-3.9.0.md).
+
+For a directly comparable run use `JAVA_HOME` pointing to Temurin OpenJDK
+21.0.8, the pinned Scala checkout/artifacts above, and `--verify-determinism`.
+The runner compares two normalized outputs byte-for-byte and emits the report
+plus `*-deferred-cohorts.tsv`. The comparison tool rejects missing frozen rows, lost successful class target
+keys, a reduced class-success count, a changed typed-method denominator, p95
+depth above 70, and full-completion fanout above 524. Shell identities touched are reported separately.
