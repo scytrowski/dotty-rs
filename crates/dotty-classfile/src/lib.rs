@@ -28,6 +28,7 @@
 
 pub mod access_flags;
 pub mod attribute;
+pub mod bytecode;
 pub mod class_file;
 pub mod class_file_builder;
 pub mod constant_pool;
@@ -45,6 +46,7 @@ pub mod writer;
 pub mod classfile {
     pub use super::access_flags::*;
     pub use super::attribute::*;
+    pub use super::bytecode::*;
     pub use super::class_file::*;
     pub use super::class_file_builder::*;
     pub use super::constant_pool::*;
