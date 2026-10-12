@@ -393,6 +393,77 @@ impl ConstantPool {
             MethodHandleKind::InvokeInterface => {
                 self.validate_reference(index, is_interface_methodref)
             }
+        }?;
+
+        if matches!(
+            kind,
+            MethodHandleKind::GetField
+                | MethodHandleKind::GetStatic
+                | MethodHandleKind::PutField
+                | MethodHandleKind::PutStatic
+        ) {
+            return Ok(());
+        }
+
+        let target_index = usize::from(index.0);
+        let target = self.get(index).ok_or(EncodeError::InvalidIndex {
+            index: target_index,
+            count: self.entries.len(),
+        })?;
+        let name_and_type_index = match target {
+            ConstantPoolEntry::Methodref {
+                name_and_type_index,
+                ..
+            }
+            | ConstantPoolEntry::InterfaceMethodref {
+                name_and_type_index,
+                ..
+            } => *name_and_type_index,
+            _ => {
+                return Err(EncodeError::InvalidReference {
+                    index: target_index,
+                });
+            }
+        };
+        self.validate_reference(name_and_type_index, is_name_and_type)?;
+        let (name_index, _) = match self.get(name_and_type_index) {
+            Some(ConstantPoolEntry::NameAndType {
+                name_index,
+                descriptor_index,
+            }) => (*name_index, *descriptor_index),
+            _ => {
+                return Err(EncodeError::InvalidReference {
+                    index: usize::from(name_and_type_index.0),
+                });
+            }
+        };
+        self.validate_reference(name_index, is_utf8)?;
+        let name = match self.get(name_index) {
+            Some(ConstantPoolEntry::Utf8(name)) => name.as_str(),
+            _ => {
+                return Err(EncodeError::InvalidReference {
+                    index: usize::from(name_index.0),
+                });
+            }
+        };
+
+        let valid_name = match kind {
+            MethodHandleKind::NewInvokeSpecial => name == "<init>",
+            MethodHandleKind::InvokeVirtual
+            | MethodHandleKind::InvokeStatic
+            | MethodHandleKind::InvokeSpecial
+            | MethodHandleKind::InvokeInterface => name != "<init>" && name != "<clinit>",
+            MethodHandleKind::GetField
+            | MethodHandleKind::GetStatic
+            | MethodHandleKind::PutField
+            | MethodHandleKind::PutStatic => true,
+        };
+        if valid_name {
+            Ok(())
+        } else {
+            Err(EncodeError::InvalidMethodHandleName {
+                index: target_index,
+            })
         }
     }
 
@@ -875,7 +946,7 @@ mod tests {
             }),
             Some(ConstantPoolEntry::MethodHandle {
                 reference_kind: MethodHandleKind::NewInvokeSpecial,
-                reference_index: ConstantPoolIndex(14),
+                reference_index: ConstantPoolIndex(33),
             }),
             Some(ConstantPoolEntry::MethodHandle {
                 reference_kind: MethodHandleKind::InvokeInterface,
@@ -899,6 +970,15 @@ mod tests {
                 name_index: ConstantPoolIndex(8),
             }),
             Some(ConstantPoolEntry::Utf8("u\0😀".to_owned())),
+            Some(ConstantPoolEntry::Utf8("<init>".to_owned())),
+            Some(ConstantPoolEntry::NameAndType {
+                name_index: ConstantPoolIndex(31),
+                descriptor_index: ConstantPoolIndex(9),
+            }),
+            Some(ConstantPoolEntry::Methodref {
+                class_index: ConstantPoolIndex(10),
+                name_and_type_index: ConstantPoolIndex(32),
+            }),
         ])
     }
 
@@ -931,7 +1011,7 @@ mod tests {
         assert_eq!(
             encoded,
             [
-                0x00, 0x1F, // constant_pool_count: 30 slots + slot zero
+                0x00, 0x22, // constant_pool_count: 33 slots + slot zero
                 0x03, 0xFF, 0xFF, 0xFF, 0xFE, // Integer(-2)
                 0x04, 0x80, 0x00, 0x00, 0x00, // Float(-0.0)
                 0x05, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Long(i64::MIN)
@@ -952,7 +1032,7 @@ mod tests {
                 0x0F, 0x05, 0x00, 0x0E, // InvokeVirtual
                 0x0F, 0x06, 0x00, 0x0E, // InvokeStatic
                 0x0F, 0x07, 0x00, 0x0E, // InvokeSpecial
-                0x0F, 0x08, 0x00, 0x0E, // NewInvokeSpecial
+                0x0F, 0x08, 0x00, 0x21, // NewInvokeSpecial
                 0x0F, 0x09, 0x00, 0x0F, // InvokeInterface
                 0x10, 0x00, 0x09, // MethodType
                 0x11, 0x12, 0x34, 0x00, 0x0C, // Dynamic
@@ -961,6 +1041,9 @@ mod tests {
                 0x14, 0x00, 0x08, // Package
                 0x01, 0x00, 0x09, b'u', 0xC0, 0x80, 0xED, 0xA0, 0xBD, 0xED, 0xB8,
                 0x80, // Utf8 MUTF-8
+                0x01, 0x00, 0x06, b'<', b'i', b'n', b'i', b't', b'>', // Utf8 <init>
+                0x0C, 0x00, 0x1F, 0x00, 0x09, // NameAndType <init>
+                0x0A, 0x00, 0x0A, 0x00, 0x20, // Methodref <init>
             ]
         );
     }
@@ -1072,6 +1155,76 @@ mod tests {
         assert_eq!(
             reserved_slot_reference.encode(),
             Err(EncodeError::InvalidReference { index: 2 })
+        );
+    }
+
+    fn pool_with_method_handle(kind: MethodHandleKind, method_name: &str) -> ConstantPool {
+        ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("C".to_owned())),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(1),
+            }),
+            Some(ConstantPoolEntry::Utf8(method_name.to_owned())),
+            Some(ConstantPoolEntry::Utf8("()V".to_owned())),
+            Some(ConstantPoolEntry::NameAndType {
+                name_index: ConstantPoolIndex(3),
+                descriptor_index: ConstantPoolIndex(4),
+            }),
+            Some(ConstantPoolEntry::Methodref {
+                class_index: ConstantPoolIndex(2),
+                name_and_type_index: ConstantPoolIndex(5),
+            }),
+            Some(ConstantPoolEntry::InterfaceMethodref {
+                class_index: ConstantPoolIndex(2),
+                name_and_type_index: ConstantPoolIndex(5),
+            }),
+            Some(ConstantPoolEntry::MethodHandle {
+                reference_kind: kind,
+                reference_index: ConstantPoolIndex(if kind == MethodHandleKind::InvokeInterface {
+                    7
+                } else {
+                    6
+                }),
+            }),
+        ])
+    }
+
+    #[test]
+    fn encode_validates_method_handle_target_names() {
+        for kind in [
+            MethodHandleKind::InvokeVirtual,
+            MethodHandleKind::InvokeStatic,
+            MethodHandleKind::InvokeSpecial,
+            MethodHandleKind::InvokeInterface,
+        ] {
+            for method_name in ["<init>", "<clinit>"] {
+                assert_eq!(
+                    pool_with_method_handle(kind, method_name).encode(),
+                    Err(EncodeError::InvalidMethodHandleName {
+                        index: if kind == MethodHandleKind::InvokeInterface {
+                            7
+                        } else {
+                            6
+                        }
+                    }),
+                    "{kind:?} must reject {method_name}"
+                );
+            }
+        }
+
+        assert_eq!(
+            pool_with_method_handle(MethodHandleKind::NewInvokeSpecial, "ordinary").encode(),
+            Err(EncodeError::InvalidMethodHandleName { index: 6 })
+        );
+        assert!(
+            pool_with_method_handle(MethodHandleKind::NewInvokeSpecial, "<init>")
+                .encode()
+                .is_ok()
+        );
+        assert!(
+            pool_with_method_handle(MethodHandleKind::InvokeVirtual, "ordinary")
+                .encode()
+                .is_ok()
         );
     }
 

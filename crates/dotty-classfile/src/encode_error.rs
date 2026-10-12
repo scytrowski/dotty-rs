@@ -44,6 +44,11 @@ pub enum EncodeError {
         /// The referenced index.
         index: usize,
     },
+    /// A method handle's target method name is invalid for its reference kind.
+    InvalidMethodHandleName {
+        /// The index of the method or interface method referenced by the handle.
+        index: usize,
+    },
     /// The provided class-file model violates a structural requirement.
     InvalidModel,
     /// The provided byte layout violates a structural requirement.
@@ -78,6 +83,10 @@ impl fmt::Display for EncodeError {
             Self::InvalidReference { index } => {
                 write!(formatter, "invalid reference to index {index}")
             }
+            Self::InvalidMethodHandleName { index } => write!(
+                formatter,
+                "invalid method name for method handle target at index {index}"
+            ),
             Self::InvalidModel => formatter.write_str("invalid class-file model"),
             Self::InvalidLayout => formatter.write_str("invalid class-file layout"),
             Self::Utf8LengthOverflow { byte_len, max } => write!(
