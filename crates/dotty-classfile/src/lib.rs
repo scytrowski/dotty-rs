@@ -7,8 +7,10 @@
 //! reference and compatibility audit this type model follows.
 //!
 //! [`constant_pool::ConstantPool::encode`] serializes constant-pool entries,
-//! while [`writer::Writer`] provides primitive JVM-format writes and checked
-//! length prefixes. The crate does not encode complete [`class_file::ClassFile`]
+//! and [`attribute::Attribute::encode`] plus [`attribute::encode_attributes`]
+//! serialize the supported scalar, list-based, and opaque attribute forms.
+//! [`writer::Writer`] provides primitive JVM-format writes and checked length
+//! prefixes. The crate does not encode complete [`class_file::ClassFile`]
 //! values, perform semantic JVM verification, or generate JVM code from Scala
 //! programs.
 
