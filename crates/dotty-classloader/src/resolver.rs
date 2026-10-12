@@ -358,6 +358,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     };
                     if class_info.class != *symbol
                         || !store.scopes.contains(class_info.declarations)
+                        || store.scopes.get(class_info.declarations).owner != Some(*symbol)
                     {
                         return Err(ResolutionError::Malformed {
                             reason: format!(
@@ -1110,6 +1111,66 @@ mod tests {
             "the incomplete source identity remains in place without a classpath twin"
         );
         assert!(resolver.session.resolved.is_empty());
+    }
+
+    #[test]
+    fn package_type_lookup_rejects_a_class_with_a_foreign_declaration_scope() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            EmptyCountingClassPath(Arc::new(AtomicUsize::new(0))),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "example");
+        let package_scope = resolver.package_scope(package).unwrap();
+        let class_name = Name::new(store.names.intern("Malformed"), Namespace::Type);
+        let foreign_scope = store.scopes.alloc(Scope::new(Some(package)));
+        let class = store.symbols.alloc(Symbol {
+            name: class_name,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: dotty_core::SymbolOrigin::Source(SourceId::from_index(0)),
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        let class_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: definitions.no_prefix,
+            class,
+            parents: Vec::new(),
+            declarations: foreign_scope,
+            self_type: None,
+        }));
+        store.symbols.get_mut(class).info = SymbolInfo::Complete(class_info);
+        store.scopes.get_mut(package_scope).enter(class_name, class);
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+
+        let error = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: class_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .expect_err("a class cannot publish another owner's declaration scope");
+
+        assert!(matches!(
+            error,
+            ResolutionError::Malformed { reason }
+                if reason.contains("invalid class identity or declaration scope")
+        ));
     }
 
     #[test]
