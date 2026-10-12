@@ -688,10 +688,10 @@ exception_table_entry {
 ```
 
 On every method except native/abstract ones. Not needed for semantic type
-analysis; the loader must still be able to walk past it (using
-`attribute_length`) and, if the writer side ever needs to round-trip class
-files unchanged, retain `code[]` and its nested attributes as opaque bytes
-rather than parse them.
+analysis; the loader walks its structure while retaining `code[]` byte for
+byte. The structural encoder preserves the exception table and nested
+attributes; unmodeled nested payloads such as `StackMapTable` remain opaque
+bytes. No bytecode instructions or verifier frames are interpreted.
 
 ### 7.13. `BootstrapMethods` (structural only)
 

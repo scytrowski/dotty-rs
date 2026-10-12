@@ -119,10 +119,10 @@ pub const DEFAULT_MAX_ANNOTATION_DEPTH: usize = 128;
 /// A structured attribute, resolved one level above [`RawAttribute`].
 ///
 /// Covers the attributes needed for symbol-level semantic analysis
-/// (`docs/classfile-format-jdk25.md` §7). Annotation attributes and other
-/// standard attributes not yet needed (`StackMapTable`, `LineNumberTable`,
-/// `Module*`, ...) fall through to [`Attribute::Other`] rather than being
-/// dropped.
+/// (`docs/classfile-format-jdk25.md` §7). `Code`, `Record`, and runtime
+/// annotation payloads are represented structurally; unmodeled nested
+/// attributes such as `StackMapTable` and `LineNumberTable` fall through to
+/// [`Attribute::Other`] so their bytes can be preserved.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attribute<'a> {
     ConstantValue(ConstantPoolIndex),
@@ -563,11 +563,11 @@ fn attribute_name(attribute: &Attribute<'_>) -> Option<&'static str> {
         Attribute::PermittedSubclasses(_) => Some("PermittedSubclasses"),
         Attribute::BootstrapMethods(_) => Some("BootstrapMethods"),
         Attribute::MethodParameters(_) => Some("MethodParameters"),
+        Attribute::Record(_) => Some("Record"),
+        Attribute::Code(_) => Some("Code"),
+        Attribute::RuntimeVisibleAnnotations(_) => Some("RuntimeVisibleAnnotations"),
+        Attribute::RuntimeInvisibleAnnotations(_) => Some("RuntimeInvisibleAnnotations"),
         Attribute::Other(_) => None,
-        Attribute::Record(_)
-        | Attribute::Code(_)
-        | Attribute::RuntimeVisibleAnnotations(_)
-        | Attribute::RuntimeInvisibleAnnotations(_) => None,
     }
 }
 
@@ -576,6 +576,76 @@ fn write_index_list(writer: &mut Writer, indices: &[ConstantPoolIndex]) -> Resul
     for index in indices {
         writer.write_u2(index.0);
     }
+    Ok(())
+}
+
+fn write_annotation(
+    writer: &mut Writer,
+    annotation: &Annotation,
+    depth: usize,
+) -> Result<(), EncodeError> {
+    writer.write_u2(annotation.type_index.0);
+    writer.write_u2_length(annotation.element_value_pairs.len())?;
+    for (name_index, value) in &annotation.element_value_pairs {
+        writer.write_u2(name_index.0);
+        write_element_value(writer, value, depth)?;
+    }
+    Ok(())
+}
+
+fn write_element_value(
+    writer: &mut Writer,
+    value: &ElementValue,
+    depth: usize,
+) -> Result<(), EncodeError> {
+    match value {
+        ElementValue::Byte(index) => write_tagged_index(writer, b'B', *index),
+        ElementValue::Char(index) => write_tagged_index(writer, b'C', *index),
+        ElementValue::Double(index) => write_tagged_index(writer, b'D', *index),
+        ElementValue::Float(index) => write_tagged_index(writer, b'F', *index),
+        ElementValue::Int(index) => write_tagged_index(writer, b'I', *index),
+        ElementValue::Long(index) => write_tagged_index(writer, b'J', *index),
+        ElementValue::Short(index) => write_tagged_index(writer, b'S', *index),
+        ElementValue::Boolean(index) => write_tagged_index(writer, b'Z', *index),
+        ElementValue::String(index) => write_tagged_index(writer, b's', *index),
+        ElementValue::Class(index) => write_tagged_index(writer, b'c', *index),
+        ElementValue::Enum {
+            type_name_index,
+            const_name_index,
+        } => {
+            writer.write_u1(b'e');
+            writer.write_u2(type_name_index.0);
+            writer.write_u2(const_name_index.0);
+            Ok(())
+        }
+        ElementValue::Annotation(annotation) => {
+            if depth >= DEFAULT_MAX_ANNOTATION_DEPTH {
+                return Err(EncodeError::TooDeeplyNestedAnnotation);
+            }
+            writer.write_u1(b'@');
+            write_annotation(writer, annotation, depth + 1)
+        }
+        ElementValue::Array(values) => {
+            if depth >= DEFAULT_MAX_ANNOTATION_DEPTH {
+                return Err(EncodeError::TooDeeplyNestedAnnotation);
+            }
+            writer.write_u1(b'[');
+            writer.write_u2_length(values.len())?;
+            for value in values {
+                write_element_value(writer, value, depth + 1)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn write_tagged_index(
+    writer: &mut Writer,
+    tag: u8,
+    index: ConstantPoolIndex,
+) -> Result<(), EncodeError> {
+    writer.write_u1(tag);
+    writer.write_u2(index.0);
     Ok(())
 }
 
@@ -625,6 +695,111 @@ fn bootstrap_methods_payload_length(
     Ok(length)
 }
 
+fn attribute_list_payload_length(attributes: &[Attribute<'_>]) -> Result<usize, EncodeError> {
+    checked_u16_len(attributes.len())?;
+    let mut length = 2;
+    for attribute in attributes {
+        length = add_payload_length(length, 6)?;
+        length = add_payload_length(length, encoded_payload_length(attribute)?)?;
+    }
+    checked_u32_len(length)?;
+    Ok(length)
+}
+
+fn code_payload_length(code: &CodeAttribute<'_>) -> Result<usize, EncodeError> {
+    if !(1..=usize::from(u16::MAX)).contains(&code.code.len()) {
+        return Err(EncodeError::InvalidCodeLength {
+            length: code.code.len(),
+        });
+    }
+    checked_u16_len(code.exception_table.len())?;
+    for (entry_index, entry) in code.exception_table.iter().enumerate() {
+        let code_length = code.code.len() as u32;
+        if u32::from(entry.start_pc) >= u32::from(entry.end_pc)
+            || u32::from(entry.end_pc) > code_length
+            || u32::from(entry.handler_pc) >= code_length
+        {
+            return Err(EncodeError::InvalidExceptionTableRange { entry_index });
+        }
+    }
+    let mut length = 10;
+    length = add_payload_length(length, code.code.len())?;
+    length = add_payload_length(
+        length,
+        repeated_payload_length(code.exception_table.len(), 8)?,
+    )?;
+    length = add_payload_length(length, attribute_list_payload_length(&code.attributes)?)?;
+    checked_u32_len(length)?;
+    Ok(length)
+}
+
+fn record_payload_length(components: &[RecordComponentInfo<'_>]) -> Result<usize, EncodeError> {
+    checked_u16_len(components.len())?;
+    let mut length = 2;
+    for component in components {
+        length = add_payload_length(length, 4)?;
+        length = add_payload_length(
+            length,
+            attribute_list_payload_length(&component.attributes)?,
+        )?;
+    }
+    checked_u32_len(length)?;
+    Ok(length)
+}
+
+fn annotation_payload_length(annotations: &[Annotation]) -> Result<usize, EncodeError> {
+    checked_u16_len(annotations.len())?;
+    let mut length = 2;
+    for annotation in annotations {
+        length = add_payload_length(length, annotation_length(annotation, 0)?)?;
+    }
+    checked_u32_len(length)?;
+    Ok(length)
+}
+
+fn annotation_length(annotation: &Annotation, depth: usize) -> Result<usize, EncodeError> {
+    checked_u16_len(annotation.element_value_pairs.len())?;
+    let mut length = 4;
+    for (_, value) in &annotation.element_value_pairs {
+        length = add_payload_length(length, 2)?;
+        length = add_payload_length(length, element_value_length(value, depth)?)?;
+    }
+    Ok(length)
+}
+
+fn element_value_length(value: &ElementValue, depth: usize) -> Result<usize, EncodeError> {
+    match value {
+        ElementValue::Byte(_)
+        | ElementValue::Char(_)
+        | ElementValue::Double(_)
+        | ElementValue::Float(_)
+        | ElementValue::Int(_)
+        | ElementValue::Long(_)
+        | ElementValue::Short(_)
+        | ElementValue::Boolean(_)
+        | ElementValue::String(_)
+        | ElementValue::Class(_) => Ok(3),
+        ElementValue::Enum { .. } => Ok(5),
+        ElementValue::Annotation(annotation) => {
+            if depth >= DEFAULT_MAX_ANNOTATION_DEPTH {
+                return Err(EncodeError::TooDeeplyNestedAnnotation);
+            }
+            add_payload_length(1, annotation_length(annotation, depth + 1)?)
+        }
+        ElementValue::Array(values) => {
+            if depth >= DEFAULT_MAX_ANNOTATION_DEPTH {
+                return Err(EncodeError::TooDeeplyNestedAnnotation);
+            }
+            checked_u16_len(values.len())?;
+            let mut length = 3;
+            for value in values {
+                length = add_payload_length(length, element_value_length(value, depth + 1)?)?;
+            }
+            Ok(length)
+        }
+    }
+}
+
 fn encoded_payload_length(attribute: &Attribute<'_>) -> Result<usize, EncodeError> {
     let length = match attribute {
         Attribute::ConstantValue(_)
@@ -652,11 +827,11 @@ fn encoded_payload_length(attribute: &Attribute<'_>) -> Result<usize, EncodeErro
             add_payload_length(1, repeated_payload_length(parameters.len(), 4)?)?
         }
         Attribute::Other(raw) => raw.bytes.len(),
-        Attribute::Record(_)
-        | Attribute::Code(_)
-        | Attribute::RuntimeVisibleAnnotations(_)
-        | Attribute::RuntimeInvisibleAnnotations(_) => {
-            return Err(EncodeError::UnsupportedAttribute);
+        Attribute::Record(components) => record_payload_length(components)?,
+        Attribute::Code(code) => code_payload_length(code)?,
+        Attribute::RuntimeVisibleAnnotations(annotations)
+        | Attribute::RuntimeInvisibleAnnotations(annotations) => {
+            annotation_payload_length(annotations)?
         }
     };
     checked_u32_len(length)?;
@@ -752,10 +927,11 @@ impl<'a> Attribute<'a> {
     /// pool. This is a structural round trip: duplicate name entries may
     /// produce different bytes while decoding to the same model. An opaque
     /// [`Attribute::Other`] preserves its original name index and payload.
-    /// This encoder currently covers scalar, list-based, and opaque
-    /// attributes; recursive and annotation attributes return
-    /// [`EncodeError::UnsupportedAttribute`].
+    /// Code and nested attribute payloads remain opaque where represented by
+    /// [`Attribute::Other`]; annotation structures are encoded recursively
+    /// with [`DEFAULT_MAX_ANNOTATION_DEPTH`].
     pub fn encode(&self, constant_pool: &ConstantPool) -> Result<Vec<u8>, EncodeError> {
+        let payload_length = encoded_payload_length(self)?;
         let name_index = if let Some(name) = attribute_name(self) {
             validate_attribute(self, constant_pool)
                 .map_err(|error| encode_pool_ref_error(constant_pool, error))?;
@@ -771,7 +947,6 @@ impl<'a> Attribute<'a> {
             return Err(EncodeError::UnsupportedAttribute);
         };
 
-        let payload_length = encoded_payload_length(self)?;
         encode_attribute_info(name_index, payload_length, |writer| {
             match self {
                 Attribute::ConstantValue(index)
@@ -814,13 +989,37 @@ impl<'a> Attribute<'a> {
                         writer.write_u2(parameter.access_flags);
                     }
                 }
-                Attribute::Other(raw) => writer.write_bytes(raw.bytes),
-                Attribute::Record(_)
-                | Attribute::Code(_)
-                | Attribute::RuntimeVisibleAnnotations(_)
-                | Attribute::RuntimeInvisibleAnnotations(_) => {
-                    return Err(EncodeError::UnsupportedAttribute);
+                Attribute::Record(components) => {
+                    writer.write_u2_length(components.len())?;
+                    for component in components {
+                        writer.write_u2(component.name_index.0);
+                        writer.write_u2(component.descriptor_index.0);
+                        writer
+                            .write_bytes(&encode_attributes(&component.attributes, constant_pool)?);
+                    }
                 }
+                Attribute::Code(code) => {
+                    writer.write_u2(code.max_stack);
+                    writer.write_u2(code.max_locals);
+                    writer.write_u4_length(code.code.len())?;
+                    writer.write_bytes(code.code);
+                    writer.write_u2_length(code.exception_table.len())?;
+                    for entry in &code.exception_table {
+                        writer.write_u2(entry.start_pc);
+                        writer.write_u2(entry.end_pc);
+                        writer.write_u2(entry.handler_pc);
+                        writer.write_u2(entry.catch_type.map_or(0, |index| index.0));
+                    }
+                    writer.write_bytes(&encode_attributes(&code.attributes, constant_pool)?);
+                }
+                Attribute::RuntimeVisibleAnnotations(annotations)
+                | Attribute::RuntimeInvisibleAnnotations(annotations) => {
+                    writer.write_u2_length(annotations.len())?;
+                    for annotation in annotations {
+                        write_annotation(writer, annotation, 0)?;
+                    }
+                }
+                Attribute::Other(raw) => writer.write_bytes(raw.bytes),
             }
             Ok(())
         })
@@ -1151,18 +1350,337 @@ mod tests {
         );
     }
 
+    fn complex_attribute_pool() -> ConstantPool {
+        ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("RuntimeVisibleAnnotations".into())), // #1
+            Some(ConstantPoolEntry::Utf8(
+                "RuntimeInvisibleAnnotations".into(),
+            )), // #2
+            Some(ConstantPoolEntry::Utf8("Code".into())),                      // #3
+            Some(ConstantPoolEntry::Utf8("Record".into())),                    // #4
+            Some(ConstantPoolEntry::Utf8("StackMapTable".into())),             // #5
+            Some(ConstantPoolEntry::Utf8("LExample;".into())),                 // #6
+            Some(ConstantPoolEntry::Utf8("value".into())),                     // #7
+            Some(ConstantPoolEntry::Integer(1)),                               // #8
+            Some(ConstantPoolEntry::Float(1.5)),                               // #9
+            Some(ConstantPoolEntry::Long(9)),                                  // #10
+            None,                                           // #11, reserved long slot
+            Some(ConstantPoolEntry::Double(2.5)),           // #12
+            None,                                           // #13, reserved double slot
+            Some(ConstantPoolEntry::Utf8("text".into())),   // #14
+            Some(ConstantPoolEntry::Utf8("LKind;".into())), // #15
+            Some(ConstantPoolEntry::Utf8("ONE".into())),    // #16
+            Some(ConstantPoolEntry::Utf8("Ljava/lang/String;".into())), // #17
+            Some(ConstantPoolEntry::Utf8("component".into())), // #18
+            Some(ConstantPoolEntry::Utf8("I".into())),      // #19
+            Some(ConstantPoolEntry::Utf8("C".into())),      // #20
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(20),
+            }), // #21
+            Some(ConstantPoolEntry::Utf8("Signature".into())), // #22
+            Some(ConstantPoolEntry::Utf8("I".into())),      // #23
+            Some(ConstantPoolEntry::Utf8("component2".into())), // #24
+            Some(ConstantPoolEntry::Utf8("J".into())),      // #25
+        ])
+    }
+
     #[test]
-    fn encode_rejects_attribute_variants_outside_this_increment() {
-        let pool = pool_with_utf8_name("Code");
-        let code = Attribute::Code(CodeAttribute {
-            max_stack: 0,
-            max_locals: 0,
-            code: &[],
-            exception_table: vec![],
-            attributes: vec![],
+    fn code_attribute_roundtrips_raw_code_exceptions_and_nested_opaque_attributes() {
+        let pool = complex_attribute_pool();
+        let nested = Attribute::Other(RawAttribute {
+            name_index: ConstantPoolIndex(5),
+            bytes: &[0xCA, 0xFE, 0x00],
+        });
+        let attribute = Attribute::Code(CodeAttribute {
+            max_stack: 3,
+            max_locals: 2,
+            code: &[0xFF, 0x00, 0x7A, 0xB1, 0x42],
+            exception_table: vec![
+                ExceptionTableEntry {
+                    start_pc: 0,
+                    end_pc: 2,
+                    handler_pc: 2,
+                    catch_type: Some(ConstantPoolIndex(21)),
+                },
+                ExceptionTableEntry {
+                    start_pc: 2,
+                    end_pc: 5,
+                    handler_pc: 4,
+                    catch_type: None,
+                },
+            ],
+            attributes: vec![nested],
         });
 
-        assert_eq!(code.encode(&pool), Err(EncodeError::UnsupportedAttribute));
+        let bytes = attribute.encode(&pool).unwrap();
+        let mut reader = Reader::new(&bytes);
+        assert_eq!(Attribute::decode(&mut reader, &pool), Ok(attribute));
+        assert!(reader.is_at_end());
+    }
+
+    #[test]
+    fn code_attribute_rejects_invalid_lengths_ranges_and_catch_types() {
+        let pool = complex_attribute_pool();
+        fn code<'a>(bytes: &'a [u8], entries: Vec<ExceptionTableEntry>) -> Attribute<'a> {
+            Attribute::Code(CodeAttribute {
+                max_stack: 0,
+                max_locals: 0,
+                code: bytes,
+                exception_table: entries,
+                attributes: vec![],
+            })
+        }
+        assert_eq!(
+            code(&[], vec![]).encode(&pool),
+            Err(EncodeError::InvalidCodeLength { length: 0 })
+        );
+        let oversized = vec![0; usize::from(u16::MAX) + 1];
+        assert_eq!(
+            code(&oversized, vec![]).encode(&pool),
+            Err(EncodeError::InvalidCodeLength {
+                length: oversized.len()
+            })
+        );
+        assert_eq!(
+            code(
+                &[0, 0],
+                vec![ExceptionTableEntry {
+                    start_pc: 1,
+                    end_pc: 1,
+                    handler_pc: 1,
+                    catch_type: None,
+                }]
+            )
+            .encode(&pool),
+            Err(EncodeError::InvalidExceptionTableRange { entry_index: 0 })
+        );
+        assert_eq!(
+            code(
+                &[0, 0],
+                vec![ExceptionTableEntry {
+                    start_pc: 0,
+                    end_pc: 2,
+                    handler_pc: 2,
+                    catch_type: None,
+                }]
+            )
+            .encode(&pool),
+            Err(EncodeError::InvalidExceptionTableRange { entry_index: 0 })
+        );
+        assert_eq!(
+            code(
+                &[0],
+                vec![ExceptionTableEntry {
+                    start_pc: 0,
+                    end_pc: 1,
+                    handler_pc: 0,
+                    catch_type: Some(ConstantPoolIndex(1)),
+                }]
+            )
+            .encode(&pool),
+            Err(EncodeError::InvalidReference { index: 1 })
+        );
+    }
+
+    #[test]
+    fn record_attribute_roundtrips_empty_and_nested_components() {
+        let pool = complex_attribute_pool();
+        let empty = Attribute::Record(vec![]);
+        let components = Attribute::Record(vec![
+            RecordComponentInfo {
+                name_index: ConstantPoolIndex(18),
+                descriptor_index: ConstantPoolIndex(19),
+                attributes: vec![Attribute::Signature(ConstantPoolIndex(23))],
+            },
+            RecordComponentInfo {
+                name_index: ConstantPoolIndex(24),
+                descriptor_index: ConstantPoolIndex(25),
+                attributes: vec![Attribute::Other(RawAttribute {
+                    name_index: ConstantPoolIndex(5),
+                    bytes: &[0x01, 0x02],
+                })],
+            },
+        ]);
+
+        for attribute in [empty, components] {
+            let bytes = attribute.encode(&pool).unwrap();
+            let mut reader = Reader::new(&bytes);
+            assert_eq!(Attribute::decode(&mut reader, &pool), Ok(attribute));
+            assert!(reader.is_at_end());
+        }
+    }
+
+    #[test]
+    fn annotation_attributes_roundtrip_every_element_value_tag() {
+        let pool = complex_attribute_pool();
+        let annotation = Annotation {
+            type_index: ConstantPoolIndex(6),
+            element_value_pairs: vec![
+                (
+                    ConstantPoolIndex(7),
+                    ElementValue::Byte(ConstantPoolIndex(8)),
+                ),
+                (
+                    ConstantPoolIndex(7),
+                    ElementValue::Char(ConstantPoolIndex(8)),
+                ),
+                (
+                    ConstantPoolIndex(7),
+                    ElementValue::Double(ConstantPoolIndex(12)),
+                ),
+                (
+                    ConstantPoolIndex(7),
+                    ElementValue::Float(ConstantPoolIndex(9)),
+                ),
+                (
+                    ConstantPoolIndex(7),
+                    ElementValue::Int(ConstantPoolIndex(8)),
+                ),
+                (
+                    ConstantPoolIndex(7),
+                    ElementValue::Long(ConstantPoolIndex(10)),
+                ),
+                (
+                    ConstantPoolIndex(7),
+                    ElementValue::Short(ConstantPoolIndex(8)),
+                ),
+                (
+                    ConstantPoolIndex(7),
+                    ElementValue::Boolean(ConstantPoolIndex(8)),
+                ),
+                (
+                    ConstantPoolIndex(7),
+                    ElementValue::String(ConstantPoolIndex(14)),
+                ),
+                (
+                    ConstantPoolIndex(7),
+                    ElementValue::Enum {
+                        type_name_index: ConstantPoolIndex(15),
+                        const_name_index: ConstantPoolIndex(16),
+                    },
+                ),
+                (
+                    ConstantPoolIndex(7),
+                    ElementValue::Class(ConstantPoolIndex(17)),
+                ),
+                (
+                    ConstantPoolIndex(7),
+                    ElementValue::Annotation(Box::new(Annotation {
+                        type_index: ConstantPoolIndex(6),
+                        element_value_pairs: vec![],
+                    })),
+                ),
+                (
+                    ConstantPoolIndex(7),
+                    ElementValue::Array(vec![
+                        ElementValue::Int(ConstantPoolIndex(8)),
+                        ElementValue::Annotation(Box::new(Annotation {
+                            type_index: ConstantPoolIndex(6),
+                            element_value_pairs: vec![],
+                        })),
+                    ]),
+                ),
+            ],
+        };
+        let attributes = [
+            Attribute::RuntimeVisibleAnnotations(vec![annotation.clone()]),
+            Attribute::RuntimeInvisibleAnnotations(vec![]),
+        ];
+
+        for attribute in attributes {
+            let bytes = attribute.encode(&pool).unwrap();
+            let mut reader = Reader::new(&bytes);
+            assert_eq!(Attribute::decode(&mut reader, &pool), Ok(attribute));
+            assert!(reader.is_at_end());
+        }
+    }
+
+    #[test]
+    fn annotation_encoder_enforces_depth_limit_before_reference_walk() {
+        let pool = pool_with_utf8_name("RuntimeVisibleAnnotations");
+        let mut value = ElementValue::Int(ConstantPoolIndex(1));
+        for _ in 0..=DEFAULT_MAX_ANNOTATION_DEPTH {
+            value = ElementValue::Array(vec![value]);
+        }
+        let attribute = Attribute::RuntimeVisibleAnnotations(vec![Annotation {
+            type_index: ConstantPoolIndex(1),
+            element_value_pairs: vec![(ConstantPoolIndex(1), value)],
+        }]);
+
+        assert_eq!(
+            attribute.encode(&pool),
+            Err(EncodeError::TooDeeplyNestedAnnotation)
+        );
+    }
+
+    #[test]
+    fn complex_attribute_counts_reject_u2_overflow() {
+        let over_u2 = usize::from(u16::MAX) + 1;
+        let pool = complex_attribute_pool();
+        let component = RecordComponentInfo {
+            name_index: ConstantPoolIndex(18),
+            descriptor_index: ConstantPoolIndex(19),
+            attributes: vec![],
+        };
+        assert_eq!(
+            Attribute::Record(vec![component; over_u2]).encode(&pool),
+            Err(EncodeError::CountOverflow {
+                value: over_u2,
+                width: crate::encode_error::LengthWidth::U16,
+            })
+        );
+
+        let exception = ExceptionTableEntry {
+            start_pc: 0,
+            end_pc: 1,
+            handler_pc: 0,
+            catch_type: None,
+        };
+        assert_eq!(
+            Attribute::Code(CodeAttribute {
+                max_stack: 0,
+                max_locals: 0,
+                code: &[0],
+                exception_table: vec![exception; over_u2],
+                attributes: vec![],
+            })
+            .encode(&pool),
+            Err(EncodeError::CountOverflow {
+                value: over_u2,
+                width: crate::encode_error::LengthWidth::U16,
+            })
+        );
+
+        let pair = (
+            ConstantPoolIndex(7),
+            ElementValue::Int(ConstantPoolIndex(8)),
+        );
+        assert_eq!(
+            Attribute::RuntimeVisibleAnnotations(vec![Annotation {
+                type_index: ConstantPoolIndex(6),
+                element_value_pairs: vec![pair; over_u2],
+            }])
+            .encode(&pool),
+            Err(EncodeError::CountOverflow {
+                value: over_u2,
+                width: crate::encode_error::LengthWidth::U16,
+            })
+        );
+
+        assert_eq!(
+            Attribute::RuntimeVisibleAnnotations(vec![Annotation {
+                type_index: ConstantPoolIndex(6),
+                element_value_pairs: vec![(
+                    ConstantPoolIndex(7),
+                    ElementValue::Array(vec![ElementValue::Int(ConstantPoolIndex(8)); over_u2]),
+                )],
+            }])
+            .encode(&pool),
+            Err(EncodeError::CountOverflow {
+                value: over_u2,
+                width: crate::encode_error::LengthWidth::U16,
+            })
+        );
     }
 
     #[test]
