@@ -581,6 +581,36 @@ mod tests {
         }
     }
 
+    struct JdkCorpusDayOfWeek;
+
+    impl ClassPathEntry for JdkCorpusDayOfWeek {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            let (bytes, origin) = match name.as_internal() {
+                "java/time/DayOfWeek" => (
+                    include_bytes!("../../dotty-classfile/tests/fixtures/jdk_corpus/jdk26/java/time/DayOfWeek.class").to_vec(),
+                    PathBuf::from("../dotty-classfile/tests/fixtures/jdk_corpus/jdk26"),
+                ),
+                "java/lang/Object" => (
+                    test_class_stub("java/lang/Object", 0x0021),
+                    PathBuf::from("<synthetic-JDK-dependency>"),
+                ),
+                _ => (
+                    test_class_stub_with_super(name.as_internal(), "java/lang/Object"),
+                    PathBuf::from("<synthetic-JDK-dependency>"),
+                ),
+            };
+            Ok(Some(ClassResource::new(
+                bytes,
+                ClassFormat::Class,
+                ClassOrigin::Directory(origin),
+            )))
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(package == ["java", "time"])
+        }
+    }
+
     struct DelayedCloseableClassPath {
         inner: CompositeClassPath,
         allow_closeable: Arc<AtomicBool>,
@@ -992,6 +1022,63 @@ mod tests {
             ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
         let get_class = Name::new(store.names.intern("getClass"), Namespace::Term);
 
+        let java_lang = resolver
+            .resolve_package(&mut store, &["java", "lang"])
+            .expect("java.lang package lookup should succeed")
+            .expect("the JDK classpath contains java.lang");
+        let java_lang_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, java_lang));
+        let object_name = Name::new(store.names.intern("Object"), Namespace::Type);
+        let object = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: java_lang_prefix,
+                    name: object_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .expect("package type lookup should load java.lang.Object")
+            .expect("java.lang.Object should materialize from the real JDK");
+
+        assert_eq!(
+            object, object_class,
+            "JDK Object reuses Definitions identity"
+        );
+        assert!(matches!(
+            store.symbols.get(object).info,
+            SymbolInfo::Complete(info) if matches!(store.types.get(info), Type::ClassInfo(_))
+        ));
+        let object_scope = resolver
+            .declaration_scope(&store, object)
+            .expect("the real JDK Object has a declaration scope");
+        assert!(store.scopes.contains(object_scope));
+        assert_eq!(
+            store
+                .scopes
+                .get(resolver.package_scope(java_lang).unwrap())
+                .lookup(&object_name),
+            Some(object),
+            "package and loader must expose the same canonical Object symbol"
+        );
+        assert_eq!(
+            resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix: java_lang_prefix,
+                        name: object_name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .unwrap(),
+            Some(object),
+            "repeated package type requests reuse the canonical identity"
+        );
+
         let method = resolver
             .resolve_member(
                 &mut store,
@@ -1170,6 +1257,142 @@ mod tests {
             store.names.resolve(store.symbols.get(source).name.text()),
             "Source"
         );
+    }
+
+    #[test]
+    fn real_scala_library_package_type_materializes_class_and_method() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(fixture_path(
+                "../dotty-tasty/tests/fixtures/scala3-library",
+            ))),
+            Box::new(SyntheticTastyJdk),
+        ]);
+        let mut resolver =
+            ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(&mut store, &["scala", "io"])
+            .expect("Scala package lookup should succeed")
+            .expect("the checked-in Scala library fixture has scala.io");
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let source_name = Name::new(store.names.intern("Source"), Namespace::Type);
+        let request = MemberRequest {
+            prefix: package_prefix,
+            name: source_name,
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+
+        let source = resolver
+            .resolve_member(&mut store, &request)
+            .expect("the real Scala 3.9 Source TASTy should load")
+            .expect("scala.io.Source should be available as a package type");
+
+        assert_eq!(store.symbols.get(source).owner, Some(package));
+        assert_eq!(store.symbols.get(source).name, source_name);
+        assert!(matches!(
+            store.symbols.get(source).kind,
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+        ));
+        assert!(matches!(
+            store.symbols.get(source).info,
+            SymbolInfo::Complete(info) if matches!(store.types.get(info), Type::ClassInfo(_))
+        ));
+        let declarations = resolver
+            .declaration_scope(&store, source)
+            .expect("Source has a declaration scope");
+        assert!(store.scopes.contains(declarations));
+        let package_scope = resolver.package_scope(package).unwrap();
+        assert_eq!(
+            store.scopes.get(package_scope).lookup(&source_name),
+            Some(source),
+            "the package scope and resolver must share the canonical symbol"
+        );
+        assert_eq!(
+            resolver.resolve_member(&mut store, &request).unwrap(),
+            Some(source),
+            "repeated package type requests must reuse the same identity"
+        );
+
+        let source_prefix = store.types.alloc(Type::ThisType { class: source });
+        let get_lines = Name::new(store.names.intern("getLines"), Namespace::Term);
+        let method = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: source_prefix,
+                    name: get_lines,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .expect("Source declaration lookup should succeed")
+            .expect("real scala.io.Source should expose getLines");
+        assert_eq!(store.symbols.get(method).owner, Some(source));
+        assert!(store.scopes.get(declarations).lookup(&get_lines).is_some());
+    }
+
+    #[test]
+    fn real_jdk_package_type_materializes_from_checked_in_classfile() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(JdkCorpusDayOfWeek, definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(&mut store, &["java", "time"])
+            .expect("java.time package lookup should succeed")
+            .expect("the checked-in JDK fixture contains java.time");
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let name = Name::new(store.names.intern("DayOfWeek"), Namespace::Type);
+        let request = MemberRequest {
+            prefix: package_prefix,
+            name,
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+
+        let class = resolver
+            .resolve_member(&mut store, &request)
+            .expect("the JDK 26 classfile should load")
+            .expect("java.time.DayOfWeek should materialize from the JDK classfile");
+
+        assert_eq!(store.symbols.get(class).owner, Some(package));
+        assert_eq!(store.symbols.get(class).name, name);
+        assert_eq!(store.symbols.get(class).kind, SymbolKind::Class);
+        assert!(matches!(
+            store.symbols.get(class).info,
+            SymbolInfo::Complete(info) if matches!(store.types.get(info), Type::ClassInfo(_))
+        ));
+        let declarations = resolver
+            .declaration_scope(&store, class)
+            .expect("DayOfWeek has a declaration scope");
+        assert!(store.scopes.contains(declarations));
+        assert_eq!(
+            resolver.resolve_member(&mut store, &request).unwrap(),
+            Some(class),
+            "repeated requests reuse the loaded JDK class identity"
+        );
+
+        let is_weekend = Name::new(store.names.intern("getValue"), Namespace::Term);
+        let class_prefix = store.types.alloc(Type::ThisType { class });
+        let method = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: class_prefix,
+                    name: is_weekend,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .expect("DayOfWeek member lookup should succeed")
+            .expect("the real JDK class declares getValue");
+        assert_eq!(store.symbols.get(method).owner, Some(class));
     }
 
     #[test]
