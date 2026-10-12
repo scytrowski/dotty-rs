@@ -499,25 +499,40 @@ fn is_nested_class_indexed_in_package(
     member: SymbolId,
     package: SymbolId,
 ) -> bool {
-    let symbol = store.symbols.get(member);
-    let Some(owner) = symbol.owner else {
-        return false;
-    };
-    let enclosing = store.symbols.get(owner);
-    if enclosing.owner != Some(package)
-        || !matches!(
+    const MAX_OWNER_DEPTH: usize = 64;
+
+    let mut current = member;
+    let mut visited = std::collections::HashSet::new();
+    for depth in 0..MAX_OWNER_DEPTH {
+        if !visited.insert(current) {
+            return false;
+        }
+        let symbol = store.symbols.get(current);
+        let Some(owner) = symbol.owner else {
+            return false;
+        };
+        let enclosing = store.symbols.get(owner);
+        if enclosing.kind == SymbolKind::Package {
+            return depth > 0 && owner == package;
+        }
+        if !matches!(
             enclosing.kind,
             SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
-        )
-    {
-        return false;
-    }
+        ) {
+            return false;
+        }
 
-    let enclosing_name = store.names.resolve(enclosing.name.text());
-    let member_name = store.names.resolve(symbol.name.text());
-    member_name
-        .strip_prefix(enclosing_name)
-        .is_some_and(|suffix| suffix.starts_with('$') && suffix.len() > 1)
+        let enclosing_name = store.names.resolve(enclosing.name.text());
+        let member_name = store.names.resolve(symbol.name.text());
+        if !member_name
+            .strip_prefix(enclosing_name)
+            .is_some_and(|suffix| suffix.starts_with('$') && suffix.len() > 1)
+        {
+            return false;
+        }
+        current = owner;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -724,6 +739,18 @@ mod tests {
                     include_bytes!("../tests/fixtures/enclosing_generics/Outer$Inner.class")
                         .to_vec()
                 }
+                "enclosing_generics/Outer$Middle" => {
+                    include_bytes!("../tests/fixtures/enclosing_generics/Outer$Middle.class")
+                        .to_vec()
+                }
+                "enclosing_generics/Outer$Middle$Deep" => {
+                    include_bytes!("../tests/fixtures/enclosing_generics/Outer$Middle$Deep.class")
+                        .to_vec()
+                }
+                "enclosing_generics/Outer$Middle$Deep$Leaf" => include_bytes!(
+                    "../tests/fixtures/enclosing_generics/Outer$Middle$Deep$Leaf.class"
+                )
+                .to_vec(),
                 "enclosing_generics/Outer$Static" => {
                     let mut bytes =
                         include_bytes!("../tests/fixtures/enclosing_generics/Outer$Static.class")
@@ -820,6 +847,49 @@ mod tests {
                 .session
                 .resolved
                 .contains_key(&BinaryName::from_internal("enclosing_generics/Outer"))
+        );
+    }
+
+    #[test]
+    fn repeated_package_lookup_preserves_deeply_nested_class_identity() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            EnclosingGenericRetryClassPath(Mutex::new(false)),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(&mut store, &["enclosing_generics"])
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let request = MemberRequest {
+            prefix: package_prefix,
+            name: Name::new(
+                store.names.intern("Outer$Middle$Deep$Leaf"),
+                Namespace::Type,
+            ),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+
+        let first = resolver
+            .resolve_member(&mut store, &request)
+            .expect("the first request should load the nested class and its outers")
+            .expect("the fixture contains the nested class");
+        let second = resolver
+            .resolve_member(&mut store, &request)
+            .expect("the repeated request should pass package owner validation")
+            .expect("the class should remain in the package's binary-name index");
+
+        assert_eq!(first, second);
+        let package_scope = resolver.session.packages.scope_of(package).unwrap();
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&request.name),
+            &[first]
         );
     }
 
