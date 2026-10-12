@@ -1,6 +1,6 @@
 # Typer classpath corpus audit: Scala 3.9.0
 
-The report is generated from two byte-identical runs of the pinned Scala 3.9.0 audit. It records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success. The source corpus, parser/namer setup, Scala revision, JDK feature release 21, and classpath remain pinned.
+The report is generated from the pinned Scala 3.9.0 audit, which runs once by default. Pass `--verify-determinism` to run it twice and compare normalized output byte-for-byte. It records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success. The source corpus, parser/namer setup, Scala revision, JDK feature release 21, and classpath remain pinned.
 
 Run `tools/typer-classpath-corpus-audit/run` with the environment documented in `docs/typer-v0.1-compatibility.md` to regenerate this report.
 

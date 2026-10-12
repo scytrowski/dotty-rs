@@ -851,14 +851,23 @@ IDs. Audit-only instrumentation counts resolver requests and outcomes without
 changing production APIs. Session cache reuse across files is not counted
 because stores are intentionally independent.
 
-Reproduce the two-run normalized determinism check and regenerate the checked
-report with:
+Regenerate the checked report with one full audit run by default:
 
 ```sh
 SCALA39_ROOT=/path/to/scala3-3.9.0 \
 JAVA_HOME=/path/to/jdk-21 \
 SCALA39_JDK_RELEASE=21 \
 tools/typer-classpath-corpus-audit/run
+```
+
+To verify determinism, pass `--verify-determinism`; this runs the full audit a
+second time and compares the normalized reports byte-for-byte:
+
+```sh
+SCALA39_ROOT=/path/to/scala3-3.9.0 \
+JAVA_HOME=/path/to/jdk-21 \
+SCALA39_JDK_RELEASE=21 \
+tools/typer-classpath-corpus-audit/run --verify-determinism
 ```
 
 The script rejects a Scala checkout whose `HEAD` is not
