@@ -815,6 +815,14 @@ mod tests {
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
         let path = CompletionClassPath::new();
+        let c_name = BinaryName::from_internal("sample/C");
+        path.classes.lock().unwrap().extend([
+            (
+                BinaryName::from_internal("sample/B"),
+                test_class_with_object_fields("sample/B", None, &[("c", "sample/C")]),
+            ),
+            (c_name.clone(), test_class_stub("sample/C", 0x0021)),
+        ]);
         let mut loader = ClassLoader::with_definitions(
             path.clone(),
             &mut store,
@@ -830,10 +838,15 @@ mod tests {
         let store_mark = store.checkpoint();
         assert_eq!(resolver.complete_class(&mut store, b), Ok(true));
         assert_eq!(resolver.session.resolved.get(&b_name), Some(&b));
+        let c = resolver.session.identified[&c_name];
+        assert_eq!(store.symbols.get(c).info, SymbolInfo::Missing);
+        let SymbolInfo::Complete(completed_info) = store.symbols.get(b).info else {
+            panic!("completed B")
+        };
         let completed = store.checkpoint();
         assert_eq!(resolver.complete_class(&mut store, b), Ok(true));
         assert_eq!(store.checkpoint(), completed);
-        assert_eq!(path.calls.load(Ordering::Relaxed), 2);
+        assert_eq!(path.calls.load(Ordering::Relaxed), 3);
         let package = previous.owner.unwrap();
         let scope = resolver.package_scope(package).unwrap();
         assert_eq!(store.scopes.get(scope).lookup_all(&previous.name), &[b]);
@@ -843,8 +856,21 @@ mod tests {
         assert_eq!(resolver.session.identified.get(&b_name), Some(&b));
         assert!(!resolver.session.resolved.contains_key(&b_name));
         assert!(!resolver.session.metadata.contains_key(&b));
+        assert_eq!(store.checkpoint(), store_mark);
+        assert!(!store.symbols.contains(c));
+        assert!(!store.types.contains(completed_info));
+        assert!(!resolver.session.identified.contains_key(&c_name));
+        assert!(!resolver.session.origins.contains_key(&c));
+        let c_text = store.names.intern("C");
+        assert!(
+            store
+                .scopes
+                .get(scope)
+                .lookup_all(&Name::new(c_text, Namespace::Type))
+                .is_empty()
+        );
         assert_eq!(resolver.complete_class(&mut store, b), Ok(true));
-        assert_eq!(path.calls.load(Ordering::Relaxed), 3);
+        assert_eq!(path.calls.load(Ordering::Relaxed), 5);
     }
 
     #[test]
