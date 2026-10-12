@@ -1,11 +1,13 @@
-//! Typed JVM instructions for the deliberately small, straight-line subset
-//! supported by this crate.
+//! Typed JVM instructions and symbolic branches for the deliberately small
+//! bytecode subset supported by this crate.
 //!
 //! This module describes instructions; [`assembler::assemble`] encodes the
 //! supported subset and [`analysis::analyze`] computes straight-line
 //! `max_stack`/`max_locals` bounds. Neither API decodes bytecode or performs
-//! general JVM verification or optimization. A method is represented as one
-//! ordered basic block with no branch targets or exception-control-flow edges.
+//! general JVM verification or optimization. These existing APIs continue to
+//! represent one ordered straight-line block. [`code_sequence`] separately
+//! models labels and a small branch family symbolically, validating targets
+//! without laying out or encoding them.
 //! The low-level [`Instruction`] constant-pool operands below contain assigned
 //! [`ConstantPoolIndex`] values. [`CodeBuilder`] offers the owned class builder
 //! a symbolic alternative that interns names before assembling those typed
@@ -50,24 +52,32 @@
 //! | `AReturn` | [`areturn`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.areturn) `0xb0` | 0 | `[reference] -> terminal` |
 //! | `LReturn` | [`lreturn`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.lreturn) `0xad` | 0 | `[long] -> terminal` |
 //!
-//! The modeled families are exhaustive for this v1 API. Float and double
-//! instructions, `invokeinterface`, `invokedynamic`, branches, labels,
-//! switches, `jsr`/`ret`, exception handlers, monitor operations, array
-//! operations, conversions, comparisons, and all other JVM instructions are
-//! intentionally unsupported. There are no catch-all opcode or raw-byte
-//! variants, so unsupported instructions cannot silently enter the model.
+//! The [`Instruction`] enum covers the straight-line instruction families
+//! listed above. [`code_sequence::BranchInstruction`] additionally models
+//! symbolic `goto`/`goto_w`, `ifeq`, `ifne`, and `if_icmp{eq,ne,lt,ge,gt,le}`
+//! branches. It does not choose branch widths or emit branch bytes. Float and
+//! double instructions, `invokeinterface`, `invokedynamic`, switches,
+//! `jsr`/`ret`, exception handlers, monitor operations, array operations,
+//! conversions, comparisons, and all other JVM instructions are intentionally
+//! unsupported. There are no catch-all opcode or raw-byte variants, so
+//! unsupported instructions cannot silently enter the model.
 //!
 //! [`ConstantPoolIndex`]: crate::constant_pool::ConstantPoolIndex
 
 pub mod analysis;
 pub mod assembler;
 pub(crate) mod code_builder;
+pub mod code_sequence;
 
 pub(crate) use analysis::analyze_validated;
 pub use analysis::{AnalysisError, CodeAnalysis, LinearCodeAnalyzer, ValueKind, analyze};
 pub(crate) use assembler::assemble_validated;
 pub use assembler::{AssembleError, ConstantPoolOperandKind, assemble};
 pub use code_builder::{CodeBuilder, CodeBuilderError};
+pub use code_sequence::{
+    BranchCondition, BranchInstruction, CodeElement, CodeSequence, CodeSequenceError, LabelId,
+    ValidatedCodeSequence,
+};
 
 use crate::constant_pool::ConstantPoolIndex;
 use std::fmt;
