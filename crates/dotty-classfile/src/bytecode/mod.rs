@@ -63,7 +63,9 @@ pub mod analysis;
 pub mod assembler;
 pub(crate) mod code_builder;
 
+pub(crate) use analysis::analyze_validated;
 pub use analysis::{AnalysisError, CodeAnalysis, LinearCodeAnalyzer, ValueKind, analyze};
+pub(crate) use assembler::assemble_validated;
 pub use assembler::{AssembleError, ConstantPoolOperandKind, assemble};
 pub use code_builder::{CodeBuilder, CodeBuilderError};
 

@@ -39,7 +39,7 @@ use crate::bytecode::code_builder::{
     self as code_builder, CodeBuilder, CodeBuilderError, FieldOperation, MethodOperation,
     SymbolicInstruction,
 };
-use crate::bytecode::{AnalysisError, AssembleError, Instruction, analyze, assemble};
+use crate::bytecode::{AnalysisError, AssembleError, Instruction};
 use crate::class_file::{ClassFile, ClassFileVersion};
 use crate::constant_pool::ConstantPoolIndex;
 use crate::constant_pool_builder::{ConstantPoolBuildError, ConstantPoolBuilder};
@@ -91,6 +91,8 @@ pub enum ClassFileBuildError {
     /// The requested class-file version is outside the crate's supported
     /// non-preview range.
     UnsupportedVersion { major: u16, minor: u16 },
+    /// An interface method reference requires class-file version 52 or newer.
+    InterfaceMethodReferenceRequiresVersion { major: u16 },
     /// A field or method descriptor failed the existing descriptor parser.
     InvalidDescriptor(DescriptorError),
     /// A method descriptor exceeds the JVMS 255 parameter-slot limit.
@@ -148,6 +150,10 @@ impl fmt::Display for ClassFileBuildError {
             Self::UnsupportedVersion { major, minor } => write!(
                 formatter,
                 "class-file version {major}.{minor} is unsupported"
+            ),
+            Self::InterfaceMethodReferenceRequiresVersion { major } => write!(
+                formatter,
+                "interface method references for invokestatic and invokespecial require class-file version 52 or newer (found {major})"
             ),
             Self::InvalidDescriptor(error) => write!(formatter, "invalid JVM descriptor: {error}"),
             Self::TooManyParameterSlots => {
@@ -612,7 +618,7 @@ impl ClassFileBuilder {
             .iter()
             .map(|method| match &method.code {
                 Some(OwnedMethodCode::Built(code)) => {
-                    resolve_code(code, &mut pool_builder).map(Some)
+                    resolve_code(code, &mut pool_builder, self.version.major).map(Some)
                 }
                 Some(OwnedMethodCode::Raw(_)) | None => Ok(None),
             })
@@ -659,9 +665,9 @@ impl ClassFileBuilder {
             .map(|(method, resolved)| match (&method.code, resolved) {
                 (Some(OwnedMethodCode::Raw(code)), None) => Ok(Some(code.clone())),
                 (Some(OwnedMethodCode::Built(_)), Some(instructions)) => {
-                    let bytes = assemble(&instructions, &constant_pool)
+                    let bytes = crate::bytecode::assemble_validated(&instructions, &constant_pool)
                         .map_err(ClassFileBuildError::Assemble)?;
-                    let analysis = analyze(
+                    let analysis = crate::bytecode::analyze_validated(
                         &method.descriptor,
                         method.access_flags.is_static(),
                         &instructions,
@@ -739,6 +745,7 @@ impl ClassFileBuilder {
 fn resolve_code(
     code: &CodeBuilder,
     pool: &mut ConstantPoolBuilder,
+    major_version: u16,
 ) -> Result<Vec<Instruction>, ClassFileBuildError> {
     code.instructions
         .iter()
@@ -791,6 +798,17 @@ fn resolve_code(
                     MethodOperation::Static | MethodOperation::StaticInterface
                 );
                 validate_method_descriptor(descriptor, has_receiver)?;
+                if matches!(
+                    operation,
+                    MethodOperation::StaticInterface | MethodOperation::SpecialInterface
+                ) && major_version < 52
+                {
+                    return Err(
+                        ClassFileBuildError::InterfaceMethodReferenceRequiresVersion {
+                            major: major_version,
+                        },
+                    );
+                }
                 let index = match operation {
                     MethodOperation::StaticInterface | MethodOperation::SpecialInterface => {
                         pool.interface_method_ref(owner, name, descriptor)?

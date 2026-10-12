@@ -373,41 +373,52 @@ impl LinearCodeAnalyzer {
         constant_pool
             .validate_for_encoding()
             .map_err(AnalysisError::InvalidConstantPool)?;
-        let descriptor = MethodDescriptor::parse(method_descriptor)
-            .map_err(AnalysisError::InvalidMethodDescriptor)?;
-        check_parameter_slots(&descriptor, !is_static, None)?;
-        let mut frame = Frame::new(&descriptor, is_static)?;
-        let mut returned = false;
-
-        for (instruction_index, instruction) in instructions.iter().copied().enumerate() {
-            if returned {
-                return Err(AnalysisError::InstructionAfterReturn {
-                    instruction: instruction_index,
-                });
-            }
-            frame.apply(instruction_index, instruction, &descriptor, constant_pool)?;
-            returned = is_return(instruction);
-        }
-
-        if !returned {
-            return Err(AnalysisError::MissingReturn);
-        }
-        Ok(CodeAnalysis {
-            max_stack: u16::try_from(frame.max_stack).map_err(|_| {
-                AnalysisError::StackLimitExceeded {
-                    instruction: instructions.len().saturating_sub(1),
-                    slots: frame.max_stack,
-                }
-            })?,
-            max_locals: u16::try_from(frame.locals.len()).map_err(|_| {
-                AnalysisError::LocalLimitExceeded {
-                    instruction: instructions.len().saturating_sub(1),
-                    index: u16::MAX,
-                    width: 1,
-                }
-            })?,
-        })
+        analyze_validated(method_descriptor, is_static, instructions, constant_pool)
     }
+}
+
+/// Analyzes code against a pool whose complete layout was already validated.
+/// Method descriptors and instruction operands are still checked.
+pub(crate) fn analyze_validated(
+    method_descriptor: &str,
+    is_static: bool,
+    instructions: &[Instruction],
+    constant_pool: &ConstantPool,
+) -> Result<CodeAnalysis, AnalysisError> {
+    let descriptor = MethodDescriptor::parse(method_descriptor)
+        .map_err(AnalysisError::InvalidMethodDescriptor)?;
+    check_parameter_slots(&descriptor, !is_static, None)?;
+    let mut frame = Frame::new(&descriptor, is_static)?;
+    let mut returned = false;
+
+    for (instruction_index, instruction) in instructions.iter().copied().enumerate() {
+        if returned {
+            return Err(AnalysisError::InstructionAfterReturn {
+                instruction: instruction_index,
+            });
+        }
+        frame.apply(instruction_index, instruction, &descriptor, constant_pool)?;
+        returned = is_return(instruction);
+    }
+
+    if !returned {
+        return Err(AnalysisError::MissingReturn);
+    }
+    Ok(CodeAnalysis {
+        max_stack: u16::try_from(frame.max_stack).map_err(|_| {
+            AnalysisError::StackLimitExceeded {
+                instruction: instructions.len().saturating_sub(1),
+                slots: frame.max_stack,
+            }
+        })?,
+        max_locals: u16::try_from(frame.locals.len()).map_err(|_| {
+            AnalysisError::LocalLimitExceeded {
+                instruction: instructions.len().saturating_sub(1),
+                index: u16::MAX,
+                width: 1,
+            }
+        })?,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

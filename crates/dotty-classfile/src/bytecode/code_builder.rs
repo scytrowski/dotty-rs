@@ -386,10 +386,7 @@ impl CodeBuilder {
         }
         if name == "<clinit>"
             || (name == "<init>"
-                && (!matches!(
-                    operation,
-                    MethodOperation::Special | MethodOperation::SpecialInterface
-                ) || parsed.return_type.is_some()))
+                && (!matches!(operation, MethodOperation::Special) || parsed.return_type.is_some()))
         {
             return Err(CodeBuilderError::InvalidName);
         }
