@@ -316,6 +316,23 @@ impl std::error::Error for AnalysisError {}
 /// This is structural/category analysis, not full JVMS verification. It does
 /// not prove initialized-`this` or object states, reference subtype
 /// compatibility, stack-map-frame correctness, or control-flow joins.
+///
+/// ```
+/// use dotty_classfile::classfile::{
+///     analyze, ConstantPool, Instruction, LocalIndex,
+/// };
+///
+/// let code = [
+///     Instruction::ILoad(LocalIndex::new(0)),
+///     Instruction::ILoad(LocalIndex::new(1)),
+///     Instruction::IAdd,
+///     Instruction::IReturn,
+/// ];
+/// let bounds = analyze("(II)I", true, &code, &ConstantPool::default())?;
+/// assert_eq!(bounds.max_stack, 2);
+/// assert_eq!(bounds.max_locals, 2);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn analyze(
     method_descriptor: &str,
     is_static: bool,
@@ -1018,18 +1035,13 @@ mod tests {
     #[test]
     fn analyzes_static_parameters_integer_arithmetic_and_return() {
         let pool = ConstantPool::default();
-        let analysis = analyze(
-            "(II)I",
-            true,
-            &[
-                Instruction::ILoad(LocalIndex::new(0)),
-                Instruction::ILoad(LocalIndex::new(1)),
-                Instruction::IAdd,
-                Instruction::IReturn,
-            ],
-            &pool,
-        )
-        .unwrap();
+        let instructions = [
+            Instruction::ILoad(LocalIndex::new(0)),
+            Instruction::ILoad(LocalIndex::new(1)),
+            Instruction::IAdd,
+            Instruction::IReturn,
+        ];
+        let analysis = analyze("(II)I", true, &instructions, &pool).unwrap();
         assert_eq!(
             analysis,
             CodeAnalysis {
@@ -1037,6 +1049,7 @@ mod tests {
                 max_locals: 2,
             }
         );
+        assert_eq!(analyze("(II)I", true, &instructions, &pool), Ok(analysis));
     }
 
     #[test]
@@ -1075,6 +1088,89 @@ mod tests {
         .unwrap();
         assert_eq!(mixed.max_stack, 2);
         assert_eq!(mixed.max_locals, 5);
+    }
+
+    #[test]
+    fn validates_constant_categories_and_reference_local_stores() {
+        let mut builder = ConstantPoolBuilder::new();
+        let integer = builder.integer(9).unwrap();
+        let string = builder.string("value").unwrap();
+        let long = builder.long(12).unwrap();
+        let pool = builder.finish().unwrap();
+
+        assert_eq!(
+            analyze(
+                "()I",
+                true,
+                &[
+                    Instruction::Ldc(LdcConstant::Integer(operand(integer))),
+                    Instruction::IReturn,
+                ],
+                &pool,
+            )
+            .unwrap()
+            .max_stack,
+            1
+        );
+        assert_eq!(
+            analyze(
+                "()Ljava/lang/String;",
+                true,
+                &[
+                    Instruction::Ldc(LdcConstant::Reference(operand(string))),
+                    Instruction::AReturn,
+                ],
+                &pool,
+            )
+            .unwrap()
+            .max_stack,
+            1
+        );
+        assert_eq!(
+            analyze(
+                "()J",
+                true,
+                &[
+                    Instruction::Ldc2(Ldc2Constant::Long(operand(long))),
+                    Instruction::LReturn,
+                ],
+                &pool,
+            )
+            .unwrap()
+            .max_stack,
+            2
+        );
+
+        let reference_local = analyze(
+            "()Ljava/lang/Object;",
+            true,
+            &[
+                Instruction::AConstNull,
+                Instruction::AStore(LocalIndex::new(2)),
+                Instruction::ALoad(LocalIndex::new(2)),
+                Instruction::AReturn,
+            ],
+            &pool,
+        )
+        .unwrap();
+        assert_eq!(reference_local.max_stack, 1);
+        assert_eq!(reference_local.max_locals, 3);
+        assert_eq!(
+            analyze(
+                "()I",
+                true,
+                &[
+                    Instruction::Ldc(LdcConstant::Integer(operand(string))),
+                    Instruction::IReturn,
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::InvalidConstantPoolOperand {
+                instruction: 0,
+                index: string,
+                expected: ConstantPoolOperandKind::IntegerConstant,
+            })
+        );
     }
 
     #[test]
@@ -1350,6 +1446,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cat1_max.max_locals, u16::MAX);
+
+        assert_eq!(
+            analyze(
+                "()I",
+                true,
+                &[
+                    Instruction::IConst(SmallIntConstant::One),
+                    Instruction::IStore(LocalIndex::new(u16::MAX)),
+                    Instruction::ILoad(LocalIndex::new(u16::MAX)),
+                    Instruction::IReturn,
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::LocalLimitExceeded {
+                instruction: 1,
+                index: u16::MAX,
+                width: 1,
+            })
+        );
 
         assert_eq!(
             analyze(
