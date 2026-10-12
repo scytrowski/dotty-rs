@@ -446,7 +446,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 .push(ResolverRequestObservation {
                     target: target_key.clone(),
                     outcome: outcome.clone(),
-                    cause: member_request_cause(&outcome, &prefix),
+                    cause: member_request_cause(&outcome, &prefix, &result),
                     materialized_prefix,
                 });
         }
@@ -1030,9 +1030,32 @@ fn member_outcome(
     }
 }
 
-fn member_request_cause(outcome: &str, prefix: &PrefixProfile) -> Option<String> {
+fn member_request_cause(
+    outcome: &str,
+    prefix: &PrefixProfile,
+    result: &Result<Option<SymbolId>, ResolutionError>,
+) -> Option<String> {
+    if let Err(error) = result {
+        let (category, _, _) = normalized_error(error);
+        return Some(
+            if matches!(
+                category.as_str(),
+                "UnresolvedTypeVariable"
+                    | "InvalidTastyFile::UnresolvedSupertype"
+                    | "InvalidTastyFile"
+                    | "unresolved class"
+                    | "malformed classfile/signature"
+                    | "circular inheritance"
+            ) {
+                "classloader error"
+            } else {
+                "other"
+            }
+            .to_owned(),
+        );
+    }
     match outcome {
-        "error" => Some("classloader error".to_owned()),
+        "error" => Some("other".to_owned()),
         "package term member unsupported" => Some("term/object materialization gap".to_owned()),
         "class member scope unavailable: incomplete class info" => {
             Some("incomplete class identity".to_owned())
@@ -1165,6 +1188,7 @@ struct RootFailure {
     range: TextRange,
     enclosing_method_tree: u32,
     failure: FailureClassification,
+    import_qualifier_path: Option<Vec<String>>,
     unsupported_type_tree: Option<u32>,
     missing_type_tree: Option<u32>,
     singleton_reference_tree: Option<u32>,
@@ -2377,6 +2401,7 @@ impl ResolutionBlockerProfile {
         file: &str,
         method_tree: u32,
         trace: &[ResolverRequestObservation],
+        import_qualifier: Option<&[String]>,
     ) {
         if !matches!(
             blocker,
@@ -2389,7 +2414,18 @@ impl ResolutionBlockerProfile {
             return;
         }
 
-        let failed = trace
+        let relevant_trace = if blocker == "ImportQualifierNotFound" {
+            import_qualifier.map_or_else(Vec::new, |qualifier| {
+                trace
+                    .iter()
+                    .filter(|request| request_matches_qualifier(request, qualifier))
+                    .cloned()
+                    .collect()
+            })
+        } else {
+            trace.to_vec()
+        };
+        let failed_requests = relevant_trace
             .iter()
             .filter_map(|request| {
                 request
@@ -2397,25 +2433,34 @@ impl ResolutionBlockerProfile {
                     .as_ref()
                     .map(|cause| (cause.clone(), request.target.clone()))
             })
-            .collect::<BTreeSet<_>>();
-        let candidate_causes = failed
+            .collect::<Vec<_>>();
+        let distinct_failures = failed_requests.iter().cloned().collect::<BTreeSet<_>>();
+        let candidate_causes = distinct_failures
             .iter()
             .map(|(cause, _)| cause.clone())
             .collect::<BTreeSet<_>>();
-        let cause = match failed.len() {
-            1 => failed
-                .first()
+        let cause = if blocker == "ImportQualifierNotFound" {
+            failed_requests
+                .last()
                 .map(|(cause, _)| cause.clone())
-                .unwrap_or_else(|| "unknown: no failed resolver request".to_owned()),
-            0 => "unknown: no failed resolver request".to_owned(),
-            _ => "unknown: multiple failed resolver requests".to_owned(),
+                .unwrap_or_else(|| "unknown: no matching failed resolver request".to_owned())
+        } else {
+            match distinct_failures.len() {
+                1 => distinct_failures
+                    .first()
+                    .map(|(cause, _)| cause.clone())
+                    .unwrap_or_else(|| "unknown: no failed resolver request".to_owned()),
+                0 => "unknown: no failed resolver request".to_owned(),
+                _ => "unknown: multiple failed resolver requests".to_owned(),
+            }
         };
-        let targets = trace
+        let targets = relevant_trace
             .iter()
+            .filter(|request| request.cause.is_some())
             .map(|request| request.target.clone())
             .filter(|target| !target.is_empty())
             .collect();
-        let materialized_prefixes = trace
+        let materialized_prefixes = relevant_trace
             .iter()
             .filter_map(|request| request.materialized_prefix.clone())
             .collect();
@@ -6215,10 +6260,17 @@ fn audit_source_inner(
                 TyperError::UnsupportedTypeTree { tree_index, .. } => Some(*tree_index),
                 _ => None,
             };
+            let import_qualifier_path = match &error {
+                TyperError::ImportQualifierNotFound {
+                    import_tree_index, ..
+                } => import_qualifier_path(&parsed.ast, &typer.store().names, *import_tree_index),
+                _ => None,
+            };
             root_failures.push(RootFailure {
                 range,
                 enclosing_method_tree: method_tree.index(),
                 failure,
+                import_qualifier_path,
                 unsupported_type_tree,
                 missing_type_tree,
                 singleton_reference_tree,
@@ -6354,6 +6406,7 @@ fn audit_source_inner(
                 local_method_signature,
                 local_value_declaration,
                 blocker_method_tree,
+                import_qualifier_path,
                 unsupported_type_tree,
             ) = root_failures
                 .iter()
@@ -6369,6 +6422,7 @@ fn audit_source_inner(
                         failure.local_method_signature.clone(),
                         failure.local_value_declaration,
                         Some(failure.enclosing_method_tree),
+                        failure.import_qualifier_path.clone(),
                         failure.unsupported_type_tree,
                     )
                 })
@@ -6378,6 +6432,7 @@ fn audit_source_inner(
                             bucket: "NoSuccessfulEnclosingMethodTyping".to_owned(),
                             family: FailureFamily::Other,
                         },
+                        None,
                         None,
                         None,
                         None,
@@ -6452,6 +6507,7 @@ fn audit_source_inner(
                     path,
                     tree.index(),
                     &trace,
+                    import_qualifier_path.as_deref(),
                 );
             }
             audit
@@ -9103,6 +9159,55 @@ fn record_failure(audit: &mut Audit, failure: FailureClassification, path: &str)
     bucket.files.insert(path.to_owned());
     bucket.examples.insert(path.to_owned());
     bucket.examples = bucket.examples.iter().take(5).cloned().collect();
+}
+
+fn import_qualifier_path(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::NameInterner,
+    import_tree_index: u32,
+) -> Option<Vec<String>> {
+    let (_, import) = arena.iter().find(|(tree, node)| {
+        tree.index() == import_tree_index && matches!(&node.kind, TreeKind::Import(_))
+    })?;
+    let TreeKind::Import(import) = &import.kind else {
+        return None;
+    };
+    let mut segments = Vec::new();
+    let mut current = import.expr;
+    loop {
+        match &arena.try_get(current)?.kind {
+            TreeKind::Ident(ident) => {
+                segments.push(names.resolve(ident.name.text()).to_owned());
+                break;
+            }
+            TreeKind::Select(select) => {
+                segments.push(names.resolve(select.name.text()).to_owned());
+                current = select.qualifier;
+            }
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => current = parens.inner,
+            _ => return None,
+        }
+    }
+    segments.reverse();
+    Some(segments)
+}
+
+fn request_matches_qualifier(request: &ResolverRequestObservation, qualifier: &[String]) -> bool {
+    for length in 1..=qualifier.len() {
+        let package = qualifier[..length].join(".");
+        if request.target == package || request.target.starts_with(&format!("{package}::")) {
+            return true;
+        }
+        if length > 1 {
+            let parent = qualifier[..length - 1].join(".");
+            let prefix = format!("prefix={parent}::");
+            let name = format!("::name={}::", qualifier[length - 1]);
+            if request.target.starts_with(&prefix) && request.target.contains(&name) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn singleton_reference_detail(
@@ -11969,23 +12074,29 @@ mod resolver_profile_tests {
         };
 
         assert_eq!(
-            member_request_cause("package term member unsupported", &package).as_deref(),
+            member_request_cause("package term member unsupported", &package, &Ok(None)).as_deref(),
             Some("term/object materialization gap")
         );
         assert_eq!(
             member_request_cause(
                 "class member scope unavailable: incomplete class info",
-                &incomplete_class
+                &incomplete_class,
+                &Ok(None)
             )
             .as_deref(),
             Some("incomplete class identity")
         );
         assert_eq!(
-            member_request_cause("error", &package).as_deref(),
-            Some("classloader error")
+            member_request_cause(
+                "error",
+                &package,
+                &Err(ResolutionError::Ambiguous { candidates: 2 }),
+            )
+            .as_deref(),
+            Some("other")
         );
         assert_eq!(
-            member_request_cause("package type member unresolved", &package).as_deref(),
+            member_request_cause("package type member unresolved", &package, &Ok(None)).as_deref(),
             Some("package resolved but member unresolved")
         );
     }
@@ -12008,7 +12119,7 @@ mod resolver_profile_tests {
             },
         ];
 
-        profile.record_attempt("ImportQualifierNotFound", "Use.scala", 12, &trace);
+        profile.record_attempt("SymbolResolution", "Use.scala", 12, &trace, None);
 
         let observation = profile.observations.first().unwrap();
         assert_eq!(
@@ -12017,5 +12128,71 @@ mod resolver_profile_tests {
         );
         assert_eq!(observation.candidate_causes.len(), 2);
         assert_eq!(observation.targets.len(), 2);
+    }
+
+    #[test]
+    fn import_qualifier_attribution_uses_the_matching_terminal_request() {
+        let mut profile = ResolutionBlockerProfile::default();
+        let qualifier = [
+            "scala".to_owned(),
+            "collection".to_owned(),
+            "List".to_owned(),
+        ];
+        let trace = [
+            ResolverRequestObservation {
+                target: "scala".to_owned(),
+                outcome: "package success".to_owned(),
+                cause: None,
+                materialized_prefix: None,
+            },
+            ResolverRequestObservation {
+                target: "scala.collection".to_owned(),
+                outcome: "package success".to_owned(),
+                cause: None,
+                materialized_prefix: None,
+            },
+            ResolverRequestObservation {
+                target: "scala.collection.List".to_owned(),
+                outcome: "package unresolved".to_owned(),
+                cause: Some("first segment/package unresolved".to_owned()),
+                materialized_prefix: None,
+            },
+            ResolverRequestObservation {
+                target: "prefix=scala.collection::namespace=type::name=List::space=Prefix"
+                    .to_owned(),
+                outcome: "package type member unresolved".to_owned(),
+                cause: Some("package resolved but member unresolved".to_owned()),
+                materialized_prefix: Some("scala/Function1".to_owned()),
+            },
+            ResolverRequestObservation {
+                target: "prefix=java.util::namespace=type::name=Map::space=Prefix".to_owned(),
+                outcome: "class member scope unavailable: incomplete class info".to_owned(),
+                cause: Some("incomplete class identity".to_owned()),
+                materialized_prefix: None,
+            },
+        ];
+
+        profile.record_attempt(
+            "ImportQualifierNotFound",
+            "Use.scala",
+            12,
+            &trace,
+            Some(&qualifier),
+        );
+
+        let observation = profile.observations.first().unwrap();
+        assert_eq!(observation.cause, "package resolved but member unresolved");
+        assert_eq!(observation.targets.len(), 2);
+        assert_eq!(
+            observation.materialized_prefixes,
+            BTreeSet::from(["scala/Function1".to_owned()])
+        );
+        assert_eq!(
+            observation.candidate_causes,
+            BTreeSet::from([
+                "first segment/package unresolved".to_owned(),
+                "package resolved but member unresolved".to_owned()
+            ])
+        );
     }
 }
