@@ -67,15 +67,17 @@ pub struct LoadingSession {
     resolved_order: Vec<BinaryName>,
     pub(crate) packages: PackageRegistry,
     pub(crate) metadata: HashMap<SymbolId, ClassfileMetadata>,
+    metadata_order: Vec<SymbolId>,
     pub(crate) origins: HashMap<SymbolId, ClassOrigin>,
-    sidecar_order: Vec<SymbolId>,
+    origin_order: Vec<SymbolId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SessionCheckpoint {
     identified: usize,
     resolved: usize,
-    sidecars: usize,
+    metadata: usize,
+    origins: usize,
     packages: (usize, usize),
 }
 
@@ -107,8 +109,9 @@ impl LoadingSession {
             resolved_order: Vec::new(),
             packages: PackageRegistry::new(),
             metadata: HashMap::new(),
+            metadata_order: Vec::new(),
             origins: HashMap::new(),
-            sidecar_order: Vec::new(),
+            origin_order: Vec::new(),
         }
     }
 
@@ -116,7 +119,8 @@ impl LoadingSession {
         SessionCheckpoint {
             identified: self.identified_order.len(),
             resolved: self.resolved_order.len(),
-            sidecars: self.sidecar_order.len(),
+            metadata: self.metadata_order.len(),
+            origins: self.origin_order.len(),
             packages: self.packages.checkpoint(),
         }
     }
@@ -138,15 +142,13 @@ impl LoadingSession {
         if self.origins.contains_key(&symbol) {
             return;
         }
-        if !self.metadata.contains_key(&symbol) {
-            self.sidecar_order.push(symbol);
-        }
+        self.origin_order.push(symbol);
         self.origins.insert(symbol, origin);
     }
 
     pub(crate) fn record_metadata(&mut self, symbol: SymbolId, metadata: ClassfileMetadata) {
-        if !self.origins.contains_key(&symbol) && !self.metadata.contains_key(&symbol) {
-            self.sidecar_order.push(symbol);
+        if !self.metadata.contains_key(&symbol) {
+            self.metadata_order.push(symbol);
         }
         self.metadata.insert(symbol, metadata);
     }
@@ -164,9 +166,12 @@ impl LoadingSession {
             let name = self.resolved_order.pop().expect("length checked");
             self.resolved.remove(&name);
         }
-        while self.sidecar_order.len() > checkpoint.sidecars {
-            let symbol = self.sidecar_order.pop().expect("length checked");
+        while self.metadata_order.len() > checkpoint.metadata {
+            let symbol = self.metadata_order.pop().expect("length checked");
             self.metadata.remove(&symbol);
+        }
+        while self.origin_order.len() > checkpoint.origins {
+            let symbol = self.origin_order.pop().expect("length checked");
             self.origins.remove(&symbol);
         }
         self.packages.rollback_to(store, checkpoint.packages);
@@ -176,6 +181,8 @@ impl LoadingSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbol::ClassfileMetadata;
+    use dotty_classfile::access_flags::ClassAccessFlags;
     use dotty_core::{
         Name, Namespace, SemanticStore, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks,
         SymbolOrigin, Visibility,
@@ -236,5 +243,37 @@ mod tests {
 
         assert!(!session.identified.contains_key(&name));
         assert!(!session.resolved.contains_key(&name));
+    }
+
+    #[test]
+    fn metadata_rollback_keeps_the_origin_of_a_preexisting_identity_shell() {
+        let mut store = SemanticStore::new();
+        let identity = symbol(&mut store, "Shell");
+        let mut session = LoadingSession::new();
+        let origin = ClassOrigin::Directory("<memory>".into());
+        session.record_origin(identity, origin.clone());
+        let checkpoint = session.checkpoint();
+        session.record_metadata(
+            identity,
+            ClassfileMetadata {
+                binary_name: BinaryName::from_internal("sample/Shell"),
+                access_flags: ClassAccessFlags(0x0021),
+                fields: Vec::new(),
+                methods: Vec::new(),
+                signature: None,
+                nest_host: None,
+                nest_members: Vec::new(),
+                permitted_subclasses: Vec::new(),
+                inner_classes: Vec::new(),
+                enclosing_method: None,
+                record_components: None,
+                annotations: Vec::new(),
+            },
+        );
+
+        session.rollback_to(&mut store, checkpoint);
+
+        assert!(!session.metadata.contains_key(&identity));
+        assert_eq!(session.origins.get(&identity), Some(&origin));
     }
 }
