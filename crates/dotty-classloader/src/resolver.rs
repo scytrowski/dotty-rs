@@ -640,7 +640,7 @@ mod tests {
             let (bytes, origin) = match name.as_internal() {
                 "java/time/DayOfWeek" => (
                     include_bytes!("../../dotty-classfile/tests/fixtures/jdk_corpus/jdk26/java/time/DayOfWeek.class").to_vec(),
-                    PathBuf::from("../dotty-classfile/tests/fixtures/jdk_corpus/jdk26"),
+                    fixture_path("../dotty-classfile/tests/fixtures/jdk_corpus/jdk26"),
                 ),
                 "java/lang/Object" => (
                     test_class_stub("java/lang/Object", 0x0021),
@@ -1532,6 +1532,13 @@ mod tests {
         assert_eq!(store.symbols.get(class).owner, Some(package));
         assert_eq!(store.symbols.get(class).name, name);
         assert_eq!(store.symbols.get(class).kind, SymbolKind::Class);
+        assert_eq!(
+            resolver.session.origins.get(&class),
+            Some(&ClassOrigin::Directory(fixture_path(
+                "../dotty-classfile/tests/fixtures/jdk_corpus/jdk26"
+            ))),
+            "the real class keeps the checked-in JDK fixture as its origin"
+        );
         assert!(matches!(
             store.symbols.get(class).info,
             SymbolInfo::Complete(info) if matches!(store.types.get(info), Type::ClassInfo(_))
