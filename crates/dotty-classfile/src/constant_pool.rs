@@ -1,4 +1,6 @@
+use crate::encode_error::EncodeError;
 use crate::reader::{ReadError, Reader};
+use crate::writer::Writer;
 use std::fmt;
 
 pub const CONSTANT_UTF8_TAG: u8 = 1;
@@ -230,6 +232,241 @@ impl ConstantPool {
         Self { entries }
     }
 
+    /// Encodes `constant_pool_count` and all stored entries in their current
+    /// slot order (JVMS §4.4).
+    ///
+    /// This is structural serialization only. It preserves indices and
+    /// duplicates, validates reserved `Long`/`Double` slots and constant-pool
+    /// references, and does not resolve `BootstrapMethods` entries or encode
+    /// any enclosing class-file structures. No bytes are returned if the
+    /// model is invalid.
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
+        self.validate_for_encoding()?;
+
+        let count = self
+            .entries
+            .len()
+            .checked_add(1)
+            .ok_or(EncodeError::CountOverflow {
+                value: usize::MAX,
+                width: crate::encode_error::LengthWidth::U16,
+            })?;
+
+        let mut writer = Writer::new();
+        writer.write_u2_length(count)?;
+        for entry in self.entries.iter().flatten() {
+            write_entry(&mut writer, entry)?;
+        }
+        Ok(writer.into_bytes())
+    }
+
+    fn validate_for_encoding(&self) -> Result<(), EncodeError> {
+        let count = self
+            .entries
+            .len()
+            .checked_add(1)
+            .ok_or(EncodeError::CountOverflow {
+                value: usize::MAX,
+                width: crate::encode_error::LengthWidth::U16,
+            })?;
+        crate::writer::checked_u16_len(count)?;
+
+        let mut slot = 0;
+        while slot < self.entries.len() {
+            match self.entries.get(slot) {
+                Some(Some(ConstantPoolEntry::Long(_) | ConstantPoolEntry::Double(_))) => {
+                    if !matches!(self.entries.get(slot + 1), Some(None)) {
+                        return Err(EncodeError::InvalidLayout);
+                    }
+                    slot += 2;
+                }
+                Some(Some(_)) => slot += 1,
+                Some(None) | None => return Err(EncodeError::InvalidLayout),
+            }
+        }
+
+        for entry in &self.entries {
+            let Some(entry) = entry else { continue };
+            match entry {
+                ConstantPoolEntry::Utf8(value) => {
+                    // Check the complete modified UTF-8 payload before output
+                    // is started; `Writer::write_modified_utf8` repeats this
+                    // while producing the final bytes.
+                    crate::modified_utf8::encode_modified_utf8(value)?;
+                }
+                ConstantPoolEntry::Integer(_)
+                | ConstantPoolEntry::Float(_)
+                | ConstantPoolEntry::Long(_)
+                | ConstantPoolEntry::Double(_) => {}
+                ConstantPoolEntry::Class { name_index }
+                | ConstantPoolEntry::Module { name_index }
+                | ConstantPoolEntry::Package { name_index } => {
+                    self.validate_reference(*name_index, is_utf8)?;
+                }
+                ConstantPoolEntry::String { string_index } => {
+                    self.validate_reference(*string_index, is_utf8)?;
+                }
+                ConstantPoolEntry::Fieldref {
+                    class_index,
+                    name_and_type_index,
+                }
+                | ConstantPoolEntry::Methodref {
+                    class_index,
+                    name_and_type_index,
+                }
+                | ConstantPoolEntry::InterfaceMethodref {
+                    class_index,
+                    name_and_type_index,
+                } => {
+                    self.validate_reference(*class_index, is_class)?;
+                    self.validate_reference(*name_and_type_index, is_name_and_type)?;
+                }
+                ConstantPoolEntry::NameAndType {
+                    name_index,
+                    descriptor_index,
+                } => {
+                    self.validate_reference(*name_index, is_utf8)?;
+                    self.validate_reference(*descriptor_index, is_utf8)?;
+                }
+                ConstantPoolEntry::MethodHandle {
+                    reference_kind,
+                    reference_index,
+                } => {
+                    self.validate_method_handle_reference(*reference_kind, *reference_index)?;
+                }
+                ConstantPoolEntry::MethodType { descriptor_index } => {
+                    self.validate_reference(*descriptor_index, is_utf8)?;
+                }
+                ConstantPoolEntry::Dynamic {
+                    name_and_type_index,
+                    ..
+                }
+                | ConstantPoolEntry::InvokeDynamic {
+                    name_and_type_index,
+                    ..
+                } => {
+                    self.validate_reference(*name_and_type_index, is_name_and_type)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_reference(
+        &self,
+        index: ConstantPoolIndex,
+        expected: fn(&ConstantPoolEntry) -> bool,
+    ) -> Result<(), EncodeError> {
+        let raw_index = usize::from(index.0);
+        let slot = raw_index
+            .checked_sub(1)
+            .and_then(|slot| self.entries.get(slot))
+            .ok_or(EncodeError::InvalidIndex {
+                index: raw_index,
+                count: self.entries.len(),
+            })?;
+
+        match slot {
+            Some(entry) if expected(entry) => Ok(()),
+            Some(_) | None => Err(EncodeError::InvalidReference { index: raw_index }),
+        }
+    }
+
+    fn validate_method_handle_reference(
+        &self,
+        kind: MethodHandleKind,
+        index: ConstantPoolIndex,
+    ) -> Result<(), EncodeError> {
+        match kind {
+            MethodHandleKind::GetField
+            | MethodHandleKind::GetStatic
+            | MethodHandleKind::PutField
+            | MethodHandleKind::PutStatic => self.validate_reference(index, is_fieldref),
+            MethodHandleKind::InvokeVirtual | MethodHandleKind::NewInvokeSpecial => {
+                self.validate_reference(index, is_methodref)
+            }
+            MethodHandleKind::InvokeStatic | MethodHandleKind::InvokeSpecial => self
+                .validate_reference(index, |entry| {
+                    is_methodref(entry) || is_interface_methodref(entry)
+                }),
+            MethodHandleKind::InvokeInterface => {
+                self.validate_reference(index, is_interface_methodref)
+            }
+        }?;
+
+        if matches!(
+            kind,
+            MethodHandleKind::GetField
+                | MethodHandleKind::GetStatic
+                | MethodHandleKind::PutField
+                | MethodHandleKind::PutStatic
+        ) {
+            return Ok(());
+        }
+
+        let target_index = usize::from(index.0);
+        let target = self.get(index).ok_or(EncodeError::InvalidIndex {
+            index: target_index,
+            count: self.entries.len(),
+        })?;
+        let name_and_type_index = match target {
+            ConstantPoolEntry::Methodref {
+                name_and_type_index,
+                ..
+            }
+            | ConstantPoolEntry::InterfaceMethodref {
+                name_and_type_index,
+                ..
+            } => *name_and_type_index,
+            _ => {
+                return Err(EncodeError::InvalidReference {
+                    index: target_index,
+                });
+            }
+        };
+        self.validate_reference(name_and_type_index, is_name_and_type)?;
+        let (name_index, _) = match self.get(name_and_type_index) {
+            Some(ConstantPoolEntry::NameAndType {
+                name_index,
+                descriptor_index,
+            }) => (*name_index, *descriptor_index),
+            _ => {
+                return Err(EncodeError::InvalidReference {
+                    index: usize::from(name_and_type_index.0),
+                });
+            }
+        };
+        self.validate_reference(name_index, is_utf8)?;
+        let name = match self.get(name_index) {
+            Some(ConstantPoolEntry::Utf8(name)) => name.as_str(),
+            _ => {
+                return Err(EncodeError::InvalidReference {
+                    index: usize::from(name_index.0),
+                });
+            }
+        };
+
+        let valid_name = match kind {
+            MethodHandleKind::NewInvokeSpecial => name == "<init>",
+            MethodHandleKind::InvokeVirtual
+            | MethodHandleKind::InvokeStatic
+            | MethodHandleKind::InvokeSpecial
+            | MethodHandleKind::InvokeInterface => name != "<init>" && name != "<clinit>",
+            MethodHandleKind::GetField
+            | MethodHandleKind::GetStatic
+            | MethodHandleKind::PutField
+            | MethodHandleKind::PutStatic => true,
+        };
+        if valid_name {
+            Ok(())
+        } else {
+            Err(EncodeError::InvalidMethodHandleName {
+                index: target_index,
+            })
+        }
+    }
+
     pub fn get(&self, index: ConstantPoolIndex) -> Option<&ConstantPoolEntry> {
         let position = usize::from(index.0).checked_sub(1)?;
         self.entries.get(position)?.as_ref()
@@ -413,6 +650,146 @@ impl ConstantPool {
     }
 }
 
+fn is_utf8(entry: &ConstantPoolEntry) -> bool {
+    matches!(entry, ConstantPoolEntry::Utf8(_))
+}
+
+fn is_class(entry: &ConstantPoolEntry) -> bool {
+    matches!(entry, ConstantPoolEntry::Class { .. })
+}
+
+fn is_name_and_type(entry: &ConstantPoolEntry) -> bool {
+    matches!(entry, ConstantPoolEntry::NameAndType { .. })
+}
+
+fn is_fieldref(entry: &ConstantPoolEntry) -> bool {
+    matches!(entry, ConstantPoolEntry::Fieldref { .. })
+}
+
+fn is_methodref(entry: &ConstantPoolEntry) -> bool {
+    matches!(entry, ConstantPoolEntry::Methodref { .. })
+}
+
+fn is_interface_methodref(entry: &ConstantPoolEntry) -> bool {
+    matches!(entry, ConstantPoolEntry::InterfaceMethodref { .. })
+}
+
+fn write_entry(writer: &mut Writer, entry: &ConstantPoolEntry) -> Result<(), EncodeError> {
+    match entry {
+        ConstantPoolEntry::Utf8(value) => {
+            writer.write_u1(CONSTANT_UTF8_TAG);
+            writer.write_modified_utf8(value)?;
+        }
+        ConstantPoolEntry::Integer(value) => {
+            writer.write_u1(CONSTANT_INTEGER_TAG);
+            writer.write_bytes(&value.to_be_bytes());
+        }
+        ConstantPoolEntry::Float(value) => {
+            writer.write_u1(CONSTANT_FLOAT_TAG);
+            writer.write_u4(value.to_bits());
+        }
+        ConstantPoolEntry::Long(value) => {
+            writer.write_u1(CONSTANT_LONG_TAG);
+            writer.write_bytes(&value.to_be_bytes());
+        }
+        ConstantPoolEntry::Double(value) => {
+            writer.write_u1(CONSTANT_DOUBLE_TAG);
+            writer.write_bytes(&value.to_bits().to_be_bytes());
+        }
+        ConstantPoolEntry::Class { name_index } => {
+            writer.write_u1(CONSTANT_CLASS_TAG);
+            writer.write_u2(name_index.0);
+        }
+        ConstantPoolEntry::String { string_index } => {
+            writer.write_u1(CONSTANT_STRING_TAG);
+            writer.write_u2(string_index.0);
+        }
+        ConstantPoolEntry::Fieldref {
+            class_index,
+            name_and_type_index,
+        } => {
+            writer.write_u1(CONSTANT_FIELDREF_TAG);
+            writer.write_u2(class_index.0);
+            writer.write_u2(name_and_type_index.0);
+        }
+        ConstantPoolEntry::Methodref {
+            class_index,
+            name_and_type_index,
+        } => {
+            writer.write_u1(CONSTANT_METHODREF_TAG);
+            writer.write_u2(class_index.0);
+            writer.write_u2(name_and_type_index.0);
+        }
+        ConstantPoolEntry::InterfaceMethodref {
+            class_index,
+            name_and_type_index,
+        } => {
+            writer.write_u1(CONSTANT_INTERFACE_METHODREF_TAG);
+            writer.write_u2(class_index.0);
+            writer.write_u2(name_and_type_index.0);
+        }
+        ConstantPoolEntry::NameAndType {
+            name_index,
+            descriptor_index,
+        } => {
+            writer.write_u1(CONSTANT_NAME_AND_TYPE_TAG);
+            writer.write_u2(name_index.0);
+            writer.write_u2(descriptor_index.0);
+        }
+        ConstantPoolEntry::MethodHandle {
+            reference_kind,
+            reference_index,
+        } => {
+            writer.write_u1(CONSTANT_METHOD_HANDLE_TAG);
+            writer.write_u1(method_handle_kind_tag(*reference_kind));
+            writer.write_u2(reference_index.0);
+        }
+        ConstantPoolEntry::MethodType { descriptor_index } => {
+            writer.write_u1(CONSTANT_METHOD_TYPE_TAG);
+            writer.write_u2(descriptor_index.0);
+        }
+        ConstantPoolEntry::Dynamic {
+            bootstrap_method_attr_index,
+            name_and_type_index,
+        } => {
+            writer.write_u1(CONSTANT_DYNAMIC_TAG);
+            writer.write_u2(bootstrap_method_attr_index.0);
+            writer.write_u2(name_and_type_index.0);
+        }
+        ConstantPoolEntry::InvokeDynamic {
+            bootstrap_method_attr_index,
+            name_and_type_index,
+        } => {
+            writer.write_u1(CONSTANT_INVOKE_DYNAMIC_TAG);
+            writer.write_u2(bootstrap_method_attr_index.0);
+            writer.write_u2(name_and_type_index.0);
+        }
+        ConstantPoolEntry::Module { name_index } => {
+            writer.write_u1(CONSTANT_MODULE_TAG);
+            writer.write_u2(name_index.0);
+        }
+        ConstantPoolEntry::Package { name_index } => {
+            writer.write_u1(CONSTANT_PACKAGE_TAG);
+            writer.write_u2(name_index.0);
+        }
+    }
+    Ok(())
+}
+
+fn method_handle_kind_tag(kind: MethodHandleKind) -> u8 {
+    match kind {
+        MethodHandleKind::GetField => 1,
+        MethodHandleKind::GetStatic => 2,
+        MethodHandleKind::PutField => 3,
+        MethodHandleKind::PutStatic => 4,
+        MethodHandleKind::InvokeVirtual => 5,
+        MethodHandleKind::InvokeStatic => 6,
+        MethodHandleKind::InvokeSpecial => 7,
+        MethodHandleKind::NewInvokeSpecial => 8,
+        MethodHandleKind::InvokeInterface => 9,
+    }
+}
+
 pub(crate) fn read_index(reader: &mut Reader<'_>) -> Result<ConstantPoolIndex, ReadError> {
     Ok(ConstantPoolIndex(reader.read_u16()?))
 }
@@ -503,6 +880,435 @@ fn decode_entry(
 mod tests {
     use super::*;
     use crate::reader::{ReadError, Reader};
+
+    fn serialization_matrix_pool() -> ConstantPool {
+        ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Integer(-2)),
+            Some(ConstantPoolEntry::Float(f32::from_bits(0x8000_0000))),
+            Some(ConstantPoolEntry::Long(i64::MIN)),
+            None,
+            Some(ConstantPoolEntry::Double(f64::from_bits(
+                0x7FF8_0000_0000_0042,
+            ))),
+            None,
+            Some(ConstantPoolEntry::Utf8("C".to_owned())),
+            Some(ConstantPoolEntry::Utf8("n".to_owned())),
+            Some(ConstantPoolEntry::Utf8("()V".to_owned())),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(7),
+            }),
+            Some(ConstantPoolEntry::String {
+                string_index: ConstantPoolIndex(8),
+            }),
+            Some(ConstantPoolEntry::NameAndType {
+                name_index: ConstantPoolIndex(8),
+                descriptor_index: ConstantPoolIndex(9),
+            }),
+            Some(ConstantPoolEntry::Fieldref {
+                class_index: ConstantPoolIndex(10),
+                name_and_type_index: ConstantPoolIndex(12),
+            }),
+            Some(ConstantPoolEntry::Methodref {
+                class_index: ConstantPoolIndex(10),
+                name_and_type_index: ConstantPoolIndex(12),
+            }),
+            Some(ConstantPoolEntry::InterfaceMethodref {
+                class_index: ConstantPoolIndex(10),
+                name_and_type_index: ConstantPoolIndex(12),
+            }),
+            Some(ConstantPoolEntry::MethodHandle {
+                reference_kind: MethodHandleKind::GetField,
+                reference_index: ConstantPoolIndex(13),
+            }),
+            Some(ConstantPoolEntry::MethodHandle {
+                reference_kind: MethodHandleKind::GetStatic,
+                reference_index: ConstantPoolIndex(13),
+            }),
+            Some(ConstantPoolEntry::MethodHandle {
+                reference_kind: MethodHandleKind::PutField,
+                reference_index: ConstantPoolIndex(13),
+            }),
+            Some(ConstantPoolEntry::MethodHandle {
+                reference_kind: MethodHandleKind::PutStatic,
+                reference_index: ConstantPoolIndex(13),
+            }),
+            Some(ConstantPoolEntry::MethodHandle {
+                reference_kind: MethodHandleKind::InvokeVirtual,
+                reference_index: ConstantPoolIndex(14),
+            }),
+            Some(ConstantPoolEntry::MethodHandle {
+                reference_kind: MethodHandleKind::InvokeStatic,
+                reference_index: ConstantPoolIndex(14),
+            }),
+            Some(ConstantPoolEntry::MethodHandle {
+                reference_kind: MethodHandleKind::InvokeSpecial,
+                reference_index: ConstantPoolIndex(14),
+            }),
+            Some(ConstantPoolEntry::MethodHandle {
+                reference_kind: MethodHandleKind::NewInvokeSpecial,
+                reference_index: ConstantPoolIndex(33),
+            }),
+            Some(ConstantPoolEntry::MethodHandle {
+                reference_kind: MethodHandleKind::InvokeInterface,
+                reference_index: ConstantPoolIndex(15),
+            }),
+            Some(ConstantPoolEntry::MethodType {
+                descriptor_index: ConstantPoolIndex(9),
+            }),
+            Some(ConstantPoolEntry::Dynamic {
+                bootstrap_method_attr_index: BootstrapMethodIndex(0x1234),
+                name_and_type_index: ConstantPoolIndex(12),
+            }),
+            Some(ConstantPoolEntry::InvokeDynamic {
+                bootstrap_method_attr_index: BootstrapMethodIndex(0xABCD),
+                name_and_type_index: ConstantPoolIndex(12),
+            }),
+            Some(ConstantPoolEntry::Module {
+                name_index: ConstantPoolIndex(7),
+            }),
+            Some(ConstantPoolEntry::Package {
+                name_index: ConstantPoolIndex(8),
+            }),
+            Some(ConstantPoolEntry::Utf8("u\0😀".to_owned())),
+            Some(ConstantPoolEntry::Utf8("<init>".to_owned())),
+            Some(ConstantPoolEntry::NameAndType {
+                name_index: ConstantPoolIndex(31),
+                descriptor_index: ConstantPoolIndex(9),
+            }),
+            Some(ConstantPoolEntry::Methodref {
+                class_index: ConstantPoolIndex(10),
+                name_and_type_index: ConstantPoolIndex(32),
+            }),
+        ])
+    }
+
+    fn assert_pool_eq_bitwise(expected: &ConstantPool, actual: &ConstantPool) {
+        assert_eq!(expected.entries.len(), actual.entries.len());
+        for (expected, actual) in expected.entries.iter().zip(&actual.entries) {
+            match (expected, actual) {
+                (
+                    Some(ConstantPoolEntry::Float(expected)),
+                    Some(ConstantPoolEntry::Float(actual)),
+                ) => {
+                    assert_eq!(expected.to_bits(), actual.to_bits());
+                }
+                (
+                    Some(ConstantPoolEntry::Double(expected)),
+                    Some(ConstantPoolEntry::Double(actual)),
+                ) => {
+                    assert_eq!(expected.to_bits(), actual.to_bits());
+                }
+                (expected, actual) => assert_eq!(expected, actual),
+            }
+        }
+    }
+
+    #[test]
+    fn encode_writes_the_tag_and_payload_for_every_entry_variant() {
+        let pool = serialization_matrix_pool();
+        let encoded = pool.encode().unwrap();
+
+        assert_eq!(
+            encoded,
+            [
+                0x00, 0x22, // constant_pool_count: 33 slots + slot zero
+                0x03, 0xFF, 0xFF, 0xFF, 0xFE, // Integer(-2)
+                0x04, 0x80, 0x00, 0x00, 0x00, // Float(-0.0)
+                0x05, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Long(i64::MIN)
+                0x06, 0x7F, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x42, // Double(NaN payload)
+                0x01, 0x00, 0x01, b'C', // Utf8
+                0x01, 0x00, 0x01, b'n', // Utf8
+                0x01, 0x00, 0x03, b'(', b')', b'V', // Utf8
+                0x07, 0x00, 0x07, // Class
+                0x08, 0x00, 0x08, // String
+                0x0C, 0x00, 0x08, 0x00, 0x09, // NameAndType
+                0x09, 0x00, 0x0A, 0x00, 0x0C, // Fieldref
+                0x0A, 0x00, 0x0A, 0x00, 0x0C, // Methodref
+                0x0B, 0x00, 0x0A, 0x00, 0x0C, // InterfaceMethodref
+                0x0F, 0x01, 0x00, 0x0D, // GetField
+                0x0F, 0x02, 0x00, 0x0D, // GetStatic
+                0x0F, 0x03, 0x00, 0x0D, // PutField
+                0x0F, 0x04, 0x00, 0x0D, // PutStatic
+                0x0F, 0x05, 0x00, 0x0E, // InvokeVirtual
+                0x0F, 0x06, 0x00, 0x0E, // InvokeStatic
+                0x0F, 0x07, 0x00, 0x0E, // InvokeSpecial
+                0x0F, 0x08, 0x00, 0x21, // NewInvokeSpecial
+                0x0F, 0x09, 0x00, 0x0F, // InvokeInterface
+                0x10, 0x00, 0x09, // MethodType
+                0x11, 0x12, 0x34, 0x00, 0x0C, // Dynamic
+                0x12, 0xAB, 0xCD, 0x00, 0x0C, // InvokeDynamic
+                0x13, 0x00, 0x07, // Module
+                0x14, 0x00, 0x08, // Package
+                0x01, 0x00, 0x09, b'u', 0xC0, 0x80, 0xED, 0xA0, 0xBD, 0xED, 0xB8,
+                0x80, // Utf8 MUTF-8
+                0x01, 0x00, 0x06, b'<', b'i', b'n', b'i', b't', b'>', // Utf8 <init>
+                0x0C, 0x00, 0x1F, 0x00, 0x09, // NameAndType <init>
+                0x0A, 0x00, 0x0A, 0x00, 0x20, // Methodref <init>
+            ]
+        );
+    }
+
+    #[test]
+    fn encode_decode_preserves_every_slot_and_float_bit_pattern() {
+        let pool = serialization_matrix_pool();
+        let encoded = pool.encode().unwrap();
+        let mut reader = Reader::new(&encoded);
+        let decoded = ConstantPool::decode(&mut reader).unwrap();
+
+        assert!(reader.is_at_end());
+        assert_pool_eq_bitwise(&pool, &decoded);
+    }
+
+    #[test]
+    fn encode_preserves_forward_references_duplicates_and_original_order() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(2),
+            }),
+            Some(ConstantPoolEntry::Utf8("duplicate".to_owned())),
+            Some(ConstantPoolEntry::Utf8("duplicate".to_owned())),
+            Some(ConstantPoolEntry::String {
+                string_index: ConstantPoolIndex(3),
+            }),
+        ]);
+
+        let encoded = pool.encode().unwrap();
+        assert_eq!(
+            encoded,
+            [
+                0x00, 0x05, 0x07, 0x00, 0x02, // forward Class reference
+                0x01, 0x00, 0x09, b'd', b'u', b'p', b'l', b'i', b'c', b'a', b't', b'e', 0x01, 0x00,
+                0x09, b'd', b'u', b'p', b'l', b'i', b'c', b'a', b't', b'e', 0x08, 0x00, 0x03,
+            ]
+        );
+        let mut reader = Reader::new(&encoded);
+        let decoded = ConstantPool::decode(&mut reader).unwrap();
+        assert_pool_eq_bitwise(&pool, &decoded);
+    }
+
+    #[test]
+    fn encode_rejects_orphaned_or_misplaced_two_slot_entries() {
+        let invalid_pools = [
+            ConstantPool::from_entries(vec![None]),
+            ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Long(1))]),
+            ConstantPool::from_entries(vec![
+                Some(ConstantPoolEntry::Long(1)),
+                Some(ConstantPoolEntry::Integer(2)),
+            ]),
+            ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Long(1)), None, None]),
+        ];
+
+        for pool in invalid_pools {
+            assert_eq!(pool.encode(), Err(EncodeError::InvalidLayout));
+        }
+    }
+
+    #[test]
+    fn encode_rejects_malformed_references_and_method_handle_targets() {
+        let invalid_index = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Class {
+            name_index: ConstantPoolIndex(0),
+        })]);
+        assert_eq!(
+            invalid_index.encode(),
+            Err(EncodeError::InvalidIndex { index: 0, count: 1 })
+        );
+
+        let out_of_range = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Class {
+            name_index: ConstantPoolIndex(2),
+        })]);
+        assert_eq!(
+            out_of_range.encode(),
+            Err(EncodeError::InvalidIndex { index: 2, count: 1 })
+        );
+
+        let wrong_kind = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Integer(1)),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(1),
+            }),
+        ]);
+        assert_eq!(
+            wrong_kind.encode(),
+            Err(EncodeError::InvalidReference { index: 1 })
+        );
+
+        let bad_handle_target = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Integer(1)),
+            Some(ConstantPoolEntry::MethodHandle {
+                reference_kind: MethodHandleKind::GetField,
+                reference_index: ConstantPoolIndex(1),
+            }),
+        ]);
+        assert_eq!(
+            bad_handle_target.encode(),
+            Err(EncodeError::InvalidReference { index: 1 })
+        );
+
+        let reserved_slot_reference = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Long(1)),
+            None,
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(2),
+            }),
+            Some(ConstantPoolEntry::Utf8("C".to_owned())),
+        ]);
+        assert_eq!(
+            reserved_slot_reference.encode(),
+            Err(EncodeError::InvalidReference { index: 2 })
+        );
+    }
+
+    fn pool_with_method_handle(kind: MethodHandleKind, method_name: &str) -> ConstantPool {
+        ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("C".to_owned())),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(1),
+            }),
+            Some(ConstantPoolEntry::Utf8(method_name.to_owned())),
+            Some(ConstantPoolEntry::Utf8("()V".to_owned())),
+            Some(ConstantPoolEntry::NameAndType {
+                name_index: ConstantPoolIndex(3),
+                descriptor_index: ConstantPoolIndex(4),
+            }),
+            Some(ConstantPoolEntry::Methodref {
+                class_index: ConstantPoolIndex(2),
+                name_and_type_index: ConstantPoolIndex(5),
+            }),
+            Some(ConstantPoolEntry::InterfaceMethodref {
+                class_index: ConstantPoolIndex(2),
+                name_and_type_index: ConstantPoolIndex(5),
+            }),
+            Some(ConstantPoolEntry::MethodHandle {
+                reference_kind: kind,
+                reference_index: ConstantPoolIndex(if kind == MethodHandleKind::InvokeInterface {
+                    7
+                } else {
+                    6
+                }),
+            }),
+        ])
+    }
+
+    #[test]
+    fn encode_validates_method_handle_target_names() {
+        for kind in [
+            MethodHandleKind::InvokeVirtual,
+            MethodHandleKind::InvokeStatic,
+            MethodHandleKind::InvokeSpecial,
+            MethodHandleKind::InvokeInterface,
+        ] {
+            for method_name in ["<init>", "<clinit>"] {
+                assert_eq!(
+                    pool_with_method_handle(kind, method_name).encode(),
+                    Err(EncodeError::InvalidMethodHandleName {
+                        index: if kind == MethodHandleKind::InvokeInterface {
+                            7
+                        } else {
+                            6
+                        }
+                    }),
+                    "{kind:?} must reject {method_name}"
+                );
+            }
+        }
+
+        assert_eq!(
+            pool_with_method_handle(MethodHandleKind::NewInvokeSpecial, "ordinary").encode(),
+            Err(EncodeError::InvalidMethodHandleName { index: 6 })
+        );
+        assert!(
+            pool_with_method_handle(MethodHandleKind::NewInvokeSpecial, "<init>")
+                .encode()
+                .is_ok()
+        );
+        assert!(
+            pool_with_method_handle(MethodHandleKind::InvokeVirtual, "ordinary")
+                .encode()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn encode_rejects_a_modified_utf8_payload_that_exceeds_u2() {
+        let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Utf8(
+            "a".repeat(usize::from(u16::MAX) + 1),
+        ))]);
+        assert_eq!(
+            pool.encode(),
+            Err(EncodeError::Utf8LengthOverflow {
+                byte_len: usize::from(u16::MAX) + 1,
+                max: u16::MAX,
+            })
+        );
+    }
+
+    #[test]
+    fn encode_preserves_long_and_double_slots_at_pool_boundaries() {
+        let pools = [
+            ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Long(1)), None]),
+            ConstantPool::from_entries(vec![
+                Some(ConstantPoolEntry::Integer(1)),
+                Some(ConstantPoolEntry::Double(2.0)),
+                None,
+            ]),
+            ConstantPool::from_entries(vec![
+                Some(ConstantPoolEntry::Integer(1)),
+                Some(ConstantPoolEntry::Long(2)),
+                None,
+                Some(ConstantPoolEntry::Double(3.0)),
+                None,
+            ]),
+        ];
+
+        for pool in pools {
+            let encoded = pool.encode().unwrap();
+            let mut reader = Reader::new(&encoded);
+            let decoded = ConstantPool::decode(&mut reader).unwrap();
+            assert_pool_eq_bitwise(&pool, &decoded);
+            assert!(reader.is_at_end());
+        }
+    }
+
+    #[test]
+    fn encode_preserves_signed_zero_and_noncanonical_nan_payloads() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Float(f32::from_bits(0x7FC0_0042))),
+            Some(ConstantPoolEntry::Float(-0.0)),
+            Some(ConstantPoolEntry::Double(f64::from_bits(
+                0x7FF0_0000_0000_0042,
+            ))),
+            None,
+            Some(ConstantPoolEntry::Double(-0.0)),
+            None,
+        ]);
+        let encoded = pool.encode().unwrap();
+        let mut reader = Reader::new(&encoded);
+        let decoded = ConstantPool::decode(&mut reader).unwrap();
+
+        assert_pool_eq_bitwise(&pool, &decoded);
+    }
+
+    #[test]
+    fn encode_checks_maximum_constant_pool_count_without_repairing_layout() {
+        let maximum = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Integer(0));
+            usize::from(u16::MAX) - 1
+        ]);
+        let bytes = maximum.encode().unwrap();
+        assert_eq!(&bytes[..2], &u16::MAX.to_be_bytes());
+
+        let too_many = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Integer(0));
+            usize::from(u16::MAX)
+        ]);
+        assert_eq!(
+            too_many.encode(),
+            Err(EncodeError::CountOverflow {
+                value: usize::from(u16::MAX) + 1,
+                width: crate::encode_error::LengthWidth::U16,
+            })
+        );
+    }
 
     #[test]
     fn constant_pool_get_returns_none_for_index_zero() {

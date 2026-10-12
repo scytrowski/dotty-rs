@@ -6,9 +6,11 @@
 //! and 26 corpora. See `docs/classfile-format-jdk25.md` for the wire-format
 //! reference and compatibility audit this type model follows.
 //!
-//! [`writer::Writer`] writes primitive JVM-format values and checked length
-//! prefixes. It does not encode [`class_file::ClassFile`] values yet, perform
-//! semantic JVM verification, or generate JVM code from Scala programs.
+//! [`constant_pool::ConstantPool::encode`] serializes constant-pool entries,
+//! while [`writer::Writer`] provides primitive JVM-format writes and checked
+//! length prefixes. The crate does not encode complete [`class_file::ClassFile`]
+//! values, perform semantic JVM verification, or generate JVM code from Scala
+//! programs.
 
 pub mod access_flags;
 pub mod attribute;
