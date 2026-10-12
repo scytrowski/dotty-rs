@@ -1,15 +1,17 @@
 //! Owned construction of JVM classes, fields, and method declarations.
 //!
-//! The builder owns names, descriptors, signatures, and raw method bytecode.
+//! The builder owns names, descriptors, signatures, and method code. Typed
+//! [`CodeBuilder`] closures provide symbolic references and infer stack/local
+//! limits; [`MethodBuilder::code`] preserves an explicit raw-byte path.
 //! At finalization it interns symbolic references with
 //! [`crate::constant_pool_builder::ConstantPoolBuilder`] and creates a
 //! temporary borrowed [`crate::class_file::ClassFile`] view for encoding.
-//! This avoids self-referential storage and does not verify bytecode semantics.
+//! This avoids self-referential storage. Typed code receives category and
+//! stack/local analysis, not full JVM verification.
 //!
 //! ```
 //! use dotty_classfile::classfile::{
-//!     ClassFileBuilder, ClassFileVersion, FieldAccessFlags, MethodAccessFlags,
-//!     ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC,
+//!     ClassFileBuilder, ClassFileVersion, FieldAccessFlags, ACC_PRIVATE,
 //! };
 //!
 //! let mut class = ClassFileBuilder::new(
@@ -17,8 +19,11 @@
 //!     ClassFileVersion { major: 65, minor: 0 },
 //! )?;
 //! class.add_field("answer", "I", FieldAccessFlags(ACC_PRIVATE))?;
-//! class.add_method("answer", "()I", MethodAccessFlags(ACC_PUBLIC | ACC_STATIC))?
-//!     .code(1, 0, [0x10, 42, 0xac])?;
+//! class.add_static_method("answer", "()I", |code| {
+//!     code.iconst(42)?;
+//!     code.ireturn()?;
+//!     Ok(())
+//! })?;
 //! let bytes = class.encode()?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
@@ -30,6 +35,11 @@ use crate::access_flags::{
     FieldAccessFlags, MethodAccessFlags,
 };
 use crate::attribute::{Attribute, CodeAttribute};
+use crate::bytecode::code_builder::{
+    self as code_builder, CodeBuilder, CodeBuilderError, FieldOperation, MethodOperation,
+    SymbolicInstruction,
+};
+use crate::bytecode::{AnalysisError, AssembleError, Instruction, analyze, assemble};
 use crate::class_file::{ClassFile, ClassFileVersion};
 use crate::constant_pool::ConstantPoolIndex;
 use crate::constant_pool_builder::{ConstantPoolBuildError, ConstantPoolBuilder};
@@ -116,6 +126,14 @@ pub enum ClassFileBuildError {
     MissingCode,
     /// Raw method code must have a length in the JVM range 1..=65535.
     InvalidCodeLength { length: usize },
+    /// A symbolic code builder operation used an invalid local or pool index.
+    CodeBuilder(CodeBuilderError),
+    /// Bytecode assembly rejected a generated instruction sequence.
+    Assemble(AssembleError),
+    /// Bytecode analysis rejected a generated instruction sequence.
+    Analysis(AnalysisError),
+    /// Internal generated-code staging did not match its method declaration.
+    InvalidCodePlan,
     /// Constant-pool construction failed.
     ConstantPool(ConstantPoolBuildError),
     /// The existing class-file encoder rejected the finalized model.
@@ -158,6 +176,10 @@ impl fmt::Display for ClassFileBuildError {
                 formatter,
                 "raw method code length {length} is outside the JVM range 1..=65535"
             ),
+            Self::CodeBuilder(error) => error.fmt(formatter),
+            Self::Assemble(error) => error.fmt(formatter),
+            Self::Analysis(error) => error.fmt(formatter),
+            Self::InvalidCodePlan => formatter.write_str("invalid generated method code plan"),
             Self::ConstantPool(error) => error.fmt(formatter),
             Self::Encode(error) => error.fmt(formatter),
         }
@@ -192,7 +214,13 @@ struct OwnedMethod {
     name: String,
     descriptor: String,
     signature: Option<String>,
-    code: Option<OwnedCode>,
+    code: Option<OwnedMethodCode>,
+}
+
+#[derive(Debug, Clone)]
+enum OwnedMethodCode {
+    Raw(OwnedCode),
+    Built(CodeBuilder),
 }
 
 #[derive(Debug, Clone)]
@@ -217,10 +245,14 @@ enum OwnedClassAttribute {
 /// order. The builder preserves the supplied flags and does not synthesize
 /// members or bytecode.
 ///
-/// [`encode`](Self::encode) accepts raw code bytes with explicit stack/local
-/// limits, but does not inspect instructions, infer limits, or prove verifier
-/// correctness. It builds only the modeled `SourceFile`, `Signature`, and
-/// `Code` attributes. Other attributes and bytecode analysis are deferred.
+/// [`encode`](Self::encode) preserves raw code bytes with explicit stack/local
+/// limits and also supports typed methods through [`CodeBuilder`]. Typed code
+/// resolves symbolic references, assembles instructions, and computes stack
+/// and local bounds before the constant pool is frozen. The analysis checks
+/// supported instruction categories and straight-line bounds; it is not full
+/// JVM verification and does not generate stack-map frames. A typed-code
+/// closure commits its method only after the closure succeeds; failures during
+/// final encoding return an error and produce no class bytes.
 pub struct ClassFileBuilder {
     class_name: String,
     version: ClassFileVersion,
@@ -412,6 +444,85 @@ impl ClassFileBuilder {
         Ok(MethodBuilder { method })
     }
 
+    /// Adds a public static method whose typed code is assembled and analyzed
+    /// automatically during [`encode`](Self::encode).
+    pub fn add_static_method<F>(
+        &mut self,
+        name: impl Into<String>,
+        descriptor: impl Into<String>,
+        code: F,
+    ) -> Result<&mut Self, ClassFileBuildError>
+    where
+        F: FnOnce(&mut CodeBuilder) -> Result<(), CodeBuilderError>,
+    {
+        self.add_code_method(
+            name,
+            descriptor,
+            MethodAccessFlags(ACC_PUBLIC | ACC_STATIC),
+            code,
+        )
+    }
+
+    /// Adds a public instance method whose typed code is assembled and
+    /// analyzed automatically during [`encode`](Self::encode).
+    pub fn add_instance_method<F>(
+        &mut self,
+        name: impl Into<String>,
+        descriptor: impl Into<String>,
+        code: F,
+    ) -> Result<&mut Self, ClassFileBuildError>
+    where
+        F: FnOnce(&mut CodeBuilder) -> Result<(), CodeBuilderError>,
+    {
+        self.add_code_method(name, descriptor, MethodAccessFlags(ACC_PUBLIC), code)
+    }
+
+    /// Adds a method with caller-selected flags and a typed code-building
+    /// closure. The method is appended only after the closure succeeds.
+    pub fn add_code_method<F>(
+        &mut self,
+        name: impl Into<String>,
+        descriptor: impl Into<String>,
+        access_flags: MethodAccessFlags,
+        code: F,
+    ) -> Result<&mut Self, ClassFileBuildError>
+    where
+        F: FnOnce(&mut CodeBuilder) -> Result<(), CodeBuilderError>,
+    {
+        let name = name.into();
+        let descriptor = descriptor.into();
+        validate_member_name(&name, true)?;
+        let parsed_descriptor = validate_method_descriptor(&descriptor, !access_flags.is_static())?;
+        validate_method_flags_for_class(
+            access_flags,
+            self.access_flags.is_interface(),
+            self.version.major,
+            &name,
+        )?;
+        validate_special_method(&name, &parsed_descriptor, access_flags)?;
+        if access_flags.is_abstract() || access_flags.is_native() {
+            return Err(ClassFileBuildError::CodeNotAllowed);
+        }
+        if self
+            .methods
+            .iter()
+            .any(|method| method.name == name && method.descriptor == descriptor)
+        {
+            return Err(ClassFileBuildError::DuplicateMethod);
+        }
+
+        let mut code_builder = CodeBuilder::new();
+        code(&mut code_builder).map_err(ClassFileBuildError::CodeBuilder)?;
+        self.methods.push(OwnedMethod {
+            access_flags,
+            name,
+            descriptor,
+            signature: None,
+            code: Some(OwnedMethodCode::Built(code_builder)),
+        });
+        Ok(self)
+    }
+
     /// Finalizes and encodes the class by interning all symbolic references
     /// before freezing the constant pool, then using the existing class-file
     /// encoder.
@@ -493,6 +604,20 @@ impl ClassFileBuilder {
             });
         }
 
+        // Resolve every symbolic code reference while the pool builder is
+        // still mutable. The resulting operand indices remain stable when the
+        // pool is finalized below.
+        let resolved_code = self
+            .methods
+            .iter()
+            .map(|method| match &method.code {
+                Some(OwnedMethodCode::Built(code)) => {
+                    resolve_code(code, &mut pool_builder).map(Some)
+                }
+                Some(OwnedMethodCode::Raw(_)) | None => Ok(None),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         if self.methods.iter().any(|method| method.code.is_some()) {
             pool_builder.utf8("Code")?;
         }
@@ -527,6 +652,33 @@ impl ClassFileBuilder {
             .collect::<Result<Vec<_>, _>>()?;
         let constant_pool = pool_builder.finish()?;
 
+        let finalized_code = self
+            .methods
+            .iter()
+            .zip(resolved_code)
+            .map(|(method, resolved)| match (&method.code, resolved) {
+                (Some(OwnedMethodCode::Raw(code)), None) => Ok(Some(code.clone())),
+                (Some(OwnedMethodCode::Built(_)), Some(instructions)) => {
+                    let bytes = assemble(&instructions, &constant_pool)
+                        .map_err(ClassFileBuildError::Assemble)?;
+                    let analysis = analyze(
+                        &method.descriptor,
+                        method.access_flags.is_static(),
+                        &instructions,
+                        &constant_pool,
+                    )
+                    .map_err(ClassFileBuildError::Analysis)?;
+                    Ok(Some(OwnedCode {
+                        max_stack: analysis.max_stack,
+                        max_locals: analysis.max_locals,
+                        bytes,
+                    }))
+                }
+                (None, None) => Ok(None),
+                _ => Err(ClassFileBuildError::InvalidCodePlan),
+            })
+            .collect::<Result<Vec<_>, ClassFileBuildError>>()?;
+
         let fields = self
             .fields
             .iter()
@@ -546,12 +698,13 @@ impl ClassFileBuilder {
             .methods
             .iter()
             .zip(methods)
-            .map(|(method, indices)| {
-                let mut attributes = Vec::with_capacity(usize::from(method.code.is_some()) + 1);
+            .zip(finalized_code.iter())
+            .map(|((method, indices), code)| {
+                let mut attributes = Vec::with_capacity(usize::from(code.is_some()) + 1);
                 if let Some(signature) = indices.signature {
                     attributes.push(Attribute::Signature(signature));
                 }
-                if let Some(code) = &method.code {
+                if let Some(code) = code {
                     attributes.push(Attribute::Code(CodeAttribute {
                         max_stack: code.max_stack,
                         max_locals: code.max_locals,
@@ -581,6 +734,76 @@ impl ClassFileBuilder {
         };
         class_file.encode().map_err(ClassFileBuildError::Encode)
     }
+}
+
+fn resolve_code(
+    code: &CodeBuilder,
+    pool: &mut ConstantPoolBuilder,
+) -> Result<Vec<Instruction>, ClassFileBuildError> {
+    code.instructions
+        .iter()
+        .map(|instruction| match instruction {
+            SymbolicInstruction::Typed(instruction) => Ok(*instruction),
+            SymbolicInstruction::Integer(value) => {
+                let index = pool.integer(*value)?;
+                code_builder::integer_load(index).map_err(ClassFileBuildError::CodeBuilder)
+            }
+            SymbolicInstruction::Long(value) => {
+                let index = pool.long(*value)?;
+                code_builder::long_load(index).map_err(ClassFileBuildError::CodeBuilder)
+            }
+            SymbolicInstruction::New(owner) => {
+                validate_internal_name(owner)?;
+                let index = pool.class(owner)?;
+                let reference = code_builder::typed_class_reference(index)
+                    .map_err(ClassFileBuildError::CodeBuilder)?;
+                Ok(Instruction::New(reference))
+            }
+            SymbolicInstruction::Field {
+                operation,
+                owner,
+                name,
+                descriptor,
+            } => {
+                validate_internal_name(owner)?;
+                validate_member_name(name, false)?;
+                validate_field_descriptor(descriptor)?;
+                let index = pool.field_ref(owner, name, descriptor)?;
+                let reference = code_builder::typed_field_reference(index)
+                    .map_err(ClassFileBuildError::CodeBuilder)?;
+                Ok(match operation {
+                    FieldOperation::Get => Instruction::GetField(reference),
+                    FieldOperation::Put => Instruction::PutField(reference),
+                    FieldOperation::GetStatic => Instruction::GetStatic(reference),
+                    FieldOperation::PutStatic => Instruction::PutStatic(reference),
+                })
+            }
+            SymbolicInstruction::Method {
+                operation,
+                owner,
+                name,
+                descriptor,
+            } => {
+                validate_internal_name(owner)?;
+                validate_member_name(name, true)?;
+                let has_receiver = !matches!(
+                    operation,
+                    MethodOperation::Static | MethodOperation::StaticInterface
+                );
+                validate_method_descriptor(descriptor, has_receiver)?;
+                let index = match operation {
+                    MethodOperation::StaticInterface | MethodOperation::SpecialInterface => {
+                        pool.interface_method_ref(owner, name, descriptor)?
+                    }
+                    MethodOperation::Static
+                    | MethodOperation::Virtual
+                    | MethodOperation::Special => pool.method_ref(owner, name, descriptor)?,
+                };
+                code_builder::typed_method_reference(*operation, index)
+                    .map_err(ClassFileBuildError::CodeBuilder)
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -662,11 +885,11 @@ impl MethodBuilder<'_> {
                 length: bytes.len(),
             });
         }
-        self.method.code = Some(OwnedCode {
+        self.method.code = Some(OwnedMethodCode::Raw(OwnedCode {
             max_stack,
             max_locals,
             bytes,
-        });
+        }));
         Ok(self)
     }
 }
