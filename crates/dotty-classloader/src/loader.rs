@@ -471,11 +471,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
     /// Loads (or returns the cached result for) the class named `name`.
     pub fn load_class(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadError> {
-        if self.collect_load_profiles {
-            self.profiled_load_class(name, &mut Vec::new())
-        } else {
-            self.load_class_with_inheritance_ancestry(name, &mut Vec::new())
-        }
+        self.load_class_detailed(name)
+            .map_err(|failure| failure.error)
     }
 
     /// Establishes the canonical symbol identity for an external class
@@ -518,8 +515,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 reason: "cyclic or excessively deep enclosing-class metadata".to_owned(),
             });
         }
-        if let Some(ClassEntry::Failed(_, failure)) = self.repository.get(name) {
-            return Err(failure.error.clone());
+        match self.repository.get(name) {
+            Some(ClassEntry::Loading(symbol)) => return Ok(*symbol),
+            Some(ClassEntry::Failed(_, failure)) => return Err(failure.error.clone()),
+            _ => {}
         }
         if let Some(symbol) = self.session.identified.get(name).copied() {
             if !self.store.symbols.contains(symbol) {
@@ -727,12 +726,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// dependency's context; absent classes and lookup errors have no
     /// resource context.
     pub fn load_class_detailed(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadFailure> {
+        let store_checkpoint = self.store.checkpoint();
+        let session_checkpoint = self.session.checkpoint();
         let result = if self.collect_load_profiles {
             self.profiled_load_class(name, &mut Vec::new())
         } else {
             self.load_class_with_inheritance_ancestry(name, &mut Vec::new())
         };
-        match result {
+        let result = match result {
             Ok(symbol) => Ok(symbol),
             Err(error) => match self.repository.get(name) {
                 Some(ClassEntry::Failed(_, failure)) => Err(failure.clone()),
@@ -742,7 +743,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     format: None,
                 }),
             },
+        };
+        if result.is_err() {
+            self.session.rollback_to(self.store, session_checkpoint);
+            self.store.rollback_to(store_checkpoint);
+            self.repository.discard_rolled_back_symbols(self.store);
         }
+        result
     }
 
     fn compiler_builtin_class(&self, name: &BinaryName) -> Option<SymbolId> {
@@ -858,27 +865,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 if let Some((id, symbol)) = previous_shell {
                     *self.store.symbols.get_mut(id) = symbol;
                 }
-                // `load_uncached` can fail after `enter_class` already
-                // allocated this class's `SymbolId` (e.g. a later
-                // `DependencyFailure` on its superclass) -- that `Symbol`
-                // is left permanently `SymbolInfo::Missing` (`SemanticStore`
-                // has no removal API to actually roll the allocation
-                // back), and is still reachable by anything holding this
-                // `SymbolId` already: a legitimate mutual member-type
-                // reference (`Self::resolve_member_class`'s `Loading`
-                // tolerance) hands out exactly this `SymbolId` while the
-                // load is in progress, with no way to later learn the load
-                // it was borrowed from went on to fail. Marking it
-                // `SymbolInfo::Error` here -- instead of leaving a
-                // `Failed` repository entry as the only place this
-                // failure is recorded -- makes that already-observable
-                // half-built `Symbol` self-describing instead of silently
-                // looking like a real, merely-not-yet-completed one.
-                // Only `None` (no `enter_class` reached yet, e.g. a
-                // `NotFound`/`InvalidClassFile` failure) or `Loading` (set
-                // by `enter_class` at the very start of this name's own
-                // `load_uncached` call, above) are reachable here -- `name`
-                // had no repository entry when `load_class` started.
+                // Internal eager loads mark newly entered symbols as erroneous
+                // until the outer public transaction rolls them back. A shell
+                // published before this operation instead keeps its previous state.
                 let still_loading_symbol = self.repository.get(name).and_then(ClassEntry::symbol);
                 if let Some(symbol) = still_loading_symbol {
                     if !self.session.identified.contains_key(name) {
@@ -1249,7 +1238,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
     /// Walks an already-parsed [`FieldType`] (JVMS §4.3.2) into a semantic
     /// `TypeId`: primitives map to their canonical [`Definitions`]
-    /// identity, `Object` resolves via [`Self::resolve_member_class`] into
+    /// identity, `Object` resolves via [`Self::ensure_dependency_identity`] into
     /// a `Type::TypeRef`, and `Array` becomes a `Type::JavaArray`
     /// recursing into its component type.
     fn lower_field_type(
@@ -1268,7 +1257,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             FieldType::Boolean => Ok(self.definitions.boolean),
             FieldType::Object(class_name) => {
                 let dependency = BinaryName::from_internal(class_name);
-                let symbol = self.resolve_member_class(owner, &dependency)?;
+                let symbol = self.ensure_dependency_identity(owner, &dependency)?;
                 Ok(self.type_ref(symbol))
             }
             FieldType::Array(component) => {
@@ -1554,7 +1543,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         signature: &ClassTypeSignature,
     ) -> Result<TypeId, ClassLoadError> {
         let dependency = class_type_signature_binary_name(signature);
-        let class_symbol = self.resolve_member_class(owner, &dependency)?;
+        let class_symbol = self.ensure_dependency_identity(owner, &dependency)?;
         let tycon = self.type_ref(class_symbol);
 
         let type_arguments = signature
@@ -1792,7 +1781,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             return self.store.types.alloc(Type::Error(ErrorType { message }));
         };
 
-        match self.resolve_member_class(owner, dependency) {
+        match self.ensure_dependency_identity(owner, dependency) {
             Ok(symbol) => self.type_ref(symbol),
             Err(error) => {
                 let text = format!(
@@ -1878,7 +1867,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         // Entered before any recursive resolution below, so a legitimate
         // mutual member-type reference back to `name` (see
-        // `resolve_member_class`) can reuse this same `SymbolId`. A genuine
+        // `ensure_dependency_identity`) can reuse this same `SymbolId`. A genuine
         // supertype cycle is rejected when this name appears on the explicit
         // ancestry threaded through `resolve_dependency`; a dependency cycle
         // that reaches this shell outside that ancestry may reuse it.
@@ -1892,7 +1881,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // and always correct for `Visibility::Package` -- see
         // `resolve_semantic_owner`'s doc comment) to the real enclosing
         // class, for a nested/local/anonymous class. Done this early, via
-        // `resolve_member_class`'s mutual-reference tolerance, so an outer
+        // `ensure_dependency_identity`'s mutual-reference tolerance, so an outer
         // class that is itself still `Loading` (e.g. its own member type
         // references this inner class back) resolves to the in-progress
         // shell instead of recursing.
@@ -2241,6 +2230,30 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         Ok(Some(EnclosingMethodRef { class, method }))
     }
 
+    /// Access modifiers on a nested class's own InnerClasses entry.
+    fn semantic_class_visibility_flags(
+        &self,
+        name: &BinaryName,
+        class_file: &ClassFile<'_>,
+    ) -> Result<Option<ClassAccessFlags>, ClassLoadError> {
+        let entries = class_file
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                Attribute::InnerClasses(entries) => Some(entries),
+                _ => None,
+            });
+        let Some(entries) = entries else {
+            return Ok(None);
+        };
+        for entry in entries {
+            if self.resolve_name(name, class_file, entry.inner_class_info_index)? == *name {
+                return Ok(Some(ClassAccessFlags(entry.inner_class_access_flags)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Resolves `name`'s real semantic owner — the enclosing class, for a
     /// nested/local/anonymous class — distinct from `Visibility::Package`,
     /// which stays the actual package symbol regardless of nesting depth
@@ -2267,40 +2280,24 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// the raw `(name, descriptor)` pair itself is still available via
     /// `ClassfileMetadata::enclosing_method` for anyone who needs it.
     ///
-    /// Resolved through [`Self::resolve_member_class`], not
-    /// [`Self::resolve_dependency`]: an outer class referencing this
-    /// class back (e.g. a member field typed as its own inner class) is a
-    /// legitimate mutual reference, not a supertype cycle.
-    fn semantic_class_visibility_flags(
-        &self,
-        name: &BinaryName,
-        class_file: &ClassFile<'_>,
-    ) -> Result<Option<ClassAccessFlags>, ClassLoadError> {
-        let entries = class_file
-            .attributes
-            .iter()
-            .find_map(|attribute| match attribute {
-                Attribute::InnerClasses(entries) => Some(entries),
-                _ => None,
-            });
-        let Some(entries) = entries else {
-            return Ok(None);
-        };
-        for entry in entries {
-            if self.resolve_name(name, class_file, entry.inner_class_info_index)? == *name {
-                return Ok(Some(ClassAccessFlags(entry.inner_class_access_flags)));
-            }
-        }
-        Ok(None)
-    }
-
+    /// Non-static member classes need the outer declaration/type-parameter
+    /// scope. Those owners are completed eagerly; static/local owners need
+    /// only the canonical identity and remain shells unless already loaded.
     fn resolve_semantic_owner(
         &mut self,
         name: &BinaryName,
         class_file: &ClassFile<'_>,
     ) -> Result<Option<SymbolId>, ClassLoadError> {
+        let needs_outer_scope =
+            self.classfile_captures_enclosing_type_parameters(name, class_file)?;
         self.semantic_owner_name(name, class_file)?
-            .map(|outer| self.resolve_member_class(name, &outer))
+            .map(|outer| {
+                if needs_outer_scope {
+                    self.resolve_owner_class(name, &outer)
+                } else {
+                    self.ensure_dependency_identity(name, &outer)
+                }
+            })
             .transpose()
     }
 
@@ -2443,18 +2440,26 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         })
     }
 
-    /// Resolves a class referenced by a member's declared type (a field
-    /// or method's `Object`/array-of-`Object` descriptor entry),
-    /// tolerant of `owner`'s own load reaching back around to
-    /// `dependency` while `dependency` is still `Loading` — the
-    /// "reusing an in-progress `SymbolId`" technique `docs/classloader.md`
-    /// §5/§9 (Milestone 6) describes: two classes each having a field or
-    /// method typed as the other is completely legitimate Java, unlike
-    /// a supertype cycle, so hitting `Loading` here returns the
-    /// in-progress `SymbolId` directly instead of erroring or re-entering
-    /// [`Self::load_class`]. Every other state (`Loaded`/`Failed`/
-    /// absent) just delegates to `load_class` as normal.
-    fn resolve_member_class(
+    /// Establishes a non-hierarchy type reference without completing its class.
+    /// Missing/malformed resources still fail classfile signature lowering;
+    /// TASTy members and annotations retain their own best-effort fallbacks.
+    fn ensure_dependency_identity(
+        &mut self,
+        owner: &BinaryName,
+        dependency: &BinaryName,
+    ) -> Result<SymbolId, ClassLoadError> {
+        self.ensure_class_identity(dependency)
+            .map_err(|source| ClassLoadError::DependencyFailure {
+                owner: owner.clone(),
+                dependency: dependency.clone(),
+                source: Rc::new(source),
+            })
+    }
+
+    // Non-static nested signatures may refer to an enclosing type parameter.
+    // That requires the owner's declaration scope, not just its identity.
+    // Static/local owners need only identity and use ensure_dependency_identity.
+    fn resolve_owner_class(
         &mut self,
         owner: &BinaryName,
         dependency: &BinaryName,
@@ -2467,12 +2472,20 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             return Ok(symbol);
         }
 
-        self.load_class(dependency)
+        self.load_owner_class(dependency)
             .map_err(|source| ClassLoadError::DependencyFailure {
                 owner: owner.clone(),
                 dependency: dependency.clone(),
                 source: Rc::new(source),
             })
+    }
+
+    fn load_owner_class(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadError> {
+        if self.collect_load_profiles {
+            self.profiled_load_class(name, &mut Vec::new())
+        } else {
+            self.load_class_with_inheritance_ancestry(name, &mut Vec::new())
+        }
     }
 
     /// Walks an already-parsed [`MethodDescriptor`] (JVMS §4.3.3) into a
@@ -2847,7 +2860,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// Resolves one decoded [`Annotation`] into a [`SemanticAnnotation`].
     ///
     /// `annotation_type` is resolved best-effort, the same tolerant way
-    /// [`Self::resolve_member_class`] resolves a member's declared type,
+    /// [`Self::ensure_dependency_identity`] resolves a member's declared type,
     /// but — unlike a field/method's declared type — a failure to load it
     /// does *not* fail the whole class: real-world bytecode routinely
     /// carries annotations (build/processor-only ones especially) whose
@@ -2871,7 +2884,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         let annotation_type = match parsed_type {
             FieldType::Object(class_name) => {
                 let dependency = BinaryName::from_internal(&class_name);
-                match self.resolve_member_class(owner, &dependency) {
+                match self.ensure_dependency_identity(owner, &dependency) {
                     Ok(symbol) => ClassRef::Resolved(symbol),
                     Err(_) => ClassRef::Unresolved(dependency),
                 }
@@ -5599,6 +5612,109 @@ mod tests {
     }
 
     #[test]
+    fn field_type_dependency_completes_only_its_identity() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(HashMap::from([
+                (
+                    BinaryName::from_internal("A"),
+                    synthetic_class_with_object_fields("A", None, &[("value", "B")]),
+                ),
+                (
+                    BinaryName::from_internal("B"),
+                    synthetic_class("B", Some("MissingParent")),
+                ),
+            ])),
+            &mut store,
+        );
+        let a = loader.load_class(&BinaryName::from_internal("A")).unwrap();
+        let ty = member_type_id(loader.store, a, "value");
+        let b = parent_symbol(loader.store, ty);
+        assert_eq!(symbol_name(loader.store, b), "B");
+        assert_eq!(loader.store.symbols.get(b).info, SymbolInfo::Missing);
+        assert_eq!(
+            loader
+                .ensure_class_identity(&BinaryName::from_internal("B"))
+                .unwrap(),
+            b
+        );
+        assert!(loader.metadata(b).is_none());
+        assert!(
+            !loader
+                .session
+                .resolved
+                .contains_key(&BinaryName::from_internal("B"))
+        );
+    }
+
+    #[test]
+    fn failed_member_load_rolls_back_new_shells_and_preserves_existing_identity() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let a_name = BinaryName::from_internal("sample/A");
+        let pre_name = BinaryName::from_internal("sample/Pre");
+        let mut classes = HashMap::from([
+            (
+                a_name.clone(),
+                synthetic_class_with_object_fields(
+                    "sample/A",
+                    None,
+                    &[
+                        ("pre", "sample/Pre"),
+                        ("new", "sample/New"),
+                        ("late", "sample/Late"),
+                    ],
+                ),
+            ),
+            (pre_name.clone(), synthetic_class("sample/Pre", None)),
+            (
+                BinaryName::from_internal("sample/New"),
+                synthetic_class("sample/New", None),
+            ),
+        ]);
+        let mut loader = ClassLoader::with_definitions(
+            InMemoryClassPath(classes.clone()),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let pre = loader.ensure_class_identity(&pre_name).unwrap();
+        let original = loader.store.symbols.get(pre).clone();
+        let checkpoint = loader.store.checkpoint();
+        let error = loader.load_class(&a_name).unwrap_err();
+        assert!(
+            matches!(error.root_cause(), ClassLoadError::NotFound(name) if name.as_internal() == "sample/Late")
+        );
+        assert_eq!(loader.store.checkpoint(), checkpoint);
+        assert_eq!(loader.store.symbols.get(pre), &original);
+        assert_eq!(loader.session.identified.len(), 1);
+        let scope = loader
+            .session
+            .packages
+            .scope_of(original.owner.unwrap())
+            .unwrap();
+        for text in ["A", "New", "Late"] {
+            let name = Name::new(loader.store.names.intern(text), Namespace::Type);
+            assert!(loader.store.scopes.get(scope).lookup_all(&name).is_empty());
+        }
+        let session = loader.into_session();
+        classes.insert(
+            BinaryName::from_internal("sample/Late"),
+            synthetic_class("sample/Late", None),
+        );
+        let mut loader = ClassLoader::with_definitions(
+            InMemoryClassPath(classes),
+            &mut store,
+            definitions,
+            session,
+        );
+        let a = loader.load_class(&a_name).unwrap();
+        let pre_type = member_type_id(loader.store, a, "pre");
+        assert_eq!(parent_symbol(loader.store, pre_type), pre);
+        assert_eq!(loader.store.symbols.get(pre).info, SymbolInfo::Missing);
+    }
+
+    #[test]
     fn identity_requests_do_not_turn_failed_inheritance_into_success() {
         let name = BinaryName::from_internal("sample/A");
         let mut store = SemanticStore::new();
@@ -6972,45 +7088,37 @@ mod tests {
         assert!(contains_depth_error(&error), "unexpected error: {error:?}");
     }
 
-    /// The circular-inheritance branch and the `DependencyFailure` branch
-    /// in `ClassLoader::load_class` are two separate places that mark a
-    /// failed load's already-allocated `Symbol` `SymbolInfo::Error` — this
-    /// checks both sides of the cycle got it, not just the one the outer
-    /// `load_class` call directly sees. `A`'s `Symbol` is marked by the
-    /// `Loading` branch when the recursive `load_class("A")` call (from
-    /// resolving `B`'s superclass) finds `A` already `Loading`; `B`'s is
-    /// then marked by the `DependencyFailure` branch once that error
-    /// propagates back out through `B`'s own still-`Loading` entry.
+    /// Public loads roll back allocations while retaining the cycle's typed error.
     #[test]
-    fn circular_inheritance_marks_both_symbols_as_error() {
-        let mut classes = HashMap::new();
-        classes.insert(
-            BinaryName::from_internal("A"),
-            synthetic_class("A", Some("B")),
-        );
-        classes.insert(
-            BinaryName::from_internal("B"),
-            synthetic_class("B", Some("A")),
-        );
-
+    fn circular_inheritance_rolls_back_both_new_symbols() {
         let mut store = SemanticStore::new();
-        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
-        loader
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(HashMap::from([
+                (
+                    BinaryName::from_internal("A"),
+                    synthetic_class("A", Some("B")),
+                ),
+                (
+                    BinaryName::from_internal("B"),
+                    synthetic_class("B", Some("A")),
+                ),
+            ])),
+            &mut store,
+        );
+        let checkpoint = loader.store.checkpoint();
+        let error = loader
             .load_class(&BinaryName::from_internal("A"))
             .unwrap_err();
-
-        let a_symbol = match loader.repository.get(&BinaryName::from_internal("A")) {
-            Some(ClassEntry::Failed(Some(symbol), _)) => *symbol,
-            other => panic!("expected A to be Failed with a Symbol, got {other:?}"),
-        };
-        let b_symbol = match loader.repository.get(&BinaryName::from_internal("B")) {
-            Some(ClassEntry::Failed(Some(symbol), _)) => *symbol,
-            other => panic!("expected B to be Failed with a Symbol, got {other:?}"),
-        };
-        drop(loader);
-
-        assert_eq!(store.symbols.get(a_symbol).info, SymbolInfo::Error);
-        assert_eq!(store.symbols.get(b_symbol).info, SymbolInfo::Error);
+        assert!(
+            matches!(error.root_cause(), ClassLoadError::CircularInheritance(name) if name.as_internal() == "A")
+        );
+        assert_eq!(loader.store.checkpoint(), checkpoint);
+        for name in ["A", "B"] {
+            assert!(matches!(
+                loader.repository.get(&BinaryName::from_internal(name)),
+                Some(ClassEntry::Failed(None, _))
+            ));
+        }
     }
 
     #[test]
@@ -7067,8 +7175,8 @@ mod tests {
     /// legitimate mutual reference `javac` compiles without complaint
     /// (see `tests/fixtures/ping_pong/generate.sh`), unlike the
     /// synthetic supertype cycle above, which must still hard-error.
-    /// Checking both sides proves the cycle resolves to consistent,
-    /// fully-completed data rather than a permanently-empty shell.
+    /// Each class completes only when explicitly requested, preserving
+    /// the canonical identity already referenced by the other's signature.
     #[test]
     fn resolves_a_legitimate_mutual_field_type_reference_between_two_real_classes() {
         let mut classes = HashMap::new();
@@ -7091,80 +7199,71 @@ mod tests {
         let ping = loader
             .load_class(&BinaryName::from_internal("Ping"))
             .expect("Ping should load despite the mutual field reference");
+        let ping_other_type = member_type_id(loader.store, ping, "other");
+        let pong = parent_symbol(loader.store, ping_other_type);
+        assert_eq!(symbol_name(loader.store, pong), "Pong");
+        assert_eq!(loader.store.symbols.get(pong).info, SymbolInfo::Missing);
+        assert_eq!(
+            loader
+                .load_class(&BinaryName::from_internal("Pong"))
+                .unwrap(),
+            pong
+        );
         drop(loader);
-
-        let ping_other_type = member_type_id(&mut store, ping, "other");
-        let pong = parent_symbol(&store, ping_other_type);
-        assert_eq!(symbol_name(&store, pong), "Pong");
 
         let pong_other_type = member_type_id(&mut store, pong, "other");
         let ping_again = parent_symbol(&store, pong_other_type);
         assert_eq!(symbol_name(&store, ping_again), "Ping");
     }
 
-    /// The other half of `resolve_member_class`'s `Loading`-tolerance
-    /// story: `MutA.other: MutB` and `MutB.other: MutA` mutually resolve
-    /// exactly like `Ping`/`Pong` above, and `MutB`'s load completes in
-    /// full -- but `MutA` also has a *second* field, `broken`, typed a
-    /// class that is not on the classpath at all, resolved strictly
-    /// after `other` (`lower_field_type` walks a class's own `fields` in
-    /// order), so `MutA`'s own load fails only after `MutB` has already
-    /// captured `MutA`'s in-progress `SymbolId` in a real,
-    /// fully-completed `Type::TypeRef`. Before this fix, that `SymbolId`
-    /// stayed `SymbolInfo::Missing` forever once `MutA`'s own load
-    /// failed -- reachable through `MutB` (which really did load, and
-    /// whose `Type::TypeRef` really does still point at it) looking
-    /// exactly like a legitimate, merely-not-yet-completed symbol
-    /// instead of a permanently abandoned one.
+    /// A failed root cannot publish a mutual member reference through a dependency.
     #[test]
-    fn a_dependency_failure_marks_a_symbol_shared_via_mutual_reference_as_error() {
-        let mut classes = HashMap::new();
-        classes.insert(
-            BinaryName::from_internal("MutA"),
-            synthetic_class_with_object_fields(
-                "MutA",
-                Some("java/lang/Object"),
-                &[("other", "MutB"), ("broken", "DoesNotExist")],
+    fn late_failure_does_not_publish_mutual_member_type_dependencies() {
+        let classes = HashMap::from([
+            (
+                BinaryName::from_internal("MutA"),
+                synthetic_class_with_object_fields(
+                    "MutA",
+                    None,
+                    &[("other", "MutB"), ("broken", "DoesNotExist")],
+                ),
             ),
-        );
-        classes.insert(
-            BinaryName::from_internal("MutB"),
-            synthetic_class_with_object_fields(
-                "MutB",
-                Some("java/lang/Object"),
-                &[("other", "MutA")],
+            (
+                BinaryName::from_internal("MutB"),
+                synthetic_class_with_object_fields("MutB", None, &[("other", "MutA")]),
             ),
-        );
-        classes.insert(
-            BinaryName::from_internal("java/lang/Object"),
-            synthetic_class("java/lang/Object", None),
-        );
-
+        ]);
         let mut store = SemanticStore::new();
-        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
-
-        let mut_a_error = loader
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut loader = ClassLoader::with_definitions(
+            InMemoryClassPath(classes.clone()),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let checkpoint = loader.store.checkpoint();
+        let error = loader
             .load_class(&BinaryName::from_internal("MutA"))
-            .expect_err("MutA's own load should fail on its second, unresolvable field");
-        assert!(matches!(
-            mut_a_error,
-            ClassLoadError::DependencyFailure { dependency, .. }
-                if dependency.as_internal() == "DoesNotExist"
-        ));
-
-        // MutB's own load already fully succeeded as a side effect of
-        // loading MutA, so this is a cache hit, not a fresh load -- the
-        // only way to reach MutB's already-completed "other" field
-        // through public API alone.
-        let mut_b = loader
+            .unwrap_err();
+        assert!(
+            matches!(error.root_cause(), ClassLoadError::NotFound(name) if name.as_internal() == "DoesNotExist")
+        );
+        assert_eq!(loader.store.checkpoint(), checkpoint);
+        assert!(loader.session.identified.is_empty());
+        let session = loader.into_session();
+        let mut loader = ClassLoader::with_definitions(
+            InMemoryClassPath(classes),
+            &mut store,
+            definitions,
+            session,
+        );
+        let b = loader
             .load_class(&BinaryName::from_internal("MutB"))
-            .expect("MutB should have already loaded successfully");
-        drop(loader);
-
-        let mut_b_other_type = member_type_id(&mut store, mut_b, "other");
-        let mut_a = parent_symbol(&store, mut_b_other_type);
-        assert_eq!(symbol_name(&store, mut_a), "MutA");
-        assert_eq!(store.symbols.get(mut_a).info, SymbolInfo::Error);
+            .unwrap();
+        let other = member_type_id(loader.store, b, "other");
+        let a = parent_symbol(loader.store, other);
+        assert_eq!(symbol_name(loader.store, a), "MutA");
+        assert_eq!(loader.store.symbols.get(a).info, SymbolInfo::Missing);
     }
 
     /// `lower_field_type`'s `FieldType::Array` branch recurses into its

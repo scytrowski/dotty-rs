@@ -862,12 +862,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(static_class, again);
-        assert!(
-            resolver
-                .session
-                .resolved
-                .contains_key(&BinaryName::from_internal("enclosing_generics/Outer"))
-        );
+        let outer_name = BinaryName::from_internal("enclosing_generics/Outer");
+        let outer = resolver.session.identified[&outer_name];
+        assert_eq!(store.symbols.get(outer).info, SymbolInfo::Missing);
+        assert!(!resolver.session.resolved.contains_key(&outer_name));
     }
 
     #[test]
