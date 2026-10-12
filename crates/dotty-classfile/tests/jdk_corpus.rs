@@ -3,6 +3,8 @@
 //! membership; each version directory records its provenance, expected
 //! class-file major, and inventory in `manifest.toml`.
 
+mod common;
+
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPool, ConstantPoolEntry, ConstantPoolIndex};
@@ -197,6 +199,36 @@ fn class_name(pool: &ConstantPool, index: ConstantPoolIndex) -> &str {
     }
 }
 
+fn collect_raw_attributes<'a>(
+    attributes: &'a [Attribute<'a>],
+    raw_attributes: &mut Vec<(ConstantPoolIndex, Vec<u8>)>,
+) {
+    for attribute in attributes {
+        match attribute {
+            Attribute::Other(raw) => raw_attributes.push((raw.name_index, raw.bytes.to_vec())),
+            Attribute::Code(code) => collect_raw_attributes(&code.attributes, raw_attributes),
+            Attribute::Record(components) => {
+                for component in components {
+                    collect_raw_attributes(&component.attributes, raw_attributes);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn raw_attributes(class_file: &ClassFile<'_>) -> Vec<(ConstantPoolIndex, Vec<u8>)> {
+    let mut attributes = Vec::new();
+    collect_raw_attributes(&class_file.attributes, &mut attributes);
+    for field in &class_file.fields {
+        collect_raw_attributes(&field.attributes, &mut attributes);
+    }
+    for method in &class_file.methods {
+        collect_raw_attributes(&method.attributes, &mut attributes);
+    }
+    attributes
+}
+
 #[test]
 fn corpus_inventory_matches_each_manifest() {
     for corpus in corpora() {
@@ -286,6 +318,93 @@ fn every_corpus_class_decodes_completely_validates_and_matches_its_jdk() {
             );
         }
     }
+}
+
+#[test]
+fn every_pinned_jdk_class_round_trips_structurally_and_deterministically() {
+    for corpus in corpora() {
+        for name in &corpus.classes {
+            let source_bytes = read_corpus_class(&corpus, name);
+            let original = decode(&corpus, name, &source_bytes);
+            assert_eq!(
+                original.validate_references(),
+                Ok(()),
+                "{}/{} failed initial reference validation",
+                corpus.id,
+                name
+            );
+
+            let encoded = original
+                .encode()
+                .unwrap_or_else(|error| panic!("{}/{} failed to encode: {error}", corpus.id, name));
+            assert_eq!(
+                original.encode().unwrap_or_else(|error| panic!(
+                    "{}/{} failed repeated encode: {error}",
+                    corpus.id, name
+                )),
+                encoded,
+                "{}/{} repeated encoding of the same model is deterministic",
+                corpus.id,
+                name
+            );
+            let decoded = decode(&corpus, name, &encoded);
+            assert_eq!(
+                decoded.validate_references(),
+                Ok(()),
+                "{}/{} failed post-encode reference validation",
+                corpus.id,
+                name
+            );
+            common::assert_class_files_structurally_equivalent(&original, &decoded);
+
+            let repeated_encoding = decoded.encode().unwrap_or_else(|error| {
+                panic!("{}/{} failed second encode: {error}", corpus.id, name)
+            });
+            assert_eq!(
+                repeated_encoding, encoded,
+                "{}/{} encoding is not deterministic",
+                corpus.id, name
+            );
+        }
+    }
+}
+
+#[test]
+fn raw_unknown_nested_attributes_keep_their_indices_and_payloads() {
+    let mut saw_stack_map_table = false;
+    let mut saw_line_number_table = false;
+
+    for corpus in corpora() {
+        for name in &corpus.classes {
+            let source_bytes = read_corpus_class(&corpus, name);
+            let original = decode(&corpus, name, &source_bytes);
+            let original_raw = raw_attributes(&original);
+            for (index, _) in &original_raw {
+                let attribute_name = utf8_name(&original.constant_pool, *index);
+                saw_stack_map_table |= attribute_name == "StackMapTable";
+                saw_line_number_table |= attribute_name == "LineNumberTable";
+            }
+
+            let encoded = original.encode().expect("valid corpus class encodes");
+            let decoded = decode(&corpus, name, &encoded);
+            assert_eq!(
+                raw_attributes(&decoded),
+                original_raw,
+                "{}/{} raw attribute name indices and payloads",
+                corpus.id,
+                name
+            );
+        }
+    }
+
+    assert!(
+        saw_stack_map_table,
+        "corpus includes raw StackMapTable data"
+    );
+    assert!(
+        saw_line_number_table,
+        "corpus includes raw LineNumberTable data"
+    );
 }
 
 #[test]

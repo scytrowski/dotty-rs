@@ -4,6 +4,8 @@
 //! `tests/fixtures/`; indices below come from `javap -v` on the exact
 //! checked-in bytes.
 
+mod common;
+
 use dotty_classfile::attribute::{Attribute, DeprecationInfo, find_deprecated_annotation};
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPool, ConstantPoolEntry, ConstantPoolIndex};
@@ -21,10 +23,13 @@ const NESTED_SAMPLE_LOCAL_RUNNABLE: &[u8] =
     include_bytes!("fixtures/nested_sample/NestedSample$1LocalRunnable.class");
 const SHAPE: &[u8] = include_bytes!("fixtures/sealed_record_sample/Shape.class");
 const SHAPE_CIRCLE: &[u8] = include_bytes!("fixtures/sealed_record_sample/Shape$Circle.class");
+const SHAPE_SQUARE: &[u8] = include_bytes!("fixtures/sealed_record_sample/Shape$Square.class");
 
 fn decode(bytes: &[u8]) -> ClassFile<'_> {
     let mut reader = Reader::new(bytes);
-    ClassFile::decode(&mut reader).unwrap()
+    let class_file = ClassFile::decode(&mut reader).unwrap();
+    assert!(reader.is_at_end(), "fixture decode consumed all bytes");
+    class_file
 }
 
 fn utf8_name(pool: &ConstantPool, index: ConstantPoolIndex) -> &str {
@@ -295,7 +300,7 @@ fn validates_references_across_every_real_fixture() {
 }
 
 #[test]
-fn class_file_encode_round_trips_real_fixtures_structurally() {
+fn class_file_encode_round_trips_every_checked_in_non_corpus_fixture() {
     for bytes in [
         POOL_SAMPLE,
         NESTED_SAMPLE,
@@ -303,11 +308,24 @@ fn class_file_encode_round_trips_real_fixtures_structurally() {
         NESTED_SAMPLE_LOCAL_RUNNABLE,
         SHAPE,
         SHAPE_CIRCLE,
+        SHAPE_SQUARE,
     ] {
         let original = decode(bytes);
+        assert_eq!(original.validate_references(), Ok(()));
         let encoded = original.encode().unwrap();
+        assert_eq!(
+            original.encode().unwrap(),
+            encoded,
+            "encoding is deterministic"
+        );
         let decoded = decode(&encoded);
-        assert_eq!(decoded, original);
+        assert_eq!(decoded.validate_references(), Ok(()));
+        common::assert_class_files_structurally_equivalent(&original, &decoded);
+        assert_eq!(
+            decoded.encode().unwrap(),
+            encoded,
+            "re-encoding is deterministic"
+        );
     }
 }
 
