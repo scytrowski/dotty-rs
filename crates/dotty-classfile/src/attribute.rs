@@ -3,7 +3,7 @@ use crate::constant_pool::{
 };
 use crate::encode_error::EncodeError;
 use crate::reader::{ReadError, Reader};
-use crate::writer::{Writer, checked_u8_len};
+use crate::writer::{Writer, checked_u8_len, checked_u16_len, checked_u32_len};
 use std::fmt;
 
 /// The lossless, borrowed byte-level view of any `attribute_info` (JVMS
@@ -579,15 +579,88 @@ fn write_index_list(writer: &mut Writer, indices: &[ConstantPoolIndex]) -> Resul
     Ok(())
 }
 
-fn write_attribute_header(
-    writer: &mut Writer,
+fn encode_attribute_info(
     name_index: ConstantPoolIndex,
     payload_length: usize,
-) -> Result<(), EncodeError> {
-    let payload_length = crate::writer::checked_u32_len(payload_length)?;
+    write_payload: impl FnOnce(&mut Writer) -> Result<(), EncodeError>,
+) -> Result<Vec<u8>, EncodeError> {
+    let payload_length = checked_u32_len(payload_length)?;
+    let mut writer = Writer::new();
     writer.write_u2(name_index.0);
     writer.write_u4(payload_length);
-    Ok(())
+    write_payload(&mut writer)?;
+    Ok(writer.into_bytes())
+}
+
+fn add_payload_length(length: usize, additional: usize) -> Result<usize, EncodeError> {
+    length
+        .checked_add(additional)
+        .ok_or(EncodeError::CountOverflow {
+            value: usize::MAX,
+            width: crate::encode_error::LengthWidth::U32,
+        })
+}
+
+fn repeated_payload_length(count: usize, element_width: usize) -> Result<usize, EncodeError> {
+    count
+        .checked_mul(element_width)
+        .ok_or(EncodeError::CountOverflow {
+            value: usize::MAX,
+            width: crate::encode_error::LengthWidth::U32,
+        })
+}
+
+fn bootstrap_methods_payload_length(
+    method_count: usize,
+    argument_counts: impl IntoIterator<Item = usize>,
+) -> Result<usize, EncodeError> {
+    checked_u16_len(method_count)?;
+    let mut length = 2;
+    for argument_count in argument_counts {
+        checked_u16_len(argument_count)?;
+        let entry_length = add_payload_length(4, repeated_payload_length(argument_count, 2)?)?;
+        length = add_payload_length(length, entry_length)?;
+    }
+    checked_u32_len(length)?;
+    Ok(length)
+}
+
+fn encoded_payload_length(attribute: &Attribute<'_>) -> Result<usize, EncodeError> {
+    let length = match attribute {
+        Attribute::ConstantValue(_)
+        | Attribute::Signature(_)
+        | Attribute::SourceFile(_)
+        | Attribute::NestHost(_) => 2,
+        Attribute::Deprecated | Attribute::Synthetic => 0,
+        Attribute::Exceptions(indices)
+        | Attribute::NestMembers(indices)
+        | Attribute::PermittedSubclasses(indices) => {
+            checked_u16_len(indices.len())?;
+            add_payload_length(2, repeated_payload_length(indices.len(), 2)?)?
+        }
+        Attribute::InnerClasses(entries) => {
+            checked_u16_len(entries.len())?;
+            add_payload_length(2, repeated_payload_length(entries.len(), 8)?)?
+        }
+        Attribute::EnclosingMethod { .. } => 4,
+        Attribute::BootstrapMethods(methods) => bootstrap_methods_payload_length(
+            methods.len(),
+            methods.iter().map(|method| method.arguments.len()),
+        )?,
+        Attribute::MethodParameters(parameters) => {
+            checked_u8_len(parameters.len())?;
+            add_payload_length(1, repeated_payload_length(parameters.len(), 4)?)?
+        }
+        Attribute::Other(raw) => raw.bytes.len(),
+        Attribute::Record(_)
+        | Attribute::Code(_)
+        | Attribute::RuntimeVisibleAnnotations(_)
+        | Attribute::RuntimeInvisibleAnnotations(_) => {
+            return Err(EncodeError::UnsupportedAttribute);
+        }
+    };
+    checked_u32_len(length)?;
+    Ok(length)
 }
 
 /// Encodes a `u2` count followed by that many `attribute_info` structures.
@@ -698,62 +771,59 @@ impl<'a> Attribute<'a> {
             return Err(EncodeError::UnsupportedAttribute);
         };
 
-        let mut payload = Writer::new();
-        match self {
-            Attribute::ConstantValue(index)
-            | Attribute::Signature(index)
-            | Attribute::SourceFile(index)
-            | Attribute::NestHost(index) => payload.write_u2(index.0),
-            Attribute::Deprecated | Attribute::Synthetic => {}
-            Attribute::Exceptions(indices)
-            | Attribute::NestMembers(indices)
-            | Attribute::PermittedSubclasses(indices) => {
-                write_index_list(&mut payload, indices)?;
-            }
-            Attribute::InnerClasses(entries) => {
-                payload.write_u2_length(entries.len())?;
-                for entry in entries {
-                    payload.write_u2(entry.inner_class_info_index.0);
-                    payload.write_u2(entry.outer_class_info_index.map_or(0, |index| index.0));
-                    payload.write_u2(entry.inner_name_index.map_or(0, |index| index.0));
-                    payload.write_u2(entry.inner_class_access_flags);
+        let payload_length = encoded_payload_length(self)?;
+        encode_attribute_info(name_index, payload_length, |writer| {
+            match self {
+                Attribute::ConstantValue(index)
+                | Attribute::Signature(index)
+                | Attribute::SourceFile(index)
+                | Attribute::NestHost(index) => writer.write_u2(index.0),
+                Attribute::Deprecated | Attribute::Synthetic => {}
+                Attribute::Exceptions(indices)
+                | Attribute::NestMembers(indices)
+                | Attribute::PermittedSubclasses(indices) => {
+                    write_index_list(writer, indices)?;
+                }
+                Attribute::InnerClasses(entries) => {
+                    writer.write_u2_length(entries.len())?;
+                    for entry in entries {
+                        writer.write_u2(entry.inner_class_info_index.0);
+                        writer.write_u2(entry.outer_class_info_index.map_or(0, |index| index.0));
+                        writer.write_u2(entry.inner_name_index.map_or(0, |index| index.0));
+                        writer.write_u2(entry.inner_class_access_flags);
+                    }
+                }
+                Attribute::EnclosingMethod {
+                    class_index,
+                    method_index,
+                } => {
+                    writer.write_u2(class_index.0);
+                    writer.write_u2(method_index.map_or(0, |index| index.0));
+                }
+                Attribute::BootstrapMethods(methods) => {
+                    writer.write_u2_length(methods.len())?;
+                    for method in methods {
+                        writer.write_u2(method.method_ref.0);
+                        write_index_list(writer, &method.arguments)?;
+                    }
+                }
+                Attribute::MethodParameters(parameters) => {
+                    writer.write_u1(checked_u8_len(parameters.len())?);
+                    for parameter in parameters {
+                        writer.write_u2(parameter.name_index.map_or(0, |index| index.0));
+                        writer.write_u2(parameter.access_flags);
+                    }
+                }
+                Attribute::Other(raw) => writer.write_bytes(raw.bytes),
+                Attribute::Record(_)
+                | Attribute::Code(_)
+                | Attribute::RuntimeVisibleAnnotations(_)
+                | Attribute::RuntimeInvisibleAnnotations(_) => {
+                    return Err(EncodeError::UnsupportedAttribute);
                 }
             }
-            Attribute::EnclosingMethod {
-                class_index,
-                method_index,
-            } => {
-                payload.write_u2(class_index.0);
-                payload.write_u2(method_index.map_or(0, |index| index.0));
-            }
-            Attribute::BootstrapMethods(methods) => {
-                payload.write_u2_length(methods.len())?;
-                for method in methods {
-                    payload.write_u2(method.method_ref.0);
-                    write_index_list(&mut payload, &method.arguments)?;
-                }
-            }
-            Attribute::MethodParameters(parameters) => {
-                payload.write_u1(checked_u8_len(parameters.len())?);
-                for parameter in parameters {
-                    payload.write_u2(parameter.name_index.map_or(0, |index| index.0));
-                    payload.write_u2(parameter.access_flags);
-                }
-            }
-            Attribute::Other(raw) => payload.write_bytes(raw.bytes),
-            Attribute::Record(_)
-            | Attribute::Code(_)
-            | Attribute::RuntimeVisibleAnnotations(_)
-            | Attribute::RuntimeInvisibleAnnotations(_) => {
-                return Err(EncodeError::UnsupportedAttribute);
-            }
-        }
-
-        let payload = payload.into_bytes();
-        let mut writer = Writer::new();
-        write_attribute_header(&mut writer, name_index, payload.len())?;
-        writer.write_bytes(&payload);
-        Ok(writer.into_bytes())
+            Ok(())
+        })
     }
 
     /// Decodes one `attribute_info` (JVMS §4.7.1), resolving its name
@@ -993,19 +1063,23 @@ mod tests {
         );
     }
 
+    #[cfg(target_pointer_width = "64")]
     #[test]
-    fn encode_rejects_an_attribute_payload_length_that_exceeds_u4() {
-        if let Some(too_long) = (u32::MAX as usize).checked_add(1) {
-            let mut writer = Writer::new();
-            assert_eq!(
-                write_attribute_header(&mut writer, ConstantPoolIndex(1), too_long),
-                Err(EncodeError::CountOverflow {
-                    value: too_long,
-                    width: crate::encode_error::LengthWidth::U32,
-                })
-            );
-            assert!(writer.is_empty());
-        }
+    fn bootstrap_methods_preflight_aggregate_payload_length_without_allocating() {
+        let method_count = 32_768;
+        let argument_count = usize::from(u16::MAX);
+        let expected_length = 2 + method_count * (4 + argument_count * 2);
+
+        assert_eq!(
+            bootstrap_methods_payload_length(
+                method_count,
+                std::iter::repeat_n(argument_count, method_count),
+            ),
+            Err(EncodeError::CountOverflow {
+                value: expected_length,
+                width: crate::encode_error::LengthWidth::U32,
+            })
+        );
     }
 
     #[test]
