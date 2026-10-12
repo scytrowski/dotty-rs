@@ -64,6 +64,13 @@ pub struct CodeAnalysis {
 pub enum AnalysisError {
     /// The method descriptor is malformed.
     InvalidMethodDescriptor(DescriptorError),
+    /// A method descriptor exceeds the JVM's 255 parameter-slot limit.
+    TooManyMethodParameterSlots {
+        /// Instruction that invokes the method, or `None` for the analyzed method.
+        instruction: Option<usize>,
+        /// Parameter slots, including the receiver for instance methods.
+        slots: usize,
+    },
     /// The constant pool has an invalid layout or nested reference.
     InvalidConstantPool(EncodeError),
     /// An instruction needs more stack values than are currently available.
@@ -196,6 +203,15 @@ impl fmt::Display for AnalysisError {
         match self {
             Self::InvalidMethodDescriptor(error) => {
                 write!(formatter, "invalid method descriptor: {error}")
+            }
+            Self::TooManyMethodParameterSlots { instruction, slots } => {
+                if let Some(instruction) = instruction {
+                    write!(formatter, "instruction {instruction} ")?;
+                }
+                write!(
+                    formatter,
+                    "method descriptor uses {slots} parameter slots, exceeding the JVM limit of 255"
+                )
             }
             Self::InvalidConstantPool(error) => write!(formatter, "invalid constant pool: {error}"),
             Self::StackUnderflow {
@@ -359,6 +375,7 @@ impl LinearCodeAnalyzer {
             .map_err(AnalysisError::InvalidConstantPool)?;
         let descriptor = MethodDescriptor::parse(method_descriptor)
             .map_err(AnalysisError::InvalidMethodDescriptor)?;
+        check_parameter_slots(&descriptor, !is_static, None)?;
         let mut frame = Frame::new(&descriptor, is_static)?;
         let mut returned = false;
 
@@ -401,6 +418,7 @@ enum LocalSlot {
 
 struct Frame {
     stack: Vec<ValueKind>,
+    stack_slots: usize,
     locals: Vec<Option<LocalSlot>>,
     max_stack: usize,
 }
@@ -432,6 +450,7 @@ impl Frame {
         }
         Ok(Self {
             stack: Vec::new(),
+            stack_slots: 0,
             locals,
             max_stack: 0,
         })
@@ -557,7 +576,7 @@ impl Frame {
     }
 
     fn push(&mut self, instruction: usize, value: ValueKind) -> Result<(), AnalysisError> {
-        let slots = self.stack_slots().checked_add(value.slots()).ok_or(
+        let slots = self.stack_slots.checked_add(value.slots()).ok_or(
             AnalysisError::StackLimitExceeded {
                 instruction,
                 slots: usize::MAX,
@@ -567,6 +586,7 @@ impl Frame {
             return Err(AnalysisError::StackLimitExceeded { instruction, slots });
         }
         self.stack.push(value);
+        self.stack_slots = slots;
         self.max_stack = self.max_stack.max(slots);
         Ok(())
     }
@@ -582,6 +602,7 @@ impl Frame {
             needed: 1,
             available,
         })?;
+        self.stack_slots -= actual.slots();
         if actual != expected {
             return Err(AnalysisError::StackTypeMismatch {
                 instruction,
@@ -592,12 +613,8 @@ impl Frame {
         Ok(actual)
     }
 
-    fn stack_slots(&self) -> usize {
-        self.stack.iter().map(|value| value.slots()).sum()
-    }
-
     fn ensure_empty_stack(&self, instruction: usize) -> Result<(), AnalysisError> {
-        let slots = self.stack_slots();
+        let slots = self.stack_slots;
         if slots == 0 {
             Ok(())
         } else {
@@ -905,6 +922,7 @@ impl Frame {
         descriptor: &MethodDescriptor,
         has_receiver: bool,
     ) -> Result<(), AnalysisError> {
+        check_parameter_slots(descriptor, has_receiver, Some(instruction))?;
         for parameter in descriptor.parameters.iter().rev() {
             self.pop_expected(instruction, value_kind(parameter))?;
         }
@@ -958,6 +976,24 @@ impl Frame {
                 actual,
             })
         }
+    }
+}
+
+fn check_parameter_slots(
+    descriptor: &MethodDescriptor,
+    has_receiver: bool,
+    instruction: Option<usize>,
+) -> Result<(), AnalysisError> {
+    let slots = descriptor
+        .parameters
+        .iter()
+        .map(|parameter| value_kind(parameter).slots())
+        .sum::<usize>()
+        + usize::from(has_receiver);
+    if slots > 255 {
+        Err(AnalysisError::TooManyMethodParameterSlots { instruction, slots })
+    } else {
+        Ok(())
     }
 }
 
@@ -1030,6 +1066,98 @@ mod tests {
 
     fn operand(index: ConstantPoolIndex) -> ConstantPoolIndexOperand {
         ConstantPoolIndexOperand::try_from(index).unwrap()
+    }
+
+    fn method_descriptor(parameters: &str) -> String {
+        format!("({parameters})V")
+    }
+
+    #[test]
+    fn enforces_the_jvm_method_parameter_slot_limit() {
+        let pool = ConstantPool::default();
+        let void_return = [Instruction::Return];
+
+        let static_boundary = method_descriptor(&format!("{}I", "J".repeat(127)));
+        assert!(analyze(&static_boundary, true, &void_return, &pool).is_ok());
+
+        let instance_boundary = method_descriptor(&"J".repeat(127));
+        assert!(analyze(&instance_boundary, false, &void_return, &pool).is_ok());
+
+        let static_overflow = method_descriptor(&"I".repeat(256));
+        assert_eq!(
+            analyze(&static_overflow, true, &void_return, &pool),
+            Err(AnalysisError::TooManyMethodParameterSlots {
+                instruction: None,
+                slots: 256,
+            })
+        );
+
+        let receiver_overflow = method_descriptor(&"I".repeat(255));
+        assert_eq!(
+            analyze(&receiver_overflow, false, &void_return, &pool),
+            Err(AnalysisError::TooManyMethodParameterSlots {
+                instruction: None,
+                slots: 256,
+            })
+        );
+
+        let category_two_overflow = method_descriptor(&"J".repeat(128));
+        assert_eq!(
+            analyze(&category_two_overflow, true, &void_return, &pool),
+            Err(AnalysisError::TooManyMethodParameterSlots {
+                instruction: None,
+                slots: 256,
+            })
+        );
+    }
+
+    #[test]
+    fn enforces_parameter_slot_limit_on_invoked_methods() {
+        let mut builder = ConstantPoolBuilder::new();
+        let static_method = builder
+            .method_ref("example/C", "wide", &method_descriptor(&"I".repeat(256)))
+            .unwrap();
+        let instance_method = builder
+            .method_ref(
+                "example/C",
+                "wideInstance",
+                &method_descriptor(&"I".repeat(255)),
+            )
+            .unwrap();
+        let pool = builder.finish().unwrap();
+
+        assert_eq!(
+            analyze(
+                "()V",
+                true,
+                &[
+                    Instruction::InvokeStatic(StaticMethodReference::new(operand(static_method))),
+                    Instruction::Return,
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::TooManyMethodParameterSlots {
+                instruction: Some(0),
+                slots: 256,
+            })
+        );
+        assert_eq!(
+            analyze(
+                "()V",
+                true,
+                &[
+                    Instruction::InvokeVirtual(VirtualMethodReference::new(operand(
+                        instance_method
+                    ))),
+                    Instruction::Return,
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::TooManyMethodParameterSlots {
+                instruction: Some(0),
+                slots: 256,
+            })
+        );
     }
 
     #[test]
@@ -1338,6 +1466,45 @@ mod tests {
                 actual: ValueKind::Long,
             })
         );
+    }
+
+    #[test]
+    fn tracks_stack_slots_for_mixed_category_values() {
+        let pool = ConstantPool::default();
+        let analysis = analyze(
+            "()J",
+            true,
+            &[
+                Instruction::LConst(SmallLongConstant::Zero),
+                Instruction::IConst(SmallIntConstant::One),
+                Instruction::IStore(LocalIndex::new(0)),
+                Instruction::LReturn,
+            ],
+            &pool,
+        )
+        .unwrap();
+        assert_eq!(analysis.max_stack, 3);
+        assert_eq!(analysis.max_locals, 1);
+    }
+
+    #[test]
+    fn analyzes_a_near_maximum_length_code_sequence_with_a_deep_stack() {
+        let values = 32_767;
+        let mut instructions = Vec::with_capacity(values * 2);
+        instructions.extend((0..values).map(|index| {
+            if index % 2 == 0 {
+                Instruction::IConst(SmallIntConstant::Zero)
+            } else {
+                Instruction::IConst(SmallIntConstant::One)
+            }
+        }));
+        instructions.extend((1..values).map(|_| Instruction::IAdd));
+        instructions.push(Instruction::IReturn);
+
+        assert_eq!(instructions.len(), 65_534);
+        let analysis = analyze("()I", true, &instructions, &ConstantPool::default()).unwrap();
+        assert_eq!(analysis.max_stack, values as u16);
+        assert_eq!(analysis.max_locals, 0);
     }
 
     #[test]
