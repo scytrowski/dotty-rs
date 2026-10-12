@@ -4,7 +4,11 @@ from compare_deferred_audit import cohort_records, gate, matching_methods, reque
 
 
 def report(depth=3, fanout=8, name='B'):
-    return f'''dependency_load_profile:
+    return f'''resolver_metrics:
+  external_class_symbol_successes=358
+audit_v1_comparison:
+  local_methods=3297
+dependency_load_profile:
   p95_dependency_depth={depth}
   max_distinct_fully_completed_classes_per_request={fanout}
 resolver_581_comparison:
@@ -22,6 +26,12 @@ class DeferredAuditComparisonTests(unittest.TestCase):
         for text in (report(depth=71), report(fanout=525)):
             with self.assertRaisesRegex(ValueError, 'reduction'):
                 gate(report(), text)
+
+    def test_success_counts_and_denominator_cannot_regress_silently(self):
+        with self.assertRaisesRegex(ValueError, 'count regressed'):
+            gate(report(), report().replace('successes=358', 'successes=357'))
+        with self.assertRaisesRegex(ValueError, 'denominator'):
+            gate(report(), report().replace('local_methods=3297', 'local_methods=3296'))
 
     def test_boundary_reduction_is_accepted(self):
         self.assertEqual(gate(report(), report(depth=70, fanout=524)), (70, 524))

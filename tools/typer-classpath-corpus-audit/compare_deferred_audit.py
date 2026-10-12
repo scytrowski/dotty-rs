@@ -71,6 +71,12 @@ def gate(baseline, current):
     fanout = scalar(current, 'dependency_load_profile', 'max_distinct_fully_completed_classes_per_request')
     if depth > 70 or fanout > 524:
         raise ValueError(f'dependency reduction gate failed: p95={depth}, fanout={fanout}')
+    before = scalar(baseline, 'resolver_metrics', 'external_class_symbol_successes')
+    after = scalar(current, 'resolver_metrics', 'external_class_symbol_successes')
+    if after < before:
+        raise ValueError(f'class-success count regressed: {after} < {before}; request movement needs explicit review')
+    if scalar(current, 'audit_v1_comparison', 'local_methods') != 3297:
+        raise ValueError('typed-method denominator changed')
     return depth, fanout
 
 
