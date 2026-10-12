@@ -2,8 +2,9 @@
 //! supported by this crate.
 //!
 //! This module describes instructions; [`assembler::assemble`] encodes the
-//! supported subset, but this module does not decode, verify, or optimize
-//! bytecode. A method is represented as one ordered basic block with
+//! supported subset and [`analysis::analyze`] computes straight-line
+//! `max_stack`/`max_locals` bounds. Neither API decodes bytecode or performs
+//! general JVM verification or optimization. A method is represented as one ordered basic block with
 //! no branch targets or exception-control-flow edges. Constant-pool operands
 //! below contain already assigned [`ConstantPoolIndex`] values. Resolve and
 //! intern symbolic names before constructing instructions; the assembler
@@ -57,8 +58,10 @@
 //!
 //! [`ConstantPoolIndex`]: crate::constant_pool::ConstantPoolIndex
 
+pub mod analysis;
 pub mod assembler;
 
+pub use analysis::{AnalysisError, CodeAnalysis, LinearCodeAnalyzer, ValueKind, analyze};
 pub use assembler::{AssembleError, ConstantPoolOperandKind, assemble};
 
 use crate::constant_pool::ConstantPoolIndex;
