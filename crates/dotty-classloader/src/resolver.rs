@@ -3,7 +3,7 @@
 use crate::binary_name::BinaryName;
 use crate::class_path::{ClassPathEntry, safe_package_segments};
 use crate::error::ClassLoadError;
-use crate::loader::ClassLoader;
+use crate::loader::{ClassLoadProfile, ClassLoader};
 use crate::session::{LoadingSession, SessionCheckpoint};
 use dotty_core::{
     Definitions, MemberRequest, MemberSelector, MemberSpace, ResolutionError, ResolverCheckpoint,
@@ -28,6 +28,8 @@ pub struct ClasspathSymbolResolver<E: ClassPathEntry> {
     definitions: Definitions,
     session: LoadingSession,
     undo: Vec<ResolverUndo>,
+    load_profiles: Vec<ClassLoadProfile>,
+    collect_load_profiles: bool,
 }
 
 impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
@@ -37,12 +39,28 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             definitions,
             session,
             undo: Vec::new(),
+            load_profiles: Vec::new(),
+            collect_load_profiles: false,
         }
+    }
+
+    /// Enables per-request class dependency observations for corpus audits
+    /// and diagnostics. Disabled by default to avoid collecting session data
+    /// in ordinary compiler use.
+    pub fn with_load_profile_collection(mut self) -> Self {
+        self.collect_load_profiles = true;
+        self
     }
 
     /// Hands the shared positive class/package cache to another resolver.
     pub fn into_session(self) -> LoadingSession {
         self.session
+    }
+
+    /// Returns and clears class dependency profiles collected by resolver
+    /// requests since the previous call.
+    pub fn take_load_profiles(&mut self) -> Vec<ClassLoadProfile> {
+        std::mem::take(&mut self.load_profiles)
     }
 
     fn transact<T>(
@@ -101,7 +119,9 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let session = std::mem::replace(&mut self.session, LoadingSession::new());
         let mut loader =
             ClassLoader::with_definitions(class_path, store, self.definitions, session);
+        loader.set_load_profile_collection(self.collect_load_profiles);
         let result = loader.load_class(name);
+        self.load_profiles.extend(loader.take_load_profiles());
         let (class_path, session) = loader.into_parts();
         self.class_path = Some(class_path);
         self.session = session;
@@ -858,7 +878,8 @@ mod tests {
             EnclosingGenericRetryClassPath(Mutex::new(false)),
             definitions,
             LoadingSession::new(),
-        );
+        )
+        .with_load_profile_collection();
         let package = resolver
             .resolve_package(&mut store, &["enclosing_generics"])
             .unwrap()
@@ -880,12 +901,31 @@ mod tests {
             .resolve_member(&mut store, &request)
             .expect("the first request should load the nested class and its outers")
             .expect("the fixture contains the nested class");
+        let load_profiles = resolver.take_load_profiles();
+        assert_eq!(load_profiles.len(), 1);
+        assert_eq!(
+            load_profiles[0].root,
+            "enclosing_generics/Outer$Middle$Deep$Leaf"
+        );
+        assert!(load_profiles[0].max_dependency_depth > 0);
+        for class in [
+            "enclosing_generics/Outer",
+            "enclosing_generics/Outer$Middle",
+            "enclosing_generics/Outer$Middle$Deep",
+            "enclosing_generics/Outer$Middle$Deep$Leaf",
+        ] {
+            assert!(
+                load_profiles[0].classes.contains(class),
+                "dependency profile should include {class}"
+            );
+        }
         let second = resolver
             .resolve_member(&mut store, &request)
             .expect("the repeated request should pass package owner validation")
             .expect("the class should remain in the package's binary-name index");
 
         assert_eq!(first, second);
+        assert!(resolver.take_load_profiles().is_empty());
         let package_scope = resolver.session.packages.scope_of(package).unwrap();
         assert_eq!(
             store.scopes.get(package_scope).lookup_all(&request.name),

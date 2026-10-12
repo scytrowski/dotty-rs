@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use dotty_classloader::classloader::{
-    ClassPathEntry, ClasspathSymbolResolver, CompositeClassPath, JarClassPath, JdkClassPath,
-    LoadingSession,
+    ClassLoadProfile, ClassPathEntry, ClasspathSymbolResolver, CompositeClassPath, JarClassPath,
+    JdkClassPath, LoadingSession,
 };
 use dotty_core::ast::{Match, Modifier, Tree, TreeKind, Untyped, UntypedNode, VisibilitySyntax};
 use dotty_core::ids::TreeId;
@@ -68,6 +68,15 @@ struct ResolverMetrics {
     package_term_object_looking_targets: BTreeSet<String>,
     package_type_class_resource: usize,
     package_type_class_targets: BTreeSet<String>,
+    dependency_profiles: Vec<DependencyObservation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DependencyObservation {
+    file: String,
+    method: String,
+    request: String,
+    profile: ClassLoadProfile,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -354,6 +363,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 .or_default() += 1;
         }
         let result = self.inner.resolve_member(store, request);
+        let load_profiles = self.inner.take_load_profiles();
         let mut metrics = self.metrics.borrow_mut();
         metrics.resolver_member_requests += 1;
         *metrics
@@ -368,6 +378,15 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         }
         let outcome = member_outcome(store, &result, request, &prefix);
         let current_file = metrics.current_file.clone();
+        let current_method = metrics.current_method.clone();
+        for profile in load_profiles {
+            metrics.dependency_profiles.push(DependencyObservation {
+                file: current_file.clone(),
+                method: current_method.clone(),
+                request: format!("{}::{}", target_key, name),
+                profile,
+            });
+        }
         if let Ok(Some(symbol)) = &result {
             let entry = store.symbols.get(*symbol);
             if is_external_symbol(entry.origin) {
@@ -379,7 +398,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 }
             }
         }
-        let method = metrics.current_method.clone();
+        let method = current_method;
         let target_key = if prefix.identity_known {
             target_key
         } else {
@@ -3654,7 +3673,8 @@ fn print_pinned_immutable_field_completion_outcomes(root: &Path, classpath: Shar
                 classpath.clone(),
                 definitions,
                 LoadingSession::with_packages(namer_packages),
-            ),
+            )
+            .with_load_profile_collection(),
             metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
             class_path_probe: None,
         }));
@@ -3819,7 +3839,8 @@ fn print_pinned_mutable_field_completion_outcomes(root: &Path, classpath: Shared
                 classpath.clone(),
                 definitions,
                 LoadingSession::with_packages(namer_packages),
-            ),
+            )
+            .with_load_profile_collection(),
             metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
             class_path_probe: None,
         }));
@@ -5538,7 +5559,8 @@ fn probe_supported_match_cases(
             classpath.clone(),
             definitions,
             LoadingSession::with_packages(Packages::new()),
-        ),
+        )
+        .with_load_profile_collection(),
         metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
         class_path_probe: Some(classpath),
     }));
@@ -5852,7 +5874,8 @@ fn audit_source_inner(
             classpath.clone(),
             definitions,
             LoadingSession::with_packages(packages),
-        );
+        )
+        .with_load_profile_collection();
         typer = typer.with_resolver(Box::new(AuditResolver {
             inner: resolver,
             metrics,
@@ -7112,6 +7135,7 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     println!("  distinct_packages={}", metrics.packages.len());
     println!("  distinct_classes={}", metrics.classes.len());
     println!("  distinct_members={}", metrics.members.len());
+    print_dependency_profiles(metrics);
     println!(
         "  classloader_success_gate={}",
         if !metrics.classes.is_empty() && !metrics.members.is_empty() {
@@ -7263,6 +7287,75 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     println!("  incomplete_prefix_classpath_binary_recovery:");
     for (key, count) in &metrics.incomplete_prefix_binary_resources {
         println!("    {key}={count}");
+    }
+}
+
+fn print_dependency_profiles(metrics: &ResolverMetrics) {
+    let mut depths = metrics
+        .dependency_profiles
+        .iter()
+        .map(|observation| observation.profile.max_dependency_depth)
+        .collect::<Vec<_>>();
+    depths.sort_unstable();
+    let median_depth = if depths.is_empty() {
+        0.0
+    } else if depths.len() % 2 == 0 {
+        (depths[depths.len() / 2 - 1] + depths[depths.len() / 2]) as f64 / 2.0
+    } else {
+        depths[depths.len() / 2] as f64
+    };
+    let p95_depth = if depths.is_empty() {
+        0
+    } else {
+        depths[(depths.len() * 95).div_ceil(100).saturating_sub(1)]
+    };
+    let max_classes = metrics
+        .dependency_profiles
+        .iter()
+        .map(|observation| observation.profile.classes.len())
+        .max()
+        .unwrap_or(0);
+
+    println!("dependency_load_profile:");
+    println!("  top_level_class_loads={}", depths.len());
+    println!(
+        "  max_dependency_depth={}",
+        depths.last().copied().unwrap_or(0)
+    );
+    println!("  median_dependency_depth={median_depth:.1}");
+    println!("  p95_dependency_depth={p95_depth}");
+    println!("  max_distinct_classes_touched_by_one_request={max_classes}");
+
+    let mut largest = metrics.dependency_profiles.iter().collect::<Vec<_>>();
+    largest.sort_by(|left, right| {
+        right
+            .profile
+            .classes
+            .len()
+            .cmp(&left.profile.classes.len())
+            .then(left.profile.root.cmp(&right.profile.root))
+            .then(left.file.cmp(&right.file))
+            .then(left.method.cmp(&right.method))
+            .then(left.request.cmp(&right.request))
+    });
+    println!("  largest_top_level_loads:");
+    for observation in largest.into_iter().take(10) {
+        println!(
+            "    root={}::file={}::method={}::request={}::depth={}::distinct_classes={}::classes=[{}]",
+            observation.profile.root,
+            observation.file,
+            observation.method,
+            observation.request,
+            observation.profile.max_dependency_depth,
+            observation.profile.classes.len(),
+            observation
+                .profile
+                .classes
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(",")
+        );
     }
 }
 
@@ -8355,7 +8448,8 @@ fn isolated_impure_function_projection(
             classpath,
             definitions,
             LoadingSession::with_packages(packages),
-        );
+        )
+        .with_load_profile_collection();
         typer = typer.with_resolver(Box::new(AuditResolver {
             inner: resolver,
             metrics: Rc::new(RefCell::new(ResolverMetrics::default())),

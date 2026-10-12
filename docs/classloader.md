@@ -320,6 +320,16 @@ classes, session cache entries, package entries, and package-scope links.
 Successful materializations are journaled so the frontend can call
 `rollback_to` before its paired `SemanticStore::rollback_to`.
 
+Corpus audits can opt in to `with_load_profile_collection()` on the resolver.
+Each observed top-level class load reports its root binary name, maximum
+dependency depth, and sorted distinct class names reached through superclass,
+interface, member-type, signature, and annotation loading. This profile
+includes internal dependency loads but does not increment the top-level
+resolver request success counters. Collection is disabled by default; callers
+drain observations with `take_load_profiles()`. Profiles describe attempted
+work, including a load later rolled back by an enclosing typer transaction,
+and are kept separate from semantic session state.
+
 ### 4.4 `.tasty` convergence
 
 `tasty_symbol::decode` reconstructs a `DecodedTastyClass` (flags,

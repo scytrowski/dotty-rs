@@ -44,7 +44,7 @@ pub mod classloader {
     pub use crate::jar_class_path::JarClassPath;
     pub use crate::jdk_class_path::JdkClassPath;
     pub use crate::jmod_class_path::JmodClassPath;
-    pub use crate::loader::ClassLoader;
+    pub use crate::loader::{ClassLoadProfile, ClassLoader};
     pub use crate::method_symbol::MethodSymbol;
     pub use crate::nesting::{EnclosingMethodRef, InnerClassEntry};
     pub use crate::record_component::RecordComponentSymbol;
