@@ -434,10 +434,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             }
         }
         let method = current_method;
-        let materialized_prefix = match &result {
-            Ok(Some(symbol)) => materialized_class_prefix(store, *symbol),
-            _ => None,
-        };
+        let materialized_prefix = materialized_request_prefix(store, &prefix);
         if !method.is_empty() {
             metrics
                 .resolver_requests_by_method
@@ -1091,6 +1088,12 @@ fn materialized_class_prefix(store: &SemanticStore, symbol: SymbolId) -> Option<
         return None;
     }
     audit_binary_candidate(store, symbol)
+}
+
+fn materialized_request_prefix(store: &SemanticStore, prefix: &PrefixProfile) -> Option<String> {
+    prefix
+        .symbol
+        .and_then(|symbol| materialized_class_prefix(store, symbol))
 }
 
 fn unresolved_package_details(
@@ -11772,6 +11775,53 @@ mod resolver_profile_tests {
             unresolved_member_kind(&store, &request, &profile),
             "other resolver Ok(None)"
         );
+    }
+
+    #[test]
+    fn failed_member_lookup_keeps_its_already_materialized_class_prefix() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let scope = store
+            .scopes
+            .alloc(dotty_core::Scope::new(Some(definitions.object_class)));
+        let info = store.types.alloc(Type::ClassInfo(dotty_core::ClassInfo {
+            prefix: definitions.no_prefix,
+            class: definitions.object_class,
+            parents: Vec::new(),
+            declarations: scope,
+            self_type: None,
+        }));
+        let origin = store.origins.register_tasty();
+        let object_class = store.symbols.get_mut(definitions.object_class);
+        object_class.origin = dotty_core::SymbolOrigin::Tasty(origin);
+        object_class.info = dotty_core::SymbolInfo::Complete(info);
+
+        let request = request(&mut store, definitions.object_type, Namespace::Term);
+        let metrics = Rc::new(RefCell::new(ResolverMetrics {
+            current_file: "Use.scala".to_owned(),
+            current_method: "Use.scala#tree=1".to_owned(),
+            ..ResolverMetrics::default()
+        }));
+        let mut resolver = AuditResolver {
+            inner: ClasspathSymbolResolver::new(
+                CompositeClassPath::new(Vec::new()),
+                definitions,
+                LoadingSession::new(),
+            ),
+            metrics: metrics.clone(),
+            class_path_probe: None,
+        };
+        assert_eq!(resolver.resolve_member(&mut store, &request), Ok(None));
+
+        let trace = metrics
+            .borrow()
+            .resolver_requests_by_method
+            .get("Use.scala#tree=1")
+            .unwrap()
+            .clone();
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].outcome, "other resolver Ok(None)");
+        assert_eq!(trace[0].materialized_prefix.as_deref(), Some("Object"));
     }
 
     #[test]
