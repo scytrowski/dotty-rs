@@ -5735,6 +5735,10 @@ mod tests {
             Some(&ClassOrigin::Directory(PathBuf::from("<memory>")))
         );
         assert!(!loader.session.resolved.contains_key(&name));
+        assert_eq!(loader.session.identified.get(&name), Some(&identity));
+        assert!(loader.repository.get(&name).is_none());
+        assert!(loader.metadata(identity).is_none());
+        assert!(!loader.session.identified.contains_key(&dependency));
 
         let package = loader.store.symbols.get(identity).owner.unwrap();
         let scope = loader.session.packages.scope_of(package).unwrap();
@@ -5751,6 +5755,15 @@ mod tests {
             SymbolInfo::Complete(_)
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 3);
+        assert_eq!(loader.session.identified.get(&name), Some(&identity));
+        assert_eq!(loader.session.resolved.get(&name), Some(&identity));
+        assert!(
+            matches!(loader.repository.get(&name), Some(ClassEntry::Loaded(id)) if *id == identity)
+        );
+        assert_eq!(
+            loader.store.scopes.get(scope).lookup_all(&symbol_name),
+            &[identity]
+        );
     }
 
     #[test]

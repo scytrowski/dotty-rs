@@ -176,7 +176,13 @@ fn write_demand_class(root: &Path, name: &str, parent: Option<&str>, fields: &[(
 #[test]
 fn source_member_selection_completes_shells_on_demand_and_rolls_back_in_place() {
     let files = TemporaryDirectory::new("demand-shells");
-    write_demand_class(files.path(), "sample/A", None, &[("b", "Lsample/B;")]);
+    write_demand_class(
+        files.path(),
+        "sample/A",
+        None,
+        &[("b", "Lsample/B;"), ("unused", "Lsample/Unused;")],
+    );
+    write_demand_class(files.path(), "sample/Unused", Some("sample/NeverRead"), &[]);
     write_demand_class(files.path(), "sample/B", None, &[("value", "I")]);
     write_demand_class(
         files.path(),
@@ -219,6 +225,9 @@ fn source_member_selection_completes_shells_on_demand_and_rolls_back_in_place() 
     let child = loader
         .ensure_class_identity(&BinaryName::from_internal("sample/Child"))
         .unwrap();
+    let unused = loader
+        .ensure_class_identity(&BinaryName::from_internal("sample/Unused"))
+        .unwrap();
     let (path, session) = loader.into_parts();
     let SymbolInfo::Complete(a_info) = store.symbols.get(a_field).info else {
         panic!("A.b should have a complete field signature");
@@ -227,7 +236,13 @@ fn source_member_selection_completes_shells_on_demand_and_rolls_back_in_place() 
     assert_eq!(store.symbols.get(child).info, SymbolInfo::Missing);
     assert_eq!(
         *reads.lock().unwrap(),
-        ["sample/A", "sample/B", "sample/Holder", "sample/Child"]
+        [
+            "sample/A",
+            "sample/B",
+            "sample/Unused",
+            "sample/Holder",
+            "sample/Child"
+        ]
     );
     let previous_b = store.symbols.get(b).clone();
     let value_name = Name::new(store.names.intern("value"), Namespace::Term);
@@ -286,11 +301,30 @@ fn source_member_selection_completes_shells_on_demand_and_rolls_back_in_place() 
         SymbolInfo::Complete(_)
     ));
     assert_eq!(log.borrow().completions, [b, b, child]);
+    let before_reuse = reads.lock().unwrap().clone();
+    let (method, rhs) = method_rhs(&unit, typer.store(), "read");
+    let context = typer.expression_context_for(method).unwrap();
+    typer.type_expression(rhs, context).unwrap();
+    assert_eq!(
+        typer.lookup_members(a_info, value_name).unwrap()[0].declaring_class,
+        b
+    );
+    assert_eq!(typer.store().symbols.get(unused).info, SymbolInfo::Missing);
+    assert_eq!(*reads.lock().unwrap(), before_reuse);
+    assert_eq!(log.borrow().completions, [b, b, child]);
+    assert!(
+        !reads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|name| name == "sample/NeverRead")
+    );
     assert_eq!(
         *reads.lock().unwrap(),
         [
             "sample/A",
             "sample/B",
+            "sample/Unused",
             "sample/Holder",
             "sample/Child",
             "sample/B",
@@ -360,6 +394,12 @@ fn direct_import_member_completion_participates_in_expression_rollback() {
         .iter()
         .map(|(tree, _)| (tree, typer.source_typed_index().get(unit.source, tree)))
         .collect();
+    let source_types: Vec<_> = unit
+        .parsed
+        .ast
+        .iter()
+        .map(|(tree, _)| (tree, typer.source_type_index().type_at(unit.source, tree)))
+        .collect();
     let error = typer.type_expression(rhs, context).unwrap_err();
     assert!(
         matches!(error, TyperError::TermNameNotFound { .. }),
@@ -370,6 +410,9 @@ fn direct_import_member_completion_participates_in_expression_rollback() {
     assert_eq!(typer.typed_ast().iter().count(), typed_count);
     for (tree, before) in mappings {
         assert_eq!(typer.source_typed_index().get(unit.source, tree), before);
+    }
+    for (tree, before) in source_types {
+        assert_eq!(typer.source_type_index().type_at(unit.source, tree), before);
     }
     let member = class_id(&log.borrow(), "value");
     assert!(!typer.store().symbols.contains(member));
