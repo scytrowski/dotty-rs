@@ -52,6 +52,13 @@ pub(crate) struct DecodedTastyClass {
     pub methods: Vec<DecodedTastyMethod>,
 }
 
+/// Facts needed to publish a TASTy-backed identity without resolving its
+/// parents or lowering any member types.
+pub(crate) struct DecodedTastyIdentity {
+    pub flags: ClassAccessFlags,
+    pub visibility: Option<DeclaredVisibility>,
+}
+
 /// Stable detail for a TASTy parent whose binary identity could not be
 /// recovered. Audit tooling can use the raw tree to inspect wire shapes
 /// without guessing a binary name.
@@ -359,6 +366,57 @@ pub(crate) fn decode_with_resolvers(
         &mut resolve_bare,
         true,
     )
+}
+
+pub(crate) fn decode_identity(
+    bytes: &[u8],
+    requested: &BinaryName,
+) -> Result<DecodedTastyIdentity, TastyDecodeError> {
+    let file = TastyFile::parse_scala_3_9(bytes)?;
+    let index = file.ast_address_index()?;
+    let requested_internal = requested.as_internal();
+    let simple_name = requested_internal
+        .rsplit('/')
+        .next()
+        .unwrap_or(requested_internal);
+    let node = index
+        .iter()
+        .find(|node| {
+            if node.tag != TYPEDEF_TAG {
+                return false;
+            }
+            let Ok(definition) = node.decode_definition() else {
+                return false;
+            };
+            wire_name(&file, definition.name()).as_deref() == Some(simple_name)
+        })
+        .ok_or(TastyDecodeError::MissingTypeDef)?;
+
+    let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+        tail,
+        type_or_template,
+        ..
+    }) = node.decode_structured()?
+    else {
+        return Err(TastyDecodeError::MissingTypeDef);
+    };
+    let RawTree::LengthNode(template_node) = type_or_template else {
+        return Err(TastyDecodeError::NoTemplateBody);
+    };
+    if template_node.tag != TEMPLATE_TAG {
+        return Err(TastyDecodeError::NoTemplateBody);
+    }
+    if !matches!(
+        template_node.decode_structured()?,
+        StructuredNode::Template(_)
+    ) {
+        return Err(TastyDecodeError::NoTemplateBody);
+    }
+
+    Ok(DecodedTastyIdentity {
+        flags: decode_flags(&tail),
+        visibility: decode_visibility(&file, &tail),
+    })
 }
 
 fn decode_impl(

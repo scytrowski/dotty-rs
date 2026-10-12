@@ -11,7 +11,7 @@ use crate::session::LoadingSession;
 use crate::symbol::{ClassRef, ClassfileMetadata};
 use crate::tasty_symbol;
 use dotty_classfile::access_flags::{
-    ACC_STATIC, ClassAccessFlags, FieldAccessFlags, MethodAccessFlags,
+    ACC_PRIVATE, ACC_PROTECTED, ACC_STATIC, ClassAccessFlags, FieldAccessFlags, MethodAccessFlags,
 };
 use dotty_classfile::attribute::{Annotation, Attribute, ElementValue};
 use dotty_classfile::class_file::ClassFile;
@@ -361,6 +361,7 @@ fn error_binary_name(error: &ClassLoadError) -> Option<&BinaryName> {
         | ClassLoadError::InheritanceDepthExceeded(name)
         | ClassLoadError::UnresolvedTypeVariable(name, _) => Some(name),
         ClassLoadError::NameMismatch { requested, .. } => Some(requested),
+        ClassLoadError::IdentityConflict { name, .. } => Some(name),
         ClassLoadError::DependencyFailure { source, .. } => error_binary_name(source),
     }
 }
@@ -475,6 +476,247 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         } else {
             self.load_class_with_inheritance_ancestry(name, &mut Vec::new())
         }
+    }
+
+    /// Establishes the canonical symbol identity for an external class
+    /// without loading its supertypes or members. The returned symbol stays
+    /// `SymbolInfo::Missing` until [`Self::load_class`] completes it.
+    /// Repeated calls in this loading session return the same identity.
+    ///
+    /// Class files and TASTy are decoded only far enough to determine the
+    /// class kind and visibility. For nested JVM classes the enclosing
+    /// class identity is also established from class-file metadata; `$` in
+    /// a name alone is never treated as evidence of nesting.
+    pub fn ensure_class_identity(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadError> {
+        let store_checkpoint = self.store.checkpoint();
+        let session_checkpoint = self.session.checkpoint();
+        let result = self.ensure_class_identity_inner(name, &mut Vec::new());
+        if result.is_err() {
+            self.session.rollback_to(self.store, session_checkpoint);
+            self.store.rollback_to(store_checkpoint);
+        }
+        result
+    }
+
+    fn ensure_class_identity_inner(
+        &mut self,
+        name: &BinaryName,
+        ancestry: &mut Vec<BinaryName>,
+    ) -> Result<SymbolId, ClassLoadError> {
+        if name.as_internal() == "java/lang/Object" {
+            self.session
+                .cache_identified(name.clone(), self.definitions.object_class);
+            return Ok(self.definitions.object_class);
+        }
+        if let Some(symbol) = self.compiler_builtin_class(name) {
+            self.session.cache_identified(name.clone(), symbol);
+            return Ok(symbol);
+        }
+        if ancestry.len() >= MAX_INHERITANCE_DEPTH || ancestry.contains(name) {
+            return Err(ClassLoadError::IdentityConflict {
+                name: name.clone(),
+                reason: "cyclic or excessively deep enclosing-class metadata".to_owned(),
+            });
+        }
+        if let Some(ClassEntry::Failed(_, failure)) = self.repository.get(name) {
+            return Err(failure.error.clone());
+        }
+        if let Some(symbol) = self.session.identified.get(name).copied() {
+            if !self.store.symbols.contains(symbol) {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: name.clone(),
+                    reason: "the session refers to a symbol removed from the semantic store"
+                        .to_owned(),
+                });
+            }
+            let info = self.store.symbols.get(symbol).info;
+            match info {
+                SymbolInfo::Missing => {}
+                SymbolInfo::Complete(info)
+                    if self.store.types.try_get(info).is_some_and(|ty| {
+                        matches!(ty, Type::ClassInfo(info)
+                        if info.class == symbol
+                            && self.store.scopes.contains(info.declarations)
+                            && self.store.scopes.get(info.declarations).owner == Some(symbol))
+                    }) =>
+                {
+                    self.session.cache_resolved(name.clone(), symbol);
+                }
+                _ => {
+                    return Err(ClassLoadError::IdentityConflict {
+                        name: name.clone(),
+                        reason: "the class identity has erroneous or invalid completion info"
+                            .to_owned(),
+                    });
+                }
+            }
+            return Ok(symbol);
+        }
+        if let Some(&symbol) = self.session.resolved.get(name) {
+            self.session.cache_identified(name.clone(), symbol);
+            return Ok(symbol);
+        }
+
+        ancestry.push(name.clone());
+        let result = self.ensure_class_identity_uncached(name, ancestry);
+        let popped = ancestry.pop();
+        debug_assert_eq!(popped.as_ref(), Some(name));
+        result
+    }
+
+    fn ensure_class_identity_uncached(
+        &mut self,
+        name: &BinaryName,
+        ancestry: &mut Vec<BinaryName>,
+    ) -> Result<SymbolId, ClassLoadError> {
+        let resource = self
+            .class_path
+            .find_class(name)
+            .map_err(|error| ClassLoadError::Io(name.clone(), Rc::new(error)))?
+            .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
+        let origin = resource.origin().clone();
+        let (flags, tasty_visibility, classfile_visibility, semantic_owner) =
+            match resource.format() {
+                ClassFormat::Class => {
+                    let mut reader = Reader::new(resource.bytes());
+                    let class_file = ClassFile::decode(&mut reader)
+                        .map_err(|error| ClassLoadError::InvalidClassFile(name.clone(), error))?;
+                    if !class_file.version.is_compatible() {
+                        return Err(ClassLoadError::UnsupportedClassVersion(
+                            name.clone(),
+                            class_file.version,
+                        ));
+                    }
+                    let actual = self.resolve_name(name, &class_file, class_file.this_class)?;
+                    if actual != *name {
+                        return Err(ClassLoadError::NameMismatch {
+                            requested: name.clone(),
+                            actual,
+                        });
+                    }
+                    let owner = self.semantic_owner_name(name, &class_file)?;
+                    let visibility = self.semantic_class_visibility_flags(name, &class_file)?;
+                    (class_file.access_flags, None, visibility, owner)
+                }
+                ClassFormat::Tasty => {
+                    let identity = tasty_symbol::decode_identity(resource.bytes(), name)
+                        .map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
+                    (identity.flags, identity.visibility, None, None)
+                }
+            };
+
+        let semantic_owner = semantic_owner
+            .map(|owner| self.ensure_class_identity_inner(&owner, ancestry))
+            .transpose()?;
+        let package = self.session.packages.resolve(self.store, name);
+        let text = self.store.names.intern(name.simple_name());
+        let symbol_name = Name::new(text, Namespace::Type);
+        let package_scope = self
+            .session
+            .packages
+            .scope_of(package)
+            .expect("resolved package has a declaration scope");
+        let existing = self
+            .store
+            .scopes
+            .get(package_scope)
+            .lookup_all(&symbol_name);
+        if existing.len() > 1 {
+            return Err(ClassLoadError::IdentityConflict {
+                name: name.clone(),
+                reason: "the canonical package scope contains multiple declarations".to_owned(),
+            });
+        }
+        if let Some(&symbol) = existing.first() {
+            let candidate = self.store.symbols.get(symbol);
+            let complete_class = match candidate.info {
+                SymbolInfo::Complete(info) => {
+                    matches!(self.store.types.get(info), Type::ClassInfo(_))
+                }
+                SymbolInfo::Missing => false,
+                _ => false,
+            };
+            if !matches!(
+                candidate.kind,
+                SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+            ) || !matches!(
+                candidate.origin,
+                SymbolOrigin::Classfile(_) | SymbolOrigin::Tasty(_)
+            ) || (candidate.info != SymbolInfo::Missing && !complete_class)
+            {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: name.clone(),
+                    reason: "the canonical package name is occupied by an incompatible symbol"
+                        .to_owned(),
+                });
+            }
+            let expected_kind = if flags.is_interface() {
+                SymbolKind::Trait
+            } else {
+                SymbolKind::Class
+            };
+            if candidate.kind != expected_kind {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: name.clone(),
+                    reason: "the existing class identity has a different class kind".to_owned(),
+                });
+            }
+            if complete_class {
+                self.session.cache_resolved(name.clone(), symbol);
+            } else {
+                self.session.cache_identified(name.clone(), symbol);
+            }
+            self.session.record_origin(symbol, origin);
+            return Ok(symbol);
+        }
+
+        let kind = if flags.is_interface() {
+            SymbolKind::Trait
+        } else {
+            SymbolKind::Class
+        };
+        let visibility = match tasty_visibility {
+            Some(visibility) => self.tasty_visibility(name, &visibility),
+            None => match classfile_visibility.unwrap_or(flags) {
+                visibility if visibility.contains(ACC_PRIVATE) => Visibility::Private,
+                visibility if visibility.contains(ACC_PROTECTED) => Visibility::Protected,
+                visibility if visibility.is_public() => Visibility::Public,
+                _ => Visibility::Package(package),
+            },
+        };
+        let mut symbol_flags = SymbolFlags::JAVA_DEFINED;
+        if flags.is_abstract() {
+            symbol_flags = symbol_flags | SymbolFlags::ABSTRACT;
+        }
+        if flags.is_final() {
+            symbol_flags = symbol_flags | SymbolFlags::FINAL;
+        }
+        if flags.is_synthetic() {
+            symbol_flags = symbol_flags | SymbolFlags::SYNTHETIC;
+        }
+        let symbol = self.store.symbols.alloc(Symbol {
+            name: symbol_name,
+            owner: Some(semantic_owner.unwrap_or(package)),
+            kind,
+            flags: symbol_flags,
+            visibility,
+            info: SymbolInfo::Missing,
+            origin: match resource.format() {
+                ClassFormat::Class => {
+                    SymbolOrigin::Classfile(self.store.origins.register_classfile())
+                }
+                ClassFormat::Tasty => SymbolOrigin::Tasty(self.store.origins.register_tasty()),
+            },
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        self.session
+            .packages
+            .enter_class(self.store, package, symbol_name, symbol);
+        self.session.cache_identified(name.clone(), symbol);
+        self.session.record_origin(symbol, origin);
+        Ok(symbol)
     }
 
     /// Loads a class like [`Self::load_class`], retaining the selected
@@ -595,6 +837,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             return Err(ClassLoadError::InheritanceDepthExceeded(name.clone()));
         }
 
+        let previous_shell = self
+            .session
+            .identified
+            .get(name)
+            .copied()
+            .map(|id| (id, self.store.symbols.get(id).clone()));
         inheritance_ancestry.push(name.clone());
         let load_result = self.load_uncached(name, inheritance_ancestry);
         let popped = inheritance_ancestry.pop();
@@ -607,6 +855,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 Ok(symbol)
             }
             Err(failure) => {
+                if let Some((id, symbol)) = previous_shell {
+                    *self.store.symbols.get_mut(id) = symbol;
+                }
                 // `load_uncached` can fail after `enter_class` already
                 // allocated this class's `SymbolId` (e.g. a later
                 // `DependencyFailure` on its superclass) -- that `Symbol`
@@ -630,7 +881,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 // had no repository entry when `load_class` started.
                 let still_loading_symbol = self.repository.get(name).and_then(ClassEntry::symbol);
                 if let Some(symbol) = still_loading_symbol {
-                    self.store.symbols.get_mut(symbol).info = SymbolInfo::Error;
+                    if !self.session.identified.contains_key(name) {
+                        self.store.symbols.get_mut(symbol).info = SymbolInfo::Error;
+                    }
                     self.in_progress_classes.remove(&symbol);
                 }
                 self.repository
@@ -760,7 +1013,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         name: &BinaryName,
         flags: ClassAccessFlags,
         origin: SymbolOrigin,
-    ) -> (SymbolId, ScopeId) {
+    ) -> Result<(SymbolId, ScopeId, SymbolOrigin), ClassLoadError> {
         let owner = self.session.packages.resolve(self.store, name);
 
         let text = self.store.names.intern(name.simple_name());
@@ -808,23 +1061,65 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // `Definitions` (e.g. an implicit JVM superclass) and one built
         // from actually loading `java/lang/Object` off the classpath name
         // the exact same symbol, not two permanently distinct ones.
-        let class_symbol = if name.as_internal() == "java/lang/Object" {
-            let symbol = self.definitions.object_class;
+        let builtin_object = name.as_internal() == "java/lang/Object";
+        let existing = self
+            .session
+            .identified
+            .get(name)
+            .copied()
+            .or_else(|| builtin_object.then_some(self.definitions.object_class));
+        let (class_symbol, class_origin) = if let Some(symbol) = existing {
+            if !self.store.symbols.contains(symbol) {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: name.clone(),
+                    reason: "the session refers to a symbol removed from the semantic store"
+                        .to_owned(),
+                });
+            }
+            let existing_symbol = self.store.symbols.get(symbol);
+            let same_origin_kind = matches!(
+                (existing_symbol.origin, origin),
+                (SymbolOrigin::Classfile(_), SymbolOrigin::Classfile(_))
+                    | (SymbolOrigin::Tasty(_), SymbolOrigin::Tasty(_))
+            );
+            if existing_symbol.kind != kind
+                || (!builtin_object && !same_origin_kind)
+                || (!builtin_object && existing_symbol.info != SymbolInfo::Missing)
+            {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: name.clone(),
+                    reason:
+                        "the existing shell has incompatible kind, provenance, or completion state"
+                            .to_owned(),
+                });
+            }
+            let class_origin = if builtin_object {
+                origin
+            } else {
+                existing_symbol.origin
+            };
+            let semantic_owner = existing_symbol.owner.unwrap_or(owner);
+            let visibility = if builtin_object {
+                visibility
+            } else {
+                existing_symbol.visibility
+            };
+            self.session.record_symbol_update(self.store, symbol);
             *self.store.symbols.get_mut(symbol) = Symbol {
                 name: symbol_name,
-                owner: Some(owner),
+                owner: Some(semantic_owner),
                 kind,
                 flags: symbol_flags,
                 visibility,
                 info: SymbolInfo::Missing,
-                origin,
+                origin: class_origin,
                 annotations: Vec::new(),
                 position: None,
                 links: SymbolLinks::default(),
             };
-            symbol
+            (symbol, class_origin)
         } else {
-            self.store.symbols.alloc(Symbol {
+            let symbol = self.store.symbols.alloc(Symbol {
                 name: symbol_name,
                 owner: Some(owner),
                 kind,
@@ -835,14 +1130,15 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 annotations: Vec::new(),
                 position: None,
                 links: SymbolLinks::default(),
-            })
+            });
+            (symbol, origin)
         };
         self.session
             .packages
             .enter_class(self.store, owner, symbol_name, class_symbol);
         let declarations = self.store.scopes.alloc(Scope::new(Some(class_symbol)));
 
-        (class_symbol, declarations)
+        Ok((class_symbol, declarations, class_origin))
     }
 
     /// Resolves `super_class`/`interfaces` into `Type::TypeRef`s and
@@ -1406,7 +1702,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             decoded.map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
 
         let origin = SymbolOrigin::Tasty(self.store.origins.register_tasty());
-        let (class_symbol, declarations) = self.enter_class(name, decoded.flags, origin);
+        let (class_symbol, declarations, origin) = self.enter_class(name, decoded.flags, origin)?;
         self.session.record_origin(class_symbol, resource_origin);
         self.repository.mark_loading(name.clone(), class_symbol);
 
@@ -1587,7 +1883,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // ancestry threaded through `resolve_dependency`; a dependency cycle
         // that reaches this shell outside that ancestry may reuse it.
         let origin = SymbolOrigin::Classfile(self.store.origins.register_classfile());
-        let (class_symbol, declarations) = self.enter_class(name, class_file.access_flags, origin);
+        let (class_symbol, declarations, origin) =
+            self.enter_class(name, class_file.access_flags, origin)?;
         self.session.record_origin(class_symbol, resource_origin);
         self.repository.mark_loading(name.clone(), class_symbol);
 
@@ -1974,11 +2271,44 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// [`Self::resolve_dependency`]: an outer class referencing this
     /// class back (e.g. a member field typed as its own inner class) is a
     /// legitimate mutual reference, not a supertype cycle.
+    fn semantic_class_visibility_flags(
+        &self,
+        name: &BinaryName,
+        class_file: &ClassFile<'_>,
+    ) -> Result<Option<ClassAccessFlags>, ClassLoadError> {
+        let entries = class_file
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                Attribute::InnerClasses(entries) => Some(entries),
+                _ => None,
+            });
+        let Some(entries) = entries else {
+            return Ok(None);
+        };
+        for entry in entries {
+            if self.resolve_name(name, class_file, entry.inner_class_info_index)? == *name {
+                return Ok(Some(ClassAccessFlags(entry.inner_class_access_flags)));
+            }
+        }
+        Ok(None)
+    }
+
     fn resolve_semantic_owner(
         &mut self,
         name: &BinaryName,
         class_file: &ClassFile<'_>,
     ) -> Result<Option<SymbolId>, ClassLoadError> {
+        self.semantic_owner_name(name, class_file)?
+            .map(|outer| self.resolve_member_class(name, &outer))
+            .transpose()
+    }
+
+    fn semantic_owner_name(
+        &self,
+        name: &BinaryName,
+        class_file: &ClassFile<'_>,
+    ) -> Result<Option<BinaryName>, ClassLoadError> {
         let self_entry = class_file
             .attributes
             .iter()
@@ -2007,9 +2337,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             }
         };
 
-        outer_class_name
-            .map(|outer_class| self.resolve_member_class(name, &outer_class))
-            .transpose()
+        Ok(outer_class_name)
     }
 
     /// Resolves a `Utf8` constant-pool reference (a field or method's
@@ -5203,6 +5531,410 @@ mod tests {
         let second = loader.load_class(&name).unwrap();
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn ensure_class_identity_creates_a_reusable_shell_without_loading_dependencies() {
+        let name = BinaryName::from_internal("sample/Identity");
+        let bytes = synthetic_class("sample/Identity", Some("sample/Dependency"));
+        let dependency = BinaryName::from_internal("sample/Dependency");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let class_path = CountingResourceClassPath {
+            resources: [
+                (name.clone(), bytes),
+                (
+                    dependency.clone(),
+                    synthetic_class("sample/Dependency", None),
+                ),
+            ]
+            .into_iter()
+            .map(|(name, bytes)| {
+                (
+                    name,
+                    (
+                        bytes,
+                        ClassFormat::Class,
+                        ClassOrigin::Directory(PathBuf::from("<memory>")),
+                    ),
+                )
+            })
+            .collect(),
+            calls: Arc::clone(&calls),
+        };
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut loader = ClassLoader::with_definitions(
+            class_path,
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+
+        let identity = loader.ensure_class_identity(&name).unwrap();
+        assert_eq!(loader.ensure_class_identity(&name).unwrap(), identity);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(loader.store.symbols.get(identity).kind, SymbolKind::Class);
+        assert_eq!(loader.store.symbols.get(identity).info, SymbolInfo::Missing);
+        assert_eq!(
+            loader.origin(identity),
+            Some(&ClassOrigin::Directory(PathBuf::from("<memory>")))
+        );
+        assert!(!loader.session.resolved.contains_key(&name));
+
+        let package = loader.store.symbols.get(identity).owner.unwrap();
+        let scope = loader.session.packages.scope_of(package).unwrap();
+        let symbol_name = loader.store.symbols.get(identity).name;
+        assert_eq!(
+            loader.store.scopes.get(scope).lookup_all(&symbol_name),
+            &[identity]
+        );
+
+        let loaded = loader.load_class(&name).unwrap();
+        assert_eq!(loaded, identity);
+        assert!(matches!(
+            loader.store.symbols.get(identity).info,
+            SymbolInfo::Complete(_)
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn identity_requests_do_not_turn_failed_inheritance_into_success() {
+        let name = BinaryName::from_internal("sample/A");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(HashMap::from([
+                (name.clone(), synthetic_class("sample/A", Some("sample/B"))),
+                (
+                    BinaryName::from_internal("sample/B"),
+                    synthetic_class("sample/B", Some("sample/A")),
+                ),
+            ])),
+            &mut store,
+        );
+        let identity = loader.ensure_class_identity(&name).unwrap();
+        assert!(loader.load_class(&name).is_err());
+        assert!(loader.ensure_class_identity(&name).is_err());
+        assert!(loader.load_class(&name).is_err());
+        assert!(!loader.session.resolved.contains_key(&name));
+        assert_eq!(loader.store.symbols.get(identity).info, SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn an_error_symbol_is_never_promoted_to_resolved_identity() {
+        let name = BinaryName::from_internal("sample/Error");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(HashMap::from([(
+                name.clone(),
+                synthetic_class("sample/Error", None),
+            )])),
+            &mut store,
+        );
+        let identity = loader.ensure_class_identity(&name).unwrap();
+        loader.store.symbols.get_mut(identity).info = SymbolInfo::Error;
+        assert!(matches!(
+            loader.ensure_class_identity(&name),
+            Err(ClassLoadError::IdentityConflict { .. })
+        ));
+        assert!(!loader.session.resolved.contains_key(&name));
+    }
+
+    #[test]
+    fn resolver_rollback_restores_a_preexisting_shell_and_allows_retry() {
+        use crate::resolver::ClasspathSymbolResolver;
+        use dotty_core::{MemberRequest, MemberSelector, MemberSpace, SymbolResolver};
+
+        for fail_operation in [false, true] {
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let b_name = BinaryName::from_internal("sample/B");
+            let classes = HashMap::from([
+                (b_name.clone(), synthetic_class("sample/B", None)),
+                (
+                    BinaryName::from_internal("sample/A"),
+                    synthetic_class_with_object_fields(
+                        "sample/A",
+                        Some("sample/B"),
+                        if fail_operation {
+                            &[("missing", "sample/Missing")]
+                        } else {
+                            &[]
+                        },
+                    ),
+                ),
+            ]);
+            let mut loader = ClassLoader::with_definitions(
+                InMemoryClassPath(classes.clone()),
+                &mut store,
+                definitions,
+                LoadingSession::new(),
+            );
+            let b = loader.ensure_class_identity(&b_name).unwrap();
+            let session = loader.into_session();
+            let original = store.symbols.get(b).clone();
+            let package = original.owner.unwrap();
+            let prefix = store
+                .types
+                .alloc(Type::type_ref(definitions.no_prefix, package));
+            let request = MemberRequest {
+                prefix,
+                name: Name::new(store.names.intern("A"), Namespace::Type),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let mut resolver = ClasspathSymbolResolver::new(
+                InMemoryClassPath(classes.clone()),
+                definitions,
+                session,
+            );
+            let checkpoint = resolver.checkpoint();
+            let store_checkpoint = store.checkpoint();
+            let result = resolver.resolve_member(&mut store, &request);
+            if fail_operation {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().is_some());
+                assert!(matches!(store.symbols.get(b).info, SymbolInfo::Complete(_)));
+                resolver.rollback_to(&mut store, checkpoint);
+                store.rollback_to(store_checkpoint);
+            }
+            assert_eq!(store.symbols.get(b), &original);
+            let session = resolver.into_session();
+            let mut loader = ClassLoader::with_definitions(
+                InMemoryClassPath(classes),
+                &mut store,
+                definitions,
+                session,
+            );
+            assert!(loader.metadata(b).is_none());
+            assert_eq!(loader.load_class(&b_name).unwrap(), b);
+            let info = class_info(loader.store, b);
+            assert!(loader.store.scopes.contains(info.declarations));
+        }
+    }
+
+    #[test]
+    fn ensure_nested_class_identity_uses_metadata_and_keeps_outer_as_shell() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(nested_sample_classpath()), &mut store);
+        let inner_name = BinaryName::from_internal("NestedSample$Inner");
+
+        let inner = loader.ensure_class_identity(&inner_name).unwrap();
+        let outer = loader
+            .session
+            .identified
+            .get(&BinaryName::from_internal("NestedSample"))
+            .copied()
+            .expect("metadata should establish the enclosing class identity");
+
+        assert_eq!(loader.store.symbols.get(inner).owner, Some(outer));
+        assert_eq!(
+            loader.store.symbols.get(inner).visibility,
+            Visibility::Public,
+            "nested class visibility comes from its InnerClasses self-entry"
+        );
+        assert_eq!(loader.store.symbols.get(outer).info, SymbolInfo::Missing);
+        assert_eq!(loader.store.symbols.get(inner).info, SymbolInfo::Missing);
+        assert!(loader.session.resolved.is_empty());
+    }
+
+    #[test]
+    fn shell_upgrade_preserves_private_and_protected_nested_visibility() {
+        use dotty_classfile::access_flags::ACC_PUBLIC;
+        for (access, expected) in [
+            (ACC_PRIVATE, Visibility::Private),
+            (ACC_PROTECTED, Visibility::Protected),
+        ] {
+            let name = BinaryName::from_internal("NestedSample$Inner");
+            let mut classes = nested_sample_classpath();
+            let bytes = classes.get(&name).unwrap();
+            let mut reader = Reader::new(bytes);
+            let mut class_file = ClassFile::decode(&mut reader).unwrap();
+            class_file.access_flags.0 &= !ACC_PUBLIC;
+            for attribute in &mut class_file.attributes {
+                if let Attribute::InnerClasses(entries) = attribute {
+                    for entry in entries {
+                        if entry.inner_class_info_index == class_file.this_class {
+                            entry.inner_class_access_flags = (entry.inner_class_access_flags
+                                & !(ACC_PUBLIC | ACC_PRIVATE | ACC_PROTECTED))
+                                | access;
+                        }
+                    }
+                }
+            }
+            let bytes = class_file.encode().unwrap();
+            classes.insert(name.clone(), bytes);
+            let mut store = SemanticStore::new();
+            let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+            let identity = loader.ensure_class_identity(&name).unwrap();
+            assert_eq!(loader.store.symbols.get(identity).visibility, expected);
+            assert_eq!(loader.load_class(&name).unwrap(), identity);
+            assert_eq!(loader.store.symbols.get(identity).visibility, expected);
+            assert!(matches!(
+                loader.store.symbols.get(identity).info,
+                SymbolInfo::Complete(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn ensure_class_identity_does_not_infer_ownership_from_dollar_names() {
+        let name = BinaryName::from_internal("sample/Top$Level");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(HashMap::from([(
+                name.clone(),
+                synthetic_class("sample/Top$Level", None),
+            )])),
+            &mut store,
+        );
+
+        let identity = loader.ensure_class_identity(&name).unwrap();
+        let owner = loader.store.symbols.get(identity).owner.unwrap();
+
+        assert_eq!(symbol_name(loader.store, owner), "sample");
+        assert_eq!(
+            loader.session.identified.len(),
+            1,
+            "a dollar sign alone must not cause an enclosing class lookup"
+        );
+    }
+
+    #[test]
+    fn an_identity_shell_survives_session_handoff_and_is_completed_in_place() {
+        let name = BinaryName::from_internal("sample/Shared");
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let bytes = synthetic_class("sample/Shared", None);
+        let mut first = ClassLoader::with_definitions(
+            InMemoryClassPath(HashMap::from([(name.clone(), bytes.clone())])),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let identity = first.ensure_class_identity(&name).unwrap();
+        let session = first.into_session();
+
+        let mut second = ClassLoader::with_definitions(
+            InMemoryClassPath(HashMap::from([(name.clone(), bytes)])),
+            &mut store,
+            definitions,
+            session,
+        );
+        assert_eq!(second.ensure_class_identity(&name).unwrap(), identity);
+        assert_eq!(second.load_class(&name).unwrap(), identity);
+        assert!(matches!(
+            second.store.symbols.get(identity).info,
+            SymbolInfo::Complete(_)
+        ));
+    }
+
+    #[test]
+    fn ensure_class_identity_reuses_an_existing_complete_package_symbol() {
+        let name = BinaryName::from_internal("sample/AlreadyLoaded");
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let class_path = || {
+            InMemoryClassPath(HashMap::from([(
+                name.clone(),
+                synthetic_class("sample/AlreadyLoaded", None),
+            )]))
+        };
+        let mut first = ClassLoader::with_definitions(
+            class_path(),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let identity = first.load_class(&name).unwrap();
+        let packages = first.into_session().into_packages();
+
+        let mut second = ClassLoader::with_definitions(
+            class_path(),
+            &mut store,
+            definitions,
+            LoadingSession::with_packages(packages),
+        );
+
+        assert_eq!(second.ensure_class_identity(&name).unwrap(), identity);
+        assert_eq!(second.session.resolved.get(&name), Some(&identity));
+    }
+
+    #[test]
+    fn a_failed_full_load_keeps_a_previously_published_identity_shell() {
+        let name = BinaryName::from_internal("sample/Incomplete");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(HashMap::from([(
+                name.clone(),
+                synthetic_class("sample/Incomplete", Some("sample/Missing")),
+            )])),
+            &mut store,
+        );
+
+        let identity = loader.ensure_class_identity(&name).unwrap();
+        assert!(loader.load_class(&name).is_err());
+
+        assert_eq!(loader.session.identified.get(&name), Some(&identity));
+        assert_eq!(loader.store.symbols.get(identity).info, SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn ensure_class_identity_rolls_back_malformed_artifact_state() {
+        let name = BinaryName::from_internal("sample/Broken");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(HashMap::from([(name.clone(), vec![0, 1, 2])])),
+            &mut store,
+        );
+
+        assert!(matches!(
+            loader.ensure_class_identity(&name),
+            Err(ClassLoadError::InvalidClassFile(_, _))
+        ));
+        assert!(!loader.session.identified.contains_key(&name));
+        assert!(loader.session.packages.get(&["sample"]).is_none());
+        assert!(loader.session.origins.is_empty());
+    }
+
+    #[test]
+    fn ensure_tasty_class_identity_does_not_resolve_tasty_parents() {
+        let name = BinaryName::from_internal("Dog");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryTastyClassPath(HashMap::from([(
+                name.clone(),
+                own_fixture_bytes("tasty_sample/Dog.tasty"),
+            )])),
+            &mut store,
+        );
+
+        let identity = loader.ensure_class_identity(&name).unwrap();
+
+        assert_eq!(loader.store.symbols.get(identity).kind, SymbolKind::Class);
+        assert_eq!(loader.store.symbols.get(identity).info, SymbolInfo::Missing);
+        assert_eq!(loader.session.identified.len(), 1);
+        assert!(loader.session.resolved.is_empty());
+    }
+
+    #[test]
+    fn ensure_java_object_identity_reuses_the_bootstrap_definition() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut loader = ClassLoader::with_definitions(
+            InMemoryClassPath(HashMap::new()),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+
+        assert_eq!(
+            loader
+                .ensure_class_identity(&BinaryName::from_internal("java/lang/Object"))
+                .unwrap(),
+            definitions.object_class
+        );
     }
 
     #[test]
