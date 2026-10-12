@@ -289,6 +289,8 @@ pub struct ClassLoader<'store, E> {
 pub struct ClassLoadProfile {
     /// Binary name requested at the root of this load operation.
     pub root: String,
+    /// Whether the root was a persistent identified shell before this operation.
+    pub root_was_shell: bool,
     /// Greatest number of eager dependency-load edges traversed from the root.
     pub max_dependency_depth: usize,
     /// Sorted binary names of the root and every distinct class reached.
@@ -314,6 +316,7 @@ pub struct ClassLoadProfile {
 #[derive(Default)]
 struct ActiveLoadProfile {
     root: String,
+    root_was_shell: bool,
     depth: usize,
     max_dependency_depth: usize,
     classes: BTreeSet<String>,
@@ -968,6 +971,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         if is_root {
             self.active_load_profile = Some(ActiveLoadProfile {
                 root: name.as_internal().to_owned(),
+                root_was_shell: self
+                    .session
+                    .identified
+                    .get(name)
+                    .is_some_and(|id| self.store.symbols.get(*id).info == SymbolInfo::Missing),
                 ..ActiveLoadProfile::default()
             });
         }
@@ -993,6 +1001,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 .expect("top-level profile was initialized above");
             self.load_profiles.push(ClassLoadProfile {
                 root: profile.root,
+                root_was_shell: profile.root_was_shell,
                 max_dependency_depth: profile.max_dependency_depth,
                 classes: profile.classes,
                 full_completions: profile.full_completions,
@@ -5830,6 +5839,24 @@ mod tests {
                 .resolved
                 .contains_key(&BinaryName::from_internal("B"))
         );
+        let previous = loader.store.symbols.get(b).clone();
+        let checkpoint = loader.store.checkpoint();
+        let error = loader
+            .load_class(&BinaryName::from_internal("B"))
+            .unwrap_err();
+        assert!(
+            matches!(error, ClassLoadError::DependencyFailure { owner, dependency, source }
+            if owner.as_internal() == "B" && dependency.as_internal() == "MissingParent"
+                && matches!(*source, ClassLoadError::NotFound(ref name) if name.as_internal() == "MissingParent"))
+        );
+        assert_eq!(loader.store.checkpoint(), checkpoint);
+        assert_eq!(loader.store.symbols.get(b), &previous);
+        assert!(
+            !loader
+                .session
+                .resolved
+                .contains_key(&BinaryName::from_internal("B"))
+        );
     }
 
     #[test]
@@ -6553,12 +6580,24 @@ mod tests {
             definitions,
             session,
         );
+        second.set_load_profile_collection(true);
         assert_eq!(second.ensure_class_identity(&name).unwrap(), identity);
         assert_eq!(second.load_class(&name).unwrap(), identity);
         assert!(matches!(
             second.store.symbols.get(identity).info,
             SymbolInfo::Complete(_)
         ));
+        let profile = second.take_load_profiles().pop().unwrap();
+        assert!(profile.root_was_shell);
+        assert_eq!(
+            profile.completed_classes,
+            BTreeSet::from(["sample/Shared".to_owned()])
+        );
+        assert_eq!(second.load_class(&name).unwrap(), identity);
+        let cached = second.take_load_profiles().pop().unwrap();
+        assert!(!cached.root_was_shell);
+        assert_eq!(cached.completed_cache_hits, 1);
+        assert!(cached.completed_classes.is_empty());
     }
 
     #[test]
@@ -8470,6 +8509,17 @@ mod tests {
                 ClassRef::Unresolved(_) => None,
             })
             .expect("NestedSample$Inner should carry a resolved @Deprecated annotation");
+        assert_eq!(
+            loader.store.symbols.get(deprecated_symbol).info,
+            SymbolInfo::Missing
+        );
+        assert!(loader.metadata(deprecated_symbol).is_none());
+        assert!(
+            !loader
+                .session
+                .resolved
+                .contains_key(&BinaryName::from_internal("java/lang/Deprecated"))
+        );
         let deprecated = annotations
             .iter()
             .find(|annotation| annotation.annotation_type == ClassRef::Resolved(deprecated_symbol))
@@ -8906,6 +8956,11 @@ mod tests {
             assert_eq!(
                 symbol_name(&store, parent_symbol(&store, core_annotation.ty)),
                 "Ann"
+            );
+            let annotation_identity = parent_symbol(&store, core_annotation.ty);
+            assert_eq!(
+                store.symbols.get(annotation_identity).info,
+                SymbolInfo::Missing
             );
         }
     }

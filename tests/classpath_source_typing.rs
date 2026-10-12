@@ -400,12 +400,23 @@ fn direct_import_member_completion_participates_in_expression_rollback() {
         .iter()
         .map(|(tree, _)| (tree, typer.source_type_index().type_at(unit.source, tree)))
         .collect();
+    let source_symbols = unit
+        .parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, _)| unit.index.symbol_at(unit.source, tree))
+        .map(|id| (id, typer.store().symbols.get(id).clone()))
+        .collect::<Vec<_>>();
     let error = typer.type_expression(rhs, context).unwrap_err();
     assert!(
         matches!(error, TyperError::TermNameNotFound { .. }),
         "{error:?}"
     );
     assert_eq!(typer.store().checkpoint(), checkpoint);
+    for (id, previous) in source_symbols {
+        assert_eq!(typer.store().symbols.get(id), &previous);
+    }
+
     assert_eq!(typer.store().symbols.get(external), &previous);
     assert_eq!(typer.typed_ast().iter().count(), typed_count);
     for (tree, before) in mappings {
@@ -590,6 +601,7 @@ struct ResolutionLog {
     members: Vec<(String, SymbolId)>,
     session: Option<LoadingSession>,
     completions: Vec<SymbolId>,
+    shell_dependencies: Vec<(String, SymbolId)>,
 }
 
 struct RecordingResolver<E: ClassPathEntry> {
@@ -636,6 +648,7 @@ impl<E: ClassPathEntry> SymbolResolver for RecordingResolver<E> {
 
     fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
         self.inner().rollback_to(store, checkpoint);
+        assert_eq!(self.inner().checkpoint(), checkpoint);
     }
 
     fn resolve_member(
@@ -648,6 +661,46 @@ impl<E: ClassPathEntry> SymbolResolver for RecordingResolver<E> {
         }
         let result = self.inner().resolve_member(store, request)?;
         if let Some(symbol) = result {
+            if let SymbolInfo::Complete(info) = store.symbols.get(symbol).info
+                && let Type::ClassInfo(info) = store.types.get(info)
+            {
+                let mut dependencies = store
+                    .scopes
+                    .get(info.declarations)
+                    .entered_symbols()
+                    .filter_map(|member| {
+                        let SymbolInfo::Complete(ty) = store.symbols.get(member).info else {
+                            return None;
+                        };
+                        let Type::TypeRef {
+                            target: dotty_core::types::TypeRefTarget::Symbol(id),
+                            ..
+                        } = store.types.get(ty)
+                        else {
+                            return None;
+                        };
+                        (store.symbols.get(*id).info == SymbolInfo::Missing).then(|| {
+                            (
+                                store
+                                    .names
+                                    .resolve(store.symbols.get(*id).name.text())
+                                    .to_owned(),
+                                *id,
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                dependencies.sort_by(|left, right| {
+                    left.0
+                        .cmp(&right.0)
+                        .then(left.1.index().cmp(&right.1.index()))
+                });
+                dependencies.dedup();
+                self.log
+                    .borrow_mut()
+                    .shell_dependencies
+                    .extend(dependencies);
+            }
             self.log
                 .borrow_mut()
                 .members
@@ -1160,11 +1213,22 @@ fn expression_failure_rolls_back_loaded_class_and_allows_a_later_resolution() {
         .iter()
         .map(|(tree, _)| (tree, typer.source_type_index().type_at(unit.source, tree)))
         .collect::<Vec<_>>();
+    let source_symbols = unit
+        .parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, _)| unit.index.symbol_at(unit.source, tree))
+        .map(|id| (id, typer.store().symbols.get(id).clone()))
+        .collect::<Vec<_>>();
     let error = typer
         .type_expression(broken_rhs, broken_context)
         .expect_err("a missing external member should fail typing");
     assert!(matches!(error, TyperError::MemberNotFound { .. }));
     assert_eq!(typer.store().checkpoint(), store_checkpoint);
+    for (id, previous) in source_symbols {
+        assert_eq!(typer.store().symbols.get(id), &previous);
+    }
+
     assert_eq!(typer.typed_ast().iter().count(), typed_node_count);
     assert_eq!(
         unit.parsed
@@ -1205,6 +1269,13 @@ fn expression_failure_rolls_back_loaded_class_and_allows_a_later_resolution() {
         "the failed expression must not leave the loaded class in the store"
     );
 
+    let pong_shell = log
+        .borrow()
+        .shell_dependencies
+        .iter()
+        .find_map(|(name, id)| (name == "Pong").then_some(*id))
+        .expect("the failed expression must have created the Ping.other shell");
+    assert!(!typer.store().symbols.contains(pong_shell));
     let (valid_method, valid_rhs) = method_rhs(&unit, typer.store(), "valid");
     let valid_context = typer.expression_context_for(valid_method).unwrap();
     let typed = typer.type_expression(valid_rhs, valid_context).unwrap();

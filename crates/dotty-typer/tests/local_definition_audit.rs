@@ -71,7 +71,6 @@ struct ResolverMetrics {
     package_type_class_resource: usize,
     package_type_class_targets: BTreeSet<String>,
     dependency_profiles: Vec<DependencyObservation>,
-    on_demand_completions: usize,
     class_member_successes_by_kind: BTreeMap<&'static str, usize>,
     class_member_after_shell_completion: usize,
     class_member_completed_prefix_reuse: usize,
@@ -289,11 +288,6 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &mut SemanticStore,
         symbol: SymbolId,
     ) -> Result<bool, ResolutionError> {
-        let target_binary = store
-            .symbols
-            .contains(symbol)
-            .then(|| audit_binary_candidate(store, symbol))
-            .flatten();
         let request = if store.symbols.contains(symbol) {
             format!("completion::{}", audit_symbol_path(store, symbol))
         } else {
@@ -302,13 +296,6 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let result = self.inner.complete_class(store, symbol);
         let profiles = self.inner.take_load_profiles();
         let mut metrics = self.metrics.borrow_mut();
-        if matches!(result, Ok(true))
-            && target_binary
-                .as_ref()
-                .is_some_and(|name| profiles.iter().any(|p| p.completed_classes.contains(name)))
-        {
-            metrics.on_demand_completions += 1;
-        }
         let file = metrics.current_file.clone();
         let method = metrics.current_method.clone();
         for profile in profiles {
@@ -478,9 +465,6 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 .any(|profile| &profile.root == name && profile.completed_classes.contains(name))
         });
         let mut metrics = self.metrics.borrow_mut();
-        if target_completed {
-            metrics.on_demand_completions += 1;
-        }
         metrics.resolver_member_requests += 1;
         *metrics
             .member_request_shapes
@@ -1593,6 +1577,7 @@ struct Audit {
     patdef_profile: PatDefProfile,
     missing_declared_type_profile: MissingDeclaredTypeProfile,
     local_method_first_blockers: BTreeMap<String, String>,
+    local_method_attempts: BTreeSet<String>,
     local_value_blocker_profile: LocalValueBlockerProfile,
     local_value_baseline_outcomes: BTreeSet<LocalValueBaselineOutcome>,
     by_name_method_outcomes: BTreeMap<String, String>,
@@ -1875,6 +1860,7 @@ impl Default for Audit {
             patdef_profile: PatDefProfile::default(),
             missing_declared_type_profile: MissingDeclaredTypeProfile::default(),
             local_method_first_blockers: BTreeMap::new(),
+            local_method_attempts: BTreeSet::new(),
             local_value_blocker_profile: LocalValueBlockerProfile::default(),
             local_value_baseline_outcomes: BTreeSet::new(),
             by_name_method_outcomes: BTreeMap::new(),
@@ -2721,6 +2707,8 @@ impl Audit {
             .merge(other.missing_declared_type_profile);
         self.local_method_first_blockers
             .extend(other.local_method_first_blockers);
+        self.local_method_attempts
+            .extend(other.local_method_attempts);
         self.resolution_blocker_profile
             .observations
             .extend(other.resolution_blocker_profile.observations);
@@ -3830,6 +3818,10 @@ fn pinned_scala39_local_definition_audit() {
     print_resolution_blocker_profile(&audit.resolution_blocker_profile);
     print_pinned_immutable_field_completion_outcomes(&root, classpath.clone());
     print_pinned_mutable_field_completion_outcomes(&root, classpath);
+    println!("local_method_attempts:");
+    for row in &audit.local_method_attempts {
+        println!("  {row}");
+    }
     print_pinned_immutable_field_method_outcomes(&audit.local_method_first_blockers);
     print_pinned_mutable_field_method_outcomes(&audit.local_method_first_blockers);
     print_local_method_signature_profile(&audit.local_method_signature_profile);
@@ -4303,6 +4295,10 @@ fn print_pinned_immutable_field_completion_outcomes(root: &Path, classpath: Shar
             definitions,
             &typer_packages,
         );
+        let metrics = Rc::new(RefCell::new(ResolverMetrics {
+            current_method: format!("field:{relative_path}#tree={expected_tree_index}"),
+            ..ResolverMetrics::default()
+        }));
         typer = typer.with_resolver(Box::new(AuditResolver {
             inner: ClasspathSymbolResolver::new(
                 classpath.clone(),
@@ -4310,7 +4306,7 @@ fn print_pinned_immutable_field_completion_outcomes(root: &Path, classpath: Shar
                 LoadingSession::with_packages(namer_packages),
             )
             .with_load_profile_collection(),
-            metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
+            metrics: metrics.clone(),
             class_path_probe: None,
         }));
         let outcome = match typer.complete_symbol(field) {
@@ -4331,6 +4327,35 @@ fn print_pinned_immutable_field_completion_outcomes(root: &Path, classpath: Shar
         };
         println!(
             "  {relative_path}: tree={expected_tree_index} field={field_name} baseline_occurrences={baseline_occurrences} outcome={outcome}"
+        );
+        let metrics = metrics.borrow();
+        let targets = metrics
+            .resolver_requests_by_method
+            .values()
+            .flatten()
+            .map(|observation| format!("{}::outcome={}", observation.target, observation.outcome))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let shells = metrics
+            .dependency_profiles
+            .iter()
+            .flat_map(|x| x.profile.identity_shells.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(",");
+        let completed = metrics
+            .dependency_profiles
+            .iter()
+            .flat_map(|x| x.profile.completed_classes.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "    field:{relative_path}#tree={expected_tree_index}::targets=[{targets}]::shells=[{shells}]::completed=[{completed}]"
         );
     }
 }
@@ -4469,6 +4494,10 @@ fn print_pinned_mutable_field_completion_outcomes(root: &Path, classpath: Shared
             definitions,
             &typer_packages,
         );
+        let metrics = Rc::new(RefCell::new(ResolverMetrics {
+            current_method: format!("field:{relative_path}#tree={expected_tree_index}"),
+            ..ResolverMetrics::default()
+        }));
         typer = typer.with_resolver(Box::new(AuditResolver {
             inner: ClasspathSymbolResolver::new(
                 classpath.clone(),
@@ -4476,7 +4505,7 @@ fn print_pinned_mutable_field_completion_outcomes(root: &Path, classpath: Shared
                 LoadingSession::with_packages(namer_packages),
             )
             .with_load_profile_collection(),
-            metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
+            metrics: metrics.clone(),
             class_path_probe: None,
         }));
         let outcome = match typer.complete_symbol(field) {
@@ -4500,6 +4529,35 @@ fn print_pinned_mutable_field_completion_outcomes(root: &Path, classpath: Shared
         };
         println!(
             "  {relative_path}: tree={expected_tree_index} field={field_name} baseline_occurrences={baseline_occurrences} outcome={outcome}"
+        );
+        let metrics = metrics.borrow();
+        let targets = metrics
+            .resolver_requests_by_method
+            .values()
+            .flatten()
+            .map(|observation| format!("{}::outcome={}", observation.target, observation.outcome))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let shells = metrics
+            .dependency_profiles
+            .iter()
+            .flat_map(|x| x.profile.identity_shells.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(",");
+        let completed = metrics
+            .dependency_profiles
+            .iter()
+            .flat_map(|x| x.profile.completed_classes.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "    field:{relative_path}#tree={expected_tree_index}::targets=[{targets}]::shells=[{shells}]::completed=[{completed}]"
         );
     }
 }
@@ -6720,8 +6778,28 @@ fn audit_source_inner(
     }
 
     for (tree, range) in local_method_trees.clone() {
+        let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind else {
+            unreachable!()
+        };
+        let name = typer
+            .store()
+            .names
+            .resolve(definition.name.as_name().text());
+        let start = parsed
+            .ast
+            .get(tree)
+            .position
+            .unwrap()
+            .span()
+            .range()
+            .start() as usize;
+        let line = text[..start].bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let site = format!("{path}:{line}:{name}");
         if typer.source_typed_index().get(source, tree).is_some() {
             audit.typed_local_defdefs += 1;
+            audit.local_method_attempts.insert(format!(
+                "method={path}#tree={}::site={site}::attempt={path}#tree={}::blocker=typed::typed=true",
+                tree.index(), tree.index()));
             audit
                 .local_method_first_blockers
                 .insert(format!("{path}#tree={}", tree.index()), "typed".to_owned());
@@ -6815,6 +6893,13 @@ fn audit_source_inner(
                         None,
                     )
                 });
+            let attempt = blocker_method_tree
+                .map_or_else(|| "<none>".to_owned(), |id| format!("{path}#tree={id}"));
+            audit.local_method_attempts.insert(format!(
+                "method={path}#tree={}::site={site}::attempt={attempt}::blocker={}::typed=false",
+                tree.index(),
+                kind.bucket
+            ));
             record_impure_function_baseline_outcome(
                 &mut audit,
                 ImpureFunctionBaselineAuditContext {
@@ -7824,6 +7909,24 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     println!("  distinct_classes={}", metrics.classes.len());
     println!("  distinct_members={}", metrics.members.len());
     print_dependency_profiles(metrics);
+    println!("resolver_observations_by_enclosing_method:");
+    for (method, observations) in &metrics.resolver_requests_by_method {
+        let mut counts = BTreeMap::new();
+        for observation in observations {
+            *counts
+                .entry((&observation.target, &observation.outcome))
+                .or_insert(0) += 1;
+        }
+        println!(
+            "    {method}: requests={}, distinct_request_outcomes={}",
+            observations.len(),
+            counts.len()
+        );
+        for ((target, outcome), count) in counts {
+            println!("      target={target}::outcome={outcome}={count}");
+        }
+    }
+
     println!(
         "  classloader_success_gate={}",
         if !metrics.classes.is_empty() && !metrics.members.is_empty() {
@@ -8052,7 +8155,15 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
 
     println!("dependency_load_profile:");
     println!("  top_level_class_loads={}", depths.len());
-    println!("  on_demand_completions={}", metrics.on_demand_completions);
+    println!(
+        "  on_demand_completions={}",
+        metrics
+            .dependency_profiles
+            .iter()
+            .filter(|x| x.profile.root_was_shell
+                && x.profile.completed_classes.contains(&x.profile.root))
+            .count()
+    );
     for (label, count) in [
         (
             "identity_shell_creations",
