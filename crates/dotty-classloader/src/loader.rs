@@ -295,6 +295,12 @@ pub struct ClassLoadProfile {
     pub classes: BTreeSet<String>,
     /// Classes newly completed in this request, excluding completed cache hits.
     pub full_completions: usize,
+    /// Sorted classes whose full load succeeded during this request.
+    pub completed_classes: BTreeSet<String>,
+    /// Identities created or reused while incomplete during this request.
+    pub identity_shells: BTreeSet<String>,
+    /// Full-load requests satisfied by an already completed session entry.
+    pub completed_cache_hits: usize,
     /// Newly allocated external identity shells (including enclosing owners).
     pub shells_created: usize,
     /// Requests reusing an incomplete external identity, including in-progress loads.
@@ -312,6 +318,9 @@ struct ActiveLoadProfile {
     max_dependency_depth: usize,
     classes: BTreeSet<String>,
     full_completions: usize,
+    completed_classes: BTreeSet<String>,
+    identity_shells: BTreeSet<String>,
+    completed_cache_hits: usize,
     shells_created: usize,
     shells_reused: usize,
     member_type_references: usize,
@@ -544,6 +553,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             Some(ClassEntry::Loading(symbol)) => {
                 if let Some(profile) = &mut self.active_load_profile {
                     profile.shells_reused += 1;
+                    profile
+                        .identity_shells
+                        .insert(name.as_internal().to_owned());
                 }
                 return Ok(*symbol);
             }
@@ -563,6 +575,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 SymbolInfo::Missing => {
                     if let Some(profile) = &mut self.active_load_profile {
                         profile.shells_reused += 1;
+                        profile
+                            .identity_shells
+                            .insert(name.as_internal().to_owned());
                     }
                 }
                 SymbolInfo::Complete(info)
@@ -706,6 +721,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.session.cache_identified(name.clone(), symbol);
                 if let Some(profile) = &mut self.active_load_profile {
                     profile.shells_reused += 1;
+                    profile
+                        .identity_shells
+                        .insert(name.as_internal().to_owned());
                 }
             }
             self.session.record_origin(symbol, origin);
@@ -760,6 +778,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.session.record_origin(symbol, origin);
         if let Some(profile) = &mut self.active_load_profile {
             profile.shells_created += 1;
+            profile
+                .identity_shells
+                .insert(name.as_internal().to_owned());
         }
         Ok(symbol)
     }
@@ -847,6 +868,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // never stored here -- only in the loader-local `self.repository`
         // consulted next.
         if let Some(&symbol) = self.session.resolved.get(name) {
+            if let Some(profile) = &mut self.active_load_profile {
+                profile.completed_cache_hits += 1;
+            }
             return Ok(symbol);
         }
 
@@ -908,6 +932,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.session.cache_resolved(name.clone(), symbol);
                 if let Some(profile) = &mut self.active_load_profile {
                     profile.full_completions += 1;
+                    profile
+                        .completed_classes
+                        .insert(name.as_internal().to_owned());
                 }
                 Ok(symbol)
             }
@@ -969,6 +996,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 max_dependency_depth: profile.max_dependency_depth,
                 classes: profile.classes,
                 full_completions: profile.full_completions,
+                completed_classes: profile.completed_classes,
+                identity_shells: profile.identity_shells,
+                completed_cache_hits: profile.completed_cache_hits,
                 shells_created: profile.shells_created,
                 shells_reused: profile.shells_reused,
                 member_type_references: profile.member_type_references,
@@ -6210,7 +6240,13 @@ mod tests {
         }
         let profile = loader.take_load_profiles().pop().unwrap();
         assert_eq!(profile.full_completions, 1);
+        assert_eq!(profile.completed_classes, BTreeSet::from(["A".to_owned()]));
+        assert_eq!(profile.completed_cache_hits, 0);
         assert_eq!(profile.shells_created, 20);
+        assert_eq!(
+            profile.identity_shells,
+            (1..=20).map(|i| format!("B{i}")).collect()
+        );
         assert_eq!(profile.shells_reused, 1);
         assert_eq!(profile.member_type_references, 21);
         assert_eq!(profile.hierarchy_loads, 0);
@@ -6219,6 +6255,8 @@ mod tests {
         assert_eq!(loader.load_class(&a_name).unwrap(), a);
         let cached = loader.take_load_profiles().pop().unwrap();
         assert_eq!(cached.full_completions, 0);
+        assert!(cached.completed_classes.is_empty());
+        assert_eq!(cached.completed_cache_hits, 1);
         assert_eq!(cached.shells_created, 0);
         assert_eq!(cached.shells_reused, 0);
         assert_eq!(calls.load(Ordering::Relaxed), 21);

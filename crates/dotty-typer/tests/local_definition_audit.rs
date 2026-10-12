@@ -71,6 +71,7 @@ struct ResolverMetrics {
     package_type_class_resource: usize,
     package_type_class_targets: BTreeSet<String>,
     dependency_profiles: Vec<DependencyObservation>,
+    on_demand_completions: usize,
     class_member_successes_by_kind: BTreeMap<&'static str, usize>,
     class_member_after_shell_completion: usize,
     class_member_completed_prefix_reuse: usize,
@@ -288,6 +289,11 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &mut SemanticStore,
         symbol: SymbolId,
     ) -> Result<bool, ResolutionError> {
+        let target_binary = store
+            .symbols
+            .contains(symbol)
+            .then(|| audit_binary_candidate(store, symbol))
+            .flatten();
         let request = if store.symbols.contains(symbol) {
             format!("completion::{}", audit_symbol_path(store, symbol))
         } else {
@@ -296,6 +302,13 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let result = self.inner.complete_class(store, symbol);
         let profiles = self.inner.take_load_profiles();
         let mut metrics = self.metrics.borrow_mut();
+        if matches!(result, Ok(true))
+            && target_binary
+                .as_ref()
+                .is_some_and(|name| profiles.iter().any(|p| p.completed_classes.contains(name)))
+        {
+            metrics.on_demand_completions += 1;
+        }
         let file = metrics.current_file.clone();
         let method = metrics.current_method.clone();
         for profile in profiles {
@@ -462,9 +475,12 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let target_completed = target_binary.as_ref().is_some_and(|name| {
             load_profiles
                 .iter()
-                .any(|profile| &profile.root == name && profile.full_completions > 0)
+                .any(|profile| &profile.root == name && profile.completed_classes.contains(name))
         });
         let mut metrics = self.metrics.borrow_mut();
+        if target_completed {
+            metrics.on_demand_completions += 1;
+        }
         metrics.resolver_member_requests += 1;
         *metrics
             .member_request_shapes
@@ -8036,7 +8052,74 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
 
     println!("dependency_load_profile:");
     println!("  top_level_class_loads={}", depths.len());
+    println!("  on_demand_completions={}", metrics.on_demand_completions);
+    for (label, count) in [
+        (
+            "identity_shell_creations",
+            metrics
+                .dependency_profiles
+                .iter()
+                .map(|x| x.profile.shells_created)
+                .sum::<usize>(),
+        ),
+        (
+            "identity_shell_reuses",
+            metrics
+                .dependency_profiles
+                .iter()
+                .map(|x| x.profile.shells_reused)
+                .sum::<usize>(),
+        ),
+        (
+            "member_type_dependencies_deferred",
+            metrics
+                .dependency_profiles
+                .iter()
+                .map(|x| x.profile.member_type_references)
+                .sum::<usize>(),
+        ),
+        (
+            "hierarchy_eager_loads",
+            metrics
+                .dependency_profiles
+                .iter()
+                .map(|x| x.profile.hierarchy_loads)
+                .sum::<usize>(),
+        ),
+    ] {
+        println!("  {label}={count}");
+    }
+    for (label, maximum) in [
+        (
+            "max_distinct_fully_completed_classes_per_request",
+            metrics
+                .dependency_profiles
+                .iter()
+                .map(|x| x.profile.completed_classes.len())
+                .max()
+                .unwrap_or(0),
+        ),
+        (
+            "max_identity_shells_created_per_request",
+            metrics
+                .dependency_profiles
+                .iter()
+                .map(|x| x.profile.shells_created)
+                .max()
+                .unwrap_or(0),
+        ),
+    ] {
+        println!("  {label}={maximum}");
+    }
     for (label, total) in [
+        (
+            "completed_cache_hits",
+            metrics
+                .dependency_profiles
+                .iter()
+                .map(|x| x.profile.completed_cache_hits)
+                .sum::<usize>(),
+        ),
         (
             "full_completions",
             metrics
@@ -8089,13 +8172,40 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
     println!("  p95_dependency_depth={p95_depth}");
     println!("  max_distinct_classes_touched_by_one_request={max_classes}");
 
+    let mut observed_by_method: BTreeMap<&str, (BTreeSet<&str>, BTreeSet<&str>)> = BTreeMap::new();
+    for observation in &metrics.dependency_profiles {
+        let (shells, completed) = observed_by_method.entry(&observation.method).or_default();
+        shells.extend(
+            observation
+                .profile
+                .identity_shells
+                .iter()
+                .map(String::as_str),
+        );
+        completed.extend(
+            observation
+                .profile
+                .completed_classes
+                .iter()
+                .map(String::as_str),
+        );
+    }
+    println!("  lifecycle_observations_by_method:");
+    for (method, (shells, completed)) in observed_by_method {
+        println!(
+            "    method={method}::shells=[{}]::completed=[{}]",
+            shells.into_iter().collect::<Vec<_>>().join(","),
+            completed.into_iter().collect::<Vec<_>>().join(",")
+        );
+    }
+
     let mut largest = metrics.dependency_profiles.iter().collect::<Vec<_>>();
     largest.sort_by(|left, right| {
         right
             .profile
-            .classes
+            .completed_classes
             .len()
-            .cmp(&left.profile.classes.len())
+            .cmp(&left.profile.completed_classes.len())
             .then(left.profile.root.cmp(&right.profile.root))
             .then(left.file.cmp(&right.file))
             .then(left.method.cmp(&right.method))
@@ -8104,7 +8214,7 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
     println!("  largest_top_level_loads:");
     for observation in largest.into_iter().take(10) {
         println!(
-            "    root={}::file={}::method={}::request={}::depth={}::distinct_classes={}::full_completions={}::shells_created={}::shells_reused={}::member_type_references={}::hierarchy_loads={}::classes=[{}]",
+            "    root={}::file={}::method={}::request={}::depth={}::distinct_classes={}::full_completions={}::shells_created={}::shells_reused={}::member_type_references={}::hierarchy_loads={}::completed_cache_hits={}::completed_classes=[{}]::classes=[{}]",
             observation.profile.root,
             observation.file,
             observation.method,
@@ -8116,6 +8226,14 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
             observation.profile.shells_reused,
             observation.profile.member_type_references,
             observation.profile.hierarchy_loads,
+            observation.profile.completed_cache_hits,
+            observation
+                .profile
+                .completed_classes
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(","),
             observation
                 .profile
                 .classes
