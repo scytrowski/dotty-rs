@@ -388,6 +388,18 @@ shape: `SymbolInfo::Missing` until a class's supertypes/members are
 known, then `SymbolInfo::Complete(TypeId)` pointing at its
 `Type::ClassInfo`.
 
+Callers that only need a stable external class identity can use
+`ClassLoader::ensure_class_identity(name)`. It reads the selected resource
+and decodes only the class kind and visibility, enters the symbol in its
+canonical package scope, and leaves `SymbolInfo::Missing`. It does not
+resolve supertypes, member types, or class members. JVM nested ownership is
+followed only when the class file's `InnerClasses` or `EnclosingMethod`
+metadata names an enclosing class; `$` in the binary name is not enough.
+The session tracks these identified shells separately from fully resolved
+classes. A later `load_class` reuses and completes the same `SymbolId`.
+Failed identity establishment rolls back newly entered symbols, packages,
+and session metadata.
+
 `ClassLoader::load_class(name)` follows that shape:
 
 1. Resolve `scala.Any`, `scala.AnyRef`, and `scala.Nothing` to their
@@ -456,8 +468,9 @@ known, then `SymbolInfo::Complete(TypeId)` pointing at its
   `Definitions` (the shared builtin primitive/`Object`/`Any`/`Nothing`
   identities every descriptor/signature/`.tasty`-tree lowering step
   targets).
-- `LoadingSession` — bundles a positive-only `BinaryName -> SymbolId`
-  map, `PackageRegistry`, and the `ClassfileMetadata`/`ClassOrigin`
+- `LoadingSession` — bundles separate positive-only `BinaryName -> SymbolId`
+  maps for identified shells and fully resolved classes, `PackageRegistry`,
+  and the `ClassfileMetadata`/`ClassOrigin`
   sidecar tables (keyed by the already-resolved `SymbolId`, so sharing
   them carries none of the negative-caching risk below) so several
   `ClassLoader`s loading sequentially against one shared `SemanticStore`

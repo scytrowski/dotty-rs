@@ -66,6 +66,9 @@ pub enum ClassLoadError {
         requested: BinaryName,
         actual: BinaryName,
     },
+    /// A name in the canonical package scope is occupied by a symbol that
+    /// cannot safely represent the requested external class identity.
+    IdentityConflict { name: BinaryName, reason: String },
     /// The bytes found for this class did not decode as a valid
     /// `.tasty` file, or no `TypeDef` in it matched the requested name —
     /// including a `.tasty` supertype reference that could not be
@@ -133,6 +136,12 @@ impl fmt::Display for ClassLoadError {
                 formatter,
                 "requested class {requested} but its class file declares {actual}"
             ),
+            Self::IdentityConflict { name, reason } => {
+                write!(
+                    formatter,
+                    "cannot establish canonical identity for {name}: {reason}"
+                )
+            }
             Self::InvalidTastyFile(name, source) => {
                 write!(formatter, "invalid .tasty file for {name}: {source}")
             }
@@ -171,6 +180,7 @@ impl ClassLoadError {
             Self::MalformedDescriptor(_, _) => "classloader.malformed_descriptor",
             Self::MalformedSignature(_, _) => "classloader.malformed_signature",
             Self::NameMismatch { .. } => "classloader.name_mismatch",
+            Self::IdentityConflict { .. } => "classloader.identity_conflict",
             Self::InvalidTastyFile(_, _) => "classloader.invalid_tasty_file",
             Self::CircularInheritance(_) => "classloader.circular_inheritance",
             Self::InheritanceDepthExceeded(_) => "classloader.inheritance_depth_exceeded",
@@ -224,6 +234,7 @@ impl ClassLoadError {
             Self::MalformedReference(_, _)
             | Self::MalformedDescriptor(_, _)
             | Self::NameMismatch { .. }
+            | Self::IdentityConflict { .. }
             | Self::CircularInheritance(_) => C::MalformedArtifact,
             Self::MalformedSignature(
                 _,
@@ -290,6 +301,7 @@ impl std::error::Error for ClassLoadError {
         match self {
             Self::NotFound(_)
             | Self::NameMismatch { .. }
+            | Self::IdentityConflict { .. }
             | Self::CircularInheritance(_)
             | Self::InheritanceDepthExceeded(_)
             | Self::UnresolvedTypeVariable(_, _)
@@ -519,6 +531,10 @@ mod tests {
                 requested: name.clone(),
                 actual: BinaryName::from_internal("B"),
             },
+            ClassLoadError::IdentityConflict {
+                name: name.clone(),
+                reason: "occupied by a non-class symbol".to_owned(),
+            },
             ClassLoadError::InvalidTastyFile(name.clone(), TastyDecodeError::MissingTypeDef),
             ClassLoadError::CircularInheritance(name.clone()),
             ClassLoadError::InheritanceDepthExceeded(name.clone()),
@@ -543,6 +559,7 @@ mod tests {
                 "classloader.malformed_descriptor",
                 "classloader.malformed_signature",
                 "classloader.name_mismatch",
+                "classloader.identity_conflict",
                 "classloader.invalid_tasty_file",
                 "classloader.circular_inheritance",
                 "classloader.inheritance_depth_exceeded",
@@ -557,6 +574,7 @@ mod tests {
                 ClassLoadCategory::IoOrEnvironment,
                 ClassLoadCategory::MalformedArtifact,
                 ClassLoadCategory::UnsupportedFeatureOrVersion,
+                ClassLoadCategory::MalformedArtifact,
                 ClassLoadCategory::MalformedArtifact,
                 ClassLoadCategory::MalformedArtifact,
                 ClassLoadCategory::MalformedArtifact,

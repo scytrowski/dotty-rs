@@ -135,7 +135,10 @@ impl LoadingSession {
     }
 
     pub(crate) fn record_origin(&mut self, symbol: SymbolId, origin: ClassOrigin) {
-        if !self.origins.contains_key(&symbol) && !self.metadata.contains_key(&symbol) {
+        if self.origins.contains_key(&symbol) {
+            return;
+        }
+        if !self.metadata.contains_key(&symbol) {
             self.sidecar_order.push(symbol);
         }
         self.origins.insert(symbol, origin);
