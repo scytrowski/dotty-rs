@@ -12631,42 +12631,42 @@ resolver_581_comparison:
     library/src/scala/util/hashing/MurmurHash3.scala#tree=1470::scala.util.hashing.MurmurHash3$.mapHash: requests=1, distinct_request_outcomes=1
       prefix=scala.collection::namespace=type::name=Map::space=Prefix::outcome=error=1
   normalized_member_error_roots:
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=dotty/tools/io/ManifestResources::root=dotty/tools/io=2
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=dotty/tools/io/VirtualDirectory::root=dotty/tools/io=1
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=dotty/tools/io/ManifestResources::root=dotty/tools/io/ManifestResources=2
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=dotty/tools/io/VirtualDirectory::root=dotty/tools/io/VirtualDirectory=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/Tuple2::root=scala/Tuple2=2
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/Tuple3::root=scala/Tuple3=1
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/annotation/retainsCap::root=scala/annotation=110
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/annotation/switch::root=scala/annotation=19
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/IndexedSeq::root=scala/caps=1
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/LinearSeq::root=scala/caps=1
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/Map::root=scala/caps=1
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/Seq::root=scala/caps=9
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/Set::root=scala/caps=2
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/SortedMapOps::root=scala/caps=1
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/annotation/retainsCap::root=scala/annotation/retainsCap=110
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/annotation/switch::root=scala/annotation/switch=19
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/IndexedSeq::root=scala/collection/Seq=1
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/LinearSeq::root=scala/collection/Seq=1
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/Map::root=scala/collection/Map=1
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/Seq::root=scala/collection/Seq=9
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/Set::root=scala/collection/Set=2
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/SortedMapOps::root=scala/collection/SortedMapOps=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/convert/impl/BoxedBooleanArrayStepper::root=scala/collection/convert/impl/BoxedBooleanArrayStepper=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/convert/impl/CharStringStepper::root=scala/collection/convert/impl/CharStringStepper=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/convert/impl/ObjectArrayStepper::root=scala/collection/convert/impl/ObjectArrayStepper=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/convert/impl/RangeStepper::root=scala/collection/convert/impl/RangeStepper=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/immutable/BitSet::root=scala/collection/immutable/BitSet=5
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/immutable/Iterable::root=scala/collection=1
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/immutable/Iterable::root=scala/collection/immutable/Iterable=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/immutable/List::root=scala/collection/immutable/List=10
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/immutable/WrappedString::root=scala/collection/immutable/WrappedString=11
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/mutable/ArrayBuffer::root=scala/collection/mutable/ArrayBuffer=4
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/mutable/ListBuffer::root=scala/collection/mutable/ListBuffer=16
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/mutable/Map::root=scala/collection=1
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/mutable/Map::root=scala/collection/mutable/Iterable=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/mutable/Queue::root=scala/collection/mutable/Queue=1
     root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/collection/mutable/StringBuilder::root=scala/collection/mutable/StringBuilder=7
-    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/io/BufferedSource::root=scala/io=2
+    root_cause=InvalidTastyFile::UnresolvedSupertype::requested=scala/io/BufferedSource::root=scala/io/BufferedSource=2
     root_cause=unresolved class::requested=dotty/tools/tasty/TastyVersion::root=scala/Serializable=4
     root_cause=unresolved class::requested=scala/collection/convert/impl/CodePointStringStepper::root=scala/collection/Stepper/EfficientSplit=1
   member_error_wrappers:
     DependencyFailure=8
   dependency_failure_chains:
     requested=dotty/tools/tasty/TastyVersion::root=scala/Serializable::root_cause=unresolved class::depth=1::distinct_dependencies=1=4
-    requested=scala/collection/IndexedSeq::root=scala/caps::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=1::distinct_dependencies=2=1
-    requested=scala/collection/LinearSeq::root=scala/caps::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=1::distinct_dependencies=2=1
+    requested=scala/collection/IndexedSeq::root=scala/collection/Seq::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=1::distinct_dependencies=1=1
+    requested=scala/collection/LinearSeq::root=scala/collection/Seq::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=1::distinct_dependencies=1=1
     requested=scala/collection/convert/impl/CodePointStringStepper::root=scala/collection/Stepper/EfficientSplit::root_cause=unresolved class::depth=1::distinct_dependencies=1=1
-    requested=scala/collection/mutable/Map::root=scala/collection::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=1::distinct_dependencies=2=1
+    requested=scala/collection/mutable/Map::root=scala/collection/mutable/Iterable::root_cause=InvalidTastyFile::UnresolvedSupertype::depth=1::distinct_dependencies=1=1
   tasty_unresolved_supertype_failures:
     requested=dotty/tools/io/ManifestResources::source_package=dotty/tools/io::parent_index=0::parent_shape=package-qualified::semantic_reference=true::reference_prefix=true::visible_names=["ZipArchive", "dotty/tools/io"]::raw_shape=LengthNode(tag=136)=2
     requested=dotty/tools/io/VirtualDirectory::source_package=dotty/tools/io::parent_index=0::parent_shape=package-qualified::semantic_reference=true::reference_prefix=true::visible_names=["AbstractFile", "dotty/tools/io"]::raw_shape=LengthNode(tag=136)=1

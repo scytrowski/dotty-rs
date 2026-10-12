@@ -884,7 +884,16 @@ fn deepest_dependency_cause(reason: &str) -> &str {
 }
 
 fn error_binary_names(reason: &str) -> Vec<String> {
-    reason
+    // TASTy unresolved-parent errors append a diagnostic profile after the
+    // class-loading chain. That profile can contain package-qualified names
+    // (for example `names=["Annotation", "scala/annotation"]`) that are not
+    // classes in the failure chain. Keep identity extraction on the stable
+    // error prefix and let `unresolved_tasty_parent_profile` consume the
+    // diagnostic payload separately.
+    let identity_chain = reason
+        .split_once("unresolved supertype reference at parent ")
+        .map_or(reason, |(identity_chain, _)| identity_chain);
+    identity_chain
         .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '/' | '$' | '_' | '.')))
         .filter(|part| part.contains('/') || part.starts_with("java.") || part.contains('$'))
         .map(str::to_owned)
@@ -11359,6 +11368,17 @@ mod resolver_profile_tests {
                 "parent_index=1::parent_shape=applied::semantic_reference=true::reference_prefix=true::visible_names=[\"scala/Parent\"]::raw_shape=LengthNode(tag=162)"
             )
         );
+    }
+
+    #[test]
+    fn tasty_parent_diagnostic_names_do_not_replace_the_failing_class_root() {
+        let error = ResolutionError::Malformed {
+            reason: "invalid .tasty file for scala/annotation/retainsCap: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\"Annotation\", \"scala/annotation\"], raw=LengthNode(tag=136)".to_owned(),
+        };
+        let (category, requested, root) = normalized_error(&error);
+        assert_eq!(category, "InvalidTastyFile::UnresolvedSupertype");
+        assert_eq!(requested, "scala/annotation/retainsCap");
+        assert_eq!(root, "scala/annotation/retainsCap");
     }
 
     #[test]
