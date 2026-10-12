@@ -8,8 +8,8 @@ use std::collections::HashMap;
 /// The `SymbolId`-allocating state that must be shared, by value, across
 /// every [`ClassLoader`](crate::loader::ClassLoader) loading against one
 /// [`SemanticStore`](dotty_core::SemanticStore) session — which class names
-/// have already been *successfully* resolved to which `SymbolId`
-/// (`resolved`), the `PackageRegistry` (which package paths have already
+/// have a canonical identity (`identified`), or have been fully loaded and
+/// completed (`resolved`), the `PackageRegistry` (which package paths have already
 /// been resolved to which package `SymbolId`), and each resolved symbol's
 /// own [`ClassfileMetadata`]/[`ClassOrigin`] sidecar data.
 ///
@@ -61,6 +61,8 @@ use std::collections::HashMap;
 /// `HashMap`s and so is moved instead).
 #[derive(Debug, Default)]
 pub struct LoadingSession {
+    pub(crate) identified: HashMap<BinaryName, SymbolId>,
+    identified_order: Vec<BinaryName>,
     pub(crate) resolved: HashMap<BinaryName, SymbolId>,
     resolved_order: Vec<BinaryName>,
     pub(crate) packages: PackageRegistry,
@@ -71,6 +73,7 @@ pub struct LoadingSession {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SessionCheckpoint {
+    identified: usize,
     resolved: usize,
     sidecars: usize,
     packages: (usize, usize),
@@ -98,6 +101,8 @@ impl LoadingSession {
     /// `SemanticStore`.
     pub fn new() -> Self {
         Self {
+            identified: HashMap::new(),
+            identified_order: Vec::new(),
             resolved: HashMap::new(),
             resolved_order: Vec::new(),
             packages: PackageRegistry::new(),
@@ -109,6 +114,7 @@ impl LoadingSession {
 
     pub(crate) fn checkpoint(&self) -> SessionCheckpoint {
         SessionCheckpoint {
+            identified: self.identified_order.len(),
             resolved: self.resolved_order.len(),
             sidecars: self.sidecar_order.len(),
             packages: self.packages.checkpoint(),
@@ -116,8 +122,15 @@ impl LoadingSession {
     }
 
     pub(crate) fn cache_resolved(&mut self, name: BinaryName, symbol: SymbolId) {
+        self.cache_identified(name.clone(), symbol);
         if self.resolved.insert(name.clone(), symbol).is_none() {
             self.resolved_order.push(name);
+        }
+    }
+
+    pub(crate) fn cache_identified(&mut self, name: BinaryName, symbol: SymbolId) {
+        if self.identified.insert(name.clone(), symbol).is_none() {
+            self.identified_order.push(name);
         }
     }
 
@@ -140,6 +153,10 @@ impl LoadingSession {
         store: &mut dotty_core::SemanticStore,
         checkpoint: SessionCheckpoint,
     ) {
+        while self.identified_order.len() > checkpoint.identified {
+            let name = self.identified_order.pop().expect("length checked");
+            self.identified.remove(&name);
+        }
         while self.resolved_order.len() > checkpoint.resolved {
             let name = self.resolved_order.pop().expect("length checked");
             self.resolved.remove(&name);
@@ -150,5 +167,71 @@ impl LoadingSession {
             self.origins.remove(&symbol);
         }
         self.packages.rollback_to(store, checkpoint.packages);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dotty_core::{
+        Name, Namespace, SemanticStore, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks,
+        SymbolOrigin, Visibility,
+    };
+
+    fn symbol(store: &mut SemanticStore, name: &str) -> SymbolId {
+        let text = store.names.intern(name);
+        store.symbols.alloc(Symbol {
+            name: Name::new(text, Namespace::Type),
+            owner: None,
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        })
+    }
+
+    #[test]
+    fn identified_shell_is_not_reported_as_fully_resolved() {
+        let mut store = SemanticStore::new();
+        let identity = symbol(&mut store, "Shell");
+        let name = BinaryName::from_internal("sample/Shell");
+        let mut session = LoadingSession::new();
+
+        session.cache_identified(name.clone(), identity);
+
+        assert_eq!(session.identified.get(&name), Some(&identity));
+        assert!(!session.resolved.contains_key(&name));
+    }
+
+    #[test]
+    fn resolving_a_class_also_records_its_canonical_identity() {
+        let mut store = SemanticStore::new();
+        let identity = symbol(&mut store, "Complete");
+        let name = BinaryName::from_internal("sample/Complete");
+        let mut session = LoadingSession::new();
+
+        session.cache_resolved(name.clone(), identity);
+
+        assert_eq!(session.identified.get(&name), Some(&identity));
+        assert_eq!(session.resolved.get(&name), Some(&identity));
+    }
+
+    #[test]
+    fn rollback_removes_a_new_shell_identity() {
+        let mut store = SemanticStore::new();
+        let identity = symbol(&mut store, "Shell");
+        let name = BinaryName::from_internal("sample/Shell");
+        let mut session = LoadingSession::new();
+        let checkpoint = session.checkpoint();
+
+        session.cache_identified(name.clone(), identity);
+        session.rollback_to(&mut store, checkpoint);
+
+        assert!(!session.identified.contains_key(&name));
+        assert!(!session.resolved.contains_key(&name));
     }
 }
