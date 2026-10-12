@@ -1,6 +1,6 @@
 # Typer classpath corpus audit: Scala 3.9.0
 
-The report is generated from the pinned Scala 3.9.0 audit, which runs once by default. Pass `--verify-determinism` to run it twice and compare normalized output byte-for-byte. It records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success. The source corpus, parser/namer setup, Scala revision, JDK feature release 21, and classpath remain pinned.
+The report is generated from the pinned Scala 3.9.0 audit, which runs once by default. Pass `--verify-determinism` to run it twice and compare normalized output byte-for-byte. It records first blockers for local method typing, isolated Match-case probes, PatDef attempts, and structural inventories. A moved first blocker is not semantic success. The source corpus, parser/namer setup, Scala revision, JDK 21.0.8 (feature release 21), and classpath remain pinned.
 
 Run `tools/typer-classpath-corpus-audit/run` with the environment documented in `docs/typer-v0.1-compatibility.md` to regenerate this report.
 
@@ -440,49 +440,39 @@ The `tasty_unresolved_supertype_failures` rows below now include the parent inde
 
 ## #975 package type and member materialization
 
-The one-run audit was rerun with the pinned Scala revision, JDK 21, and the
-documented classpath. Its normalized output matches the checked-in raw report
-byte-for-byte. The resolver materializes 358 external class symbols across 29
-distinct classes: 125 are first materializations in a file session and 233
-reuse a symbol already loaded in that session. No corpus request succeeds as
-a non-class member; 7,493 requests remain unresolved and 217 fail during
-loading. The source corpus therefore still does not cross the external-member
-gate. Focused integration tests establish the next step directly: real JDK
-and Scala 3.9 classes materialize from package type requests, declared members
-are reachable from their class scopes, and ordinary typer lookup can reach an
-inherited Scala-library member.
+At the #975 checkpoint, package `TypeRef` plus a unique type name materialized a class into its canonical package/session identity. The pinned Scala 3.9/JDK 21 corpus recorded 358 external class symbols across 29 distinct classes (125 first materializations and 233 same-file session reuses); non-class external members remained at zero. The remaining member requests and errors are refreshed in the raw audit below. Focused fixtures cover a real JDK class and a real Scala 3.9 class, with complete class info, declaration scope, declared member access, inherited lookup, repeated identity, and rollback/retry.
 
-The frozen cohorts retain their first-blocker outcomes. Successful class
-materializations do not by themselves imply that an enclosing source method
-typed:
+Frozen cohorts are tracked row by row; a moved blocker is not full method typing:
 
-| Cohort | Current resolution or typing result | External class/member movement | Enclosing method |
-| --- | --- | --- | --- |
-| #946 impure functions (13 rows) | All stop at `SymbolResolution` while resolving `scala/annotation/retainsCap`'s unresolved TASTy parent. | No non-class member success. | 0 typed |
-| Earlier ordinary function types (12 rows) | 8 stop at `ImportQualifierNotFound`, 1 at `MemberLookup`, and 3 at `TypeNameNotFound`. | No non-class member success. | 0 typed |
-| Inferred class fields | All 14 immutable field completions stop at `ImportQualifierNotFound`; the 7 mutable fields have 3 direct completions, 3 `ImportQualifierNotFound` outcomes, and 1 `TypeNameNotFound`. | No enclosing method reaches a successful external member. | Method attempts remain blocked separately |
-| Singleton references (22 rows) | All moved past singleton projection and now stop at `ImportQualifierNotFound`. | No non-class member success. | 0 typed |
-| Local signatures (14 rows) | All remain at `ImportQualifierNotFound`; the local-signature-specific deferral is gone. | No non-class member success. | 0 typed |
-| Local values (21 rows) | 16 stop at `ImportQualifierNotFound`, 4 at anonymous-given identity deferral, and 1 at the inline-value deferral. | No non-class member success. | No completed local-symbol mapping |
+| Cohort | Current resolution or typing result | Enclosing method |
+| --- | --- | --- |
+| #946 impure functions (13 rows) | All stop at `SymbolResolution` at `scala/annotation/retainsCap`'s unresolved TASTy parent. | 0 typed |
+| Earlier ordinary function types (12 rows) | 8 stop at `ImportQualifierNotFound`, 1 at `MemberLookup`, and 3 at `TypeNameNotFound`. | 0 typed |
+| Inferred class fields | All 14 immutable completions stop at `ImportQualifierNotFound`; 3 of 7 mutable fields complete directly, 3 stop at `ImportQualifierNotFound`, and 1 at `TypeNameNotFound`. | No external member success |
+| Singleton references (22 rows) | All moved past singleton projection and stop at `ImportQualifierNotFound`. | 0 typed |
+| Local signatures (14 rows) | All remain at `ImportQualifierNotFound`; the local-signature-specific deferral is gone. | 0 typed |
+| Local values (21 rows) | 16 stop at `ImportQualifierNotFound`, 4 at anonymous-given identity deferral, and 1 at inline-value deferral. | No completed local-symbol mapping |
 
-The audit's package type resources now cover 575 requests and 57 distinct
-targets; among 8,070 external member requests, 358 resolve to class symbols
-and zero resolve to non-class declarations. Package term/object and incomplete
-source-class completion remain explicit boundaries. Generic external receiver
-argument adaptation remains deferred even when the class identity loads.
-Resolver rollback still removes failed loads and permits retry, as covered by
-the classloader and source-typing integration tests.
+Package term/object and incomplete source-class completion remain explicit boundaries. Generic external receiver argument adaptation remains deferred even when the class identity loads. Resolver rollback removes failed loads and permits retry.
 
 ## #976 audit gate and dependency profile
 
-The final pinned Scala 3.9/JDK 21 audit ran twice; normalized reports matched byte-for-byte. The frozen #972 request-shape cohorts, #973 generic-signature cases, #974 TASTy parent cases, #975 class/member gate, and #946/#826–#829/#856–#858/#880/#899/#929 rows remain represented in this report. Local methods remain 0/3,297. `ImportQualifierNotFound` remains the largest first blocker at 2,908 observations across 277 files and is classified under resolution/classpath environment. This is distinct from the Typer-owned semantic ranking, where `AnonymousClassInstantiationDeferred` leads at 32 observations in 15 files.
+The final pinned Scala 3.9/JDK `21.0.8` audit ran twice; normalized reports matched byte-for-byte. The frozen #972 request shapes, #973 generic-signature cases, #974 TASTy parent cases, #975 materialization gate, and #946/#826–#829/#856–#858/#880/#899/#929 cohorts remain in the audit. The local-method result is `0` / 3,297. `ImportQualifierNotFound` is `2908 (277 files)` and remains in the resolution/classpath family; the separate Typer-owned semantic leader remains `AnonymousClassInstantiationDeferred` (32 observations / 15 files).
 
-The resolver-side member outcome breakdown is `class member scope unavailable: incomplete class info` 3,771, `package term member unsupported` 2,749, `unsupported prefix shape` 503, `package type member unresolved` 402, external class success 358, load error 217, other resolver miss 68, and other success 2. These request outcomes identify the dominant unresolved shapes behind the classpath ceiling; they are aggregate measures alongside first-blocker counts, not a one-to-one attribution of each `ImportQualifierNotFound` observation.
+The `resolution_blocker_attribution` table in the raw output joins each tracked first-blocker method attempt to resolver requests made during its enclosing typing attempt. It reports cause, method count, file count, distinct target count and examples, and successfully materialized prefix classes. A cause is assigned only when there is exactly one distinct failed resolver target/outcome in that method attempt; no such request or multiple candidates is reported as `unknown` with candidate causes and targets. It includes `ImportQualifierNotFound`, `SymbolResolution`, `TypeNameNotFound`, `MemberLookup`, and `TermNameNotFound`. Package resolution probes distinguish an unresolved first segment/package from a loader error; member outcomes distinguish an unresolved package member, term/object gap, incomplete class identity, loader error, and other.
 
-The class gate passes its external-class threshold: 358 class-symbol successes across 29 distinct classes. External non-class member successes remain 0; 7,493 member requests are unresolved and 217 fail during loading. Package-term lookup produced 2,749 unsupported outcomes for 80 request keys across 115 files. Although the classpath contains type-side resources for 2,212 requests/51 keys and companion `$` resources for 2,196 requests/46 keys, neither resource alone establishes canonical module identity. The frozen rows and full request-shape breakdown remain in the raw data below.
+The external class-symbol gate is `358` successes across `29` classes; external non-class member successes are `0`, unresolved requests are `7493`, and loader errors are `217`. Package term requests have type-side resources for `2212` requests / `51` targets; companion `$` resources occur on `2196` requests / `46` targets. A resource is evidence only and does not establish canonical module identity.
 
-Opt-in dependency profiling observed 958 top-level class loads: median nested depth 0, p95 140, maximum 141, and a maximum fanout of 1,048 distinct classes in one request. The largest roots are repeated `dotty/tools/io/AbstractFile` requests from classpath and TASTy operations. This long tail is evidence of eager transitive-loading cost. **Next sprint recommendation: investigate lazy/deferred dependency completion**, and use the profile to verify the tail reduction. Package term/object materialization remains a separate identity boundary. The source-typing rollback regression asserts the store checkpoint, typed tree and source-type mappings, package links, declaration scopes, and clean class identity on retry.
+The opt-in profile observed `958` top-level loads, median nested depth `0.0`, p95 `140`, maximum depth `141`, and maximum fanout `1048` distinct classes. The largest roots are headed by `dotty/tools/io/AbstractFile`. This distribution is evidence for an eager-loading tail, while the majority of requests have no nested dependency loads.
 
+| Candidate | Measured reach | Reuse and risk |
+| --- | --- | --- |
+| A. Anonymous classes | 32 observations / 15 files | Reuses ordinary `new` typing; high identity, ownership, and class-info risk. |
+| B. Lazy/deferred dependency completion | `958` top-level loads; p95 depth `140`; maximum fanout `1048` classes | Reuses the new profile as before/after evidence; high loader transaction and completeness risk. |
+| C. Package term/object materialization | `2212` requests / `51` target keys; companion resource on `2196` requests / `46` targets | Reuses package probes; high canonical module/companion identity risk. |
+| D. External generic member adaptation | No corpus external non-class member has materialized yet. | Focused generic receiver support exists; broad substitution semantics remain unmeasured in corpus reach. |
+
+**Next sprint recommendation: investigate lazy/deferred dependency completion.** The p95 and maximum depth/fanout meet the measured condition for this candidate; retain the profile and require a bounded before/after reduction. Do not expand loading eagerness as part of #976. This is one recommendation; the other candidates remain separately measured alternatives.
 ## Previous type projection snapshot
 
 The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.
@@ -12985,6 +12975,23 @@ resolver_581_comparison:
     state=Missing::origin=source::candidate=scala/concurrent/duration/Duration$::status=resource-found=28
     state=Missing::origin=source::candidate=scala/concurrent/duration/FiniteDuration$::status=resource-found=28
     state=Missing::origin=source::candidate=scala/util/Using$$Manager$::status=resource-absent=3
+resolution_blocker_attribution:
+  observations=3100
+  blocker=ImportQualifierNotFound::cause=first segment/package unresolved count=2446 files=214 distinct_targets=30 targets=[Character::<first-segment-unresolved>, Constants::<first-segment-unresolved>, Contexts::<first-segment-unresolved>, Decorators::<first-segment-unresolved>, FileUtils::<first-segment-unresolved>, Flags::<first-segment-unresolved>, JavaTokens::<first-segment-unresolved>, Manifest::<first-segment-unresolved>, MegaPhase::<first-segment-unresolved>, Names::<first-segment-unresolved>, Parsers::<first-segment-unresolved>, Periods::<first-segment-unresolved>] methods_with_materialized_prefix=0 distinct_materialized_prefixes=0 prefixes=[] candidate_causes=[first segment/package unresolved]
+  blocker=ImportQualifierNotFound::cause=term/object materialization gap count=361 files=58 distinct_targets=36 targets=[dotty.tools.backend.jvm.BCodeUtils::<first-segment-unresolved>, dotty.tools.backend.jvm.GenBCode::<first-segment-unresolved>, dotty.tools.dotc.ast.Trees::<first-segment-unresolved>, dotty.tools.dotc.ast.tpd::<first-segment-unresolved>, dotty.tools.dotc.config.Feature::<first-segment-unresolved>, dotty.tools.dotc.core.Annotations::<first-segment-unresolved>, dotty.tools.dotc.core.Constants::<first-segment-unresolved>, dotty.tools.dotc.core.Contexts::<first-segment-unresolved>, dotty.tools.dotc.core.Decorators::<first-segment-unresolved>, dotty.tools.dotc.core.Flags::<first-segment-unresolved>, dotty.tools.dotc.core.NameOps::<first-segment-unresolved>, dotty.tools.dotc.core.Symbols::<first-segment-unresolved>] methods_with_materialized_prefix=0 distinct_materialized_prefixes=0 prefixes=[] candidate_causes=[first segment/package unresolved, term/object materialization gap]
+  blocker=ImportQualifierNotFound::cause=unknown: no matching failed resolver request count=101 files=6 distinct_targets=0 targets=[] methods_with_materialized_prefix=0 distinct_materialized_prefixes=0 prefixes=[] candidate_causes=[]
+  blocker=MemberLookup::cause=first segment/package unresolved count=27 files=9 distinct_targets=8 targets=[Contexts::<first-segment-unresolved>, Periods::<first-segment-unresolved>, Symbols::<first-segment-unresolved>, ast::<first-segment-unresolved>, core::<first-segment-unresolved>, dotty::<first-segment-unresolved>, printing::<first-segment-unresolved>, processInternal::<first-segment-unresolved>] methods_with_materialized_prefix=1 distinct_materialized_prefixes=1 prefixes=[scala/Function1] candidate_causes=[first segment/package unresolved]
+  blocker=MemberLookup::cause=unknown: multiple failed resolver requests count=5 files=2 distinct_targets=6 targets=[Contexts::<first-segment-unresolved>, core::<first-segment-unresolved>, prefix=dotty.tools.dotc.ast::namespace=term::name=Trees::space=Prefix, prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix, prefix=dotty.tools.dotc.core.classfile.ClassfileParser$::namespace=type::name=LazyType::space=Prefix, prefix=dotty.tools.dotc.typer.VarianceChecker$::namespace=term::name=tpd::space=Prefix] methods_with_materialized_prefix=0 distinct_materialized_prefixes=0 prefixes=[] candidate_causes=[first segment/package unresolved, incomplete class identity, term/object materialization gap]
+  blocker=MemberLookup::cause=unknown: no failed resolver request count=30 files=18 distinct_targets=0 targets=[] methods_with_materialized_prefix=0 distinct_materialized_prefixes=0 prefixes=[] candidate_causes=[]
+  blocker=SymbolResolution::cause=classloader error count=14 files=5 distinct_targets=4 targets=[prefix=scala.collection.immutable::namespace=type::name=List::space=Prefix, prefix=scala.collection.mutable::namespace=type::name=ArrayBuffer::space=Prefix, prefix=scala.collection.mutable::namespace=type::name=ListBuffer::space=Prefix, prefix=scala.collection::namespace=type::name=LinearSeq::space=Prefix] methods_with_materialized_prefix=0 distinct_materialized_prefixes=0 prefixes=[] candidate_causes=[classloader error]
+  blocker=SymbolResolution::cause=unknown: multiple failed resolver requests count=13 files=2 distinct_targets=2 targets=[prefix=scala.annotation::namespace=type::name=retainsCap::space=Prefix, prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix] methods_with_materialized_prefix=13 distinct_materialized_prefixes=1 prefixes=[scala/Function1] candidate_causes=[classloader error, package resolved but member unresolved]
+  blocker=TermNameNotFound::cause=first segment/package unresolved count=2 files=2 distinct_targets=2 targets=[File::<first-segment-unresolved>, List::<first-segment-unresolved>] methods_with_materialized_prefix=0 distinct_materialized_prefixes=0 prefixes=[] candidate_causes=[first segment/package unresolved]
+  blocker=TermNameNotFound::cause=term/object materialization gap count=8 files=2 distinct_targets=2 targets=[prefix=dotty.tools.backend.jvm::namespace=term::name=BCodeUtils::space=Prefix, prefix=scala.util::namespace=term::name=Failure::space=Prefix] methods_with_materialized_prefix=0 distinct_materialized_prefixes=0 prefixes=[] candidate_causes=[term/object materialization gap]
+  blocker=TermNameNotFound::cause=unknown: multiple failed resolver requests count=2 files=1 distinct_targets=2 targets=[prefix=dotty.tools.dotc.util.WeakHashSet$::namespace=term::name=Stats::space=Prefix, prefix=dotty.tools::namespace=term::name=Stats::space=Prefix] methods_with_materialized_prefix=0 distinct_materialized_prefixes=0 prefixes=[] candidate_causes=[incomplete class identity, term/object materialization gap]
+  blocker=TermNameNotFound::cause=unknown: no failed resolver request count=8 files=7 distinct_targets=0 targets=[] methods_with_materialized_prefix=0 distinct_materialized_prefixes=0 prefixes=[] candidate_causes=[]
+  blocker=TypeNameNotFound::cause=package resolved but member unresolved count=1 files=1 distinct_targets=1 targets=[prefix=scala.concurrent.duration::namespace=type::name=Iterator::space=Prefix] methods_with_materialized_prefix=0 distinct_materialized_prefixes=0 prefixes=[] candidate_causes=[package resolved but member unresolved]
+  blocker=TypeNameNotFound::cause=unknown: multiple failed resolver requests count=10 files=3 distinct_targets=10 targets=[prefix=dotty.tools.dotc.util.LRUCache$::namespace=type::name=Int::space=Prefix, prefix=dotty.tools.dotc.util.LRUCache$::namespace=type::name=SixteenNibbles::space=Prefix, prefix=dotty.tools.dotc.util.WeakHashSet$::namespace=type::name=Array::space=Prefix, prefix=dotty.tools.dotc.util.WeakHashSet$::namespace=type::name=Null::space=Prefix, prefix=dotty.tools::namespace=type::name=Array::space=Prefix, prefix=dotty.tools::namespace=type::name=Null::space=Prefix, prefix=scala.concurrent.duration.Duration$::namespace=type::name=Long::space=Prefix, prefix=scala.concurrent.duration.Duration$::namespace=type::name=TimeUnit::space=Prefix, prefix=scala.concurrent.duration.FiniteDuration$::namespace=type::name=Long::space=Prefix, prefix=scala.concurrent.duration.FiniteDuration$::namespace=type::name=TimeUnit::space=Prefix] methods_with_materialized_prefix=0 distinct_materialized_prefixes=0 prefixes=[] candidate_causes=[incomplete class identity, package resolved but member unresolved]
+  blocker=TypeNameNotFound::cause=unknown: no failed resolver request count=72 files=27 distinct_targets=0 targets=[] methods_with_materialized_prefix=3 distinct_materialized_prefixes=1 prefixes=[scala/Function1] candidate_causes=[]
 immutable_class_field_completion_outcomes:
   compiler/src/dotty/tools/dotc/core/TypeErrors.scala: tree=584 field=cycleSym baseline_occurrences=1 outcome=blocked::ImportQualifierNotFound::ImportQualifierNotFound { source: SourceId(0), import_tree_index: 5 }
   compiler/src/dotty/tools/dotc/inlines/Inliner.scala: tree=966 field=thisProxy baseline_occurrences=1 outcome=blocked::ImportQualifierNotFound::ImportQualifierNotFound { source: SourceId(0), import_tree_index: 5 }

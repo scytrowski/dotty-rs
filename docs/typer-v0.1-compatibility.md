@@ -892,7 +892,7 @@ so the pinned published library/compiler jars provide compiled Scala symbols.
 The script runs the ignored corpus test twice, extracts only its normalized
 report section, compares the sections byte-for-byte, and then writes
 [`typer-classpath-corpus-audit-3.9.0.md`](typer-classpath-corpus-audit-3.9.0.md).
-In the recorded environment (JDK 21), the profile-enabled audit test took
+In the recorded environment (OpenJDK 21.0.8), the profile-enabled audit test took
 about 173 seconds per run; peak memory was not measured. Determinism
 verification runs it twice, so it takes about six minutes on this worker. The
 normal workspace test suite skips this audit.
@@ -1013,7 +1013,7 @@ report are recorded in the #975 section of
 
 ### #976 classpath audit and transaction hardening
 
-The final pinned Scala 3.9/JDK 21 audit was run twice and the normalized
+The final pinned Scala 3.9/OpenJDK 21.0.8 audit was run twice and the normalized
 reports matched byte-for-byte. It retains the #972 request-shape cohorts,
 #973 generic-signature regressions, #974 TASTy parent rows, #975 class/member
 gate, and frozen #946/#826–#829/#856–#858/#880/#899/#929 cohorts. The source
@@ -1024,11 +1024,16 @@ largest first blocker is `ImportQualifierNotFound` at 2,908 observations in
 277 files. This remains classified as resolution/classpath environment, not a
 Typer semantic success or failure.
 
-Resolver request outcomes explain the dominant shapes at this boundary:
-3,771 requests lack complete class member scopes, 2,749 are unsupported
-package-term lookups, 503 have unsupported prefix shapes, and 402 are
-unresolved package-type members. These are aggregate request counts, not a
-one-to-one cause attribution for each `ImportQualifierNotFound` observation.
+The audit now records resolver requests in order for each enclosing method
+attempt and extracts the exact qualifier path for `ImportQualifierNotFound`.
+For imports, the cause is attributed to the last failed request matching that
+path; unrelated requests in the method are excluded. Other resolution
+first-blockers require a single distinct failed resolver target/outcome to
+receive a cause. Missing or ambiguous correlations are reported as `unknown`
+with candidate causes and targets. The generated table includes counts, files,
+distinct targets, target examples, and successfully materialized prefix
+classes for `ImportQualifierNotFound`, `SymbolResolution`, `TypeNameNotFound`,
+`MemberLookup`, and `TermNameNotFound`.
 
 The external class gate remains at 358 successes across 29 class identities;
 external non-class member successes remain zero, with 7,493 unresolved member
