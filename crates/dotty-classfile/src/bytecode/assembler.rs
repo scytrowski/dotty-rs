@@ -144,6 +144,15 @@ pub fn assemble(
         .validate_for_encoding()
         .map_err(AssembleError::InvalidConstantPool)?;
 
+    assemble_validated(instructions, constant_pool)
+}
+
+/// Assembles against a pool whose complete layout was already validated.
+/// Operand references are still checked for each instruction.
+pub(crate) fn assemble_validated(
+    instructions: &[Instruction],
+    constant_pool: &ConstantPool,
+) -> Result<Vec<u8>, AssembleError> {
     let mut writer = Writer::new();
     for instruction in instructions {
         write_instruction(&mut writer, *instruction, constant_pool)?;

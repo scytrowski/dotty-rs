@@ -4,12 +4,13 @@
 //! This module describes instructions; [`assembler::assemble`] encodes the
 //! supported subset and [`analysis::analyze`] computes straight-line
 //! `max_stack`/`max_locals` bounds. Neither API decodes bytecode or performs
-//! general JVM verification or optimization. A method is represented as one ordered basic block with
-//! no branch targets or exception-control-flow edges. Constant-pool operands
-//! below contain already assigned [`ConstantPoolIndex`] values. Resolve and
-//! intern symbolic names before constructing instructions; the assembler
-//! checks that each index exists and has the right constant-pool tag without
-//! mutating the pool.
+//! general JVM verification or optimization. A method is represented as one
+//! ordered basic block with no branch targets or exception-control-flow edges.
+//! The low-level [`Instruction`] constant-pool operands below contain assigned
+//! [`ConstantPoolIndex`] values. [`CodeBuilder`] offers the owned class builder
+//! a symbolic alternative that interns names before assembling those typed
+//! operands. The assembler checks each low-level index and its constant-pool
+//! tag without mutating the pool.
 //!
 //! The stack column uses JVM stack values except where it explicitly says
 //! "slots". `getfield`, `putfield`, static fields, and calls depend on the
@@ -60,9 +61,13 @@
 
 pub mod analysis;
 pub mod assembler;
+pub(crate) mod code_builder;
 
+pub(crate) use analysis::analyze_validated;
 pub use analysis::{AnalysisError, CodeAnalysis, LinearCodeAnalyzer, ValueKind, analyze};
+pub(crate) use assembler::assemble_validated;
 pub use assembler::{AssembleError, ConstantPoolOperandKind, assemble};
+pub use code_builder::{CodeBuilder, CodeBuilderError};
 
 use crate::constant_pool::ConstantPoolIndex;
 use std::fmt;

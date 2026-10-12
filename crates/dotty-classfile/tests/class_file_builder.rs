@@ -1,7 +1,8 @@
 use dotty_classfile::classfile::{
     ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_NATIVE, ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC,
     ACC_SUPER, Attribute, ClassAccessFlags, ClassFile, ClassFileBuildError, ClassFileBuilder,
-    ClassFileVersion, ConstantPoolEntry, FieldAccessFlags, MethodAccessFlags, Reader,
+    ClassFileVersion, CodeBuilderError, ConstantPoolEntry, FieldAccessFlags, MethodAccessFlags,
+    Reader,
 };
 use std::fs;
 use std::process::Command;
@@ -230,6 +231,519 @@ fn builds_constructor_and_static_method_using_raw_code() {
         assert!(String::from_utf8_lossy(&output.stdout).contains("<init>"));
         fs::remove_dir_all(directory).unwrap();
     }
+}
+
+#[test]
+fn builds_static_arithmetic_method_from_typed_instructions() {
+    let mut builder = ClassFileBuilder::new(
+        "example/TypedCalculator",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_static_method("add", "(II)I", |code| {
+            code.iload(0)?;
+            code.iload(1)?;
+            code.iadd()?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    assert_eq!(class_file.methods.len(), 1);
+    assert!(matches!(
+        class_file.methods[0].attributes.as_slice(),
+        [Attribute::Code(code)]
+            if code.max_stack == 2
+                && code.max_locals == 2
+                && code.code == [0x1a, 0x1b, 0x60, 0xac]
+    ));
+}
+
+#[test]
+fn builds_constructor_and_instance_field_access_from_symbolic_code() {
+    let mut builder = ClassFileBuilder::new(
+        "example/Counter",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_field("value", "I", FieldAccessFlags(ACC_PRIVATE))
+        .unwrap();
+    builder
+        .add_instance_method("<init>", "()V", |code| {
+            code.aload(0)?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_instance_method("getValue", "()I", |code| {
+            code.aload(0)?;
+            code.getfield("example/Counter", "value", "I")?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_instance_method("setValue", "(I)V", |code| {
+            code.aload(0)?;
+            code.iload(1)?;
+            code.putfield("example/Counter", "value", "I")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    assert_eq!(class_file.fields.len(), 1);
+    assert_eq!(class_file.methods.len(), 3);
+    assert!(matches!(
+        class_file.methods[0].attributes.as_slice(),
+        [Attribute::Code(code)]
+            if code.max_stack == 1 && code.max_locals == 1
+                && code.code.len() == 5 && code.code[0] == 0x2a
+                && code.code[1] == 0xb7 && code.code[4] == 0xb1
+    ));
+    assert!(matches!(
+        class_file.methods[1].attributes.as_slice(),
+        [Attribute::Code(code)]
+            if code.max_stack == 1 && code.max_locals == 1
+                && code.code[0] == 0x2a && code.code[1] == 0xb4 && code.code[4] == 0xac
+    ));
+    assert!(matches!(
+        class_file.methods[2].attributes.as_slice(),
+        [Attribute::Code(code)]
+            if code.max_stack == 2 && code.max_locals == 2
+                && code.code[0] == 0x2a && code.code[1] == 0x1b
+                && code.code[2] == 0xb5 && code.code[5] == 0xb1
+    ));
+}
+
+#[test]
+fn builds_new_dup_and_constructor_invocation_from_symbolic_code() {
+    let mut builder = ClassFileBuilder::new(
+        "example/Factory",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_static_method("create", "()Lexample/Widget;", |code| {
+            code.new_object("example/Widget")?;
+            code.dup()?;
+            code.invokespecial("example/Widget", "<init>", "()V")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    assert!(matches!(
+        class_file.methods[0].attributes.as_slice(),
+        [Attribute::Code(code)]
+            if code.max_stack == 2 && code.max_locals == 0
+                && code.code[0] == 0xbb && code.code[3] == 0x59
+                && code.code[4] == 0xb7 && code.code[7] == 0xb0
+    ));
+}
+
+#[test]
+fn rejects_interface_constructor_invocation_without_committing_the_method() {
+    let mut builder = ClassFileBuilder::new(
+        "example/InterfaceConstructor",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+
+    let error = match builder.add_static_method("candidate", "()V", |code| {
+        code.aconst_null()?;
+        code.invokespecial_interface("example/Api", "<init>", "()V")?;
+        code.return_void()?;
+        Ok(())
+    }) {
+        Err(error) => error,
+        Ok(_) => panic!("interface constructor invocation should fail"),
+    };
+    assert!(matches!(
+        error,
+        ClassFileBuildError::CodeBuilder(CodeBuilderError::InvalidName)
+    ));
+
+    // The rejected closure leaves no partial declaration behind.
+    builder
+        .add_static_method("candidate", "()V", |code| {
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(decode(&builder.encode().unwrap()).methods.len(), 1);
+}
+
+#[test]
+fn interface_method_reference_versions_are_checked_but_raw_code_remains_opaque() {
+    for is_special in [false, true] {
+        let mut builder = ClassFileBuilder::new(
+            "example/OldInterfaceCall",
+            ClassFileVersion {
+                major: 51,
+                minor: 0,
+            },
+        )
+        .unwrap();
+        if is_special {
+            builder
+                .add_code_method("call", "()V", MethodAccessFlags(ACC_PUBLIC), |code| {
+                    code.aload(0)?;
+                    code.invokespecial_interface("example/Api", "touch", "()V")?;
+                    code.return_void()?;
+                    Ok(())
+                })
+                .unwrap();
+        } else {
+            builder
+                .add_static_method("call", "()V", |code| {
+                    code.invokestatic_interface("example/Api", "touch", "()V")?;
+                    code.return_void()?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let error = builder.encode().unwrap_err();
+        assert_eq!(
+            error,
+            ClassFileBuildError::InterfaceMethodReferenceRequiresVersion { major: 51 }
+        );
+    }
+
+    let mut old_raw = ClassFileBuilder::new(
+        "example/OldRawCode",
+        ClassFileVersion {
+            major: 51,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    old_raw
+        .add_method("run", "()V", MethodAccessFlags(ACC_PUBLIC))
+        .unwrap()
+        .code(0, 1, [0xb1])
+        .unwrap();
+    assert_eq!(decode(&old_raw.encode().unwrap()).version.major, 51);
+
+    let mut modern = ClassFileBuilder::new(
+        "example/ModernInterfaceCall",
+        ClassFileVersion {
+            major: 52,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    modern
+        .add_static_method("staticCall", "()V", |code| {
+            code.invokestatic_interface("example/Api", "touch", "()V")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    modern
+        .add_code_method(
+            "specialCall",
+            "()V",
+            MethodAccessFlags(ACC_PUBLIC),
+            |code| {
+                code.aload(0)?;
+                code.invokespecial_interface("example/Api", "touch", "()V")?;
+                code.return_void()?;
+                Ok(())
+            },
+        )
+        .unwrap();
+    let bytes = modern.encode().unwrap();
+    let modern = decode(&bytes);
+    assert_eq!(modern.version.major, 52);
+    for (method, (opcode, index_offset)) in modern
+        .methods
+        .iter()
+        .zip([(0xb8_u8, 1_usize), (0xb7_u8, 2_usize)])
+    {
+        let code = match &method.attributes[..] {
+            [Attribute::Code(code)] => code,
+            _ => panic!("typed methods should have one Code attribute each"),
+        };
+        assert_eq!(code.code[index_offset - 1], opcode);
+        let index = u16::from_be_bytes([code.code[index_offset], code.code[index_offset + 1]]);
+        assert!(matches!(
+            modern
+                .constant_pool
+                .get(dotty_classfile::constant_pool::ConstantPoolIndex(index)),
+            Some(ConstantPoolEntry::InterfaceMethodref { .. })
+        ));
+    }
+}
+
+#[test]
+fn assembles_many_typed_methods_against_one_finalized_pool() {
+    let mut builder = ClassFileBuilder::new(
+        "example/ManyMethods",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    for index in 0..256 {
+        builder
+            .add_static_method(format!("method{index}"), "()I", |code| {
+                code.iconst(7)?;
+                code.ireturn()?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    assert_eq!(class_file.methods.len(), 256);
+    assert!(class_file.methods.iter().all(|method| matches!(
+        method.attributes.as_slice(),
+        [Attribute::Code(code)] if code.code == [0x10, 7, 0xac] && code.max_stack == 1
+    )));
+}
+
+#[test]
+fn interns_wide_integer_and_long_constants_for_typed_methods() {
+    let mut builder = ClassFileBuilder::new(
+        "example/Constants",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_static_method("integer", "()I", |code| {
+            code.iconst(70_000)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("long", "()J", |code| {
+            code.lconst(2)?;
+            code.lreturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    let integer = match &class_file.methods[0].attributes[..] {
+        [Attribute::Code(code)] => code,
+        _ => panic!("typed methods should have one Code attribute each"),
+    };
+    assert_eq!(integer.code[0], 0x12);
+    assert_eq!(integer.code[2], 0xac);
+    let integer_index = u16::from(integer.code[1]);
+    assert!(matches!(
+        class_file
+            .constant_pool
+            .get(dotty_classfile::constant_pool::ConstantPoolIndex(
+                integer_index
+            )),
+        Some(ConstantPoolEntry::Integer(70_000))
+    ));
+
+    let long = match &class_file.methods[1].attributes[..] {
+        [Attribute::Code(code)] => code,
+        _ => panic!("typed methods should have one Code attribute each"),
+    };
+    assert_eq!(long.code[0], 0x14);
+    assert_eq!(long.code[3], 0xad);
+    let long_index = u16::from_be_bytes([long.code[1], long.code[2]]);
+    assert!(matches!(
+        class_file
+            .constant_pool
+            .get(dotty_classfile::constant_pool::ConstantPoolIndex(
+                long_index
+            )),
+        Some(ConstantPoolEntry::Long(2))
+    ));
+}
+
+#[test]
+fn interns_symbolic_calls_once_and_reuses_stable_instruction_indices() {
+    let mut builder = ClassFileBuilder::new(
+        "example/Calls",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    for name in ["first", "second"] {
+        builder
+            .add_static_method(name, "(I)I", |code| {
+                code.iload(0)?;
+                code.invokestatic("example/Math", "abs", "(I)I")?;
+                code.ireturn()?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    builder
+        .add_static_method("stringLength", "(Ljava/lang/String;)I", |code| {
+            code.aload(0)?;
+            code.invokevirtual("java/lang/String", "length", "()I")?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("normalize", "(I)I", |code| {
+            code.iload(0)?;
+            code.invokestatic_interface("example/Normalizer", "normalize", "(I)I")?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    let (first, second) = match (
+        &class_file.methods[0].attributes[0],
+        &class_file.methods[1].attributes[0],
+    ) {
+        (Attribute::Code(first), Attribute::Code(second)) => (first, second),
+        _ => panic!("typed methods should have one Code attribute each"),
+    };
+    assert_eq!(first.code[1], 0xb8);
+    assert_eq!(first.code[2..4], second.code[2..4]);
+    let method_index = u16::from_be_bytes([first.code[2], first.code[3]]);
+    assert!(matches!(
+        class_file
+            .constant_pool
+            .get(dotty_classfile::constant_pool::ConstantPoolIndex(
+                method_index
+            )),
+        Some(ConstantPoolEntry::Methodref { .. })
+    ));
+    assert!(matches!(
+        class_file.methods[2].attributes.as_slice(),
+        [Attribute::Code(code)] if code.code[1] == 0xb6 && code.max_locals == 1
+    ));
+    let interface_call = match &class_file.methods[3].attributes[..] {
+        [Attribute::Code(code)] => code,
+        _ => panic!("typed methods should have one Code attribute each"),
+    };
+    assert_eq!(interface_call.code[1], 0xb8);
+    let interface_index = u16::from_be_bytes([interface_call.code[2], interface_call.code[3]]);
+    assert!(matches!(
+        class_file
+            .constant_pool
+            .get(dotty_classfile::constant_pool::ConstantPoolIndex(
+                interface_index
+            )),
+        Some(ConstantPoolEntry::InterfaceMethodref { .. })
+    ));
+}
+
+#[test]
+fn failed_typed_method_construction_does_not_publish_a_partial_method() {
+    let mut builder = ClassFileBuilder::new(
+        "example/Failure",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        builder
+            .add_code_method(
+                "answer",
+                "()I",
+                MethodAccessFlags(ACC_PUBLIC | ACC_STATIC),
+                |code| {
+                    code.iconst(1)?;
+                    code.iload(usize::MAX).map(|_| ())
+                }
+            )
+            .err(),
+        Some(ClassFileBuildError::CodeBuilder(
+            CodeBuilderError::LocalIndexOutOfRange { index: usize::MAX }
+        ))
+    );
+    builder
+        .add_static_method("answer", "()I", |code| {
+            code.iconst(42)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("invalid", "()I", |code| {
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(matches!(
+        builder.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::StackUnderflow {
+                instruction: 0,
+                needed: 1,
+                available: 0,
+            }
+        ))
+    ));
+}
+
+#[test]
+fn rejects_invalid_symbolic_references_and_descriptors() {
+    let mut builder = ClassFileBuilder::new(
+        "example/InvalidReference",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        builder.add_static_method("badField", "()I", |code| {
+            code.getstatic("example/Owner", "value", "V")?;
+            code.ireturn()?;
+            Ok(())
+        }),
+        Err(ClassFileBuildError::CodeBuilder(
+            CodeBuilderError::InvalidDescriptor(_)
+        ))
+    ));
+    builder
+        .add_static_method("badField", "()I", |code| {
+            code.iconst(0)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(builder.encode().is_ok());
 }
 
 #[test]
