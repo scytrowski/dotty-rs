@@ -25,8 +25,9 @@ use std::collections::HashMap;
 /// happened while this entry was `Loading` — a `NotFound`/
 /// `InvalidClassFile`/etc. failure that never reached `enter_class` has
 /// none). A caller can then still name the half-built `Symbol` a failed
-/// load left behind — see `ClassLoader::load_class`, which marks it
-/// `SymbolInfo::Error` right before recording this state.
+/// load used internally. Public load transactions roll back new allocations
+/// on failure and clear freed IDs here, retaining the error and resource context.
+/// A pre-existing identity shell survives with its original semantic state.
 #[derive(Debug, Clone)]
 pub(crate) enum ClassEntry {
     Loading(SymbolId),
@@ -64,6 +65,26 @@ impl ClassRepository {
     /// The class's current entry, or `None` if it is missing (never seen).
     pub(crate) fn get(&self, name: &BinaryName) -> Option<&ClassEntry> {
         self.entries.get(name)
+    }
+
+    /// Drops positive entries invalidated by a matching store/session rollback.
+    /// Negative results keep their artifact context but never retain freed IDs.
+    pub(crate) fn discard_rolled_back_symbols(&mut self, store: &dotty_core::SemanticStore) {
+        self.entries.retain(|_, entry| match entry {
+            ClassEntry::Loaded(id) => {
+                store.symbols.contains(*id) && {
+                    matches!(store.symbols.get(*id).info, dotty_core::SymbolInfo::Complete(info)
+                    if store.types.contains(info))
+                }
+            }
+            ClassEntry::Loading(_) => false,
+            ClassEntry::Failed(id, _) => {
+                if id.is_some_and(|id| !store.symbols.contains(id)) {
+                    *id = None;
+                }
+                true
+            }
+        });
     }
 
     pub(crate) fn mark_loading(&mut self, name: BinaryName, symbol: SymbolId) {

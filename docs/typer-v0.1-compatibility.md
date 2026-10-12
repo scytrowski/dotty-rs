@@ -1011,6 +1011,18 @@ source-typing tests. Frozen cohort outcomes and the unchanged full pinned
 report are recorded in the #975 section of
 [`typer-classpath-corpus-audit-3.9.0.md`](typer-classpath-corpus-audit-3.9.0.md).
 
+### #1020 deferred classloader member identities
+
+Classloader completion now keeps superclass/interface parents eager while
+using canonical identity shells for member descriptors, generic signatures,
+bounds, annotation identities, and named best-effort TASTy member types.
+A completed external class may contain `TypeRef`s to classes whose info is
+still `Missing`. This issue does not add on-demand completion to Typer member
+lookup (#1021) or direct resolver access (#1022). Callers needing those members
+must currently complete the referenced class explicitly. Existing #975/#976
+corpus measurements remain historical evidence; new shell/completion counters
+are available for the follow-up #1023 audit.
+
 ### #976 classpath audit and transaction hardening
 
 The final pinned Scala 3.9/OpenJDK 21.0.8 audit was run twice and the normalized

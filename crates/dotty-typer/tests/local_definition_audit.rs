@@ -7661,6 +7661,51 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
 
     println!("dependency_load_profile:");
     println!("  top_level_class_loads={}", depths.len());
+    for (label, total) in [
+        (
+            "full_completions",
+            metrics
+                .dependency_profiles
+                .iter()
+                .map(|x| x.profile.full_completions)
+                .sum::<usize>(),
+        ),
+        (
+            "shells_created",
+            metrics
+                .dependency_profiles
+                .iter()
+                .map(|x| x.profile.shells_created)
+                .sum::<usize>(),
+        ),
+        (
+            "shells_reused",
+            metrics
+                .dependency_profiles
+                .iter()
+                .map(|x| x.profile.shells_reused)
+                .sum::<usize>(),
+        ),
+        (
+            "member_type_references",
+            metrics
+                .dependency_profiles
+                .iter()
+                .map(|x| x.profile.member_type_references)
+                .sum::<usize>(),
+        ),
+        (
+            "hierarchy_loads",
+            metrics
+                .dependency_profiles
+                .iter()
+                .map(|x| x.profile.hierarchy_loads)
+                .sum::<usize>(),
+        ),
+    ] {
+        println!("  {label}={total}");
+    }
+
     println!(
         "  max_dependency_depth={}",
         depths.last().copied().unwrap_or(0)
@@ -7684,13 +7729,18 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
     println!("  largest_top_level_loads:");
     for observation in largest.into_iter().take(10) {
         println!(
-            "    root={}::file={}::method={}::request={}::depth={}::distinct_classes={}::classes=[{}]",
+            "    root={}::file={}::method={}::request={}::depth={}::distinct_classes={}::full_completions={}::shells_created={}::shells_reused={}::member_type_references={}::hierarchy_loads={}::classes=[{}]",
             observation.profile.root,
             observation.file,
             observation.method,
             observation.request,
             observation.profile.max_dependency_depth,
             observation.profile.classes.len(),
+            observation.profile.full_completions,
+            observation.profile.shells_created,
+            observation.profile.shells_reused,
+            observation.profile.member_type_references,
+            observation.profile.hierarchy_loads,
             observation
                 .profile
                 .classes
