@@ -185,7 +185,10 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 let Some(scope) = self.package_scope(package) else {
                     return false;
                 };
-                store.scopes.contains(scope)
+                store.symbols.contains(package)
+                    && store.symbols.get(package).kind == SymbolKind::Package
+                    && store.scopes.contains(scope)
+                    && store.scopes.get(scope).owner == Some(package)
                     && store.scopes.get(scope).lookup_all(&item.name) == [symbol]
                     && (item.owner == Some(package)
                         || is_nested_class_indexed_in_package(store, symbol, package))
@@ -630,13 +633,16 @@ fn is_nested_class_indexed_in_package(
     let mut current = member;
     let mut visited = std::collections::HashSet::new();
     for depth in 0..MAX_OWNER_DEPTH {
-        if !visited.insert(current) {
+        if !store.symbols.contains(current) || !visited.insert(current) {
             return false;
         }
         let symbol = store.symbols.get(current);
         let Some(owner) = symbol.owner else {
             return false;
         };
+        if !store.symbols.contains(owner) {
+            return false;
+        }
         let enclosing = store.symbols.get(owner);
         if enclosing.kind == SymbolKind::Package {
             return depth > 0 && owner == package;
@@ -946,6 +952,42 @@ mod tests {
                 .resolved
                 .contains_key(&BinaryName::from_internal("sample/B"))
         );
+    }
+
+    #[test]
+    fn complete_class_rejects_invalid_owner_and_package_scope_without_panicking() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let path = CompletionClassPath::new();
+        let mut loader = ClassLoader::with_definitions(
+            path.clone(),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let b = loader
+            .ensure_class_identity(&BinaryName::from_internal("sample/B"))
+            .unwrap();
+        let session = loader.into_session();
+        let original = store.symbols.get(b).clone();
+        let mut resolver = ClasspathSymbolResolver::new(path.clone(), definitions, session);
+        let checkpoint = store.checkpoint();
+        let invalid_owner = store.symbols.alloc(original.clone());
+        store.rollback_to(checkpoint);
+        store.symbols.get_mut(b).owner = Some(invalid_owner);
+        assert!(
+            matches!(resolver.complete_class(&mut store, b), Err(ResolutionError::Malformed { reason }) if reason.contains("canonical package/name"))
+        );
+        assert_eq!(store.symbols.get(b).owner, Some(invalid_owner));
+        *store.symbols.get_mut(b) = original.clone();
+        let scope = resolver.package_scope(original.owner.unwrap()).unwrap();
+        store.scopes.get_mut(scope).owner = None;
+        assert!(
+            matches!(resolver.complete_class(&mut store, b), Err(ResolutionError::Malformed { reason }) if reason.contains("canonical package/name"))
+        );
+        assert_eq!(store.scopes.get(scope).owner, None);
+        assert_eq!(store.checkpoint(), checkpoint);
+        assert_eq!(path.calls.load(Ordering::Relaxed), 1);
     }
 
     impl ClassPathEntry for EmptyCountingClassPath {
