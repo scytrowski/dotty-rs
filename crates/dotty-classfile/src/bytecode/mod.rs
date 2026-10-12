@@ -57,8 +57,10 @@
 //!
 //! [`ConstantPoolIndex`]: crate::constant_pool::ConstantPoolIndex
 
+pub mod analysis;
 pub mod assembler;
 
+pub use analysis::{AnalysisError, CodeAnalysis, LinearCodeAnalyzer, ValueKind, analyze};
 pub use assembler::{AssembleError, ConstantPoolOperandKind, assemble};
 
 use crate::constant_pool::ConstantPoolIndex;
