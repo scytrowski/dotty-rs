@@ -241,7 +241,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let SymbolInfo::Complete(info) = store.symbols.get(class).info else {
             return None;
         };
-        let Type::ClassInfo(info) = store.types.get(info) else {
+        let Some(Type::ClassInfo(info)) = store.types.try_get(info) else {
             return None;
         };
         Some(info.declarations)
@@ -266,6 +266,12 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             }
             PrefixTarget::Class(class) => {
                 let mut scope = self.declaration_scope(store, class);
+                if scope.is_none() {
+                    // Stay inside resolve_member's transaction: None/ambiguity
+                    // must undo even a successful prefix completion.
+                    self.complete_class_inner(store, class)?;
+                    scope = self.declaration_scope(store, class);
+                }
                 if scope.is_none() && class == self.definitions.object_class {
                     match self.load_class(store, &BinaryName::from_internal("java/lang/Object")) {
                         Ok(loaded) if loaded == class => {
@@ -287,15 +293,36 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     }
                 }
                 let Some(scope) = scope else {
-                    // A symbol already present in the caller's store is its
-                    // canonical identity. If it is incomplete, this adapter
-                    // cannot complete it by loading a second symbol with the
-                    // same binary name.
+                    if store.symbols.contains(class)
+                        && matches!(store.symbols.get(class).info, SymbolInfo::Complete(_))
+                    {
+                        return Err(ResolutionError::Malformed {
+                            reason: format!("class {class:?} has invalid ClassInfo"),
+                        });
+                    }
+                    // Unknown/source identities are declined by the hook.
                     return Ok(None);
                 };
                 if !store.scopes.contains(scope) {
                     return Err(ResolutionError::Malformed {
                         reason: format!("class {class:?} has an invalid declaration scope"),
+                    });
+                }
+                let SymbolInfo::Complete(info) = store.symbols.get(class).info else {
+                    return Err(ResolutionError::Malformed {
+                        reason: format!("class {class:?} lost completed info"),
+                    });
+                };
+                let Some(Type::ClassInfo(info)) = store.types.try_get(info) else {
+                    return Err(ResolutionError::Malformed {
+                        reason: format!("class {class:?} has invalid ClassInfo"),
+                    });
+                };
+                if info.class != class || store.scopes.get(scope).owner != Some(class) {
+                    return Err(ResolutionError::Malformed {
+                        reason: format!(
+                            "class {class:?} has inconsistent ClassInfo identity/scope"
+                        ),
                     });
                 }
                 (class, scope)
@@ -721,6 +748,291 @@ mod tests {
     struct CompletionClassPath {
         classes: Arc<Mutex<std::collections::HashMap<BinaryName, Vec<u8>>>>,
         calls: Arc<AtomicUsize>,
+    }
+
+    fn member_class_path() -> CompletionClassPath {
+        use dotty_classfile::{
+            access_flags::{ClassAccessFlags, FieldAccessFlags, MethodAccessFlags},
+            attribute::Attribute,
+            class_file::{ClassFile, ClassFileVersion},
+            constant_pool_builder::ConstantPoolBuilder,
+            field::FieldInfo,
+            method::MethodInfo,
+        };
+        let mut pool = ConstantPoolBuilder::new();
+        pool.utf8("Signature").unwrap();
+        let this_class = pool.class("sample/B").unwrap();
+        let parent = pool.class("java/lang/Object").unwrap();
+        let signature = pool
+            .utf8("<T:Ljava/lang/Object;>Ljava/lang/Object;")
+            .unwrap();
+        let fields = vec![FieldInfo {
+            access_flags: FieldAccessFlags(1),
+            name_index: pool.utf8("value").unwrap(),
+            descriptor_index: pool.utf8("I").unwrap(),
+            attributes: Vec::new(),
+        }];
+        let methods = [
+            ("get", "()Ljava/lang/String;", None),
+            ("generic", "()Ljava/lang/Object;", Some("()TT;")),
+            ("over", "()I", None),
+            ("over", "(I)I", None),
+        ]
+        .into_iter()
+        .map(|(name, descriptor, signature)| MethodInfo {
+            access_flags: MethodAccessFlags(0x0401),
+            name_index: pool.utf8(name).unwrap(),
+            descriptor_index: pool.utf8(descriptor).unwrap(),
+            attributes: signature
+                .into_iter()
+                .map(|sig| Attribute::Signature(pool.utf8(sig).unwrap()))
+                .collect(),
+        })
+        .collect();
+        let bytes = ClassFile {
+            version: ClassFileVersion {
+                major: 65,
+                minor: 0,
+            },
+            constant_pool: pool.finish().unwrap(),
+            access_flags: ClassAccessFlags(0x0421),
+            this_class,
+            super_class: Some(parent),
+            interfaces: Vec::new(),
+            fields,
+            methods,
+            attributes: vec![Attribute::Signature(signature)],
+        }
+        .encode()
+        .unwrap();
+        let path = CompletionClassPath::new();
+        path.classes.lock().unwrap().extend([
+            (BinaryName::from_internal("sample/B"), bytes),
+            (
+                BinaryName::from_internal("java/lang/Object"),
+                test_class_stub("java/lang/Object", 0x0021),
+            ),
+            (
+                BinaryName::from_internal("java/lang/String"),
+                test_class_stub("java/lang/String", 0x0021),
+            ),
+        ]);
+        path
+    }
+
+    #[test]
+    fn direct_shell_members_support_all_prefix_views_and_reuse_declarations() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let path = member_class_path();
+        let mut loader = ClassLoader::with_definitions(
+            path.clone(),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let b = loader
+            .ensure_class_identity(&BinaryName::from_internal("sample/B"))
+            .unwrap();
+        let a = loader
+            .ensure_class_identity(&BinaryName::from_internal("sample/A"))
+            .unwrap();
+        let session = loader.into_session();
+        let b_ref = store.types.alloc(Type::type_ref(definitions.no_prefix, b));
+        let a_ref = store.types.alloc(Type::type_ref(definitions.no_prefix, a));
+        let applied = store.types.alloc(Type::Applied {
+            tycon: b_ref,
+            args: vec![definitions.int],
+        });
+        let this = store.types.alloc(Type::ThisType { class: b });
+        let value = Name::new(store.names.intern("value"), Namespace::Term);
+        let get = Name::new(store.names.intern("get"), Namespace::Term);
+        let mut resolver = ClasspathSymbolResolver::new(path.clone(), definitions, session);
+        let mut field = None;
+        let mut method = None;
+        for (prefix, space) in [
+            (b_ref, MemberSpace::Prefix),
+            (applied, MemberSpace::Prefix),
+            (this, MemberSpace::Prefix),
+            (a_ref, MemberSpace::Explicit(b_ref)),
+        ] {
+            for _ in 0..2 {
+                let f = resolver
+                    .resolve_member(
+                        &mut store,
+                        &MemberRequest {
+                            prefix,
+                            name: value,
+                            selector: MemberSelector::Unique,
+                            space: space.clone(),
+                        },
+                    )
+                    .unwrap()
+                    .unwrap();
+                let m = resolver
+                    .resolve_member(
+                        &mut store,
+                        &MemberRequest {
+                            prefix,
+                            name: get,
+                            selector: MemberSelector::Unique,
+                            space: space.clone(),
+                        },
+                    )
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(*field.get_or_insert(f), f);
+                assert_eq!(*method.get_or_insert(m), m);
+                assert_eq!(store.symbols.get(f).owner, Some(b));
+                assert_eq!(store.symbols.get(f).kind, SymbolKind::Field);
+                assert_eq!(
+                    store.symbols.get(f).info,
+                    SymbolInfo::Complete(definitions.int)
+                );
+                assert_eq!(store.symbols.get(m).owner, Some(b));
+                assert_eq!(store.symbols.get(m).kind, SymbolKind::Method);
+                assert_eq!(path.calls.load(Ordering::Relaxed), 5);
+                assert_eq!(store.symbols.get(a).info, SymbolInfo::Missing);
+            }
+        }
+        let SymbolInfo::Complete(info) = store.symbols.get(method.unwrap()).info else {
+            panic!("method info")
+        };
+        let Type::Method(info) = store.types.get(info) else {
+            panic!("Method")
+        };
+        let string = store.types.get(info.result).reference_symbol().unwrap();
+        assert_eq!(
+            store.names.resolve(store.symbols.get(string).name.text()),
+            "String"
+        );
+        assert_eq!(store.symbols.get(string).info, SymbolInfo::Missing);
+        let t_name = Name::new(store.names.intern("T"), Namespace::Type);
+        let t = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: b_ref,
+                    name: t_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.symbols.get(t).kind, SymbolKind::TypeParameter);
+        let generic_name = Name::new(store.names.intern("generic"), Namespace::Term);
+        let generic = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: applied,
+                    name: generic_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let SymbolInfo::Complete(info) = store.symbols.get(generic).info else {
+            panic!("generic info")
+        };
+        let Type::Method(info) = store.types.get(info) else {
+            panic!("Method")
+        };
+        assert_eq!(
+            store.types.get(info.result).reference_symbol(),
+            Some(t),
+            "resolver does not substitute applied receiver arguments"
+        );
+        let mark = store.checkpoint();
+        assert_eq!(
+            resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix: b_ref,
+                        name: value,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Explicit(a_ref)
+                    }
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(store.symbols.get(a).info, SymbolInfo::Missing);
+        assert_eq!(store.checkpoint(), mark);
+    }
+
+    #[test]
+    fn missing_ambiguous_and_failed_members_are_atomic_and_retryable() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let path = member_class_path();
+        let mut loader = ClassLoader::with_definitions(
+            path.clone(),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let b = loader
+            .ensure_class_identity(&BinaryName::from_internal("sample/B"))
+            .unwrap();
+        let session = loader.into_session();
+        let original = store.symbols.get(b).clone();
+        let prefix = store.types.alloc(Type::type_ref(definitions.no_prefix, b));
+        let mut resolver = ClasspathSymbolResolver::new(path.clone(), definitions, session);
+        for name in ["absent", "over"] {
+            let request = MemberRequest {
+                prefix,
+                name: Name::new(store.names.intern(name), Namespace::Term),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let mark = store.checkpoint();
+            let resolver_mark = resolver.checkpoint();
+            let session_mark = resolver.session.checkpoint();
+            for _ in 0..2 {
+                let result = resolver.resolve_member(&mut store, &request);
+                if name == "absent" {
+                    assert_eq!(result, Ok(None));
+                } else {
+                    assert_eq!(result, Err(ResolutionError::Ambiguous { candidates: 2 }));
+                }
+                assert_eq!(store.symbols.get(b), &original);
+                assert_eq!(store.checkpoint(), mark);
+                assert_eq!(resolver.checkpoint(), resolver_mark);
+                assert_eq!(resolver.session.checkpoint(), session_mark);
+            }
+        }
+        let request = MemberRequest {
+            prefix,
+            name: Name::new(store.names.intern("value"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let bytes = path
+            .classes
+            .lock()
+            .unwrap()
+            .insert(BinaryName::from_internal("sample/B"), vec![0, 1, 2])
+            .unwrap();
+        let mark = store.checkpoint();
+        assert!(
+            matches!(resolver.resolve_member(&mut store, &request), Err(ResolutionError::Malformed { reason }) if reason.contains("invalid class file"))
+        );
+        assert_eq!(store.checkpoint(), mark);
+        assert_eq!(store.symbols.get(b), &original);
+        path.classes
+            .lock()
+            .unwrap()
+            .insert(BinaryName::from_internal("sample/B"), bytes);
+        assert!(
+            resolver
+                .resolve_member(&mut store, &request)
+                .unwrap()
+                .is_some()
+        );
     }
 
     impl CompletionClassPath {
