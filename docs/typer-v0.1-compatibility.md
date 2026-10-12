@@ -979,6 +979,35 @@ classloader limitation is now unresolved JDK generic-signature variables and
 Scala library TASTy supertypes. The updated audit records this as a blocker;
 it does not claim that the #605/#606 resolver integration gate passed.
 
+### #975 package type and member materialization
+
+After #973–#974, a package `TypeRef` plus a unique type name can load a
+classpath class into its canonical package/session identity. The pinned
+Scala 3.9/JDK 21 audit reports 358 class-symbol successes across 29 classes
+(125 first loads and 233 same-file session reuses), while non-class external
+member successes remain zero. The current corpus records 7,493 unresolved
+external member requests and 217 loader errors. Thus class identities now
+materialize in the corpus, but the enclosing source methods still do not
+reach successful external-member typing.
+
+Focused real-artifact tests cover the lookup boundary that the corpus does not
+exercise: the checked-in JDK 26 `DayOfWeek.class` resolves from `java.time` and
+exposes `getValue`; the pinned Scala 3.9 `scala.io.Source.tasty` resolves from
+`scala.io`, exposes `getLines`, and reaches inherited `isEmpty` through normal
+Typer parent lookup. Identity, completed `ClassInfo`, declaration scope, and
+repeated-request reuse are asserted. The JDK class's transitive dependencies
+are small synthetic stubs, so this test requires no installed JDK.
+
+Package term requests remain unresolved unless an authoritative module
+identity is already present. Existing incomplete source classes are not
+replaced by classpath duplicates because there is no safe in-place completion
+contract. Applying external generic receiver arguments remains a focused
+`ExternalGenericInstantiationDeferred` boundary. Resolver failures roll back
+store and session state, and retries remain covered by the classloader and
+source-typing tests. Frozen cohort outcomes and the unchanged full pinned
+report are recorded in the #975 section of
+[`typer-classpath-corpus-audit-3.9.0.md`](typer-classpath-corpus-audit-3.9.0.md).
+
 For the #610 feature comparison against #581, first-blocker counts moved from
 146 to 0 for `UnsupportedExpression::Parens`, 146 to 0 for
 `UnsupportedExpression::InfixOp`, and 139 to 0 for

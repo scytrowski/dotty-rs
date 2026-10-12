@@ -438,6 +438,41 @@ The frozen #972 cohort had 342 `UnresolvedSupertype` errors across 33 requested 
 
 The `tasty_unresolved_supertype_failures` rows below now include the parent index, structured shape, semantic-reference and explicit-prefix flags, visible name-table spellings, and compact raw-tree tag shape. A representative fixed row is `scala/Function1`: its `IDENTTPT` parent wraps a shared type reference whose target resolves through `scala.AnyRef`, still normalized to `java/lang/Object`. The real Scala 3.9 `Source.tasty` integration fixture covers an applied parent through the package-object alias path. Unresolved semantic references continue to fail without a same-package guess.
 
+## #975 package type and member materialization
+
+The one-run audit was rerun with the pinned Scala revision, JDK 21, and the
+documented classpath. Its normalized output matches the checked-in raw report
+byte-for-byte. The resolver materializes 358 external class symbols across 29
+distinct classes: 125 are first materializations in a file session and 233
+reuse a symbol already loaded in that session. No corpus request succeeds as
+a non-class member; 7,493 requests remain unresolved and 217 fail during
+loading. The source corpus therefore still does not cross the external-member
+gate. Focused integration tests establish the next step directly: real JDK
+and Scala 3.9 classes materialize from package type requests, declared members
+are reachable from their class scopes, and ordinary typer lookup can reach an
+inherited Scala-library member.
+
+The frozen cohorts retain their first-blocker outcomes. Successful class
+materializations do not by themselves imply that an enclosing source method
+typed:
+
+| Cohort | Current resolution or typing result | External class/member movement | Enclosing method |
+| --- | --- | --- | --- |
+| #946 impure functions (13 rows) | All stop at `SymbolResolution` while resolving `scala/annotation/retainsCap`'s unresolved TASTy parent. | No non-class member success. | 0 typed |
+| Earlier ordinary function types (12 rows) | 8 stop at `ImportQualifierNotFound`, 1 at `MemberLookup`, and 3 at `TypeNameNotFound`. | No non-class member success. | 0 typed |
+| Inferred class fields | All 14 immutable field completions stop at `ImportQualifierNotFound`; the 7 mutable fields have 3 direct completions, 3 `ImportQualifierNotFound` outcomes, and 1 `TypeNameNotFound`. | No enclosing method reaches a successful external member. | Method attempts remain blocked separately |
+| Singleton references (22 rows) | All moved past singleton projection and now stop at `ImportQualifierNotFound`. | No non-class member success. | 0 typed |
+| Local signatures (14 rows) | All remain at `ImportQualifierNotFound`; the local-signature-specific deferral is gone. | No non-class member success. | 0 typed |
+| Local values (21 rows) | 16 stop at `ImportQualifierNotFound`, 4 at anonymous-given identity deferral, and 1 at the inline-value deferral. | No non-class member success. | No completed local-symbol mapping |
+
+The audit's package type resources now cover 575 requests and 57 distinct
+targets; among 8,070 external member requests, 358 resolve to class symbols
+and zero resolve to non-class declarations. Package term/object and incomplete
+source-class completion remain explicit boundaries. Generic external receiver
+argument adaptation remains deferred even when the class identity loads.
+Resolver rollback still removes failed loads and permits retry, as covered by
+the classloader and source-typing integration tests.
+
 ## Previous type projection snapshot
 
 The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.

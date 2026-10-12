@@ -317,6 +317,57 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 }
             }
             [] => Ok(None),
+            [symbol]
+                if store.symbols.get(resolved_owner).kind == SymbolKind::Package
+                    && request.name.is_type() =>
+            {
+                let member = store.symbols.get(*symbol);
+                if matches!(
+                    member.kind,
+                    SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                ) {
+                    let owner_mismatch = member.owner != Some(resolved_owner)
+                        && !is_nested_class_indexed_in_package(store, *symbol, resolved_owner);
+                    if owner_mismatch || member.name != request.name {
+                        return Err(ResolutionError::Malformed {
+                            reason: format!(
+                                "package type member {symbol:?} does not match its canonical package/name"
+                            ),
+                        });
+                    }
+                    let SymbolInfo::Complete(info) = member.info else {
+                        // A source-owned class is already the canonical identity.
+                        // This adapter cannot complete it in place, and loading a
+                        // classpath twin would create a duplicate identity.
+                        return Ok(None);
+                    };
+                    let Some(ty) = store.types.try_get(info) else {
+                        return Err(ResolutionError::Malformed {
+                            reason: format!(
+                                "package class {symbol:?} has an invalid or unfilled completion type"
+                            ),
+                        });
+                    };
+                    let Type::ClassInfo(class_info) = ty else {
+                        return Err(ResolutionError::Malformed {
+                            reason: format!(
+                                "package class {symbol:?} is complete without ClassInfo"
+                            ),
+                        });
+                    };
+                    if class_info.class != *symbol
+                        || !store.scopes.contains(class_info.declarations)
+                        || store.scopes.get(class_info.declarations).owner != Some(*symbol)
+                    {
+                        return Err(ResolutionError::Malformed {
+                            reason: format!(
+                                "package class {symbol:?} has invalid class identity or declaration scope"
+                            ),
+                        });
+                    }
+                }
+                Ok(Some(*symbol))
+            }
             [symbol] => Ok(Some(*symbol)),
             many => Err(ResolutionError::Ambiguous {
                 candidates: many.len(),
@@ -439,6 +490,51 @@ fn package_path_of_symbol(store: &SemanticStore, package: SymbolId) -> Option<Ve
     Some(segments)
 }
 
+/// Nested JVM classes are also indexed in their binary package scope (for
+/// example, `Outer$Inner` under `example`), while their semantic owner is the
+/// enclosing class. Accept that shape only when the enclosing class itself is
+/// owned by the requested package and its binary name prefixes the member.
+fn is_nested_class_indexed_in_package(
+    store: &SemanticStore,
+    member: SymbolId,
+    package: SymbolId,
+) -> bool {
+    const MAX_OWNER_DEPTH: usize = 64;
+
+    let mut current = member;
+    let mut visited = std::collections::HashSet::new();
+    for depth in 0..MAX_OWNER_DEPTH {
+        if !visited.insert(current) {
+            return false;
+        }
+        let symbol = store.symbols.get(current);
+        let Some(owner) = symbol.owner else {
+            return false;
+        };
+        let enclosing = store.symbols.get(owner);
+        if enclosing.kind == SymbolKind::Package {
+            return depth > 0 && owner == package;
+        }
+        if !matches!(
+            enclosing.kind,
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+        ) {
+            return false;
+        }
+
+        let enclosing_name = store.names.resolve(enclosing.name.text());
+        let member_name = store.names.resolve(symbol.name.text());
+        if !member_name
+            .strip_prefix(enclosing_name)
+            .is_some_and(|suffix| suffix.starts_with('$') && suffix.len() > 1)
+        {
+            return false;
+        }
+        current = owner;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,7 +544,7 @@ mod tests {
     };
     use crate::jdk_class_path::JdkClassPath;
     use crate::jmod_class_path::JmodClassPath;
-    use dotty_core::{ClassInfo, MemberSelector, Name, Namespace, Scope};
+    use dotty_core::{ClassInfo, MemberSelector, Name, Namespace, Scope, SourceId};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -581,6 +677,36 @@ mod tests {
         }
     }
 
+    struct JdkCorpusDayOfWeek;
+
+    impl ClassPathEntry for JdkCorpusDayOfWeek {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            let (bytes, origin) = match name.as_internal() {
+                "java/time/DayOfWeek" => (
+                    include_bytes!("../../dotty-classfile/tests/fixtures/jdk_corpus/jdk26/java/time/DayOfWeek.class").to_vec(),
+                    fixture_path("../dotty-classfile/tests/fixtures/jdk_corpus/jdk26"),
+                ),
+                "java/lang/Object" => (
+                    test_class_stub("java/lang/Object", 0x0021),
+                    PathBuf::from("<synthetic-JDK-dependency>"),
+                ),
+                _ => (
+                    test_class_stub_with_super(name.as_internal(), "java/lang/Object"),
+                    PathBuf::from("<synthetic-JDK-dependency>"),
+                ),
+            };
+            Ok(Some(ClassResource::new(
+                bytes,
+                ClassFormat::Class,
+                ClassOrigin::Directory(origin),
+            )))
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(package == ["java", "time"])
+        }
+    }
+
     struct DelayedCloseableClassPath {
         inner: CompositeClassPath,
         allow_closeable: Arc<AtomicBool>,
@@ -613,6 +739,18 @@ mod tests {
                     include_bytes!("../tests/fixtures/enclosing_generics/Outer$Inner.class")
                         .to_vec()
                 }
+                "enclosing_generics/Outer$Middle" => {
+                    include_bytes!("../tests/fixtures/enclosing_generics/Outer$Middle.class")
+                        .to_vec()
+                }
+                "enclosing_generics/Outer$Middle$Deep" => {
+                    include_bytes!("../tests/fixtures/enclosing_generics/Outer$Middle$Deep.class")
+                        .to_vec()
+                }
+                "enclosing_generics/Outer$Middle$Deep$Leaf" => include_bytes!(
+                    "../tests/fixtures/enclosing_generics/Outer$Middle$Deep$Leaf.class"
+                )
+                .to_vec(),
                 "enclosing_generics/Outer$Static" => {
                     let mut bytes =
                         include_bytes!("../tests/fixtures/enclosing_generics/Outer$Static.class")
@@ -709,6 +847,49 @@ mod tests {
                 .session
                 .resolved
                 .contains_key(&BinaryName::from_internal("enclosing_generics/Outer"))
+        );
+    }
+
+    #[test]
+    fn repeated_package_lookup_preserves_deeply_nested_class_identity() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            EnclosingGenericRetryClassPath(Mutex::new(false)),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(&mut store, &["enclosing_generics"])
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let request = MemberRequest {
+            prefix: package_prefix,
+            name: Name::new(
+                store.names.intern("Outer$Middle$Deep$Leaf"),
+                Namespace::Type,
+            ),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+
+        let first = resolver
+            .resolve_member(&mut store, &request)
+            .expect("the first request should load the nested class and its outers")
+            .expect("the fixture contains the nested class");
+        let second = resolver
+            .resolve_member(&mut store, &request)
+            .expect("the repeated request should pass package owner validation")
+            .expect("the class should remain in the package's binary-name index");
+
+        assert_eq!(first, second);
+        let package_scope = resolver.session.packages.scope_of(package).unwrap();
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&request.name),
+            &[first]
         );
     }
 
@@ -976,6 +1157,244 @@ mod tests {
     }
 
     #[test]
+    fn package_type_lookup_does_not_return_an_incomplete_source_class() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let probes = Arc::new(AtomicUsize::new(0));
+        let mut resolver = ClasspathSymbolResolver::new(
+            EmptyCountingClassPath(Arc::clone(&probes)),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "example");
+        let package_scope = resolver.package_scope(package).unwrap();
+        let class_name = Name::new(store.names.intern("Pending"), Namespace::Type);
+        let source_class = store.symbols.alloc(Symbol {
+            name: class_name,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: dotty_core::SymbolOrigin::Source(SourceId::from_index(0)),
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store
+            .scopes
+            .get_mut(package_scope)
+            .enter(class_name, source_class);
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+
+        let result = resolver.resolve_member(
+            &mut store,
+            &MemberRequest {
+                prefix: package_prefix,
+                name: class_name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            },
+        );
+
+        assert_eq!(result, Ok(None));
+        assert_eq!(probes.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&class_name),
+            &[source_class],
+            "the incomplete source identity remains in place without a classpath twin"
+        );
+        assert!(resolver.session.resolved.is_empty());
+    }
+
+    #[test]
+    fn package_type_lookup_rejects_a_class_with_a_foreign_declaration_scope() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            EmptyCountingClassPath(Arc::new(AtomicUsize::new(0))),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "example");
+        let package_scope = resolver.package_scope(package).unwrap();
+        let class_name = Name::new(store.names.intern("Malformed"), Namespace::Type);
+        let foreign_scope = store.scopes.alloc(Scope::new(Some(package)));
+        let class = store.symbols.alloc(Symbol {
+            name: class_name,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: dotty_core::SymbolOrigin::Source(SourceId::from_index(0)),
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        let class_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: definitions.no_prefix,
+            class,
+            parents: Vec::new(),
+            declarations: foreign_scope,
+            self_type: None,
+        }));
+        store.symbols.get_mut(class).info = SymbolInfo::Complete(class_info);
+        store.scopes.get_mut(package_scope).enter(class_name, class);
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+
+        let error = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: class_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .expect_err("a class cannot publish another owner's declaration scope");
+
+        assert!(matches!(
+            error,
+            ResolutionError::Malformed { reason }
+                if reason.contains("invalid class identity or declaration scope")
+        ));
+    }
+
+    #[test]
+    fn package_type_lookup_rejects_an_unfilled_completion_slot_without_mutation() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            EmptyCountingClassPath(Arc::new(AtomicUsize::new(0))),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "example");
+        let package_scope = resolver.package_scope(package).unwrap();
+        let class_name = Name::new(store.names.intern("Reserved"), Namespace::Type);
+        let reserved_type = store.types.reserve().id();
+        let class = store.symbols.alloc(Symbol {
+            name: class_name,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Complete(reserved_type),
+            origin: dotty_core::SymbolOrigin::Tasty(store.origins.register_tasty()),
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store.scopes.get_mut(package_scope).enter(class_name, class);
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let checkpoint = store.checkpoint();
+
+        let error = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: class_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .expect_err("an unfilled type reservation is malformed class metadata");
+
+        assert!(matches!(
+            error,
+            ResolutionError::Malformed { reason }
+                if reason.contains("invalid or unfilled completion type")
+        ));
+        assert_eq!(store.checkpoint(), checkpoint);
+        assert!(resolver.session.resolved.is_empty());
+    }
+
+    #[test]
+    fn package_type_lookup_rejects_an_external_class_owned_by_another_package() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            EmptyCountingClassPath(Arc::new(AtomicUsize::new(0))),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "example");
+        let package_scope = resolver.package_scope(package).unwrap();
+        let foreign_package = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "foreign");
+        let class_name = Name::new(store.names.intern("WrongOwner"), Namespace::Type);
+        let class = store.symbols.alloc(Symbol {
+            name: class_name,
+            owner: Some(foreign_package),
+            kind: SymbolKind::Class,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: dotty_core::SymbolOrigin::Tasty(store.origins.register_tasty()),
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        let class_scope = store.scopes.alloc(Scope::new(Some(class)));
+        let class_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: definitions.no_prefix,
+            class,
+            parents: Vec::new(),
+            declarations: class_scope,
+            self_type: None,
+        }));
+        store.symbols.get_mut(class).info = SymbolInfo::Complete(class_info);
+        store.scopes.get_mut(package_scope).enter(class_name, class);
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let checkpoint = store.checkpoint();
+
+        let error = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: class_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .expect_err("an external package entry cannot return a class from another package");
+
+        assert!(matches!(
+            error,
+            ResolutionError::Malformed { reason }
+                if reason.contains("canonical package/name")
+        ));
+        assert_eq!(store.checkpoint(), checkpoint);
+        assert!(resolver.session.resolved.is_empty());
+    }
+
+    #[test]
     #[ignore = "requires JAVA_HOME pointing to a JDK with jmods/java.base.jmod"]
     fn real_jdk_object_and_get_class_materialize_through_the_resolver() {
         let java_home = std::env::var_os("JAVA_HOME")
@@ -991,6 +1410,63 @@ mod tests {
         let mut resolver =
             ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
         let get_class = Name::new(store.names.intern("getClass"), Namespace::Term);
+
+        let java_lang = resolver
+            .resolve_package(&mut store, &["java", "lang"])
+            .expect("java.lang package lookup should succeed")
+            .expect("the JDK classpath contains java.lang");
+        let java_lang_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, java_lang));
+        let object_name = Name::new(store.names.intern("Object"), Namespace::Type);
+        let object = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: java_lang_prefix,
+                    name: object_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .expect("package type lookup should load java.lang.Object")
+            .expect("java.lang.Object should materialize from the real JDK");
+
+        assert_eq!(
+            object, object_class,
+            "JDK Object reuses Definitions identity"
+        );
+        assert!(matches!(
+            store.symbols.get(object).info,
+            SymbolInfo::Complete(info) if matches!(store.types.get(info), Type::ClassInfo(_))
+        ));
+        let object_scope = resolver
+            .declaration_scope(&store, object)
+            .expect("the real JDK Object has a declaration scope");
+        assert!(store.scopes.contains(object_scope));
+        assert_eq!(
+            store
+                .scopes
+                .get(resolver.package_scope(java_lang).unwrap())
+                .lookup(&object_name),
+            Some(object),
+            "package and loader must expose the same canonical Object symbol"
+        );
+        assert_eq!(
+            resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix: java_lang_prefix,
+                        name: object_name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .unwrap(),
+            Some(object),
+            "repeated package type requests reuse the canonical identity"
+        );
 
         let method = resolver
             .resolve_member(
@@ -1170,6 +1646,149 @@ mod tests {
             store.names.resolve(store.symbols.get(source).name.text()),
             "Source"
         );
+    }
+
+    #[test]
+    fn real_scala_library_package_type_materializes_class_and_method() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(fixture_path(
+                "../dotty-tasty/tests/fixtures/scala3-library",
+            ))),
+            Box::new(SyntheticTastyJdk),
+        ]);
+        let mut resolver =
+            ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(&mut store, &["scala", "io"])
+            .expect("Scala package lookup should succeed")
+            .expect("the checked-in Scala library fixture has scala.io");
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let source_name = Name::new(store.names.intern("Source"), Namespace::Type);
+        let request = MemberRequest {
+            prefix: package_prefix,
+            name: source_name,
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+
+        let source = resolver
+            .resolve_member(&mut store, &request)
+            .expect("the real Scala 3.9 Source TASTy should load")
+            .expect("scala.io.Source should be available as a package type");
+
+        assert_eq!(store.symbols.get(source).owner, Some(package));
+        assert_eq!(store.symbols.get(source).name, source_name);
+        assert!(matches!(
+            store.symbols.get(source).kind,
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+        ));
+        assert!(matches!(
+            store.symbols.get(source).info,
+            SymbolInfo::Complete(info) if matches!(store.types.get(info), Type::ClassInfo(_))
+        ));
+        let declarations = resolver
+            .declaration_scope(&store, source)
+            .expect("Source has a declaration scope");
+        assert!(store.scopes.contains(declarations));
+        let package_scope = resolver.package_scope(package).unwrap();
+        assert_eq!(
+            store.scopes.get(package_scope).lookup(&source_name),
+            Some(source),
+            "the package scope and resolver must share the canonical symbol"
+        );
+        assert_eq!(
+            resolver.resolve_member(&mut store, &request).unwrap(),
+            Some(source),
+            "repeated package type requests must reuse the same identity"
+        );
+
+        let source_prefix = store.types.alloc(Type::ThisType { class: source });
+        let get_lines = Name::new(store.names.intern("getLines"), Namespace::Term);
+        let method = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: source_prefix,
+                    name: get_lines,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .expect("Source declaration lookup should succeed")
+            .expect("real scala.io.Source should expose getLines");
+        assert_eq!(store.symbols.get(method).owner, Some(source));
+        assert!(store.scopes.get(declarations).lookup(&get_lines).is_some());
+    }
+
+    #[test]
+    fn real_jdk_package_type_materializes_from_checked_in_classfile() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(JdkCorpusDayOfWeek, definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(&mut store, &["java", "time"])
+            .expect("java.time package lookup should succeed")
+            .expect("the checked-in JDK fixture contains java.time");
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let name = Name::new(store.names.intern("DayOfWeek"), Namespace::Type);
+        let request = MemberRequest {
+            prefix: package_prefix,
+            name,
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+
+        let class = resolver
+            .resolve_member(&mut store, &request)
+            .expect("the JDK 26 classfile should load")
+            .expect("java.time.DayOfWeek should materialize from the JDK classfile");
+
+        assert_eq!(store.symbols.get(class).owner, Some(package));
+        assert_eq!(store.symbols.get(class).name, name);
+        assert_eq!(store.symbols.get(class).kind, SymbolKind::Class);
+        assert_eq!(
+            resolver.session.origins.get(&class),
+            Some(&ClassOrigin::Directory(fixture_path(
+                "../dotty-classfile/tests/fixtures/jdk_corpus/jdk26"
+            ))),
+            "the real class keeps the checked-in JDK fixture as its origin"
+        );
+        assert!(matches!(
+            store.symbols.get(class).info,
+            SymbolInfo::Complete(info) if matches!(store.types.get(info), Type::ClassInfo(_))
+        ));
+        let declarations = resolver
+            .declaration_scope(&store, class)
+            .expect("DayOfWeek has a declaration scope");
+        assert!(store.scopes.contains(declarations));
+        assert_eq!(
+            resolver.resolve_member(&mut store, &request).unwrap(),
+            Some(class),
+            "repeated requests reuse the loaded JDK class identity"
+        );
+
+        let is_weekend = Name::new(store.names.intern("getValue"), Namespace::Term);
+        let class_prefix = store.types.alloc(Type::ThisType { class });
+        let method = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: class_prefix,
+                    name: is_weekend,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .expect("DayOfWeek member lookup should succeed")
+            .expect("the real JDK class declares getValue");
+        assert_eq!(store.symbols.get(method).owner, Some(class));
     }
 
     #[test]

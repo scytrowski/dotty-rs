@@ -4,7 +4,7 @@ use dotty_classloader::classloader::{
     ClassPathEntry, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
 };
 use dotty_core::ast::{TreeKind, Untyped};
-use dotty_core::types::{Type, TypeRefTarget};
+use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, Name, Namespace, Packages, ResolutionError, ResolverCheckpoint, SemanticStore,
     SourceId, SourceText, SymbolId, SymbolInfo, SymbolResolver, TreeId,
@@ -441,6 +441,100 @@ fn source_typer_resolves_external_imports_and_types_member_applications() {
 }
 
 #[test]
+fn source_typer_resolves_a_member_inherited_from_a_real_scala_library_class() {
+    let stubs = TemporaryDirectory::new("scala-library-inherited-member");
+    write_required_jdk_stubs(stubs.path());
+    write_stub_class(
+        stubs.path(),
+        "java/io/Closeable",
+        Some("java/lang/Object"),
+        0x0601,
+    );
+    let scala_library = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/dotty-tasty/tests/fixtures/scala3-library");
+    let classpath = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(scala_library)),
+        Box::new(DirectoryClassPath::new(PathBuf::from(TASTY_SAMPLE))),
+        Box::new(DirectoryClassPath::new(stubs.path().to_path_buf())),
+    ]);
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "def isEmpty(source: scala.io.Source): Boolean = source.isEmpty",
+        SourceId::from_index(11),
+        &mut store,
+        &mut packages,
+    );
+    let is_empty = Name::new(store.names.intern("isEmpty"), Namespace::Term);
+    let resolver = ClasspathSymbolResolver::new(
+        classpath,
+        definitions,
+        LoadingSession::with_packages(packages),
+    );
+    let log = Rc::new(RefCell::new(ResolutionLog::default()));
+    let resolver = RecordingResolver::new(resolver, Rc::clone(&log));
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        unit.source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let (method, rhs) = method_rhs(&unit, typer.store(), "isEmpty");
+    let context = typer.expression_context_for(method).unwrap();
+
+    let typed_tree = typer
+        .type_expression(rhs, context)
+        .expect("Source's inherited isEmpty should type through normal member lookup");
+    let bool_type = typer.typed_ast().get(typed_tree).ty;
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(inherited_method),
+        ..
+    } = typer.store().types.get(bool_type)
+    else {
+        panic!("inherited isEmpty should resolve to its declaring method")
+    };
+    let inherited_method = *inherited_method;
+
+    let source = log
+        .borrow()
+        .members
+        .iter()
+        .find_map(|(name, symbol)| (name == "Source").then_some(*symbol))
+        .expect("the external Scala Source class should be materialized");
+    let SymbolInfo::Complete(info) = typer.store().symbols.get(source).info else {
+        panic!("the external Source class should be complete")
+    };
+    let Type::ClassInfo(info) = typer.store().types.get(info) else {
+        panic!("the external Source class should have class info")
+    };
+    assert!(
+        typer
+            .store()
+            .scopes
+            .get(info.declarations)
+            .lookup(&is_empty)
+            .is_none(),
+        "the resolved member comes from a parent rather than Source's direct declarations"
+    );
+    assert_eq!(
+        typer.store().symbols.get(inherited_method).name,
+        is_empty,
+        "the typed selection should retain the inherited method identity"
+    );
+    assert_ne!(
+        typer.store().symbols.get(inherited_method).owner,
+        Some(source),
+        "the inherited method remains owned by its declaring parent"
+    );
+}
+
+#[test]
 fn inferred_field_resolves_external_members_and_rolls_back_failed_classpath_completion() {
     let stubs = TemporaryDirectory::new("inferred-field-classpath-stubs");
     write_required_jdk_stubs(stubs.path());
@@ -607,11 +701,36 @@ fn generic_external_receiver_reports_the_current_signature_limitation() {
         &mut store,
         &mut packages,
     );
-    let resolver = ClasspathSymbolResolver::new(
+    let mut resolver = ClasspathSymbolResolver::new(
         class_path(&stubs),
         definitions,
         LoadingSession::with_packages(packages),
     );
+    let external = resolver
+        .resolve_package(&mut store, &["external"])
+        .unwrap()
+        .expect("the fixture has the external package");
+    let external_prefix = store
+        .types
+        .alloc(Type::type_ref(definitions.no_prefix, external));
+    let generic_name = Name::new(store.names.intern("GenericSample"), Namespace::Type);
+    let generic_class = resolver
+        .resolve_member(
+            &mut store,
+            &dotty_core::MemberRequest {
+                prefix: external_prefix,
+                name: generic_name,
+                selector: dotty_core::MemberSelector::Unique,
+                space: dotty_core::MemberSpace::Prefix,
+            },
+        )
+        .unwrap()
+        .expect("GenericSample should materialize before receiver adaptation");
+    assert_eq!(store.symbols.get(generic_class).owner, Some(external));
+    assert!(matches!(
+        store.symbols.get(generic_class).info,
+        SymbolInfo::Complete(info) if matches!(store.types.get(info), Type::ClassInfo(_))
+    ));
     let typer_packages = Packages::new();
     let mut typer = SourceTyper::new(
         &unit.parsed.ast,
@@ -835,10 +954,33 @@ fn classloader_resolver_reuses_symbols_entered_by_the_tasty_adapter() {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
     let tasty = TastyFile::parse_scala_3_9(WIDGET_TASTY).unwrap();
+    let widget_address = tasty
+        .ast_address_index()
+        .unwrap()
+        .iter_nodes()
+        .find(|node| node.tag == dotty_tasty::tasty::TYPEDEF_TAG)
+        .and_then(|node| u32::try_from(node.offset).ok())
+        .expect("the Widget TASTy fixture has a top-level class definition");
+    let mut packages = Packages::new();
+    let java_lang = packages
+        .enter(
+            &mut store,
+            dotty_core::SymbolOrigin::Synthetic,
+            &["java", "lang"],
+        )
+        .last()
+        .unwrap()
+        .symbol;
+    let object_name = Name::new(store.names.intern("Object"), Namespace::Type);
+    store
+        .scopes
+        .get_mut(packages.scope_of(java_lang).unwrap())
+        .enter(object_name, definitions.object_class);
     let (_index, packages) = {
         let mut unpickler =
-            TastyUnpickler::with_packages(&tasty, &mut store, definitions, Packages::new());
+            TastyUnpickler::with_packages(&tasty, &mut store, definitions, packages);
         unpickler.enter_symbols().unwrap();
+        unpickler.complete_symbol(widget_address).unwrap();
         unpickler.into_parts()
     };
     let root = packages.symbol::<&str>(&[]).unwrap();

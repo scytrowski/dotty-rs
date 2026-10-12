@@ -294,6 +294,27 @@ The resolver returns declaration symbols only; inherited lookup, receiver
 adaptation, and overload ranking stay with the caller. Unsupported prefix
 forms return `None`.
 
+A unique type-name request whose prefix is a package `TypeRef` derives the
+binary class name from the canonical package owner chain and asks the loader
+to materialize that class. Success returns the class's canonical symbol only
+after it has `Complete(Type::ClassInfo)` and a valid declaration scope. The
+same `LoadingSession` shares its canonical package registry and positive
+class cache across package lookup, class dependencies, and later member
+lookup, so repeated requests return the same `SymbolId`. Package term
+requests are not rewritten to `Foo$`; a classpath
+resource for `Foo` alone does not establish a Scala module identity. A
+pre-existing incomplete source class also remains unresolved because this
+adapter has no safe in-place completion contract for it.
+
+The checked-in resolver regressions exercise a real JDK 26
+`java.time.DayOfWeek` classfile and a real Scala 3.9 `scala.io.Source` TASTy
+file through package type requests. They check completed class identity,
+scope and repeated-request reuse, then reach declared members (`getValue`,
+`getLines`). The source-typing integration also resolves inherited
+`Source.isEmpty` through the existing parent lookup path. Synthetic JDK
+dependency stubs keep the JDK fixture independent of a local JDK install;
+the materialized `DayOfWeek` bytes themselves are the checked-in JDK class.
+
 Every resolver call is atomic. A miss or loading error removes newly loaded
 classes, session cache entries, package entries, and package-scope links.
 Successful materializations are journaled so the frontend can call
