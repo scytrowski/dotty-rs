@@ -258,10 +258,10 @@ pub struct ClassLoader<'store, E> {
     /// resolve, but nested signatures may need an enclosing class's already-
     /// entered type parameters while that enclosing class is still loading.
     in_progress_classes: HashMap<SymbolId, InProgressClass>,
-    /// A package-object TASTy resource decoded while resolving a TASTy
-    /// alias. Its error is returned through the requesting class's load,
-    /// so keep its artifact context until that outer call records failure.
-    alias_failure_context: Option<(BinaryName, ClassOrigin, ClassFormat)>,
+    /// Resource context for a failed identity-header or TASTy alias decode.
+    /// The requesting class consumes it when recording its detailed failure;
+    /// successful loads discard context from tolerated best-effort failures.
+    dependency_failure_context: Option<(BinaryName, ClassOrigin, ClassFormat)>,
     /// Resource context for classes whose decoding is currently in progress.
     /// Inheritance-cycle detection can fail a class before its own load
     /// returns, so its selected resource must be available to that branch.
@@ -426,7 +426,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             session,
             repository: ClassRepository::new(),
             in_progress_classes: HashMap::new(),
-            alias_failure_context: None,
+            dependency_failure_context: None,
             loading_context: HashMap::new(),
             active_load_profile: None,
             load_profiles: Vec::new(),
@@ -506,6 +506,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// class identity is also established from class-file metadata; `$` in
     /// a name alone is never treated as evidence of nesting.
     pub fn ensure_class_identity(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadError> {
+        self.dependency_failure_context = None;
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let result = self.ensure_class_identity_inner(name, &mut Vec::new());
@@ -607,8 +608,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .map_err(|error| ClassLoadError::Io(name.clone(), Rc::new(error)))?
             .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
         let origin = resource.origin().clone();
-        let (flags, tasty_visibility, classfile_visibility, semantic_owner) =
-            match resource.format() {
+        let header = (|| -> Result<_, ClassLoadError> {
+            Ok(match resource.format() {
                 ClassFormat::Class => {
                     let mut reader = Reader::new(resource.bytes());
                     let class_file = ClassFile::decode(&mut reader)
@@ -635,7 +636,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                         .map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?;
                     (identity.flags, identity.visibility, None, None)
                 }
-            };
+            })
+        })();
+        let (flags, tasty_visibility, classfile_visibility, semantic_owner) =
+            header.inspect_err(|_| {
+                self.dependency_failure_context =
+                    Some((name.clone(), origin.clone(), resource.format()));
+            })?;
 
         let semantic_owner = semantic_owner
             .map(|owner| self.ensure_class_identity_inner(&owner, ancestry))
@@ -765,6 +772,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// dependency's context; absent classes and lookup errors have no
     /// resource context.
     pub fn load_class_detailed(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadFailure> {
+        self.dependency_failure_context = None;
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let result = if self.collect_load_profiles {
@@ -1012,17 +1020,16 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             ),
         };
         self.loading_context.remove(name);
+        let observed_context = self.dependency_failure_context.take();
         result.map_err(|error| {
             let cause_name = error_binary_name(error.root_cause());
             let failure_is_for_another_name =
                 cause_name.is_some_and(|cause_name| cause_name != name);
-            let alias_context = self
-                .alias_failure_context
-                .take()
-                .filter(|(alias_name, _, _)| Some(alias_name) == cause_name)
+            let observed_context = observed_context
+                .filter(|(dependency, _, _)| Some(dependency) == cause_name)
                 .map(|(_, origin, format)| (Some(origin), Some(format)));
             let dependency_context = self.cached_dependency_context(&error);
-            let (origin, format) = alias_context.or(dependency_context).unwrap_or({
+            let (origin, format) = observed_context.or(dependency_context).unwrap_or({
                 if failure_is_for_another_name {
                     (None, None)
                 } else {
@@ -1731,7 +1738,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         );
         if let Some(error) = alias_error.into_inner() {
             let (error, context) = error.into_class_load_error();
-            self.alias_failure_context = context;
+            self.dependency_failure_context = context;
             return Err(error);
         }
         let decoded =
@@ -5780,6 +5787,90 @@ mod tests {
                 .resolved
                 .contains_key(&BinaryName::from_internal("B"))
         );
+    }
+
+    #[test]
+    fn malformed_member_identity_retains_its_resource_in_detailed_failures() {
+        let name = BinaryName::from_internal("A");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            ResourceClassPath(HashMap::from([
+                (
+                    name.clone(),
+                    (
+                        synthetic_class_with_object_fields("A", None, &[("value", "Broken")]),
+                        ClassFormat::Class,
+                        ClassOrigin::Directory("/root".into()),
+                    ),
+                ),
+                (
+                    BinaryName::from_internal("Broken"),
+                    (
+                        vec![0, 1, 2],
+                        ClassFormat::Class,
+                        ClassOrigin::Directory("/dependency".into()),
+                    ),
+                ),
+            ])),
+            &mut store,
+        );
+        for _ in 0..2 {
+            let failure = loader.load_class_detailed(&name).unwrap_err();
+            assert!(
+                matches!(failure.root_cause(), ClassLoadError::InvalidClassFile(name, _)
+                if name.as_internal() == "Broken")
+            );
+            assert_eq!(
+                failure.origin,
+                Some(ClassOrigin::Directory("/dependency".into()))
+            );
+            assert_eq!(failure.format, Some(ClassFormat::Class));
+        }
+        assert!(loader.session.identified.is_empty());
+    }
+
+    #[test]
+    fn tolerated_tasty_identity_failure_does_not_leak_stale_resource_context() {
+        let name = BinaryName::from_internal("A");
+        let broken = BinaryName::from_internal("Broken");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            ResourceClassPath(HashMap::from([
+                (
+                    name.clone(),
+                    (
+                        synthetic_class_with_object_fields("A", None, &[("value", "Broken")]),
+                        ClassFormat::Class,
+                        ClassOrigin::Directory("/root".into()),
+                    ),
+                ),
+                (
+                    broken.clone(),
+                    (
+                        vec![0, 1, 2],
+                        ClassFormat::Class,
+                        ClassOrigin::Directory("/dependency".into()),
+                    ),
+                ),
+            ])),
+            &mut store,
+        );
+        let fallback = loader.lower_tasty_member_type(&name, Some(&broken));
+        let Type::Error(error) = loader.store.types.get(fallback) else {
+            panic!("TASTy fallback")
+        };
+        assert!(
+            loader
+                .store
+                .names
+                .resolve(error.message)
+                .contains("invalid class file for Broken")
+        );
+        loader.class_path.0.remove(&broken);
+        let failure = loader.load_class_detailed(&name).unwrap_err();
+        assert!(matches!(failure.root_cause(), ClassLoadError::NotFound(name) if name == &broken));
+        assert_eq!(failure.origin, None);
+        assert_eq!(failure.format, None);
     }
 
     #[test]
