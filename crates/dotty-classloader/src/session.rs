@@ -2,7 +2,7 @@ use crate::binary_name::BinaryName;
 use crate::class_path::ClassOrigin;
 use crate::packages::PackageRegistry;
 use crate::symbol::ClassfileMetadata;
-use dotty_core::SymbolId;
+use dotty_core::{Symbol, SymbolId};
 use std::collections::HashMap;
 
 /// The `SymbolId`-allocating state that must be shared, by value, across
@@ -70,6 +70,7 @@ pub struct LoadingSession {
     metadata_order: Vec<SymbolId>,
     pub(crate) origins: HashMap<SymbolId, ClassOrigin>,
     origin_order: Vec<SymbolId>,
+    symbol_undo: Vec<(SymbolId, Symbol)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +79,7 @@ pub(crate) struct SessionCheckpoint {
     resolved: usize,
     metadata: usize,
     origins: usize,
+    symbols: usize,
     packages: (usize, usize),
 }
 
@@ -112,6 +114,7 @@ impl LoadingSession {
             metadata_order: Vec::new(),
             origins: HashMap::new(),
             origin_order: Vec::new(),
+            symbol_undo: Vec::new(),
         }
     }
 
@@ -121,6 +124,7 @@ impl LoadingSession {
             resolved: self.resolved_order.len(),
             metadata: self.metadata_order.len(),
             origins: self.origin_order.len(),
+            symbols: self.symbol_undo.len(),
             packages: self.packages.checkpoint(),
         }
     }
@@ -130,6 +134,10 @@ impl LoadingSession {
         if self.resolved.insert(name.clone(), symbol).is_none() {
             self.resolved_order.push(name);
         }
+    }
+
+    pub(crate) fn record_symbol_update(&mut self, store: &dotty_core::SemanticStore, id: SymbolId) {
+        self.symbol_undo.push((id, store.symbols.get(id).clone()));
     }
 
     pub(crate) fn cache_identified(&mut self, name: BinaryName, symbol: SymbolId) {
@@ -158,6 +166,12 @@ impl LoadingSession {
         store: &mut dotty_core::SemanticStore,
         checkpoint: SessionCheckpoint,
     ) {
+        while self.symbol_undo.len() > checkpoint.symbols {
+            let (id, symbol) = self.symbol_undo.pop().expect("length checked");
+            if store.symbols.contains(id) {
+                *store.symbols.get_mut(id) = symbol;
+            }
+        }
         while self.identified_order.len() > checkpoint.identified {
             let name = self.identified_order.pop().expect("length checked");
             self.identified.remove(&name);

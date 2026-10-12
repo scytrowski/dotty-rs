@@ -817,6 +817,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             return Err(ClassLoadError::InheritanceDepthExceeded(name.clone()));
         }
 
+        let previous_shell = self
+            .session
+            .identified
+            .get(name)
+            .copied()
+            .map(|id| (id, self.store.symbols.get(id).clone()));
         inheritance_ancestry.push(name.clone());
         let load_result = self.load_uncached(name, inheritance_ancestry);
         let popped = inheritance_ancestry.pop();
@@ -829,6 +835,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 Ok(symbol)
             }
             Err(failure) => {
+                if let Some((id, symbol)) = previous_shell {
+                    *self.store.symbols.get_mut(id) = symbol;
+                }
                 // `load_uncached` can fail after `enter_class` already
                 // allocated this class's `SymbolId` (e.g. a later
                 // `DependencyFailure` on its superclass) -- that `Symbol`
@@ -1070,6 +1079,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 existing_symbol.origin
             };
             let semantic_owner = existing_symbol.owner.unwrap_or(owner);
+            self.session.record_symbol_update(self.store, symbol);
             *self.store.symbols.get_mut(symbol) = Symbol {
                 name: symbol_name,
                 owner: Some(semantic_owner),
@@ -5561,6 +5571,80 @@ mod tests {
             SymbolInfo::Complete(_)
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn resolver_rollback_restores_a_preexisting_shell_and_allows_retry() {
+        use crate::resolver::ClasspathSymbolResolver;
+        use dotty_core::{MemberRequest, MemberSelector, MemberSpace, SymbolResolver};
+
+        for fail_operation in [false, true] {
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let b_name = BinaryName::from_internal("sample/B");
+            let classes = HashMap::from([
+                (b_name.clone(), synthetic_class("sample/B", None)),
+                (
+                    BinaryName::from_internal("sample/A"),
+                    synthetic_class_with_object_fields(
+                        "sample/A",
+                        Some("sample/B"),
+                        if fail_operation {
+                            &[("missing", "sample/Missing")]
+                        } else {
+                            &[]
+                        },
+                    ),
+                ),
+            ]);
+            let mut loader = ClassLoader::with_definitions(
+                InMemoryClassPath(classes.clone()),
+                &mut store,
+                definitions,
+                LoadingSession::new(),
+            );
+            let b = loader.ensure_class_identity(&b_name).unwrap();
+            let session = loader.into_session();
+            let original = store.symbols.get(b).clone();
+            let package = original.owner.unwrap();
+            let prefix = store
+                .types
+                .alloc(Type::type_ref(definitions.no_prefix, package));
+            let request = MemberRequest {
+                prefix,
+                name: Name::new(store.names.intern("A"), Namespace::Type),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let mut resolver = ClasspathSymbolResolver::new(
+                InMemoryClassPath(classes.clone()),
+                definitions,
+                session,
+            );
+            let checkpoint = resolver.checkpoint();
+            let store_checkpoint = store.checkpoint();
+            let result = resolver.resolve_member(&mut store, &request);
+            if fail_operation {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().is_some());
+                assert!(matches!(store.symbols.get(b).info, SymbolInfo::Complete(_)));
+                resolver.rollback_to(&mut store, checkpoint);
+                store.rollback_to(store_checkpoint);
+            }
+            assert_eq!(store.symbols.get(b), &original);
+            let session = resolver.into_session();
+            let mut loader = ClassLoader::with_definitions(
+                InMemoryClassPath(classes),
+                &mut store,
+                definitions,
+                session,
+            );
+            assert!(loader.metadata(b).is_none());
+            assert_eq!(loader.load_class(&b_name).unwrap(), b);
+            let info = class_info(loader.store, b);
+            assert!(loader.store.scopes.contains(info.declarations));
+        }
     }
 
     #[test]
