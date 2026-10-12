@@ -1524,12 +1524,38 @@ mod tests {
             store.symbols.get(method).origin,
             dotty_core::SymbolOrigin::Classfile(_)
         ));
+        let class_name = BinaryName::from_internal("java/lang/Class");
         let class_symbol = *resolver
             .session
-            .resolved
-            .get(&BinaryName::from_internal("java/lang/Class"))
-            .expect("getClass's descriptor should materialize java/lang/Class");
+            .identified
+            .get(&class_name)
+            .expect("getClass's result should establish java/lang/Class identity");
         assert_ne!(class_symbol, object_class);
+        assert_eq!(store.symbols.get(class_symbol).info, SymbolInfo::Missing);
+        assert!(!resolver.session.resolved.contains_key(&class_name));
+        let SymbolInfo::Complete(method_type) = store.symbols.get(method).info else {
+            panic!("getClass should have complete method info");
+        };
+        let Type::Method(method_info) = store.types.get(method_type) else {
+            panic!("getClass should have a Method type");
+        };
+        let Type::Applied { tycon, args } = store.types.get(method_info.result) else {
+            panic!("getClass's generic result should be Class[?]");
+        };
+        assert_eq!(
+            store.types.get(*tycon).reference_symbol(),
+            Some(class_symbol)
+        );
+        assert_eq!(args.len(), 1);
+        assert!(matches!(store.types.get(args[0]), Type::Wildcard { .. }));
+
+        // Inspecting Class's parents requires explicit completion on this session.
+        let class_path = resolver.class_path.take().unwrap();
+        let session = resolver.into_session();
+        let mut loader =
+            ClassLoader::with_definitions(class_path, &mut store, definitions, session);
+        assert_eq!(loader.load_class(&class_name).unwrap(), class_symbol);
+        drop(loader);
         assert!(matches!(
             store.symbols.get(class_symbol).info,
             SymbolInfo::Complete(info)
