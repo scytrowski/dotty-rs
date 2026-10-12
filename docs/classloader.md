@@ -401,6 +401,46 @@ classes. A later `load_class` reuses and completes the same `SymbolId`.
 Failed identity establishment rolls back newly entered symbols, packages,
 and session metadata.
 
+The dependency policy is explicit:
+
+| Reference role | Policy |
+| --- | --- |
+| Direct superclass/interface or TASTy trait parent | Eager completion |
+| Field or record component value type | Identity only |
+| Method parameter/result, including object arrays | Identity only |
+| Generic constructor/argument, class/method type parameter bound, wildcard bound | Identity only |
+| Annotation type | Identity only; unresolved identity retains the existing annotation fallback |
+| Best-effort TASTy member type | Identity only; missing/unreducible types retain focused `Type::Error` |
+| Static member/local/anonymous enclosing class | Identity only |
+| Non-static member-class enclosing class | Eager completion for its declaration/type-parameter scope |
+
+A completed `ClassInfo` can therefore contain member `TypeRef`s whose target
+class still has `SymbolInfo::Missing`. This does not supply an automatic lazy
+completer: `load_class` must be requested explicitly to inspect that class's
+members. Typer member lookup and direct resolver shell completion are separate
+increments (#1021/#1022). Non-static enclosing owners remain eager because the
+current #973 type-variable environment consumes their declaration scopes;
+identity alone cannot resolve an outer generic parameter. Static edges still
+stop that lookup.
+
+Classfile members naming a missing/malformed class still fail with
+`DependencyFailure`; class existence must be established by the classpath.
+The special canonical `Definitions` identities remain shared. Public full-load
+failures roll back new symbols, package-scope entries, types, and positive
+session state, including member shells created earlier in that load. Previous
+shells and their provenance survive, and prior symbol state is restored before
+store allocations are freed. Loader-local failures retain their typed artifact
+context with no freed symbol IDs; a new loader sharing the session can retry.
+
+Opt-in `ClassLoadProfile` records distinct touched identities and eager load
+depth, plus `full_completions`, `shells_created`, `shells_reused`,
+`member_type_references`, and `hierarchy_loads`. Completions exclude cache hits;
+shell reuse counts incomplete external identities, not completed classes or
+builtins. Member references count successful descriptor/signature/annotation
+identity requests; hierarchy loads count superclass/interface requests,
+including cache hits or errors. Counts report work done even if the root later
+rolls it back. The corpus audit emits totals and per-request counts for #1023.
+
 `ClassLoader::load_class(name)` follows that shape:
 
 1. Resolve `scala.Any`, `scala.AnyRef`, and `scala.Nothing` to their
@@ -411,8 +451,8 @@ and session metadata.
    genuine cycle and reports `CircularInheritance`; an in-progress symbol
    outside it may be reused as a dependency reached through a member type
    (for example Object -> member Class -> superclass Object). Mutual
-   member references still reuse their in-progress shell through
-   `resolve_member_class`/`resolve_semantic_owner`.
+   member references reuse their canonical identity through
+   `ensure_dependency_identity`; owner resolution follows the policy above.
    The inheritance ancestry is capped at 256 classes; exceeding it reports
    `InheritanceDepthExceeded` rather than recursing without bound.
 2. Ask the classpath for the bytes; not found -> `NotFound` (cached).
@@ -440,7 +480,8 @@ and session metadata.
 8. Decode and enter fields/methods/constructors as real symbols, lowering
    each one's descriptor (preferring a `Signature` attribute's generic
    type over the erased descriptor type when present and consistent with
-   it), and resolve+enter its annotations (`.class` only, §3).
+   it), using identity shells for referenced classes, and resolve+enter
+   its annotations (`.class` only, §3).
 9. Complete the class: build its `Type::ClassInfo` (parents + the
    declarations `Scope`) and set `SymbolInfo::Complete` on it.
 10. Mark `Loaded`, return the symbol.

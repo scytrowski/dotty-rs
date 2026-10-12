@@ -289,7 +289,7 @@ pub struct ClassLoader<'store, E> {
 pub struct ClassLoadProfile {
     /// Binary name requested at the root of this load operation.
     pub root: String,
-    /// Greatest number of dependency edges traversed from the root.
+    /// Greatest number of eager dependency-load edges traversed from the root.
     pub max_dependency_depth: usize,
     /// Sorted binary names of the root and every distinct class reached.
     pub classes: BTreeSet<String>,
@@ -487,6 +487,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     }
 
     /// Loads (or returns the cached result for) the class named `name`.
+    /// Hierarchy parents are completed eagerly; member/signature references
+    /// need only class identities. Failed loads roll back their allocations
+    /// and session updates, preserving any identities published beforehand.
+    /// The typed failure remains cached in this loader instance.
     pub fn load_class(&mut self, name: &BinaryName) -> Result<SymbolId, ClassLoadError> {
         self.load_class_detailed(name)
             .map_err(|failure| failure.error)
@@ -3525,6 +3529,73 @@ mod tests {
         bytes
     }
 
+    /// Small abstract class with independently configurable JVM descriptors/signatures.
+    fn signature_class(
+        name: &str,
+        parent: Option<&str>,
+        interfaces: &[&str],
+        signature: Option<&str>,
+        fields: &[(&str, &str, Option<&str>)],
+        methods: &[(&str, &str, Option<&str>)],
+    ) -> Vec<u8> {
+        use dotty_classfile::class_file::ClassFileVersion;
+        use dotty_classfile::{
+            constant_pool_builder::ConstantPoolBuilder, field::FieldInfo, method::MethodInfo,
+        };
+        let mut pool = ConstantPoolBuilder::new();
+        pool.utf8("Signature").unwrap();
+        let this_class = pool.class(name).unwrap();
+        let super_class = parent.map(|name| pool.class(name).unwrap());
+        let interfaces = interfaces
+            .iter()
+            .map(|name| pool.class(name).unwrap())
+            .collect();
+        let fields = fields
+            .iter()
+            .map(|(name, descriptor, signature)| FieldInfo {
+                access_flags: FieldAccessFlags(0x0001),
+                name_index: pool.utf8(name).unwrap(),
+                descriptor_index: pool.utf8(descriptor).unwrap(),
+                attributes: signature
+                    .iter()
+                    .map(|sig| Attribute::Signature(pool.utf8(sig).unwrap()))
+                    .collect(),
+            })
+            .collect();
+        let methods = methods
+            .iter()
+            .map(|(name, descriptor, signature)| MethodInfo {
+                access_flags: MethodAccessFlags(0x0401),
+                name_index: pool.utf8(name).unwrap(),
+                descriptor_index: pool.utf8(descriptor).unwrap(),
+                attributes: signature
+                    .iter()
+                    .map(|sig| Attribute::Signature(pool.utf8(sig).unwrap()))
+                    .collect(),
+            })
+            .collect();
+        let attributes = signature
+            .iter()
+            .map(|sig| Attribute::Signature(pool.utf8(sig).unwrap()))
+            .collect();
+        ClassFile {
+            version: ClassFileVersion {
+                major: 65,
+                minor: 0,
+            },
+            constant_pool: pool.finish().unwrap(),
+            access_flags: ClassAccessFlags(0x0421),
+            this_class,
+            super_class,
+            interfaces,
+            fields,
+            methods,
+            attributes,
+        }
+        .encode()
+        .unwrap()
+    }
+
     /// The real `PoolSample.class` fixture references `java/lang/Object`
     /// (superclass) and `java/lang/Runnable` (interface); since
     /// Milestone 6, its `GREETING` field's type also forces resolving
@@ -4827,6 +4898,11 @@ mod tests {
             symbol_name(&store, parent_symbol(&store, *tycon)),
             "Comparable"
         );
+        assert_eq!(
+            store.symbols.get(parent_symbol(&store, *tycon)).info,
+            SymbolInfo::Missing,
+            "F-bounded class/method signatures require only Comparable's identity"
+        );
         assert_eq!(args.len(), 1);
         assert_eq!(parent_symbol(&store, args[0]), type_param);
     }
@@ -5704,6 +5780,267 @@ mod tests {
                 .resolved
                 .contains_key(&BinaryName::from_internal("B"))
         );
+    }
+
+    #[test]
+    fn method_parameters_results_and_arrays_share_deferred_identities() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(HashMap::from([
+                (
+                    BinaryName::from_internal("A"),
+                    signature_class(
+                        "A",
+                        None,
+                        &[],
+                        None,
+                        &[],
+                        &[
+                            ("one", "(LB;)LC;", None),
+                            ("many", "(LB;[LB;ILC;)[LB;", None),
+                        ],
+                    ),
+                ),
+                (
+                    BinaryName::from_internal("B"),
+                    synthetic_class("B", Some("MissingBParent")),
+                ),
+                (
+                    BinaryName::from_internal("C"),
+                    synthetic_class("C", Some("MissingCParent")),
+                ),
+            ])),
+            &mut store,
+        );
+        let a = loader.load_class(&BinaryName::from_internal("A")).unwrap();
+        let b = loader.session.identified[&BinaryName::from_internal("B")];
+        let c = loader.session.identified[&BinaryName::from_internal("C")];
+        let one = member_type_id(loader.store, a, "one");
+        let Type::Method(one) = loader.store.types.get(one) else {
+            panic!("method")
+        };
+        assert_eq!(one.params.len(), 1);
+        assert_eq!(parent_symbol(loader.store, one.params[0].ty), b);
+        assert_eq!(parent_symbol(loader.store, one.result), c);
+        let many = member_type_id(loader.store, a, "many");
+        let Type::Method(many) = loader.store.types.get(many) else {
+            panic!("method")
+        };
+        assert_eq!(many.params.len(), 4);
+        assert_eq!(parent_symbol(loader.store, many.params[0].ty), b);
+        assert_eq!(many.params[2].ty, loader.definitions.int);
+        assert_eq!(parent_symbol(loader.store, many.params[3].ty), c);
+        for array in [many.params[1].ty, many.result] {
+            let Type::JavaArray { element } = loader.store.types.get(array) else {
+                panic!("array")
+            };
+            assert_eq!(parent_symbol(loader.store, *element), b);
+        }
+        for symbol in [b, c] {
+            assert_eq!(loader.store.symbols.get(symbol).info, SymbolInfo::Missing);
+        }
+    }
+
+    #[test]
+    fn generic_arguments_bounds_and_wildcards_keep_structure_using_shells() {
+        let mut classes = HashMap::from([
+            (
+                BinaryName::from_internal("A"),
+                signature_class(
+                    "A",
+                    Some("java/lang/Object"),
+                    &[],
+                    Some("<T:LBound;>Ljava/lang/Object;"),
+                    &[
+                        ("list", "LList;", Some("LList<LString;>;")),
+                        ("upper", "LList;", Some("LList<+LParent;>;")),
+                        ("lower", "LList;", Some("LList<-LChild;>;")),
+                        ("nested", "LMap;", Some("LMap<LKey;LList<LValue;>;>;")),
+                    ],
+                    &[(
+                        "transform",
+                        "(LList;)LMap;",
+                        Some("(LList<LOther;>;)LMap<LString;LOther;>;"),
+                    )],
+                ),
+            ),
+            (
+                BinaryName::from_internal("java/lang/Object"),
+                synthetic_class("java/lang/Object", None),
+            ),
+        ]);
+        for name in [
+            "Bound", "List", "String", "Parent", "Child", "Map", "Key", "Value", "Other",
+        ] {
+            classes.insert(
+                BinaryName::from_internal(name),
+                synthetic_class(name, Some("UnneededParent")),
+            );
+        }
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        let a = loader.load_class(&BinaryName::from_internal("A")).unwrap();
+        for name in [
+            "Bound", "List", "String", "Parent", "Child", "Map", "Key", "Value", "Other",
+        ] {
+            let id = loader.session.identified[&BinaryName::from_internal(name)];
+            assert_eq!(
+                loader.store.symbols.get(id).info,
+                SymbolInfo::Missing,
+                "{name}"
+            );
+        }
+        let t = type_parameter_symbol(loader.store, a, "T");
+        let SymbolInfo::Complete(bounds) = loader.store.symbols.get(t).info else {
+            panic!("T bounds")
+        };
+        let Type::Bounds { high, .. } = loader.store.types.get(bounds) else {
+            panic!("bounds")
+        };
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, *high)),
+            "Bound"
+        );
+        let list = member_type_id(loader.store, a, "list");
+        let Type::Applied { tycon, args } = loader.store.types.get(list) else {
+            panic!("List[String]")
+        };
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, *tycon)),
+            "List"
+        );
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, args[0])),
+            "String"
+        );
+        for (field, bound, high) in [("upper", "Parent", true), ("lower", "Child", false)] {
+            let ty = member_type_id(loader.store, a, field);
+            let Type::Applied { args, .. } = loader.store.types.get(ty) else {
+                panic!("applied")
+            };
+            let Type::Wildcard { bounds } = loader.store.types.get(args[0]) else {
+                panic!("wildcard")
+            };
+            let Type::Bounds { low, high: upper } = loader.store.types.get(*bounds) else {
+                panic!("bounds")
+            };
+            assert_eq!(
+                symbol_name(
+                    loader.store,
+                    parent_symbol(loader.store, if high { *upper } else { *low })
+                ),
+                bound
+            );
+            assert_eq!(
+                symbol_name(
+                    loader.store,
+                    parent_symbol(loader.store, if high { *low } else { *upper })
+                ),
+                if high { "Nothing" } else { "Any" }
+            );
+        }
+        let nested = member_type_id(loader.store, a, "nested");
+        let Type::Applied { tycon, args } = loader.store.types.get(nested) else {
+            panic!("Map[Key,List[Value]]")
+        };
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, *tycon)),
+            "Map"
+        );
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, args[0])),
+            "Key"
+        );
+        let Type::Applied { tycon, args } = loader.store.types.get(args[1]) else {
+            panic!("List[Value]")
+        };
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, *tycon)),
+            "List"
+        );
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, args[0])),
+            "Value"
+        );
+        let transform = member_type_id(loader.store, a, "transform");
+        let Type::Method(method) = loader.store.types.get(transform) else {
+            panic!("method")
+        };
+        let Type::Applied { args, .. } = loader.store.types.get(method.params[0].ty) else {
+            panic!("parameter")
+        };
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, args[0])),
+            "Other"
+        );
+        let Type::Applied { args, .. } = loader.store.types.get(method.result) else {
+            panic!("result")
+        };
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, args[0])),
+            "String"
+        );
+        assert_eq!(
+            symbol_name(loader.store, parent_symbol(loader.store, args[1])),
+            "Other"
+        );
+    }
+
+    #[test]
+    fn superclass_and_interface_still_complete_eagerly_and_are_profiled() {
+        let mut classes = HashMap::from([
+            (
+                BinaryName::from_internal("Child"),
+                signature_class("Child", Some("Parent"), &["I"], None, &[], &[]),
+            ),
+            (
+                BinaryName::from_internal("Parent"),
+                synthetic_class("Parent", None),
+            ),
+        ]);
+        let bytes = synthetic_class("I", None);
+        let mut reader = Reader::new(&bytes);
+        let mut interface = ClassFile::decode(&mut reader).unwrap();
+        interface.access_flags = ClassAccessFlags(0x0601);
+        classes.insert(BinaryName::from_internal("I"), interface.encode().unwrap());
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        loader.set_load_profile_collection(true);
+        let child = loader
+            .load_class(&BinaryName::from_internal("Child"))
+            .unwrap();
+        let parents = class_info(loader.store, child).parents.clone();
+        assert_eq!(parents.len(), 2);
+        for (parent, name) in parents.into_iter().zip(["Parent", "I"]) {
+            let id = parent_symbol(loader.store, parent);
+            assert_eq!(symbol_name(loader.store, id), name);
+            assert!(matches!(
+                loader.store.symbols.get(id).info,
+                SymbolInfo::Complete(_)
+            ));
+        }
+        let profile = loader.take_load_profiles().pop().unwrap();
+        assert_eq!(profile.full_completions, 3);
+        assert_eq!(profile.hierarchy_loads, 2);
+        assert_eq!(profile.shells_created, 0);
+        assert_eq!(profile.max_dependency_depth, 1);
+    }
+
+    #[test]
+    fn best_effort_tasty_member_type_keeps_a_named_class_as_shell() {
+        let name = BinaryName::from_internal("Member");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(HashMap::from([(
+                name.clone(),
+                synthetic_class("Member", Some("UnneededParent")),
+            )])),
+            &mut store,
+        );
+        let ty = loader.lower_tasty_member_type(&BinaryName::from_internal("Owner"), Some(&name));
+        let id = parent_symbol(loader.store, ty);
+        assert_eq!(loader.store.symbols.get(id).info, SymbolInfo::Missing);
+        assert_eq!(loader.ensure_class_identity(&name).unwrap(), id);
     }
 
     #[test]
@@ -7569,6 +7906,11 @@ mod tests {
             symbol_name(&store, parent_symbol(&store, *tycon)),
             "Comparable"
         );
+        assert_eq!(
+            store.symbols.get(parent_symbol(&store, *tycon)).info,
+            SymbolInfo::Missing,
+            "F-bounded class/method signatures require only Comparable's identity"
+        );
         assert_eq!(args.len(), 1);
         assert_eq!(
             store.types.get(args[0]),
@@ -8017,6 +8359,10 @@ mod tests {
         let core_annotation = store.annotations.get(symbol_annotations[0]);
         assert_eq!(core_annotation.tree, None);
         assert_eq!(parent_symbol(&store, core_annotation.ty), deprecated_symbol);
+        assert_eq!(
+            store.symbols.get(deprecated_symbol).info,
+            SymbolInfo::Missing
+        );
     }
 
     /// A hand-built, minimal, synthetic class file carrying one
