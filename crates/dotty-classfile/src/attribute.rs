@@ -116,6 +116,10 @@ pub enum ElementValue {
 /// like `signature::DEFAULT_MAX_SIGNATURE_DEPTH`.
 pub const DEFAULT_MAX_ANNOTATION_DEPTH: usize = 128;
 
+/// Bounds recursively nested `Code` and `Record` attribute lists during
+/// encoding so caller-constructed models cannot exhaust the stack.
+pub const DEFAULT_MAX_ATTRIBUTE_DEPTH: usize = 128;
+
 /// A structured attribute, resolved one level above [`RawAttribute`].
 ///
 /// Covers the attributes needed for symbol-level semantic analysis
@@ -414,6 +418,17 @@ fn read_record_components<'a>(
 /// Validates the constant pool references inside a single attribute (JVMS
 /// §4.7), recursing into nested attribute lists (`Record`, `Code`).
 fn validate_attribute(attribute: &Attribute<'_>, pool: &ConstantPool) -> Result<(), PoolRefError> {
+    validate_attribute_at_depth(attribute, pool, 0)
+}
+
+fn validate_attribute_at_depth(
+    attribute: &Attribute<'_>,
+    pool: &ConstantPool,
+    depth: usize,
+) -> Result<(), PoolRefError> {
+    if depth > DEFAULT_MAX_ATTRIBUTE_DEPTH {
+        return Err(PoolRefError::TooDeeplyNestedAttribute);
+    }
     match attribute {
         Attribute::ConstantValue(index) => pool.check_constant_value(*index),
         Attribute::Signature(index) | Attribute::SourceFile(index) => pool.utf8(*index).map(|_| ()),
@@ -460,7 +475,7 @@ fn validate_attribute(attribute: &Attribute<'_>, pool: &ConstantPool) -> Result<
             for component in components {
                 pool.utf8(component.name_index)?;
                 pool.utf8(component.descriptor_index)?;
-                validate_attributes(&component.attributes, pool)?;
+                validate_attributes_at_depth(&component.attributes, pool, depth + 1)?;
             }
             Ok(())
         }
@@ -470,7 +485,7 @@ fn validate_attribute(attribute: &Attribute<'_>, pool: &ConstantPool) -> Result<
                     pool.class_name(catch_type)?;
                 }
             }
-            validate_attributes(&code.attributes, pool)
+            validate_attributes_at_depth(&code.attributes, pool, depth + 1)
         }
         Attribute::BootstrapMethods(methods) => {
             for method in methods {
@@ -496,10 +511,21 @@ fn validate_attribute(attribute: &Attribute<'_>, pool: &ConstantPool) -> Result<
 /// Validates an `annotation`'s constant pool references (JVMS §4.7.16):
 /// `type_index`, each `element_name_index`, and each paired `element_value`.
 fn validate_annotation(annotation: &Annotation, pool: &ConstantPool) -> Result<(), PoolRefError> {
+    validate_annotation_at_depth(annotation, pool, 0)
+}
+
+fn validate_annotation_at_depth(
+    annotation: &Annotation,
+    pool: &ConstantPool,
+    depth: usize,
+) -> Result<(), PoolRefError> {
+    if depth > DEFAULT_MAX_ANNOTATION_DEPTH {
+        return Err(PoolRefError::TooDeeplyNestedAnnotation);
+    }
     pool.utf8(annotation.type_index)?;
     for (element_name_index, value) in &annotation.element_value_pairs {
         pool.utf8(*element_name_index)?;
-        validate_element_value(value, pool)?;
+        validate_element_value_at_depth(value, pool, depth)?;
     }
     Ok(())
 }
@@ -507,7 +533,16 @@ fn validate_annotation(annotation: &Annotation, pool: &ConstantPool) -> Result<(
 /// Validates an `element_value`'s constant pool reference(s) against the
 /// exact kind its `tag` mandates (JVMS §4.7.16.1) — notably `String`/`Class`
 /// against `Utf8`, not `CONSTANT_String`/`CONSTANT_Class`.
+#[cfg(test)]
 fn validate_element_value(value: &ElementValue, pool: &ConstantPool) -> Result<(), PoolRefError> {
+    validate_element_value_at_depth(value, pool, 0)
+}
+
+fn validate_element_value_at_depth(
+    value: &ElementValue,
+    pool: &ConstantPool,
+    depth: usize,
+) -> Result<(), PoolRefError> {
     match value {
         ElementValue::Byte(index)
         | ElementValue::Char(index)
@@ -526,10 +561,18 @@ fn validate_element_value(value: &ElementValue, pool: &ConstantPool) -> Result<(
             pool.utf8(*const_name_index)?;
             Ok(())
         }
-        ElementValue::Annotation(annotation) => validate_annotation(annotation, pool),
+        ElementValue::Annotation(annotation) => {
+            if depth >= DEFAULT_MAX_ANNOTATION_DEPTH {
+                return Err(PoolRefError::TooDeeplyNestedAnnotation);
+            }
+            validate_annotation_at_depth(annotation, pool, depth + 1)
+        }
         ElementValue::Array(values) => {
+            if depth >= DEFAULT_MAX_ANNOTATION_DEPTH {
+                return Err(PoolRefError::TooDeeplyNestedAnnotation);
+            }
             for value in values {
-                validate_element_value(value, pool)?;
+                validate_element_value_at_depth(value, pool, depth + 1)?;
             }
             Ok(())
         }
@@ -545,6 +588,8 @@ fn encode_pool_ref_error(pool: &ConstantPool, error: PoolRefError) -> EncodeErro
         PoolRefError::WrongKind { index, .. } => EncodeError::InvalidReference {
             index: usize::from(index.0),
         },
+        PoolRefError::TooDeeplyNestedAttribute => EncodeError::TooDeeplyNestedAttribute,
+        PoolRefError::TooDeeplyNestedAnnotation => EncodeError::TooDeeplyNestedAnnotation,
     }
 }
 
@@ -695,18 +740,21 @@ fn bootstrap_methods_payload_length(
     Ok(length)
 }
 
-fn attribute_list_payload_length(attributes: &[Attribute<'_>]) -> Result<usize, EncodeError> {
+fn attribute_list_payload_length(
+    attributes: &[Attribute<'_>],
+    depth: usize,
+) -> Result<usize, EncodeError> {
     checked_u16_len(attributes.len())?;
     let mut length = 2;
     for attribute in attributes {
         length = add_payload_length(length, 6)?;
-        length = add_payload_length(length, encoded_payload_length(attribute)?)?;
+        length = add_payload_length(length, encoded_payload_length(attribute, depth)?)?;
     }
     checked_u32_len(length)?;
     Ok(length)
 }
 
-fn code_payload_length(code: &CodeAttribute<'_>) -> Result<usize, EncodeError> {
+fn code_payload_length(code: &CodeAttribute<'_>, depth: usize) -> Result<usize, EncodeError> {
     if !(1..=usize::from(u16::MAX)).contains(&code.code.len()) {
         return Err(EncodeError::InvalidCodeLength {
             length: code.code.len(),
@@ -728,19 +776,25 @@ fn code_payload_length(code: &CodeAttribute<'_>) -> Result<usize, EncodeError> {
         length,
         repeated_payload_length(code.exception_table.len(), 8)?,
     )?;
-    length = add_payload_length(length, attribute_list_payload_length(&code.attributes)?)?;
+    length = add_payload_length(
+        length,
+        attribute_list_payload_length(&code.attributes, depth + 1)?,
+    )?;
     checked_u32_len(length)?;
     Ok(length)
 }
 
-fn record_payload_length(components: &[RecordComponentInfo<'_>]) -> Result<usize, EncodeError> {
+fn record_payload_length(
+    components: &[RecordComponentInfo<'_>],
+    depth: usize,
+) -> Result<usize, EncodeError> {
     checked_u16_len(components.len())?;
     let mut length = 2;
     for component in components {
         length = add_payload_length(length, 4)?;
         length = add_payload_length(
             length,
-            attribute_list_payload_length(&component.attributes)?,
+            attribute_list_payload_length(&component.attributes, depth + 1)?,
         )?;
     }
     checked_u32_len(length)?;
@@ -800,7 +854,10 @@ fn element_value_length(value: &ElementValue, depth: usize) -> Result<usize, Enc
     }
 }
 
-fn encoded_payload_length(attribute: &Attribute<'_>) -> Result<usize, EncodeError> {
+fn encoded_payload_length(attribute: &Attribute<'_>, depth: usize) -> Result<usize, EncodeError> {
+    if depth > DEFAULT_MAX_ATTRIBUTE_DEPTH {
+        return Err(EncodeError::TooDeeplyNestedAttribute);
+    }
     let length = match attribute {
         Attribute::ConstantValue(_)
         | Attribute::Signature(_)
@@ -827,8 +884,8 @@ fn encoded_payload_length(attribute: &Attribute<'_>) -> Result<usize, EncodeErro
             add_payload_length(1, repeated_payload_length(parameters.len(), 4)?)?
         }
         Attribute::Other(raw) => raw.bytes.len(),
-        Attribute::Record(components) => record_payload_length(components)?,
-        Attribute::Code(code) => code_payload_length(code)?,
+        Attribute::Record(components) => record_payload_length(components, depth)?,
+        Attribute::Code(code) => code_payload_length(code, depth)?,
         Attribute::RuntimeVisibleAnnotations(annotations)
         | Attribute::RuntimeInvisibleAnnotations(annotations) => {
             annotation_payload_length(annotations)?
@@ -849,10 +906,18 @@ pub fn encode_attributes(
     attributes: &[Attribute<'_>],
     constant_pool: &ConstantPool,
 ) -> Result<Vec<u8>, EncodeError> {
+    encode_attributes_at_depth(attributes, constant_pool, 0)
+}
+
+fn encode_attributes_at_depth(
+    attributes: &[Attribute<'_>],
+    constant_pool: &ConstantPool,
+    depth: usize,
+) -> Result<Vec<u8>, EncodeError> {
     let mut writer = Writer::new();
     writer.write_u2_length(attributes.len())?;
     for attribute in attributes {
-        writer.write_bytes(&attribute.encode(constant_pool)?);
+        writer.write_bytes(&attribute.encode_at_depth(constant_pool, depth)?);
     }
     Ok(writer.into_bytes())
 }
@@ -863,8 +928,16 @@ pub(crate) fn validate_attributes(
     attributes: &[Attribute<'_>],
     pool: &ConstantPool,
 ) -> Result<(), PoolRefError> {
+    validate_attributes_at_depth(attributes, pool, 0)
+}
+
+fn validate_attributes_at_depth(
+    attributes: &[Attribute<'_>],
+    pool: &ConstantPool,
+    depth: usize,
+) -> Result<(), PoolRefError> {
     for attribute in attributes {
-        validate_attribute(attribute, pool)?;
+        validate_attribute_at_depth(attribute, pool, depth)?;
     }
     Ok(())
 }
@@ -929,9 +1002,18 @@ impl<'a> Attribute<'a> {
     /// [`Attribute::Other`] preserves its original name index and payload.
     /// Code and nested attribute payloads remain opaque where represented by
     /// [`Attribute::Other`]; annotation structures are encoded recursively
-    /// with [`DEFAULT_MAX_ANNOTATION_DEPTH`].
+    /// with [`DEFAULT_MAX_ANNOTATION_DEPTH`]. Nested `Code`/`Record` attribute
+    /// lists are bounded by [`DEFAULT_MAX_ATTRIBUTE_DEPTH`].
     pub fn encode(&self, constant_pool: &ConstantPool) -> Result<Vec<u8>, EncodeError> {
-        let payload_length = encoded_payload_length(self)?;
+        self.encode_at_depth(constant_pool, 0)
+    }
+
+    fn encode_at_depth(
+        &self,
+        constant_pool: &ConstantPool,
+        depth: usize,
+    ) -> Result<Vec<u8>, EncodeError> {
+        let payload_length = encoded_payload_length(self, depth)?;
         let name_index = if let Some(name) = attribute_name(self) {
             validate_attribute(self, constant_pool)
                 .map_err(|error| encode_pool_ref_error(constant_pool, error))?;
@@ -994,8 +1076,11 @@ impl<'a> Attribute<'a> {
                     for component in components {
                         writer.write_u2(component.name_index.0);
                         writer.write_u2(component.descriptor_index.0);
-                        writer
-                            .write_bytes(&encode_attributes(&component.attributes, constant_pool)?);
+                        writer.write_bytes(&encode_attributes_at_depth(
+                            &component.attributes,
+                            constant_pool,
+                            depth + 1,
+                        )?);
                     }
                 }
                 Attribute::Code(code) => {
@@ -1010,7 +1095,11 @@ impl<'a> Attribute<'a> {
                         writer.write_u2(entry.handler_pc);
                         writer.write_u2(entry.catch_type.map_or(0, |index| index.0));
                     }
-                    writer.write_bytes(&encode_attributes(&code.attributes, constant_pool)?);
+                    writer.write_bytes(&encode_attributes_at_depth(
+                        &code.attributes,
+                        constant_pool,
+                        depth + 1,
+                    )?);
                 }
                 Attribute::RuntimeVisibleAnnotations(annotations)
                 | Attribute::RuntimeInvisibleAnnotations(annotations) => {
@@ -1384,6 +1473,105 @@ mod tests {
         ])
     }
 
+    fn wrap_code_attribute(attribute: Attribute<'static>) -> Attribute<'static> {
+        Attribute::Code(CodeAttribute {
+            max_stack: 0,
+            max_locals: 0,
+            code: &[0],
+            exception_table: vec![],
+            attributes: vec![attribute],
+        })
+    }
+
+    fn wrap_record_attribute(attribute: Attribute<'static>) -> Attribute<'static> {
+        Attribute::Record(vec![RecordComponentInfo {
+            name_index: ConstantPoolIndex(18),
+            descriptor_index: ConstantPoolIndex(19),
+            attributes: vec![attribute],
+        }])
+    }
+
+    #[test]
+    fn nested_code_and_record_encoding_obeys_the_depth_boundary() {
+        let pool = complex_attribute_pool();
+        let leaf = || Attribute::Signature(ConstantPoolIndex(23));
+
+        let mut code_chain = leaf();
+        for _ in 0..DEFAULT_MAX_ATTRIBUTE_DEPTH {
+            code_chain = wrap_code_attribute(code_chain);
+        }
+        assert!(code_chain.encode(&pool).is_ok());
+        let too_deep_code = wrap_code_attribute(code_chain);
+        assert_eq!(
+            too_deep_code.encode(&pool),
+            Err(EncodeError::TooDeeplyNestedAttribute)
+        );
+        assert_eq!(
+            validate_attributes(std::slice::from_ref(&too_deep_code), &pool),
+            Err(PoolRefError::TooDeeplyNestedAttribute)
+        );
+
+        let mut record_chain = leaf();
+        for _ in 0..DEFAULT_MAX_ATTRIBUTE_DEPTH {
+            record_chain = wrap_record_attribute(record_chain);
+        }
+        assert!(record_chain.encode(&pool).is_ok());
+        let too_deep_record = wrap_record_attribute(record_chain);
+        assert_eq!(
+            too_deep_record.encode(&pool),
+            Err(EncodeError::TooDeeplyNestedAttribute)
+        );
+        assert_eq!(
+            validate_attributes(std::slice::from_ref(&too_deep_record), &pool),
+            Err(PoolRefError::TooDeeplyNestedAttribute)
+        );
+
+        let mut mixed_chain = leaf();
+        for level in 0..=DEFAULT_MAX_ATTRIBUTE_DEPTH {
+            mixed_chain = if level % 2 == 0 {
+                wrap_code_attribute(mixed_chain)
+            } else {
+                wrap_record_attribute(mixed_chain)
+            };
+        }
+        assert_eq!(
+            mixed_chain.encode(&pool),
+            Err(EncodeError::TooDeeplyNestedAttribute)
+        );
+        assert_eq!(
+            validate_attributes(std::slice::from_ref(&mixed_chain), &pool),
+            Err(PoolRefError::TooDeeplyNestedAttribute)
+        );
+    }
+
+    #[test]
+    fn very_deep_code_attribute_chain_returns_a_typed_error() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let pool = complex_attribute_pool();
+                let mut attribute = Attribute::Signature(ConstantPoolIndex(23));
+                for _ in 0..8_193 {
+                    attribute = wrap_code_attribute(attribute);
+                }
+
+                assert_eq!(
+                    validate_attributes(std::slice::from_ref(&attribute), &pool),
+                    Err(PoolRefError::TooDeeplyNestedAttribute)
+                );
+                assert_eq!(
+                    attribute.encode(&pool),
+                    Err(EncodeError::TooDeeplyNestedAttribute)
+                );
+                // Avoid recursively dropping the deliberately deep adversarial model;
+                // its small allocation is reclaimed when the test process exits.
+                std::mem::forget(attribute);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     fn code_attribute_roundtrips_raw_code_exceptions_and_nested_opaque_attributes() {
         let pool = complex_attribute_pool();
@@ -1610,6 +1798,10 @@ mod tests {
         assert_eq!(
             attribute.encode(&pool),
             Err(EncodeError::TooDeeplyNestedAnnotation)
+        );
+        assert_eq!(
+            validate_attribute(&attribute, &pool),
+            Err(PoolRefError::TooDeeplyNestedAnnotation)
         );
     }
 

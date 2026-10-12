@@ -10,7 +10,8 @@
 //! and [`attribute::Attribute::encode`] plus [`attribute::encode_attributes`]
 //! serialize modeled scalar, list-based, code, record, annotation, and opaque
 //! attribute forms. Bytecode remains byte-for-byte opaque, and recursive
-//! annotation values are bounded by an explicit depth limit.
+//! annotation values and nested Code/Record attributes are bounded by
+//! explicit depth limits.
 //! [`writer::Writer`] provides primitive JVM-format writes and checked length
 //! prefixes. The crate does not encode complete [`class_file::ClassFile`]
 //! values, perform semantic JVM verification, or generate JVM code from Scala

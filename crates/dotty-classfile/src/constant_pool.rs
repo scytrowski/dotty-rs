@@ -206,6 +206,10 @@ pub enum PoolRefError {
         index: ConstantPoolIndex,
         expected: EntryKind,
     },
+    /// Nested `Code`/`Record` attribute lists exceed their encoder/validator depth limit.
+    TooDeeplyNestedAttribute,
+    /// Nested annotation or array element values exceed their depth limit.
+    TooDeeplyNestedAnnotation,
 }
 
 impl fmt::Display for PoolRefError {
@@ -221,6 +225,12 @@ impl fmt::Display for PoolRefError {
                 "constant pool index {} does not resolve to {expected}",
                 index.0
             ),
+            Self::TooDeeplyNestedAttribute => {
+                formatter.write_str("Code/Record attribute nesting exceeds its depth limit")
+            }
+            Self::TooDeeplyNestedAnnotation => {
+                formatter.write_str("annotation element_value nesting exceeds its depth limit")
+            }
         }
     }
 }

@@ -73,6 +73,8 @@ pub enum EncodeError {
     },
     /// An annotation or array element value exceeds the configured nesting limit.
     TooDeeplyNestedAnnotation,
+    /// Nested `Code`/`Record` attribute lists exceed their configured depth limit.
+    TooDeeplyNestedAttribute,
     /// The provided byte layout violates a structural requirement.
     InvalidLayout,
     /// A UTF-8 byte length does not fit a JVM `u2` length field.
@@ -132,6 +134,11 @@ impl fmt::Display for EncodeError {
                 formatter,
                 "annotation element_value nested past depth {}",
                 crate::attribute::DEFAULT_MAX_ANNOTATION_DEPTH
+            ),
+            Self::TooDeeplyNestedAttribute => write!(
+                formatter,
+                "Code/Record attribute nesting exceeds depth {}",
+                crate::attribute::DEFAULT_MAX_ATTRIBUTE_DEPTH
             ),
             Self::InvalidLayout => formatter.write_str("invalid class-file layout"),
             Self::Utf8LengthOverflow { byte_len, max } => write!(
