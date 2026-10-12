@@ -337,6 +337,16 @@ fn every_pinned_jdk_class_round_trips_structurally_and_deterministically() {
             let encoded = original
                 .encode()
                 .unwrap_or_else(|error| panic!("{}/{} failed to encode: {error}", corpus.id, name));
+            assert_eq!(
+                original.encode().unwrap_or_else(|error| panic!(
+                    "{}/{} failed repeated encode: {error}",
+                    corpus.id, name
+                )),
+                encoded,
+                "{}/{} repeated encoding of the same model is deterministic",
+                corpus.id,
+                name
+            );
             let decoded = decode(&corpus, name, &encoded);
             assert_eq!(
                 decoded.validate_references(),

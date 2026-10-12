@@ -27,7 +27,9 @@ const SHAPE_SQUARE: &[u8] = include_bytes!("fixtures/sealed_record_sample/Shape$
 
 fn decode(bytes: &[u8]) -> ClassFile<'_> {
     let mut reader = Reader::new(bytes);
-    ClassFile::decode(&mut reader).unwrap()
+    let class_file = ClassFile::decode(&mut reader).unwrap();
+    assert!(reader.is_at_end(), "fixture decode consumed all bytes");
+    class_file
 }
 
 fn utf8_name(pool: &ConstantPool, index: ConstantPoolIndex) -> &str {
@@ -311,6 +313,11 @@ fn class_file_encode_round_trips_every_checked_in_non_corpus_fixture() {
         let original = decode(bytes);
         assert_eq!(original.validate_references(), Ok(()));
         let encoded = original.encode().unwrap();
+        assert_eq!(
+            original.encode().unwrap(),
+            encoded,
+            "encoding is deterministic"
+        );
         let decoded = decode(&encoded);
         assert_eq!(decoded.validate_references(), Ok(()));
         common::assert_class_files_structurally_equivalent(&original, &decoded);
