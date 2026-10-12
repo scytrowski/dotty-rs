@@ -485,8 +485,12 @@ fn unresolved_parent_reference(
 ) -> UnresolvedParentReference {
     let visible_names = parent_visible_names(file, parent);
     let has_semantic_reference = parent_has_semantic_reference(file, parent, package);
-    let has_reference_prefix = parent_has_reference_prefix(file, parent, package, 0);
+    // A path through Scala's synthetic `package` object is an implicit
+    // import alias, not an explicit package prefix for the referenced class.
+    let has_reference_prefix = !visible_names.iter().any(|name| name == "package")
+        && parent_has_reference_prefix(file, parent, package, 0);
     let shape = match parent_reference_shape(file, parent).as_str() {
+        "qualified-reference" if has_reference_prefix => "package-qualified".to_owned(),
         "other" if !visible_names.is_empty() && !has_semantic_reference => {
             "bare-implicit-like".to_owned()
         }
@@ -514,30 +518,52 @@ fn parent_has_reference_prefix(
         return false;
     }
     match tree {
-        RawTree::Leaf(term) if matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG) => term
+        RawTree::Leaf(term) if term.ast_ref().is_some() => term
             .ast_ref()
             .and_then(|reference| decode_shared_tree(file, reference.address))
             .is_some_and(|shared| parent_has_reference_prefix(file, &shared, package, depth + 1)),
-        RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } => {
-            parent_has_reference_prefix(file, child, package, depth + 1)
-        }
+        RawTree::Ast { child, .. } => parent_has_reference_prefix(file, child, package, depth + 1),
         _ => match tree.decode_structured() {
             Ok(StructuredTree::Reference(ReferenceNode {
-                tag: TERMREFPKG_TAG | TYPEREFPKG_TAG | TERMREF_TAG | TYPEREF_TAG,
+                tag: TERMREFPKG_TAG | TYPEREFPKG_TAG,
                 ..
             }))
             | Ok(StructuredTree::Select(_)) => true,
+            Ok(StructuredTree::Reference(ReferenceNode {
+                tag: TERMREF_TAG | TYPEREF_TAG,
+                qualifier,
+                ..
+            })) => resolve_reference_prefix_in_package(file, &qualifier, Some(package)).is_some(),
             Ok(StructuredTree::Length(StructuredNode::AppliedType(applied))) => {
                 parent_has_reference_prefix(file, &applied.tycon, package, depth + 1)
+            }
+            Ok(StructuredTree::Length(StructuredNode::Apply(apply))) => {
+                parent_has_reference_prefix(file, &apply.function, package, depth + 1)
+            }
+            Ok(StructuredTree::Length(StructuredNode::SelectIn(selection))) => {
+                parent_has_reference_prefix(file, &selection.qualifier, package, depth + 1)
+                    || parent_has_reference_prefix(
+                        file,
+                        &selection.underlying_type,
+                        package,
+                        depth + 1,
+                    )
             }
             Ok(StructuredTree::Ident(ident)) => {
                 parent_has_reference_prefix(file, &ident.type_tree, package, depth + 1)
             }
+            Ok(StructuredTree::AstChild(child)) => {
+                parent_has_reference_prefix(file, &child.child, package, depth + 1)
+            }
             _ => {
-                matches!(
-                    resolve_reference_name_in_package(file, tree, Some(package)),
-                    ReferenceResolution::Resolved(_)
-                )
+                if let RawTree::NatAst { child, .. } = tree {
+                    parent_has_reference_prefix(file, child, package, depth + 1)
+                } else {
+                    matches!(
+                        resolve_reference_name_in_package(file, tree, Some(package)),
+                        ReferenceResolution::Resolved(_)
+                    )
+                }
             }
         },
     }
@@ -582,12 +608,63 @@ fn parent_visible_names_at_depth(
         .into_iter()
         .filter_map(|reference| wire_name(file, reference))
         .collect::<Vec<_>>();
+    if let RawTree::Leaf(term) = tree
+        && let Some(reference) = term.name_ref()
+    {
+        if let Some(name) = wire_name(file, reference) {
+            names.push(name);
+        } else if matches!(term.tag, TERMREFPKG_TAG | TYPEREFPKG_TAG)
+            && let Some(name) = resolve_qualified_name(file, reference)
+        {
+            names.push(name);
+        }
+    }
     if let Ok(StructuredTree::Length(StructuredNode::AppliedType(applied))) =
         tree.decode_structured()
     {
         names.extend(parent_visible_names_at_depth(
             file,
             &applied.tycon,
+            depth + 1,
+        ));
+    } else if let RawTree::Leaf(term) = tree
+        && let Some(reference) = term.ast_ref()
+        && let Some(shared) = decode_shared_tree(file, reference.address)
+    {
+        names.extend(parent_visible_names_at_depth(file, &shared, depth + 1));
+    } else if let Ok(StructuredTree::Reference(reference)) = tree.decode_structured() {
+        if let Some(name) = wire_name(file, reference.reference) {
+            names.push(name);
+        }
+        names.extend(parent_visible_names_at_depth(
+            file,
+            &reference.qualifier,
+            depth + 1,
+        ));
+    } else if let RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } = tree {
+        names.extend(parent_visible_names_at_depth(file, child, depth + 1));
+    } else if let Ok(StructuredTree::Length(StructuredNode::Apply(apply))) =
+        tree.decode_structured()
+    {
+        names.extend(parent_visible_names_at_depth(
+            file,
+            &apply.function,
+            depth + 1,
+        ));
+    } else if let Ok(StructuredTree::Length(StructuredNode::SelectIn(selection))) =
+        tree.decode_structured()
+    {
+        if let Some(name) = wire_name(file, selection.name) {
+            names.push(name);
+        }
+        names.extend(parent_visible_names_at_depth(
+            file,
+            &selection.qualifier,
+            depth + 1,
+        ));
+        names.extend(parent_visible_names_at_depth(
+            file,
+            &selection.underlying_type,
             depth + 1,
         ));
     }
@@ -617,7 +694,15 @@ fn parent_has_semantic_reference_at_depth(
         return true;
     }
     match tree {
-        RawTree::Leaf(term) if matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG) => term
+        RawTree::Leaf(term)
+            if matches!(
+                term.tag,
+                TERMREFPKG_TAG | TYPEREFPKG_TAG | TERMREF_TAG | TYPEREF_TAG
+            ) =>
+        {
+            true
+        }
+        RawTree::Leaf(term) if term.ast_ref().is_some() => term
             .ast_ref()
             .and_then(|reference| decode_shared_tree(file, reference.address))
             .is_some_and(|shared| {
@@ -629,6 +714,22 @@ fn parent_has_semantic_reference_at_depth(
         _ => match tree.decode_structured() {
             Ok(StructuredTree::Length(StructuredNode::AppliedType(applied))) => {
                 parent_has_semantic_reference_at_depth(file, &applied.tycon, package, depth + 1)
+            }
+            Ok(StructuredTree::Length(StructuredNode::Apply(apply))) => {
+                parent_has_semantic_reference_at_depth(file, &apply.function, package, depth + 1)
+            }
+            Ok(StructuredTree::Length(StructuredNode::SelectIn(selection))) => {
+                parent_has_semantic_reference_at_depth(
+                    file,
+                    &selection.qualifier,
+                    package,
+                    depth + 1,
+                ) || parent_has_semantic_reference_at_depth(
+                    file,
+                    &selection.underlying_type,
+                    package,
+                    depth + 1,
+                )
             }
             Ok(StructuredTree::Ident(ident)) => {
                 parent_has_semantic_reference_at_depth(file, &ident.type_tree, package, depth + 1)
@@ -661,11 +762,33 @@ fn parent_reference_shape_at_depth(
         Ok(StructuredTree::Reference(reference)) => match reference.tag {
             TERMREFPKG_TAG | TYPEREFPKG_TAG => "package-qualified".to_owned(),
             TERMREFSYMBOL_TAG | TYPEREFSYMBOL_TAG => "direct-symbol".to_owned(),
-            TERMREF_TAG | TYPEREF_TAG => "qualified-reference".to_owned(),
+            TERMREF_TAG | TYPEREF_TAG => {
+                if parent_has_reference_prefix(file, &reference.qualifier, "", depth + 1) {
+                    "package-qualified".to_owned()
+                } else {
+                    "qualified-reference".to_owned()
+                }
+            }
             _ => "reference".to_owned(),
         },
         Ok(StructuredTree::Select(_)) => "selected-qualified".to_owned(),
         Ok(StructuredTree::Length(StructuredNode::AppliedType(_))) => "applied".to_owned(),
+        Ok(StructuredTree::Length(StructuredNode::Apply(apply))) => {
+            parent_reference_shape_at_depth(file, &apply.function, depth + 1)
+        }
+        Ok(StructuredTree::Length(StructuredNode::SelectIn(selection))) => {
+            let qualifier_shape =
+                parent_reference_shape_at_depth(file, &selection.qualifier, depth + 1);
+            let underlying_shape =
+                parent_reference_shape_at_depth(file, &selection.underlying_type, depth + 1);
+            if qualifier_shape == "package-qualified" || underlying_shape == "package-qualified" {
+                "package-qualified".to_owned()
+            } else if qualifier_shape != "other" {
+                qualifier_shape
+            } else {
+                underlying_shape
+            }
+        }
         Ok(StructuredTree::Ident(ident)) => {
             let inner = parent_reference_shape_at_depth(file, &ident.type_tree, depth + 1);
             if inner == "other" {
@@ -675,8 +798,13 @@ fn parent_reference_shape_at_depth(
             }
         }
         _ => match tree {
-            RawTree::Leaf(term) if matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG) => {
-                "shared".to_owned()
+            RawTree::Leaf(term) if term.ast_ref().is_some() => term
+                .ast_ref()
+                .and_then(|reference| decode_shared_tree(file, reference.address))
+                .map(|shared| parent_reference_shape_at_depth(file, &shared, depth + 1))
+                .unwrap_or_else(|| "shared".to_owned()),
+            RawTree::Leaf(term) if matches!(term.tag, TERMREFPKG_TAG | TYPEREFPKG_TAG) => {
+                "package-qualified".to_owned()
             }
             RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } => {
                 parent_reference_shape_at_depth(file, child, depth + 1)
@@ -1938,6 +2066,36 @@ mod tests {
     }
 
     #[test]
+    fn profiles_retains_cap_parent_references_through_apply_and_select_in() {
+        let bytes = fixture_bytes("scala3-library/scala/annotation/retainsCap.tasty");
+        let error = decode_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("scala/annotation/retainsCap"),
+            |_, _| None,
+            |_, _| None,
+        )
+        .expect_err("without classpath fallbacks, retainsCap must expose its parent profile");
+        let TastyDecodeError::UnresolvedSupertype(parent) = error else {
+            panic!("expected an unresolved parent profile, got {error:?}");
+        };
+
+        assert_eq!(parent.parent_index, 0);
+        assert!(parent.has_semantic_reference, "profile: {parent:#?}");
+        assert!(parent.has_reference_prefix, "profile: {parent:#?}");
+        assert!(
+            parent.visible_names.iter().any(|name| name == "Annotation"),
+            "profile: {parent:#?}"
+        );
+        assert!(
+            parent
+                .visible_names
+                .iter()
+                .any(|name| name == "scala/annotation")
+        );
+        assert_eq!(parent.shape, "package-qualified", "profile: {parent:#?}");
+    }
+
+    #[test]
     fn resolves_package_object_aliases_in_their_defining_package() {
         let bytes = fixture_bytes("scala3-library/scala/package.tasty");
         let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
@@ -2139,16 +2297,15 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(
-            error,
-            TastyDecodeError::UnresolvedSupertype(parent)
-                if parent.shape == "applied"
-                    && parent.parent_index == 1
-                    && parent.has_semantic_reference
-                    && !parent.has_reference_prefix
-                    && parent.visible_names.iter().any(|name| name == "Iterator")
-                    && !parent.raw_tree.is_empty()
-        ));
+        let TastyDecodeError::UnresolvedSupertype(parent) = error else {
+            panic!("expected unresolved supertype, got {error:?}");
+        };
+        assert_eq!(parent.shape, "applied");
+        assert_eq!(parent.parent_index, 1);
+        assert!(parent.has_semantic_reference);
+        assert!(!parent.has_reference_prefix);
+        assert!(parent.visible_names.iter().any(|name| name == "Iterator"));
+        assert!(!parent.raw_tree.is_empty());
     }
 
     /// `scala3-library/scala/math/BigInt.tasty`'s real `BigInt` mixes in
