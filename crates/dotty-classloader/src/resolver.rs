@@ -326,10 +326,9 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     member.kind,
                     SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
                 ) {
-                    let source_owned_by_other_scope =
-                        matches!(member.origin, dotty_core::SymbolOrigin::Source(_))
-                            && member.owner != Some(resolved_owner);
-                    if source_owned_by_other_scope || member.name != request.name {
+                    let owner_mismatch = member.owner != Some(resolved_owner)
+                        && !is_nested_class_indexed_in_package(store, *symbol, resolved_owner);
+                    if owner_mismatch || member.name != request.name {
                         return Err(ResolutionError::Malformed {
                             reason: format!(
                                 "package type member {symbol:?} does not match its canonical package/name"
@@ -489,6 +488,36 @@ fn package_path_of_symbol(store: &SemanticStore, package: SymbolId) -> Option<Ve
     }
     segments.reverse();
     Some(segments)
+}
+
+/// Nested JVM classes are also indexed in their binary package scope (for
+/// example, `Outer$Inner` under `example`), while their semantic owner is the
+/// enclosing class. Accept that shape only when the enclosing class itself is
+/// owned by the requested package and its binary name prefixes the member.
+fn is_nested_class_indexed_in_package(
+    store: &SemanticStore,
+    member: SymbolId,
+    package: SymbolId,
+) -> bool {
+    let symbol = store.symbols.get(member);
+    let Some(owner) = symbol.owner else {
+        return false;
+    };
+    let enclosing = store.symbols.get(owner);
+    if enclosing.owner != Some(package)
+        || !matches!(
+            enclosing.kind,
+            SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+        )
+    {
+        return false;
+    }
+
+    let enclosing_name = store.names.resolve(enclosing.name.text());
+    let member_name = store.names.resolve(symbol.name.text());
+    member_name
+        .strip_prefix(enclosing_name)
+        .is_some_and(|suffix| suffix.starts_with('$') && suffix.len() > 1)
 }
 
 #[cfg(test)]
@@ -1171,6 +1200,73 @@ mod tests {
             ResolutionError::Malformed { reason }
                 if reason.contains("invalid class identity or declaration scope")
         ));
+    }
+
+    #[test]
+    fn package_type_lookup_rejects_an_external_class_owned_by_another_package() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            EmptyCountingClassPath(Arc::new(AtomicUsize::new(0))),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "example");
+        let package_scope = resolver.package_scope(package).unwrap();
+        let foreign_package = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "foreign");
+        let class_name = Name::new(store.names.intern("WrongOwner"), Namespace::Type);
+        let class = store.symbols.alloc(Symbol {
+            name: class_name,
+            owner: Some(foreign_package),
+            kind: SymbolKind::Class,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: dotty_core::SymbolOrigin::Tasty(store.origins.register_tasty()),
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        let class_scope = store.scopes.alloc(Scope::new(Some(class)));
+        let class_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: definitions.no_prefix,
+            class,
+            parents: Vec::new(),
+            declarations: class_scope,
+            self_type: None,
+        }));
+        store.symbols.get_mut(class).info = SymbolInfo::Complete(class_info);
+        store.scopes.get_mut(package_scope).enter(class_name, class);
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let checkpoint = store.checkpoint();
+
+        let error = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: class_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .expect_err("an external package entry cannot return a class from another package");
+
+        assert!(matches!(
+            error,
+            ResolutionError::Malformed { reason }
+                if reason.contains("canonical package/name")
+        ));
+        assert_eq!(store.checkpoint(), checkpoint);
+        assert!(resolver.session.resolved.is_empty());
     }
 
     #[test]
