@@ -118,6 +118,12 @@ if [[ "$verify_determinism" == 1 ]] \
     exit 1
 fi
 
+if [[ "$verify_determinism" == 1 ]]; then
+    audit_run_summary='two runs were compared byte-for-byte'
+else
+    audit_run_summary='one run was completed; determinism was not checked'
+fi
+
 report_field() {
     awk -F= -v wanted="$1" '
         {
@@ -717,6 +723,7 @@ printf 'The #950 snapshot recommended the import/classpath resolution sprint. It
         -e "s|@MAX_FANOUT@|$max_fanout|g" \
         -e "s|@LARGEST_ROOT@|$largest_root|g" \
         -e "s|@JDK_VERSION@|$jdk_version|g" \
+        -e "s|@AUDIT_RUN_SUMMARY@|$audit_run_summary|g" \
         "$script_dir/report-notes.md"
     printf '## Previous type projection snapshot\n\n'
     printf 'The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.\n\n'
