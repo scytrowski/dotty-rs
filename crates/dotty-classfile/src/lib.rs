@@ -15,6 +15,10 @@
 //! attribute forms. Bytecode remains byte-for-byte opaque, and recursive
 //! annotation values and nested Code/Record attributes are bounded by
 //! explicit depth limits.
+//! [`constant_pool_builder::ConstantPoolBuilder`] constructs a new basic
+//! constant pool with stable first-insertion indices. It currently omits
+//! method handles, method types, dynamic/invokedynamic entries, and bootstrap
+//! method table construction.
 //! [`writer::Writer`] provides primitive JVM-format writes and checked length
 //! prefixes. The crate does not perform semantic JVM verification or generate
 //! JVM code from Scala programs.
@@ -23,6 +27,7 @@ pub mod access_flags;
 pub mod attribute;
 pub mod class_file;
 pub mod constant_pool;
+pub mod constant_pool_builder;
 pub mod descriptor;
 pub mod encode_error;
 pub mod field;
@@ -38,6 +43,7 @@ pub mod classfile {
     pub use super::attribute::*;
     pub use super::class_file::*;
     pub use super::constant_pool::*;
+    pub use super::constant_pool_builder::*;
     pub use super::descriptor::*;
     pub use super::encode_error::*;
     pub use super::field::*;
