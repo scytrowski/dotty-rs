@@ -1,7 +1,9 @@
 use crate::constant_pool::{
     ConstantPool, ConstantPoolEntry, ConstantPoolIndex, PoolRefError, read_index,
 };
+use crate::encode_error::EncodeError;
 use crate::reader::{ReadError, Reader};
+use crate::writer::{Writer, checked_u8_len};
 use std::fmt;
 
 /// The lossless, borrowed byte-level view of any `attribute_info` (JVMS
@@ -534,6 +536,79 @@ fn validate_element_value(value: &ElementValue, pool: &ConstantPool) -> Result<(
     }
 }
 
+fn encode_pool_ref_error(pool: &ConstantPool, error: PoolRefError) -> EncodeError {
+    match error {
+        PoolRefError::InvalidIndex { index } => EncodeError::InvalidIndex {
+            index: usize::from(index.0),
+            count: pool.entry_count(),
+        },
+        PoolRefError::WrongKind { index, .. } => EncodeError::InvalidReference {
+            index: usize::from(index.0),
+        },
+    }
+}
+
+fn attribute_name(attribute: &Attribute<'_>) -> Option<&'static str> {
+    match attribute {
+        Attribute::ConstantValue(_) => Some("ConstantValue"),
+        Attribute::Signature(_) => Some("Signature"),
+        Attribute::Exceptions(_) => Some("Exceptions"),
+        Attribute::InnerClasses(_) => Some("InnerClasses"),
+        Attribute::EnclosingMethod { .. } => Some("EnclosingMethod"),
+        Attribute::SourceFile(_) => Some("SourceFile"),
+        Attribute::Deprecated => Some("Deprecated"),
+        Attribute::Synthetic => Some("Synthetic"),
+        Attribute::NestHost(_) => Some("NestHost"),
+        Attribute::NestMembers(_) => Some("NestMembers"),
+        Attribute::PermittedSubclasses(_) => Some("PermittedSubclasses"),
+        Attribute::BootstrapMethods(_) => Some("BootstrapMethods"),
+        Attribute::MethodParameters(_) => Some("MethodParameters"),
+        Attribute::Other(_) => None,
+        Attribute::Record(_)
+        | Attribute::Code(_)
+        | Attribute::RuntimeVisibleAnnotations(_)
+        | Attribute::RuntimeInvisibleAnnotations(_) => None,
+    }
+}
+
+fn write_index_list(writer: &mut Writer, indices: &[ConstantPoolIndex]) -> Result<(), EncodeError> {
+    writer.write_u2_length(indices.len())?;
+    for index in indices {
+        writer.write_u2(index.0);
+    }
+    Ok(())
+}
+
+fn write_attribute_header(
+    writer: &mut Writer,
+    name_index: ConstantPoolIndex,
+    payload_length: usize,
+) -> Result<(), EncodeError> {
+    let payload_length = crate::writer::checked_u32_len(payload_length)?;
+    writer.write_u2(name_index.0);
+    writer.write_u4(payload_length);
+    Ok(())
+}
+
+/// Encodes a `u2` count followed by that many `attribute_info` structures.
+///
+/// Attribute payloads are structurally encoded. Known attributes use the
+/// first matching UTF-8 name entry in `constant_pool`, so their bytes may use
+/// a different duplicate name index than the original input. Opaque
+/// [`Attribute::Other`] values retain their original name index and payload
+/// bytes exactly. The pool is never modified or reindexed.
+pub fn encode_attributes(
+    attributes: &[Attribute<'_>],
+    constant_pool: &ConstantPool,
+) -> Result<Vec<u8>, EncodeError> {
+    let mut writer = Writer::new();
+    writer.write_u2_length(attributes.len())?;
+    for attribute in attributes {
+        writer.write_bytes(&attribute.encode(constant_pool)?);
+    }
+    Ok(writer.into_bytes())
+}
+
 /// Validates the constant pool references of every attribute in `attributes`
 /// (JVMS §4.7), stopping at the first bad reference.
 pub(crate) fn validate_attributes(
@@ -598,6 +673,89 @@ pub fn find_deprecated_annotation(
 }
 
 impl<'a> Attribute<'a> {
+    /// Encodes one `attribute_info` (JVMS §4.7.1).
+    ///
+    /// Known variants use the first matching UTF-8 name entry in the supplied
+    /// pool. This is a structural round trip: duplicate name entries may
+    /// produce different bytes while decoding to the same model. An opaque
+    /// [`Attribute::Other`] preserves its original name index and payload.
+    /// This encoder currently covers scalar, list-based, and opaque
+    /// attributes; recursive and annotation attributes return
+    /// [`EncodeError::UnsupportedAttribute`].
+    pub fn encode(&self, constant_pool: &ConstantPool) -> Result<Vec<u8>, EncodeError> {
+        let name_index = if let Some(name) = attribute_name(self) {
+            validate_attribute(self, constant_pool)
+                .map_err(|error| encode_pool_ref_error(constant_pool, error))?;
+            constant_pool
+                .find_utf8(name)
+                .ok_or(EncodeError::MissingAttributeName { name })?
+        } else if let Attribute::Other(raw) = self {
+            constant_pool
+                .utf8(raw.name_index)
+                .map_err(|error| encode_pool_ref_error(constant_pool, error))?;
+            raw.name_index
+        } else {
+            return Err(EncodeError::UnsupportedAttribute);
+        };
+
+        let mut payload = Writer::new();
+        match self {
+            Attribute::ConstantValue(index)
+            | Attribute::Signature(index)
+            | Attribute::SourceFile(index)
+            | Attribute::NestHost(index) => payload.write_u2(index.0),
+            Attribute::Deprecated | Attribute::Synthetic => {}
+            Attribute::Exceptions(indices)
+            | Attribute::NestMembers(indices)
+            | Attribute::PermittedSubclasses(indices) => {
+                write_index_list(&mut payload, indices)?;
+            }
+            Attribute::InnerClasses(entries) => {
+                payload.write_u2_length(entries.len())?;
+                for entry in entries {
+                    payload.write_u2(entry.inner_class_info_index.0);
+                    payload.write_u2(entry.outer_class_info_index.map_or(0, |index| index.0));
+                    payload.write_u2(entry.inner_name_index.map_or(0, |index| index.0));
+                    payload.write_u2(entry.inner_class_access_flags);
+                }
+            }
+            Attribute::EnclosingMethod {
+                class_index,
+                method_index,
+            } => {
+                payload.write_u2(class_index.0);
+                payload.write_u2(method_index.map_or(0, |index| index.0));
+            }
+            Attribute::BootstrapMethods(methods) => {
+                payload.write_u2_length(methods.len())?;
+                for method in methods {
+                    payload.write_u2(method.method_ref.0);
+                    write_index_list(&mut payload, &method.arguments)?;
+                }
+            }
+            Attribute::MethodParameters(parameters) => {
+                payload.write_u1(checked_u8_len(parameters.len())?);
+                for parameter in parameters {
+                    payload.write_u2(parameter.name_index.map_or(0, |index| index.0));
+                    payload.write_u2(parameter.access_flags);
+                }
+            }
+            Attribute::Other(raw) => payload.write_bytes(raw.bytes),
+            Attribute::Record(_)
+            | Attribute::Code(_)
+            | Attribute::RuntimeVisibleAnnotations(_)
+            | Attribute::RuntimeInvisibleAnnotations(_) => {
+                return Err(EncodeError::UnsupportedAttribute);
+            }
+        }
+
+        let payload = payload.into_bytes();
+        let mut writer = Writer::new();
+        write_attribute_header(&mut writer, name_index, payload.len())?;
+        writer.write_bytes(&payload);
+        Ok(writer.into_bytes())
+    }
+
     /// Decodes one `attribute_info` (JVMS §4.7.1), resolving its name
     /// through `constant_pool` to pick a grammar. An unrecognized name
     /// always decodes to [`Attribute::Other`] rather than erroring.
@@ -680,6 +838,257 @@ mod tests {
 
     fn pool_with_utf8_name(name: &str) -> ConstantPool {
         ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Utf8(name.to_owned()))])
+    }
+
+    fn attribute_encoding_pool() -> ConstantPool {
+        ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("ConstantValue".to_owned())), // #1
+            Some(ConstantPoolEntry::Utf8("Signature".to_owned())),     // #2, first duplicate
+            Some(ConstantPoolEntry::Utf8("Signature".to_owned())),     // #3
+            Some(ConstantPoolEntry::Utf8("Exceptions".to_owned())),    // #4
+            Some(ConstantPoolEntry::Utf8("InnerClasses".to_owned())),  // #5
+            Some(ConstantPoolEntry::Utf8("EnclosingMethod".to_owned())), // #6
+            Some(ConstantPoolEntry::Utf8("SourceFile".to_owned())),    // #7
+            Some(ConstantPoolEntry::Utf8("Deprecated".to_owned())),    // #8
+            Some(ConstantPoolEntry::Utf8("Synthetic".to_owned())),     // #9
+            Some(ConstantPoolEntry::Utf8("NestHost".to_owned())),      // #10
+            Some(ConstantPoolEntry::Utf8("NestMembers".to_owned())),   // #11
+            Some(ConstantPoolEntry::Utf8("PermittedSubclasses".to_owned())), // #12
+            Some(ConstantPoolEntry::Utf8("BootstrapMethods".to_owned())), // #13
+            Some(ConstantPoolEntry::Utf8("MethodParameters".to_owned())), // #14
+            Some(ConstantPoolEntry::Utf8("StackMapTable".to_owned())), // #15
+            Some(ConstantPoolEntry::Utf8("StackMapTable".to_owned())), // #16
+            Some(ConstantPoolEntry::Integer(7)),                       // #17
+            Some(ConstantPoolEntry::Utf8("Lsig;".to_owned())),         // #18
+            Some(ConstantPoolEntry::Utf8("Demo.java".to_owned())),     // #19
+            Some(ConstantPoolEntry::Utf8("C".to_owned())),             // #20
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(20),
+            }), // #21
+            Some(ConstantPoolEntry::Utf8("Outer".to_owned())),         // #22
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(22),
+            }), // #23
+            Some(ConstantPoolEntry::Utf8("Inner".to_owned())),         // #24
+            Some(ConstantPoolEntry::Utf8("run".to_owned())),           // #25
+            Some(ConstantPoolEntry::Utf8("()V".to_owned())),           // #26
+            Some(ConstantPoolEntry::NameAndType {
+                name_index: ConstantPoolIndex(25),
+                descriptor_index: ConstantPoolIndex(26),
+            }), // #27
+            Some(ConstantPoolEntry::Methodref {
+                class_index: ConstantPoolIndex(21),
+                name_and_type_index: ConstantPoolIndex(27),
+            }), // #28
+            Some(ConstantPoolEntry::MethodHandle {
+                reference_kind: crate::constant_pool::MethodHandleKind::InvokeStatic,
+                reference_index: ConstantPoolIndex(28),
+            }), // #29
+            Some(ConstantPoolEntry::Long(9)),                          // #30
+            None,                                                      // #31, reserved long slot
+            Some(ConstantPoolEntry::Float(1.5)),                       // #32
+            Some(ConstantPoolEntry::Double(2.5)),                      // #33
+        ])
+    }
+
+    #[test]
+    fn encodes_and_decodes_every_supported_attribute_variant() {
+        let pool = attribute_encoding_pool();
+        let attributes = vec![
+            Attribute::ConstantValue(ConstantPoolIndex(17)),
+            Attribute::Signature(ConstantPoolIndex(18)),
+            Attribute::Exceptions(vec![ConstantPoolIndex(21), ConstantPoolIndex(23)]),
+            Attribute::InnerClasses(vec![
+                InnerClassEntry {
+                    inner_class_info_index: ConstantPoolIndex(21),
+                    outer_class_info_index: Some(ConstantPoolIndex(23)),
+                    inner_name_index: Some(ConstantPoolIndex(24)),
+                    inner_class_access_flags: 0x0019,
+                },
+                InnerClassEntry {
+                    inner_class_info_index: ConstantPoolIndex(23),
+                    outer_class_info_index: None,
+                    inner_name_index: None,
+                    inner_class_access_flags: 0x0001,
+                },
+            ]),
+            Attribute::EnclosingMethod {
+                class_index: ConstantPoolIndex(21),
+                method_index: Some(ConstantPoolIndex(27)),
+            },
+            Attribute::EnclosingMethod {
+                class_index: ConstantPoolIndex(23),
+                method_index: None,
+            },
+            Attribute::SourceFile(ConstantPoolIndex(19)),
+            Attribute::Deprecated,
+            Attribute::Synthetic,
+            Attribute::NestHost(ConstantPoolIndex(23)),
+            Attribute::NestMembers(vec![]),
+            Attribute::PermittedSubclasses(vec![ConstantPoolIndex(21), ConstantPoolIndex(23)]),
+            Attribute::BootstrapMethods(vec![
+                BootstrapMethodEntry {
+                    method_ref: ConstantPoolIndex(29),
+                    arguments: vec![ConstantPoolIndex(17), ConstantPoolIndex(21)],
+                },
+                BootstrapMethodEntry {
+                    method_ref: ConstantPoolIndex(29),
+                    arguments: vec![],
+                },
+            ]),
+            Attribute::BootstrapMethods(vec![]),
+            Attribute::MethodParameters(vec![
+                MethodParameterEntry {
+                    name_index: Some(ConstantPoolIndex(25)),
+                    access_flags: 0x0010,
+                },
+                MethodParameterEntry {
+                    name_index: None,
+                    access_flags: 0x8000,
+                },
+            ]),
+            Attribute::Other(RawAttribute {
+                name_index: ConstantPoolIndex(16),
+                bytes: &[0xCA, 0xFE, 0x00, 0xFF],
+            }),
+        ];
+        let original_pool = pool.clone();
+
+        for attribute in &attributes {
+            let bytes = attribute.encode(&pool).unwrap();
+            let mut reader = Reader::new(&bytes);
+            assert_eq!(Attribute::decode(&mut reader, &pool), Ok(attribute.clone()));
+            assert!(reader.is_at_end());
+        }
+
+        let encoded = encode_attributes(&attributes, &pool).unwrap();
+        assert_eq!(encoded, encode_attributes(&attributes, &pool).unwrap());
+        let mut reader = Reader::new(&encoded);
+        assert_eq!(decode_attributes(&mut reader, &pool).unwrap(), attributes);
+        assert!(reader.is_at_end());
+        assert_eq!(pool, original_pool);
+
+        // The structured Signature model has no name index, so encoding uses
+        // the first duplicate Utf8 name in the original constant pool.
+        assert_eq!(attributes[1].encode(&pool).unwrap()[..2], [0, 2]);
+        // Opaque attributes retain their original name index and payload.
+        assert_eq!(
+            attributes.last().unwrap().encode(&pool).unwrap(),
+            [0, 16, 0, 0, 0, 4, 0xCA, 0xFE, 0, 0xFF]
+        );
+    }
+
+    #[test]
+    fn encode_attributes_writes_a_checked_u2_count() {
+        let pool = pool_with_utf8_name("Deprecated");
+        assert_eq!(encode_attributes(&[], &pool).unwrap(), [0, 0]);
+
+        let attributes = vec![Attribute::Deprecated; usize::from(u16::MAX) + 1];
+        assert_eq!(
+            encode_attributes(&attributes, &pool),
+            Err(EncodeError::CountOverflow {
+                value: usize::from(u16::MAX) + 1,
+                width: crate::encode_error::LengthWidth::U16,
+            })
+        );
+    }
+
+    #[test]
+    fn encode_rejects_an_attribute_payload_length_that_exceeds_u4() {
+        if let Some(too_long) = (u32::MAX as usize).checked_add(1) {
+            let mut writer = Writer::new();
+            assert_eq!(
+                write_attribute_header(&mut writer, ConstantPoolIndex(1), too_long),
+                Err(EncodeError::CountOverflow {
+                    value: too_long,
+                    width: crate::encode_error::LengthWidth::U32,
+                })
+            );
+            assert!(writer.is_empty());
+        }
+    }
+
+    #[test]
+    fn encode_checks_names_references_and_nested_lengths() {
+        assert_eq!(
+            Attribute::Signature(ConstantPoolIndex(1)).encode(&ConstantPool::from_entries(vec![
+                Some(ConstantPoolEntry::Utf8("Lsig;".to_owned())),
+            ])),
+            Err(EncodeError::MissingAttributeName { name: "Signature" })
+        );
+
+        let wrong_other_name = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("StackMapTable".to_owned())),
+            Some(ConstantPoolEntry::Integer(1)),
+        ]);
+        assert_eq!(
+            Attribute::Other(RawAttribute {
+                name_index: ConstantPoolIndex(2),
+                bytes: &[],
+            })
+            .encode(&wrong_other_name),
+            Err(EncodeError::InvalidReference { index: 2 })
+        );
+
+        let bad_reference_pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("ConstantValue".to_owned())),
+            Some(ConstantPoolEntry::Utf8("not a constant".to_owned())),
+        ]);
+        assert_eq!(
+            Attribute::ConstantValue(ConstantPoolIndex(2)).encode(&bad_reference_pool),
+            Err(EncodeError::InvalidReference { index: 2 })
+        );
+        assert_eq!(
+            Attribute::SourceFile(ConstantPoolIndex(3)).encode(&bad_reference_pool),
+            Err(EncodeError::InvalidIndex { index: 3, count: 2 })
+        );
+
+        let exceptions_pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("Exceptions".to_owned())),
+            Some(ConstantPoolEntry::Utf8("E".to_owned())),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(2),
+            }),
+        ]);
+        let too_many_classes =
+            Attribute::Exceptions(vec![ConstantPoolIndex(3); usize::from(u16::MAX) + 1]);
+        assert_eq!(
+            too_many_classes.encode(&exceptions_pool),
+            Err(EncodeError::CountOverflow {
+                value: usize::from(u16::MAX) + 1,
+                width: crate::encode_error::LengthWidth::U16,
+            })
+        );
+
+        let parameters_pool = pool_with_utf8_name("MethodParameters");
+        let too_many_parameters = Attribute::MethodParameters(vec![
+            MethodParameterEntry {
+                name_index: None,
+                access_flags: 0,
+            };
+            usize::from(u8::MAX) + 1
+        ]);
+        assert_eq!(
+            too_many_parameters.encode(&parameters_pool),
+            Err(EncodeError::CountOverflow {
+                value: usize::from(u8::MAX) + 1,
+                width: crate::encode_error::LengthWidth::U8,
+            })
+        );
+    }
+
+    #[test]
+    fn encode_rejects_attribute_variants_outside_this_increment() {
+        let pool = pool_with_utf8_name("Code");
+        let code = Attribute::Code(CodeAttribute {
+            max_stack: 0,
+            max_locals: 0,
+            code: &[],
+            exception_table: vec![],
+            attributes: vec![],
+        });
+
+        assert_eq!(code.encode(&pool), Err(EncodeError::UnsupportedAttribute));
     }
 
     #[test]

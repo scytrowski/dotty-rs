@@ -232,6 +232,22 @@ impl ConstantPool {
         Self { entries }
     }
 
+    pub(crate) fn find_utf8(&self, value: &str) -> Option<ConstantPoolIndex> {
+        self.entries.iter().enumerate().find_map(|(slot, entry)| {
+            if matches!(entry, Some(ConstantPoolEntry::Utf8(candidate)) if candidate == value) {
+                u16::try_from(slot.checked_add(1)?)
+                    .ok()
+                    .map(ConstantPoolIndex)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Encodes `constant_pool_count` and all stored entries in their current
     /// slot order (JVMS §4.4).
     ///

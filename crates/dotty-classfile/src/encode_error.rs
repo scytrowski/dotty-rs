@@ -3,6 +3,8 @@ use std::fmt;
 /// The fixed-width integer used to store a count or byte length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LengthWidth {
+    /// A JVM `u1` (one-byte) count or length.
+    U8,
     /// A JVM `u2` (two-byte) count or length.
     U16,
     /// A JVM `u4` (four-byte) count or length.
@@ -12,6 +14,7 @@ pub enum LengthWidth {
 impl LengthWidth {
     fn max_value(self) -> u64 {
         match self {
+            Self::U8 => u64::from(u8::MAX),
             Self::U16 => u64::from(u16::MAX),
             Self::U32 => u64::from(u32::MAX),
         }
@@ -49,6 +52,13 @@ pub enum EncodeError {
         /// The index of the method or interface method referenced by the handle.
         index: usize,
     },
+    /// A known attribute name is absent from the supplied constant pool.
+    MissingAttributeName {
+        /// The standard attribute name required by the model variant.
+        name: &'static str,
+    },
+    /// The attribute model is recognized but its encoder is outside the current scope.
+    UnsupportedAttribute,
     /// The provided class-file model violates a structural requirement.
     InvalidModel,
     /// The provided byte layout violates a structural requirement.
@@ -69,6 +79,7 @@ impl fmt::Display for EncodeError {
                 formatter,
                 "count or length {value} does not fit in a {}-bit field (maximum {})",
                 match width {
+                    LengthWidth::U8 => 8,
                     LengthWidth::U16 => 16,
                     LengthWidth::U32 => 32,
                 },
@@ -87,6 +98,15 @@ impl fmt::Display for EncodeError {
                 formatter,
                 "invalid method name for method handle target at index {index}"
             ),
+            Self::MissingAttributeName { name } => {
+                write!(
+                    formatter,
+                    "constant pool has no Utf8 entry for attribute {name}"
+                )
+            }
+            Self::UnsupportedAttribute => {
+                formatter.write_str("attribute variant is not supported by the encoder")
+            }
             Self::InvalidModel => formatter.write_str("invalid class-file model"),
             Self::InvalidLayout => formatter.write_str("invalid class-file layout"),
             Self::Utf8LengthOverflow { byte_len, max } => write!(

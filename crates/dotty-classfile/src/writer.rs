@@ -95,6 +95,14 @@ pub fn checked_u16_len(value: usize) -> Result<u16, EncodeError> {
     })
 }
 
+/// Converts a count or length to `u8`, returning a typed error on overflow.
+pub fn checked_u8_len(value: usize) -> Result<u8, EncodeError> {
+    u8::try_from(value).map_err(|_| EncodeError::CountOverflow {
+        value,
+        width: LengthWidth::U8,
+    })
+}
+
 /// Converts a count or length to `u32`, returning a typed error on overflow.
 pub fn checked_u32_len(value: usize) -> Result<u32, EncodeError> {
     u32::try_from(value).map_err(|_| EncodeError::CountOverflow {
@@ -116,7 +124,7 @@ pub fn checked_utf8_len(byte_len: usize) -> Result<u16, EncodeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Writer, checked_u16_len, checked_u32_len, checked_utf8_len};
+    use super::{Writer, checked_u8_len, checked_u16_len, checked_u32_len, checked_utf8_len};
     use crate::encode_error::{EncodeError, LengthWidth};
 
     #[test]
@@ -140,6 +148,8 @@ mod tests {
 
     #[test]
     fn length_conversions_accept_zero_and_maximum_values() {
+        assert_eq!(checked_u8_len(0), Ok(0));
+        assert_eq!(checked_u8_len(usize::from(u8::MAX)), Ok(u8::MAX));
         assert_eq!(checked_u16_len(0), Ok(0));
         assert_eq!(checked_u16_len(usize::from(u16::MAX)), Ok(u16::MAX));
         assert_eq!(checked_u32_len(0), Ok(0));
@@ -150,6 +160,13 @@ mod tests {
 
     #[test]
     fn length_conversions_reject_overflow_without_allocating() {
+        assert_eq!(
+            checked_u8_len(usize::from(u8::MAX) + 1),
+            Err(EncodeError::CountOverflow {
+                value: usize::from(u8::MAX) + 1,
+                width: LengthWidth::U8,
+            })
+        );
         let too_long_u16 = usize::from(u16::MAX) + 1;
         assert_eq!(
             checked_u16_len(too_long_u16),
