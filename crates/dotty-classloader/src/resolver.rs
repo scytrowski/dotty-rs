@@ -317,6 +317,57 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 }
             }
             [] => Ok(None),
+            [symbol]
+                if store.symbols.get(resolved_owner).kind == SymbolKind::Package
+                    && request.name.is_type() =>
+            {
+                let member = store.symbols.get(*symbol);
+                if matches!(
+                    member.kind,
+                    SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+                ) {
+                    let source_owned_by_other_scope =
+                        matches!(member.origin, dotty_core::SymbolOrigin::Source(_))
+                            && member.owner != Some(resolved_owner);
+                    if source_owned_by_other_scope || member.name != request.name {
+                        return Err(ResolutionError::Malformed {
+                            reason: format!(
+                                "package type member {symbol:?} does not match its canonical package/name"
+                            ),
+                        });
+                    }
+                    let SymbolInfo::Complete(info) = member.info else {
+                        // A source-owned class is already the canonical identity.
+                        // This adapter cannot complete it in place, and loading a
+                        // classpath twin would create a duplicate identity.
+                        return Ok(None);
+                    };
+                    if !store.types.contains(info) {
+                        return Err(ResolutionError::Malformed {
+                            reason: format!(
+                                "package class {symbol:?} has an invalid completion type"
+                            ),
+                        });
+                    }
+                    let Type::ClassInfo(class_info) = store.types.get(info) else {
+                        return Err(ResolutionError::Malformed {
+                            reason: format!(
+                                "package class {symbol:?} is complete without ClassInfo"
+                            ),
+                        });
+                    };
+                    if class_info.class != *symbol
+                        || !store.scopes.contains(class_info.declarations)
+                    {
+                        return Err(ResolutionError::Malformed {
+                            reason: format!(
+                                "package class {symbol:?} has invalid class identity or declaration scope"
+                            ),
+                        });
+                    }
+                }
+                Ok(Some(*symbol))
+            }
             [symbol] => Ok(Some(*symbol)),
             many => Err(ResolutionError::Ambiguous {
                 candidates: many.len(),
@@ -448,7 +499,7 @@ mod tests {
     };
     use crate::jdk_class_path::JdkClassPath;
     use crate::jmod_class_path::JmodClassPath;
-    use dotty_core::{ClassInfo, MemberSelector, Name, Namespace, Scope};
+    use dotty_core::{ClassInfo, MemberSelector, Name, Namespace, Scope, SourceId};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -1003,6 +1054,62 @@ mod tests {
             2,
             "aliases occupy only the type namespace"
         );
+    }
+
+    #[test]
+    fn package_type_lookup_does_not_return_an_incomplete_source_class() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let probes = Arc::new(AtomicUsize::new(0));
+        let mut resolver = ClasspathSymbolResolver::new(
+            EmptyCountingClassPath(Arc::clone(&probes)),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .session
+            .packages
+            .resolve_package(&mut store, "example");
+        let package_scope = resolver.package_scope(package).unwrap();
+        let class_name = Name::new(store.names.intern("Pending"), Namespace::Type);
+        let source_class = store.symbols.alloc(Symbol {
+            name: class_name,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: dotty_core::SymbolOrigin::Source(SourceId::from_index(0)),
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store
+            .scopes
+            .get_mut(package_scope)
+            .enter(class_name, source_class);
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+
+        let result = resolver.resolve_member(
+            &mut store,
+            &MemberRequest {
+                prefix: package_prefix,
+                name: class_name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            },
+        );
+
+        assert_eq!(result, Ok(None));
+        assert_eq!(probes.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&class_name),
+            &[source_class],
+            "the incomplete source identity remains in place without a classpath twin"
+        );
+        assert!(resolver.session.resolved.is_empty());
     }
 
     #[test]
