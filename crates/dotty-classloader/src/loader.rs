@@ -282,7 +282,9 @@ pub struct ClassLoader<'store, E> {
 ///
 /// `max_dependency_depth` is zero when the request only touches its root
 /// class. `classes` includes the root and every distinct class reached by
-/// superclass, interface, member-type, signature, or annotation loading.
+/// superclass, interface, member-type, signature, or annotation identity work.
+/// Depth counts eager load edges only. Counters describe work performed,
+/// including work later rolled back when the root operation fails.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClassLoadProfile {
     /// Binary name requested at the root of this load operation.
@@ -291,6 +293,16 @@ pub struct ClassLoadProfile {
     pub max_dependency_depth: usize,
     /// Sorted binary names of the root and every distinct class reached.
     pub classes: BTreeSet<String>,
+    /// Classes newly completed in this request, excluding completed cache hits.
+    pub full_completions: usize,
+    /// Newly allocated external identity shells (including enclosing owners).
+    pub shells_created: usize,
+    /// Requests reusing an incomplete external identity, including in-progress loads.
+    pub shells_reused: usize,
+    /// Successful member/signature/annotation references resolved without full loading.
+    pub member_type_references: usize,
+    /// Eager superclass/interface load requests, including cache hits and failures.
+    pub hierarchy_loads: usize,
 }
 
 #[derive(Default)]
@@ -299,6 +311,11 @@ struct ActiveLoadProfile {
     depth: usize,
     max_dependency_depth: usize,
     classes: BTreeSet<String>,
+    full_completions: usize,
+    shells_created: usize,
+    shells_reused: usize,
+    member_type_references: usize,
+    hierarchy_loads: usize,
 }
 
 /// Reconstructs a [`ClassTypeSignature`]'s binary name (JVMS §4.2.1): its
@@ -500,6 +517,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         name: &BinaryName,
         ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
+        if let Some(profile) = &mut self.active_load_profile {
+            profile.classes.insert(name.as_internal().to_owned());
+        }
         if name.as_internal() == "java/lang/Object" {
             self.session
                 .cache_identified(name.clone(), self.definitions.object_class);
@@ -516,7 +536,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             });
         }
         match self.repository.get(name) {
-            Some(ClassEntry::Loading(symbol)) => return Ok(*symbol),
+            Some(ClassEntry::Loading(symbol)) => {
+                if let Some(profile) = &mut self.active_load_profile {
+                    profile.shells_reused += 1;
+                }
+                return Ok(*symbol);
+            }
             Some(ClassEntry::Failed(_, failure)) => return Err(failure.error.clone()),
             _ => {}
         }
@@ -530,7 +555,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             }
             let info = self.store.symbols.get(symbol).info;
             match info {
-                SymbolInfo::Missing => {}
+                SymbolInfo::Missing => {
+                    if let Some(profile) = &mut self.active_load_profile {
+                        profile.shells_reused += 1;
+                    }
+                }
                 SymbolInfo::Complete(info)
                     if self.store.types.try_get(info).is_some_and(|ty| {
                         matches!(ty, Type::ClassInfo(info)
@@ -664,6 +693,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.session.cache_resolved(name.clone(), symbol);
             } else {
                 self.session.cache_identified(name.clone(), symbol);
+                if let Some(profile) = &mut self.active_load_profile {
+                    profile.shells_reused += 1;
+                }
             }
             self.session.record_origin(symbol, origin);
             return Ok(symbol);
@@ -715,6 +747,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .enter_class(self.store, package, symbol_name, symbol);
         self.session.cache_identified(name.clone(), symbol);
         self.session.record_origin(symbol, origin);
+        if let Some(profile) = &mut self.active_load_profile {
+            profile.shells_created += 1;
+        }
         Ok(symbol)
     }
 
@@ -859,6 +894,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             Ok(symbol) => {
                 self.repository.mark_loaded(name.clone(), symbol);
                 self.session.cache_resolved(name.clone(), symbol);
+                if let Some(profile) = &mut self.active_load_profile {
+                    profile.full_completions += 1;
+                }
                 Ok(symbol)
             }
             Err(failure) => {
@@ -918,6 +956,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 root: profile.root,
                 max_dependency_depth: profile.max_dependency_depth,
                 classes: profile.classes,
+                full_completions: profile.full_completions,
+                shells_created: profile.shells_created,
+                shells_reused: profile.shells_reused,
+                member_type_references: profile.member_type_references,
+                hierarchy_loads: profile.hierarchy_loads,
             });
         }
         result
@@ -2295,7 +2338,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 if needs_outer_scope {
                     self.resolve_owner_class(name, &outer)
                 } else {
-                    self.ensure_dependency_identity(name, &outer)
+                    self.ensure_class_identity(&outer).map_err(|source| {
+                        ClassLoadError::DependencyFailure {
+                            owner: name.clone(),
+                            dependency: outer,
+                            source: Rc::new(source),
+                        }
+                    })
                 }
             })
             .transpose()
@@ -2428,6 +2477,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         dependency: BinaryName,
         inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
+        if let Some(profile) = &mut self.active_load_profile {
+            profile.hierarchy_loads += 1;
+        }
         if self.collect_load_profiles {
             self.profiled_load_class(&dependency, inheritance_ancestry)
         } else {
@@ -2448,12 +2500,19 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         owner: &BinaryName,
         dependency: &BinaryName,
     ) -> Result<SymbolId, ClassLoadError> {
-        self.ensure_class_identity(dependency)
-            .map_err(|source| ClassLoadError::DependencyFailure {
+        let result = self.ensure_class_identity(dependency).map_err(|source| {
+            ClassLoadError::DependencyFailure {
                 owner: owner.clone(),
                 dependency: dependency.clone(),
                 source: Rc::new(source),
-            })
+            }
+        });
+        if result.is_ok()
+            && let Some(profile) = &mut self.active_load_profile
+        {
+            profile.member_type_references += 1;
+        }
+        result
     }
 
     // Non-static nested signatures may refer to an enclosing type parameter.
@@ -5645,6 +5704,83 @@ mod tests {
                 .resolved
                 .contains_key(&BinaryName::from_internal("B"))
         );
+    }
+
+    #[test]
+    fn member_fanout_stops_at_twenty_shells_and_profiles_actual_work() {
+        let mut classes = HashMap::new();
+        let fields: Vec<_> = (1..=20)
+            .map(|i| (format!("b{i}"), format!("B{i}")))
+            .collect();
+        let mut refs: Vec<_> = fields
+            .iter()
+            .map(|(field, ty)| (field.as_str(), ty.as_str()))
+            .collect();
+        refs.push(("again", "B1"));
+        classes.insert(
+            BinaryName::from_internal("A"),
+            synthetic_class_with_object_fields("A", None, &refs),
+        );
+        for i in 1..=20 {
+            let b = format!("B{i}");
+            let c = format!("C{i}");
+            classes.insert(
+                BinaryName::from_internal(&b),
+                synthetic_class_with_object_fields(&b, None, &[("next", &c)]),
+            );
+            classes.insert(BinaryName::from_internal(&c), synthetic_class(&c, None));
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            CountingResourceClassPath {
+                resources: classes
+                    .into_iter()
+                    .map(|(name, bytes)| {
+                        (
+                            name,
+                            (
+                                bytes,
+                                ClassFormat::Class,
+                                ClassOrigin::Directory("<memory>".into()),
+                            ),
+                        )
+                    })
+                    .collect(),
+                calls: Arc::clone(&calls),
+            },
+            &mut store,
+        );
+        loader.set_load_profile_collection(true);
+        let a_name = BinaryName::from_internal("A");
+        let a = loader.load_class(&a_name).unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 21);
+        for i in 1..=20 {
+            let b = loader.session.identified[&BinaryName::from_internal(format!("B{i}"))];
+            assert_eq!(loader.store.symbols.get(b).info, SymbolInfo::Missing);
+            assert!(
+                !loader
+                    .session
+                    .identified
+                    .contains_key(&BinaryName::from_internal(format!("C{i}")))
+            );
+            let ty = member_type_id(loader.store, a, &format!("b{i}"));
+            assert_eq!(parent_symbol(loader.store, ty), b);
+        }
+        let profile = loader.take_load_profiles().pop().unwrap();
+        assert_eq!(profile.full_completions, 1);
+        assert_eq!(profile.shells_created, 20);
+        assert_eq!(profile.shells_reused, 1);
+        assert_eq!(profile.member_type_references, 21);
+        assert_eq!(profile.hierarchy_loads, 0);
+        assert_eq!(profile.max_dependency_depth, 0);
+        assert_eq!(profile.classes.len(), 21);
+        assert_eq!(loader.load_class(&a_name).unwrap(), a);
+        let cached = loader.take_load_profiles().pop().unwrap();
+        assert_eq!(cached.full_completions, 0);
+        assert_eq!(cached.shells_created, 0);
+        assert_eq!(cached.shells_reused, 0);
+        assert_eq!(calls.load(Ordering::Relaxed), 21);
     }
 
     #[test]
