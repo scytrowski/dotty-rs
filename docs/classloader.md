@@ -415,10 +415,10 @@ The dependency policy is explicit:
 | Non-static member-class enclosing class | Eager completion for its declaration/type-parameter scope |
 
 A completed `ClassInfo` can therefore contain member `TypeRef`s whose target
-class still has `SymbolInfo::Missing`. This does not supply an automatic lazy
-completer: `load_class` must be requested explicitly to inspect that class's
-members. Typer member lookup and direct resolver shell completion are separate
-increments (#1021/#1022). Non-static enclosing owners remain eager because the
+class still has `SymbolInfo::Missing`. SourceTyper requests `SymbolResolver::complete_class` when member lookup
+needs an external shell's `ClassInfo` (#1021). Direct resolver member requests
+against incomplete prefixes remain the separate #1022 increment. This bounded
+hook does not introduce the general `CompletionId`/completer engine. Non-static enclosing owners remain eager because the
 current #973 type-variable environment consumes their declaration scopes;
 identity alone cannot resolve an outer generic parameter. Static edges still
 stop that lookup.
@@ -440,6 +440,19 @@ builtins. Member references count successful descriptor/signature/annotation
 identity requests; hierarchy loads count superclass/interface requests,
 including cache hits or errors. Counts report work done even if the root later
 rolls it back. The corpus audit emits totals and per-request counts for #1023.
+
+The classpath completion hook accepts only identities registered in the same
+`LoadingSession` and backed by classfile/TASTy origins. It recovers the canonical
+binary name, validates package/name/owner identity, and calls `load_class` for
+`Missing` info. Already-complete classes are validated and reused without byte
+reads or duplicate declarations. Error/Deferred or malformed info produces a
+focused `ResolutionError`; unowned source/synthetic classes and unbacked
+builtins are declined atomically. Successful completion retains the same
+`SymbolId` and joins the resolver journal. A later caller rollback restores a
+pre-existing shell's entire previous symbol and removes new members/scopes,
+metadata, and completed-cache entries. A shell introduced inside that caller
+transaction is removed by the matching store rollback instead. Session handoff
+between a loader and resolver preserves both forms of identity.
 
 `ClassLoader::load_class(name)` follows that shape:
 

@@ -1573,7 +1573,19 @@ undeclares changes to older scopes, then rolls back the store. This keeps
 resolver caches from retaining IDs freed by typer or unpickler rollback.
 Overload selection by signature is a `#[non_exhaustive]` extension of
 `MemberSelector`; today only `Unique` exists. `NoResolver` answers `None` to
-everything and never mutates the store.
+member/package requests and never mutates the store.
+
+`complete_class(store, SymbolId) -> Result<bool, ResolutionError>` is a defaulted,
+object-safe hook for a resolver-owned external class identity. `true` requires
+in-place `Complete(ClassInfo)` with the original symbol, a matching
+`ClassInfo.class`, and a valid declaration scope. `false` declines ownership or
+support; false and errors have the same atomicity guarantees as unresolved
+member requests. Successful symbol updates must be journaled so an outer
+rollback restores an existing shell before freeing its new types/scopes.
+`NoResolver` defaults to false. The hook does not authorize completion of
+source or arbitrary synthetic symbols, and is bounded to external classes;
+a general `CompletionId` engine remains a separate design increment.
+
 
 `MemberSpace` says where the declaration is looked for. `Prefix` (ordinary
 references) searches the members of `prefix`. `Explicit(TypeId)` (Scala's

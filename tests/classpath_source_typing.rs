@@ -1,7 +1,8 @@
 //! End-to-end source typing with the classloader's transactional resolver.
 
 use dotty_classloader::classloader::{
-    ClassPathEntry, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+    BinaryName, ClassLoader, ClassPathEntry, ClasspathSymbolResolver, CompositeClassPath,
+    DirectoryClassPath, LoadingSession,
 };
 use dotty_core::ast::{TreeKind, Untyped};
 use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
@@ -103,6 +104,201 @@ fn class_path(stubs: &TemporaryDirectory) -> CompositeClassPath {
         Box::new(DirectoryClassPath::new(PathBuf::from(TASTY_SAMPLE))),
         Box::new(DirectoryClassPath::new(stubs.path().to_path_buf())),
     ])
+}
+
+struct DemandClassPath {
+    root: PathBuf,
+    reads: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ClassPathEntry for DemandClassPath {
+    fn find_class(
+        &self,
+        name: &BinaryName,
+    ) -> Result<
+        Option<dotty_classloader::classloader::ClassResource>,
+        dotty_classloader::classloader::ClassPathError,
+    > {
+        self.reads
+            .lock()
+            .unwrap()
+            .push(name.as_internal().to_owned());
+        DirectoryClassPath::new(self.root.clone()).find_class(name)
+    }
+    fn contains_package(
+        &self,
+        path: &[&str],
+    ) -> Result<bool, dotty_classloader::classloader::ClassPathError> {
+        DirectoryClassPath::new(self.root.clone()).contains_package(path)
+    }
+}
+
+fn write_demand_class(root: &Path, name: &str, parent: Option<&str>, fields: &[(&str, &str)]) {
+    use dotty_classfile::{
+        access_flags::{ClassAccessFlags, FieldAccessFlags},
+        class_file::{ClassFile, ClassFileVersion},
+        constant_pool_builder::ConstantPoolBuilder,
+        field::FieldInfo,
+    };
+    let mut pool = ConstantPoolBuilder::new();
+    let this_class = pool.class(name).unwrap();
+    let super_class = parent.map(|parent| pool.class(parent).unwrap());
+    let fields = fields
+        .iter()
+        .map(|(name, descriptor)| FieldInfo {
+            access_flags: FieldAccessFlags(1),
+            name_index: pool.utf8(name).unwrap(),
+            descriptor_index: pool.utf8(descriptor).unwrap(),
+            attributes: Vec::new(),
+        })
+        .collect();
+    let bytes = ClassFile {
+        version: ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+        constant_pool: pool.finish().unwrap(),
+        access_flags: ClassAccessFlags(0x0021),
+        this_class,
+        super_class,
+        fields,
+        methods: Vec::new(),
+        interfaces: Vec::new(),
+        attributes: Vec::new(),
+    }
+    .encode()
+    .unwrap();
+    let path = root.join(format!("{name}.class"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn source_member_selection_completes_shells_on_demand_and_rolls_back_in_place() {
+    let files = TemporaryDirectory::new("demand-shells");
+    write_demand_class(files.path(), "sample/A", None, &[("b", "Lsample/B;")]);
+    write_demand_class(files.path(), "sample/B", None, &[("value", "I")]);
+    write_demand_class(
+        files.path(),
+        "sample/Holder",
+        None,
+        &[("child", "Lsample/Child;")],
+    );
+    write_demand_class(files.path(), "sample/Child", Some("sample/Parent"), &[]);
+    write_demand_class(files.path(), "sample/Parent", None, &[("inherited", "I")]);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "import sample.A\nimport sample.Holder\nclass Own { val value: Int = 1 }\ndef source(x: Own): Int = x.value\ndef broken(a: A): Int = { val b = a.b; b.missing }\ndef read(a: A): Int = { val b = a.b; b.value }\ndef inherited(h: Holder): Int = { val c = h.child; c.inherited }",
+        SourceId::from_index(10),
+        &mut store,
+        &mut packages,
+    );
+    let reads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let path = DemandClassPath {
+        root: files.path().to_owned(),
+        reads: reads.clone(),
+    };
+    let mut loader = ClassLoader::with_definitions(
+        path,
+        &mut store,
+        definitions,
+        LoadingSession::with_packages(packages),
+    );
+    let a = loader
+        .load_class(&BinaryName::from_internal("sample/A"))
+        .unwrap();
+    loader
+        .load_class(&BinaryName::from_internal("sample/Holder"))
+        .unwrap();
+    let a_field = loader.metadata(a).expect("A classfile metadata").fields[0].symbol();
+    let b = loader
+        .ensure_class_identity(&BinaryName::from_internal("sample/B"))
+        .unwrap();
+    let child = loader
+        .ensure_class_identity(&BinaryName::from_internal("sample/Child"))
+        .unwrap();
+    let (path, session) = loader.into_parts();
+    let SymbolInfo::Complete(a_info) = store.symbols.get(a_field).info else {
+        panic!("A.b should have a complete field signature");
+    };
+    assert_eq!(store.symbols.get(b).info, SymbolInfo::Missing);
+    assert_eq!(store.symbols.get(child).info, SymbolInfo::Missing);
+    assert_eq!(
+        *reads.lock().unwrap(),
+        ["sample/A", "sample/B", "sample/Holder", "sample/Child"]
+    );
+    let previous_b = store.symbols.get(b).clone();
+    let value_name = Name::new(store.names.intern("value"), Namespace::Term);
+    let log = Rc::new(RefCell::new(ResolutionLog::default()));
+    let resolver = RecordingResolver::new(
+        ClasspathSymbolResolver::new(path, definitions, session),
+        log.clone(),
+    );
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        unit.source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let (method, rhs) = method_rhs(&unit, typer.store(), "source");
+    let context = typer.expression_context_for(method).unwrap();
+    typer.type_expression(rhs, context).unwrap();
+    assert!(
+        log.borrow().completions.is_empty(),
+        "current source classes use source completion"
+    );
+    let (method, rhs) = method_rhs(&unit, typer.store(), "broken");
+    let context = typer.expression_context_for(method).unwrap();
+    let checkpoint = typer.store().checkpoint();
+    let error = typer.type_expression(rhs, context).unwrap_err();
+    assert!(
+        matches!(error, TyperError::MemberNotFound { .. }),
+        "{error:?}"
+    );
+    assert_eq!(typer.store().checkpoint(), checkpoint);
+    assert_eq!(typer.store().symbols.get(b), &previous_b);
+    assert_eq!(log.borrow().completions, [b]);
+    let (method, rhs) = method_rhs(&unit, typer.store(), "read");
+    let context = typer.expression_context_for(method).unwrap();
+    typer.type_expression(rhs, context).unwrap();
+    assert!(matches!(
+        typer.store().symbols.get(b).info,
+        SymbolInfo::Complete(_)
+    ));
+    let candidate = typer.lookup_members(a_info, value_name).unwrap()[0];
+    assert_eq!(candidate.declaring_class, b);
+    assert_eq!(
+        typer.store().symbols.get(candidate.symbol).info,
+        SymbolInfo::Complete(definitions.int)
+    );
+    assert_eq!(log.borrow().completions, [b, b]);
+    let (method, rhs) = method_rhs(&unit, typer.store(), "inherited");
+    let context = typer.expression_context_for(method).unwrap();
+    typer.type_expression(rhs, context).unwrap();
+    assert!(matches!(
+        typer.store().symbols.get(child).info,
+        SymbolInfo::Complete(_)
+    ));
+    assert_eq!(log.borrow().completions, [b, b, child]);
+    assert_eq!(
+        *reads.lock().unwrap(),
+        [
+            "sample/A",
+            "sample/B",
+            "sample/Holder",
+            "sample/Child",
+            "sample/B",
+            "sample/B",
+            "sample/Child",
+            "sample/Parent"
+        ]
+    );
 }
 
 fn replace_all(mut input: Vec<u8>, old: &[u8], new: &[u8]) -> Vec<u8> {
@@ -256,6 +452,7 @@ struct ResolutionLog {
     packages: Vec<(Vec<String>, SymbolId)>,
     members: Vec<(String, SymbolId)>,
     session: Option<LoadingSession>,
+    completions: Vec<SymbolId>,
 }
 
 struct RecordingResolver<E: ClassPathEntry> {
@@ -284,6 +481,18 @@ impl<E: ClassPathEntry> RecordingResolver<E> {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for RecordingResolver<E> {
+    fn complete_class(
+        &mut self,
+        store: &mut SemanticStore,
+        symbol: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        let result = self.inner().complete_class(store, symbol)?;
+        if result {
+            self.log.borrow_mut().completions.push(symbol);
+        }
+        Ok(result)
+    }
+
     fn checkpoint(&self) -> ResolverCheckpoint {
         self.inner.as_ref().unwrap().checkpoint()
     }

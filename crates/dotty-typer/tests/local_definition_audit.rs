@@ -277,6 +277,32 @@ impl ClassPathEntry for SharedClassPath {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
+    fn complete_class(
+        &mut self,
+        store: &mut SemanticStore,
+        symbol: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        let request = if store.symbols.contains(symbol) {
+            format!("completion::{}", audit_symbol_path(store, symbol))
+        } else {
+            "completion::unknown-symbol".to_owned()
+        };
+        let result = self.inner.complete_class(store, symbol);
+        let profiles = self.inner.take_load_profiles();
+        let mut metrics = self.metrics.borrow_mut();
+        let file = metrics.current_file.clone();
+        let method = metrics.current_method.clone();
+        for profile in profiles {
+            metrics.dependency_profiles.push(DependencyObservation {
+                file: file.clone(),
+                method: method.clone(),
+                request: request.clone(),
+                profile,
+            });
+        }
+        result
+    }
+
     fn checkpoint(&self) -> ResolverCheckpoint {
         self.inner.checkpoint()
     }

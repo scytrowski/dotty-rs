@@ -1023,6 +1023,26 @@ must currently complete the referenced class explicitly. Existing #975/#976
 corpus measurements remain historical evidence; new shell/completion counters
 are available for the follow-up #1023 audit.
 
+### #1021 on-demand external ClassInfo
+
+Nominal member lookup now offers external Missing class identities to the
+resolver's bounded `complete_class` hook. Current source classes keep their
+source completion path. Declined/unowned identities retain
+`ClassInfoUnavailable`; recognized completion errors use
+`ExternalClassCompletion`, and reported success is checked for valid class
+identity, ClassInfo, and declarations. Applied receiver views remain attached
+to candidates, preserving the existing external generic substitution boundary.
+A parent shell is completed only when lookup visits its inheritance branch;
+classpath loading itself still eagerly completes direct hierarchy parents.
+
+Completion participates in the existing expression/lookup transaction:
+pre-existing shells return to their prior info on failure, newly created
+symbols are removed, and retry preserves canonical identities. Focused source
+fixtures select fields through member shells and inherited fields through a
+shell receiver, with exact byte-read order and rollback assertions. This hook
+is limited to resolver-owned external classes; direct resolver member-prefix
+completion (#1022) and the full CompletionId engine remain separate work.
+
 ### #976 classpath audit and transaction hardening
 
 The final pinned Scala 3.9/OpenJDK 21.0.8 audit was run twice and the normalized

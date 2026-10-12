@@ -854,6 +854,12 @@ mod tests {
             LoadingSession::new(),
         );
         let b = loader.ensure_class_identity(&name).unwrap();
+        assert_eq!(
+            loader
+                .ensure_class_identity(&BinaryName::from_internal("java/lang/Object"))
+                .unwrap(),
+            definitions.object_class
+        );
         let session = loader.into_session();
         let previous = store.symbols.get(b).clone();
         let foreign = store.symbols.alloc(previous.clone());
@@ -881,6 +887,65 @@ mod tests {
             .unwrap()
             .insert(name, test_class_stub("sample/B", 0x0021));
         assert_eq!(resolver.complete_class(&mut store, b), Ok(true));
+    }
+
+    #[test]
+    fn complete_class_rejects_corrupt_owned_state_without_loading_or_mutation() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let path = CompletionClassPath::new();
+        let mut loader = ClassLoader::with_definitions(
+            path.clone(),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let b = loader
+            .ensure_class_identity(&BinaryName::from_internal("sample/B"))
+            .unwrap();
+        let session = loader.into_session();
+        let original = store.symbols.get(b).clone();
+        let mut resolver = ClasspathSymbolResolver::new(path.clone(), definitions, session);
+        for (info, expected) in [
+            (SymbolInfo::Error, "Error info"),
+            (
+                SymbolInfo::Complete(definitions.no_prefix),
+                "not a valid ClassInfo",
+            ),
+        ] {
+            store.symbols.get_mut(b).info = info;
+            let checkpoint = store.checkpoint();
+            let session_checkpoint = resolver.session.checkpoint();
+            assert!(
+                matches!(resolver.complete_class(&mut store, b), Err(ResolutionError::Malformed { reason }) if reason.contains(expected))
+            );
+            assert_eq!(store.symbols.get(b).info, info);
+            assert_eq!(store.checkpoint(), checkpoint);
+            assert_eq!(resolver.session.checkpoint(), session_checkpoint);
+        }
+        *store.symbols.get_mut(b) = original.clone();
+        let wrong_name = Name::new(store.names.intern("Wrong"), Namespace::Type);
+        store.symbols.get_mut(b).name = wrong_name;
+        assert!(
+            matches!(resolver.complete_class(&mut store, b), Err(ResolutionError::Malformed { reason }) if reason.contains("canonical package/name"))
+        );
+        assert_eq!(store.symbols.get(b).name, wrong_name);
+        *store.symbols.get_mut(b) = original;
+        assert_eq!(path.calls.load(Ordering::Relaxed), 1);
+        path.classes
+            .lock()
+            .unwrap()
+            .remove(&BinaryName::from_internal("sample/B"));
+        assert!(
+            matches!(resolver.complete_class(&mut store, b), Err(ResolutionError::Malformed { reason }) if reason.contains("class not found: sample/B"))
+        );
+        assert_eq!(store.symbols.get(b).info, SymbolInfo::Missing);
+        assert!(
+            !resolver
+                .session
+                .resolved
+                .contains_key(&BinaryName::from_internal("sample/B"))
+        );
     }
 
     impl ClassPathEntry for EmptyCountingClassPath {
