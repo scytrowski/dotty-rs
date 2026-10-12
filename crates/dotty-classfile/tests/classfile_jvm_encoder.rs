@@ -1,4 +1,8 @@
-use dotty_classfile::classfile::{ClassFileBuilder, ClassFileVersion};
+use dotty_classfile::classfile::{
+    ACC_PRIVATE, ACC_PUBLIC, ACC_SUPER, Attribute, ClassAccessFlags, ClassFile, ClassFileBuilder,
+    ClassFileVersion, CodeAttribute, ConstantPoolEntry, FieldAccessFlags, MethodAccessFlags,
+    Reader,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -110,57 +114,279 @@ fn run(executable: &str, args: &[&str]) -> Output {
         .unwrap_or_else(|error| panic!("failed to start {executable}: {error}"))
 }
 
-#[test]
-fn public_encoder_emits_a_class_accepted_and_executed_by_the_jvm() {
-    if !require_jdk_or_skip() {
-        return;
-    }
+fn decode_and_validate(bytes: &[u8]) -> ClassFile<'_> {
+    let mut reader = Reader::new(bytes);
+    let class_file = ClassFile::decode(&mut reader).expect("builder output decodes");
+    assert!(
+        reader.is_at_end(),
+        "decoder consumed the complete class file"
+    );
+    class_file
+        .validate_references()
+        .expect("builder output has valid constant-pool references");
+    class_file
+}
 
+fn code<'a, 'b>(method: &'a dotty_classfile::classfile::MethodInfo<'b>) -> &'a CodeAttribute<'b> {
+    match method.attributes.as_slice() {
+        [Attribute::Code(code)] => code,
+        attributes => panic!("expected exactly one Code attribute, got {attributes:?}"),
+    }
+}
+
+fn operand_index(
+    code: &CodeAttribute<'_>,
+    offset: usize,
+) -> dotty_classfile::classfile::ConstantPoolIndex {
+    dotty_classfile::classfile::ConstantPoolIndex(u16::from_be_bytes([
+        code.code[offset],
+        code.code[offset + 1],
+    ]))
+}
+
+#[test]
+fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     let directory = TempDir::new();
-    let answer_path = directory.path().join("Answer.class");
-    let mut class = ClassFileBuilder::new(
-        "Answer",
-        ClassFileVersion {
-            major: 65,
-            minor: 0,
-        },
-    )
-    .expect("Java 21 class builder is supported");
-    class
-        .add_static_method("answer", "()I", |code| {
-            code.iconst(42)?;
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+
+    let mut calculator =
+        ClassFileBuilder::new("Calculator", version).expect("Java 21 class builder is supported");
+    calculator
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    calculator
+        .add_static_method("add", "(II)I", |code| {
+            code.iload(0)?;
+            code.iload(1)?;
+            code.iadd()?;
             code.ireturn()?;
             Ok(())
         })
         .expect("typed method construction succeeds");
-    let bytes = class
+    let calculator_bytes = calculator
         .encode()
-        .expect("the typed class builder produces a valid class file");
-    fs::write(&answer_path, bytes)
-        .unwrap_or_else(|error| panic!("write {}: {error}", answer_path.display()));
+        .expect("Calculator is generated through the typed builder");
+    let calculator_path = directory.path().join("Calculator.class");
+    fs::write(&calculator_path, &calculator_bytes)
+        .unwrap_or_else(|error| panic!("write {}: {error}", calculator_path.display()));
 
-    let harness_path = directory.path().join("AnswerHarness.java");
+    let mut box_class =
+        ClassFileBuilder::new("Box", version).expect("Java 21 class builder is supported");
+    box_class
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    box_class
+        .add_field("value", "I", FieldAccessFlags(ACC_PRIVATE))
+        .unwrap();
+    box_class
+        .add_code_method("<init>", "(I)V", MethodAccessFlags(ACC_PUBLIC), |code| {
+            code.aload(0)?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.aload(0)?;
+            code.iload(1)?;
+            code.putfield("Box", "value", "I")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .expect("typed constructor construction succeeds");
+    box_class
+        .add_instance_method("get", "()I", |code| {
+            code.aload(0)?;
+            code.getfield("Box", "value", "I")?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .expect("typed getter construction succeeds");
+    let box_bytes = box_class
+        .encode()
+        .expect("Box is generated through the typed builder");
+    let box_path = directory.path().join("Box.class");
+    fs::write(&box_path, &box_bytes)
+        .unwrap_or_else(|error| panic!("write {}: {error}", box_path.display()));
+
+    let mut caller =
+        ClassFileBuilder::new("Caller", version).expect("Java 21 class builder is supported");
+    caller
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    caller
+        .add_static_method("answer", "()I", |code| {
+            code.iconst(20)?;
+            code.iconst(22)?;
+            code.invokestatic("Calculator", "add", "(II)I")?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .expect("typed caller method construction succeeds");
+    let caller_bytes = caller
+        .encode()
+        .expect("Caller is generated through the typed builder");
+    let caller_path = directory.path().join("Caller.class");
+    fs::write(&caller_path, &caller_bytes)
+        .unwrap_or_else(|error| panic!("write {}: {error}", caller_path.display()));
+
+    let calculator = decode_and_validate(&calculator_bytes);
+    assert_eq!(calculator.version, version);
+    assert_eq!(calculator.access_flags.0, ACC_PUBLIC | ACC_SUPER);
+    assert_eq!(calculator.methods.len(), 1);
+    let add = &calculator.methods[0];
+    assert_eq!(calculator.constant_pool.utf8(add.name_index), Ok("add"));
+    assert_eq!(
+        calculator.constant_pool.utf8(add.descriptor_index),
+        Ok("(II)I")
+    );
+    assert_eq!(
+        add.access_flags.0,
+        ACC_PUBLIC | dotty_classfile::classfile::ACC_STATIC
+    );
+    let add_code = code(add);
+    assert_eq!((add_code.max_stack, add_code.max_locals), (2, 2));
+    assert_eq!(add_code.code, [0x1a, 0x1b, 0x60, 0xac]);
+    assert!(add_code.exception_table.is_empty());
+    assert!(add_code.attributes.is_empty());
+
+    let box_file = decode_and_validate(&box_bytes);
+    assert_eq!(box_file.version, version);
+    assert_eq!(box_file.access_flags.0, ACC_PUBLIC | ACC_SUPER);
+    assert_eq!(box_file.fields.len(), 1);
+    assert_eq!(
+        box_file.constant_pool.utf8(box_file.fields[0].name_index),
+        Ok("value")
+    );
+    assert_eq!(
+        box_file
+            .constant_pool
+            .utf8(box_file.fields[0].descriptor_index),
+        Ok("I")
+    );
+    assert_eq!(box_file.fields[0].access_flags.0, ACC_PRIVATE);
+    assert_eq!(box_file.methods.len(), 2);
+    assert_eq!(
+        box_file.constant_pool.utf8(box_file.methods[0].name_index),
+        Ok("<init>")
+    );
+    assert_eq!(box_file.methods[0].access_flags.0, ACC_PUBLIC);
+    let constructor = code(&box_file.methods[0]);
+    assert_eq!((constructor.max_stack, constructor.max_locals), (2, 2));
+    assert_eq!(constructor.code.len(), 10);
+    assert_eq!(constructor.code[0], 0x2a);
+    assert_eq!(constructor.code[1], 0xb7);
+    assert!(matches!(
+        box_file.constant_pool.get(operand_index(constructor, 2)),
+        Some(ConstantPoolEntry::Methodref { .. })
+    ));
+    assert_eq!(&constructor.code[4..6], &[0x2a, 0x1b]);
+    assert_eq!(constructor.code[6], 0xb5);
+    assert_eq!(constructor.code[9], 0xb1);
+    assert!(constructor.exception_table.is_empty());
+    assert!(constructor.attributes.is_empty());
+    assert_eq!(
+        box_file.constant_pool.utf8(box_file.methods[1].name_index),
+        Ok("get")
+    );
+    assert_eq!(box_file.methods[1].access_flags.0, ACC_PUBLIC);
+    let getter = code(&box_file.methods[1]);
+    assert_eq!((getter.max_stack, getter.max_locals), (1, 1));
+    assert_eq!(getter.code.len(), 5);
+    assert_eq!(&getter.code[..1], &[0x2a]);
+    assert_eq!(getter.code[1], 0xb4);
+    assert!(matches!(
+        box_file.constant_pool.get(operand_index(getter, 2)),
+        Some(ConstantPoolEntry::Fieldref { .. })
+    ));
+    assert_eq!(getter.code[4], 0xac);
+    assert!(getter.exception_table.is_empty());
+    assert!(getter.attributes.is_empty());
+
+    let caller = decode_and_validate(&caller_bytes);
+    assert_eq!(caller.version, version);
+    assert_eq!(caller.access_flags.0, ACC_PUBLIC | ACC_SUPER);
+    assert_eq!(caller.methods.len(), 1);
+    let answer = &caller.methods[0];
+    assert_eq!(caller.constant_pool.utf8(answer.name_index), Ok("answer"));
+    assert_eq!(
+        caller.constant_pool.utf8(answer.descriptor_index),
+        Ok("()I")
+    );
+    assert_eq!(
+        answer.access_flags.0,
+        ACC_PUBLIC | dotty_classfile::classfile::ACC_STATIC
+    );
+    let answer_code = code(answer);
+    assert_eq!((answer_code.max_stack, answer_code.max_locals), (2, 0));
+    assert_eq!(answer_code.code.len(), 8);
+    assert_eq!(&answer_code.code[..4], &[0x10, 20, 0x10, 22]);
+    assert_eq!(answer_code.code[4], 0xb8);
+    assert!(matches!(
+        caller.constant_pool.get(operand_index(answer_code, 5)),
+        Some(ConstantPoolEntry::Methodref { .. })
+    ));
+    assert_eq!(answer_code.code[7], 0xac);
+    assert!(answer_code.exception_table.is_empty());
+    assert!(answer_code.attributes.is_empty());
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+
+    let harness_path = directory.path().join("GeneratedClassesHarness.java");
     fs::write(
         &harness_path,
-        "public final class AnswerHarness {\n    public static void main(String[] args) {\n        int answer = Answer.answer();\n        if (answer != 42) throw new AssertionError(\"expected 42, got \" + answer);\n        System.out.println(answer);\n    }\n}\n",
+        "public final class GeneratedClassesHarness {\n    public static void main(String[] args) {\n        int calculator = Calculator.add(20, 22);\n        if (calculator != 42) throw new AssertionError(\"Calculator.add: \" + calculator);\n        int boxed = new Box(42).get();\n        if (boxed != 42) throw new AssertionError(\"Box.get: \" + boxed);\n        int caller = Caller.answer();\n        if (caller != 42) throw new AssertionError(\"Caller.answer: \" + caller);\n        System.out.println(\"Calculator.add=\" + calculator);\n        System.out.println(\"Box.get=\" + boxed);\n        System.out.println(\"Caller.answer=\" + caller);\n    }\n}\n",
     )
     .unwrap_or_else(|error| panic!("write {}: {error}", harness_path.display()));
 
     let directory_arg = directory.path().to_string_lossy().into_owned();
-    let javap = run("javap", &["-v", "-classpath", &directory_arg, "Answer"]);
-    assert!(
-        javap.status.success(),
-        "javap -v rejected generated Answer.class\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&javap.stdout),
-        String::from_utf8_lossy(&javap.stderr)
-    );
-    let javap_output = String::from_utf8_lossy(&javap.stdout);
-    assert!(
-        javap_output.contains("public static int answer();"),
-        "{javap_output}"
-    );
-    assert!(javap_output.contains("bipush        42"), "{javap_output}");
-    assert!(javap_output.contains("ireturn"), "{javap_output}");
+    for (class_name, expected) in [
+        (
+            "Calculator",
+            [
+                "public static int add(int, int);",
+                "stack=2, locals=2",
+                "iload_0",
+                "iload_1",
+                "iadd",
+            ],
+        ),
+        (
+            "Box",
+            [
+                "public Box(int);",
+                "stack=2, locals=2",
+                "stack=1, locals=1",
+                "putfield",
+                "getfield",
+            ],
+        ),
+        (
+            "Caller",
+            [
+                "public static int answer();",
+                "invokestatic",
+                "stack=2, locals=0",
+                "bipush        20",
+                "bipush        22",
+            ],
+        ),
+    ] {
+        let javap = run("javap", &["-v", "-classpath", &directory_arg, class_name]);
+        assert!(
+            javap.status.success(),
+            "javap -v rejected generated {class_name}.class\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javap.stdout),
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let javap_output = String::from_utf8_lossy(&javap.stdout);
+        for item in expected {
+            assert!(
+                javap_output.contains(item),
+                "javap output for {class_name} did not contain {item:?}:\n{javap_output}"
+            );
+        }
+    }
 
     let javac = run(
         "javac",
@@ -174,7 +400,7 @@ fn public_encoder_emits_a_class_accepted_and_executed_by_the_jvm() {
     );
     assert!(
         javac.status.success(),
-        "javac failed to compile the invocation harness\nstdout:\n{}\nstderr:\n{}",
+        "javac failed to compile the generated-class harness\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&javac.stdout),
         String::from_utf8_lossy(&javac.stderr)
     );
@@ -185,14 +411,17 @@ fn public_encoder_emits_a_class_accepted_and_executed_by_the_jvm() {
             "-Xverify:all",
             "-classpath",
             &directory_arg,
-            "AnswerHarness",
+            "GeneratedClassesHarness",
         ],
     );
     assert!(
         java.status.success(),
-        "java -Xverify:all rejected or failed to invoke generated Answer.class\nstdout:\n{}\nstderr:\n{}",
+        "java -Xverify:all rejected or failed to execute generated classes\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&java.stdout),
         String::from_utf8_lossy(&java.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "42");
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "Calculator.add=42\nBox.get=42\nCaller.answer=42"
+    );
 }

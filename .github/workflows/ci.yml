@@ -77,7 +77,7 @@ jobs:
       - name: Install stable Rust toolchain
         run: rustup toolchain install stable --profile minimal
 
-      - name: Verify generated class with javap and the JVM
+      - name: Verify generated Calculator, Box, and Caller with javap and the JVM
         env:
           DOTTY_CLASSFILE_REQUIRE_JDK: '1'
         run: cargo +stable test -p dotty-classfile --test classfile_jvm_encoder --locked -- --nocapture

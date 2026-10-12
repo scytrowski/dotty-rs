@@ -75,13 +75,32 @@ unpaired UTF-16 surrogate code units from modified UTF-8 input. Bytecode and
 unmodeled nested attributes remain opaque; this crate does not verify general
 bytecode or synthesize stack maps.
 
+## Supported typed generation subset
+
+The executable fixture covers the current straight-line generation subset:
+
+| Generated class | Typed operations exercised |
+| --- | --- |
+| `Calculator` | `iload`, `iadd`, `ireturn` |
+| `Box` | `aload`, `iload`, `invokespecial`, `putfield`, `getfield`, `return`, `ireturn` |
+| `Caller` | integer constants, `invokestatic`, `ireturn` |
+
+Every class is built with `ClassFileBuilder` and `CodeBuilder`; the fixture
+does not embed complete class bytes, constant-pool indices, or caller-provided
+stack/local limits. It decodes each generated file, checks that the decoder
+consumes all bytes, validates constant-pool references, and checks method
+descriptors, flags, opcodes, and inferred `max_stack`/`max_locals`.
+
+`Box` exercises a generated constructor that calls `java/lang/Object.<init>`,
+stores its argument in an instance field, and reads it back. `Caller.answer`
+uses `invokestatic` to invoke the generated `Calculator.add` method.
+
 ## JVM execution gate
 
-`tests/classfile_jvm_encoder.rs` builds `Answer.class` using the public
-`ClassFileBuilder` and typed `CodeBuilder` API. Its Java 21 static `answer()I`
-method is written without opcode bytes or explicit stack/local limits. The
-test asks `javap -v` to parse it, compiles a small Java caller, and invokes the
-class with `java -Xverify:all`, checking that the caller prints `42`.
+`tests/classfile_jvm_encoder.rs` asks `javap -v` to parse all three generated
+classes, compiles a small Java caller, and executes it with
+`java -Xverify:all`. The Java assertions check that `Calculator.add(20, 22)`,
+`new Box(42).get()`, and `Caller.answer()` each return `42`.
 
 Run the structural and ordinary crate tests with:
 
@@ -97,13 +116,14 @@ DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test -p dotty-classfile --test classfile_jvm
 ```
 
 When a JDK tool is missing or is older than 21, the gate prints the missing or
-unsupported tool and skips locally. CI's ordinary Rust job may use an older
-JDK; the gate skips there explicitly. CI separately provisions Temurin JDK 21
-and sets
-`DOTTY_CLASSFILE_REQUIRE_JDK=1`, so a missing tool fails the dedicated job
-instead of silently passing. The JDK corpus itself is checked in, so the
-structural round-trip suite does not depend on an installed JDK.
+unsupported tool and skips its JVM execution portion locally, after running
+the generated-class structure and reference checks. CI's dedicated job
+provisions Temurin JDK 21 and sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, making all
+three runtime scenarios mandatory. The JDK corpus itself is checked in, so
+the structural round-trip suite does not depend on an installed JDK.
 
-The gate verifies one deliberately small executable class. It does not provide
-a general bytecode verifier, Scala compilation, or a JVM backend; those remain
-separate future work.
+The supported subset remains limited to straight-line methods. Labels,
+branches and other control-flow graph features, `StackMapTable` generation,
+exception edges, and general verification of arbitrary input bytecode are out
+of scope for this increment. It does not add Scala compilation or a JVM
+backend.
