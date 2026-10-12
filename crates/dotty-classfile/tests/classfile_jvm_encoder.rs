@@ -38,31 +38,74 @@ impl Drop for TempDir {
     }
 }
 
-fn executable_available(executable: &str) -> bool {
-    Command::new(executable)
-        .arg("-version")
-        .output()
-        .is_ok_and(|output| output.status.success())
+fn parse_tool_major_version(version_output: &str) -> Option<u32> {
+    version_output.split_whitespace().find_map(|token| {
+        let token = token.trim_matches('"');
+        let numeric_version = token.split(['-', '+']).next()?;
+        if numeric_version.is_empty()
+            || !numeric_version
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '.')
+        {
+            return None;
+        }
+
+        let mut components = numeric_version.split('.');
+        let first = components.next()?.parse::<u32>().ok()?;
+        if first == 1 {
+            components.next()?.parse::<u32>().ok()
+        } else {
+            Some(first)
+        }
+    })
+}
+
+fn executable_major_version(executable: &str) -> Option<u32> {
+    let output = Command::new(executable).arg("-version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_tool_major_version(&text)
 }
 
 fn require_jdk_or_skip() -> bool {
-    let missing: Vec<&str> = ["java", "javac", "javap"]
+    let unavailable: Vec<String> = ["java", "javac", "javap"]
         .into_iter()
-        .filter(|executable| !executable_available(executable))
+        .filter_map(|executable| match executable_major_version(executable) {
+            Some(version) if version >= 21 => None,
+            Some(version) => Some(format!("{executable} {version} (requires JDK 21+)")),
+            None => Some(format!("{executable} (missing or version unavailable)")),
+        })
         .collect();
-    if missing.is_empty() {
+    if unavailable.is_empty() {
         return true;
     }
 
     let message = format!(
-        "JVM encoder gate requires JDK tools on PATH; unavailable: {}",
-        missing.join(", ")
+        "JVM encoder gate requires java, javac, and javap from JDK 21+ on PATH; unavailable: {}",
+        unavailable.join(", ")
     );
     if std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1") {
         panic!("{message}; CI sets DOTTY_CLASSFILE_REQUIRE_JDK=1 to make this gate mandatory");
     }
     eprintln!("skipping JVM encoder gate: {message}");
     false
+}
+
+#[test]
+fn parses_jdk_version_formats_and_rejects_older_major_versions() {
+    assert_eq!(
+        parse_tool_major_version("openjdk version \"17.0.18\" 2025-10-21"),
+        Some(17)
+    );
+    assert_eq!(parse_tool_major_version("javac 21.0.12"), Some(21));
+    assert_eq!(parse_tool_major_version("21-ea"), Some(21));
+    assert_eq!(parse_tool_major_version("javac version unknown"), None);
 }
 
 fn run(executable: &str, args: &[&str]) -> Output {

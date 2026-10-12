@@ -55,14 +55,17 @@ Run the structural and ordinary crate tests with:
 cargo test -p dotty-classfile --locked
 ```
 
-Run the executable gate with JDK 21 or later installed:
+Run the executable gate with `java`, `javac`, and `javap` from JDK 21 or later
+on `PATH`:
 
 ```sh
 DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test -p dotty-classfile --test classfile_jvm_encoder --locked -- --nocapture
 ```
 
-Without the three JDK tools on `PATH`, the gate prints the missing tool names
-and skips locally. CI provisions Temurin JDK 21 and sets
+When a JDK tool is missing or is older than 21, the gate prints the missing or
+unsupported tool and skips locally. CI's ordinary Rust job may use an older
+JDK; the gate skips there explicitly. CI separately provisions Temurin JDK 21
+and sets
 `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so a missing tool fails the dedicated job
 instead of silently passing. The JDK corpus itself is checked in, so the
 structural round-trip suite does not depend on an installed JDK.
