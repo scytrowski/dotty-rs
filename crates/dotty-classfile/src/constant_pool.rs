@@ -286,7 +286,7 @@ impl ConstantPool {
         Ok(writer.into_bytes())
     }
 
-    fn validate_for_encoding(&self) -> Result<(), EncodeError> {
+    pub(crate) fn validate_for_encoding(&self) -> Result<(), EncodeError> {
         let count = self
             .entries
             .len()
