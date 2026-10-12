@@ -8,7 +8,10 @@
 //!
 //! [`constant_pool::ConstantPool::encode`] serializes constant-pool entries,
 //! and [`attribute::Attribute::encode`] plus [`attribute::encode_attributes`]
-//! serialize the supported scalar, list-based, and opaque attribute forms.
+//! serialize modeled scalar, list-based, code, record, annotation, and opaque
+//! attribute forms. Bytecode remains byte-for-byte opaque, and recursive
+//! annotation values and nested Code/Record attributes are bounded by
+//! explicit depth limits.
 //! [`writer::Writer`] provides primitive JVM-format writes and checked length
 //! prefixes. The crate does not encode complete [`class_file::ClassFile`]
 //! values, perform semantic JVM verification, or generate JVM code from Scala

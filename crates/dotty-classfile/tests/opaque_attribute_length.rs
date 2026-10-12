@@ -1,7 +1,8 @@
 #![cfg(all(target_os = "linux", target_pointer_width = "64"))]
 
 use dotty_classfile::classfile::{
-    Attribute, ConstantPool, ConstantPoolEntry, ConstantPoolIndex, EncodeError, RawAttribute,
+    Attribute, CodeAttribute, ConstantPool, ConstantPoolEntry, ConstantPoolIndex, EncodeError,
+    RawAttribute,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::ffi::c_void;
@@ -99,19 +100,16 @@ fn opaque_attribute_payload_overflow_returns_before_allocating_or_copying() {
     // SAFETY: `mapped` names a valid, readable anonymous mapping of this exact
     // length; the encoder must reject the length before reading its contents.
     let bytes = unsafe { std::slice::from_raw_parts(mapped.cast::<u8>(), payload_length) };
-    let pool = ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Utf8(
-        "StackMapTable".to_owned(),
-    ))]);
+    let pool = ConstantPool::from_entries(vec![
+        Some(ConstantPoolEntry::Utf8("StackMapTable".to_owned())),
+        Some(ConstantPoolEntry::Utf8("Code".to_owned())),
+    ]);
     LIMIT_LARGE_ALLOCATIONS.store(true, Ordering::Relaxed);
     let result = Attribute::Other(RawAttribute {
         name_index: ConstantPoolIndex(1),
         bytes,
     })
     .encode(&pool);
-    LIMIT_LARGE_ALLOCATIONS.store(false, Ordering::Relaxed);
-
-    // SAFETY: Release the full mapping created above after the encoder returns.
-    assert_eq!(unsafe { munmap(mapped, payload_length) }, 0);
     assert_eq!(
         result,
         Err(EncodeError::CountOverflow {
@@ -119,4 +117,40 @@ fn opaque_attribute_payload_overflow_returns_before_allocating_or_copying() {
             width: dotty_classfile::classfile::LengthWidth::U32,
         })
     );
+
+    let half_length = payload_length / 2;
+    // SAFETY: Both halves are readable ranges inside the same live mapping.
+    let first_half = unsafe { std::slice::from_raw_parts(mapped.cast::<u8>(), half_length) };
+    // SAFETY: The second half begins at the mapped midpoint and remains in range.
+    let second_half =
+        unsafe { std::slice::from_raw_parts(mapped.cast::<u8>().add(half_length), half_length) };
+    let aggregate_result = Attribute::Code(CodeAttribute {
+        max_stack: 0,
+        max_locals: 0,
+        code: &[0],
+        exception_table: vec![],
+        attributes: vec![
+            Attribute::Other(RawAttribute {
+                name_index: ConstantPoolIndex(1),
+                bytes: first_half,
+            }),
+            Attribute::Other(RawAttribute {
+                name_index: ConstantPoolIndex(1),
+                bytes: second_half,
+            }),
+        ],
+    })
+    .encode(&pool);
+    let aggregate_nested_attribute_length = payload_length + 14;
+    assert_eq!(
+        aggregate_result,
+        Err(EncodeError::CountOverflow {
+            value: aggregate_nested_attribute_length,
+            width: dotty_classfile::classfile::LengthWidth::U32,
+        })
+    );
+
+    LIMIT_LARGE_ALLOCATIONS.store(false, Ordering::Relaxed);
+    // SAFETY: Release the full mapping created above after both encoders return.
+    assert_eq!(unsafe { munmap(mapped, payload_length) }, 0);
 }

@@ -61,6 +61,20 @@ pub enum EncodeError {
     UnsupportedAttribute,
     /// The provided class-file model violates a structural requirement.
     InvalidModel,
+    /// A `Code` attribute has a code array length outside the JVMS range 1..=65535.
+    InvalidCodeLength {
+        /// The supplied bytecode length.
+        length: usize,
+    },
+    /// An exception table entry has an invalid range in the raw-PC model.
+    InvalidExceptionTableRange {
+        /// Index of the invalid entry in the exception table.
+        entry_index: usize,
+    },
+    /// An annotation or array element value exceeds the configured nesting limit.
+    TooDeeplyNestedAnnotation,
+    /// Nested `Code`/`Record` attribute lists exceed their configured depth limit.
+    TooDeeplyNestedAttribute,
     /// The provided byte layout violates a structural requirement.
     InvalidLayout,
     /// A UTF-8 byte length does not fit a JVM `u2` length field.
@@ -108,6 +122,24 @@ impl fmt::Display for EncodeError {
                 formatter.write_str("attribute variant is not supported by the encoder")
             }
             Self::InvalidModel => formatter.write_str("invalid class-file model"),
+            Self::InvalidCodeLength { length } => write!(
+                formatter,
+                "Code bytecode length {length} is outside the JVMS range 1..=65535"
+            ),
+            Self::InvalidExceptionTableRange { entry_index } => write!(
+                formatter,
+                "invalid Code exception table range at entry {entry_index}"
+            ),
+            Self::TooDeeplyNestedAnnotation => write!(
+                formatter,
+                "annotation element_value nested past depth {}",
+                crate::attribute::DEFAULT_MAX_ANNOTATION_DEPTH
+            ),
+            Self::TooDeeplyNestedAttribute => write!(
+                formatter,
+                "Code/Record attribute nesting exceeds depth {}",
+                crate::attribute::DEFAULT_MAX_ATTRIBUTE_DEPTH
+            ),
             Self::InvalidLayout => formatter.write_str("invalid class-file layout"),
             Self::Utf8LengthOverflow { byte_len, max } => write!(
                 formatter,
