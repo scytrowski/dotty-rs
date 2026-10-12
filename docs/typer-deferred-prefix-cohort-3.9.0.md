@@ -49,3 +49,10 @@ canonical actual-owner classes/member keys, and requests reusing already
 complete prefixes. Explicit request owners are used instead of displayed
 prefixes; package-type materialization is excluded. Counts describe observed
 successful requests even if a later outer expression transaction rolls back.
+
+For `Ok(None)`, a successful load profile rooted at the actual lookup owner
+records that its class scope was available during the request, even though
+the resolver restores the shell to `Missing`. The outcome and unresolved-kind
+counter use the existing `other resolver Ok(None)` category, rather than
+reporting an incomplete class identity. Unowned shells without such an
+operation observation retain the incomplete-identity classification.
