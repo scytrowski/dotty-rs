@@ -518,6 +518,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 reason: "cyclic or excessively deep enclosing-class metadata".to_owned(),
             });
         }
+        if let Some(ClassEntry::Failed(_, failure)) = self.repository.get(name) {
+            return Err(failure.error.clone());
+        }
         if let Some(symbol) = self.session.identified.get(name).copied() {
             if !self.store.symbols.contains(symbol) {
                 return Err(ClassLoadError::IdentityConflict {
@@ -527,8 +530,25 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 });
             }
             let info = self.store.symbols.get(symbol).info;
-            if self.session.resolved.get(name) == Some(&symbol) || info != SymbolInfo::Missing {
-                self.session.cache_resolved(name.clone(), symbol);
+            match info {
+                SymbolInfo::Missing => {}
+                SymbolInfo::Complete(info)
+                    if self.store.types.try_get(info).is_some_and(|ty| {
+                        matches!(ty, Type::ClassInfo(info)
+                        if info.class == symbol
+                            && self.store.scopes.contains(info.declarations)
+                            && self.store.scopes.get(info.declarations).owner == Some(symbol))
+                    }) =>
+                {
+                    self.session.cache_resolved(name.clone(), symbol);
+                }
+                _ => {
+                    return Err(ClassLoadError::IdentityConflict {
+                        name: name.clone(),
+                        reason: "the class identity has erroneous or invalid completion info"
+                            .to_owned(),
+                    });
+                }
             }
             return Ok(symbol);
         }
@@ -5571,6 +5591,48 @@ mod tests {
             SymbolInfo::Complete(_)
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn identity_requests_do_not_turn_failed_inheritance_into_success() {
+        let name = BinaryName::from_internal("sample/A");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(HashMap::from([
+                (name.clone(), synthetic_class("sample/A", Some("sample/B"))),
+                (
+                    BinaryName::from_internal("sample/B"),
+                    synthetic_class("sample/B", Some("sample/A")),
+                ),
+            ])),
+            &mut store,
+        );
+        let identity = loader.ensure_class_identity(&name).unwrap();
+        assert!(loader.load_class(&name).is_err());
+        assert!(loader.ensure_class_identity(&name).is_err());
+        assert!(loader.load_class(&name).is_err());
+        assert!(!loader.session.resolved.contains_key(&name));
+        assert_eq!(loader.store.symbols.get(identity).info, SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn an_error_symbol_is_never_promoted_to_resolved_identity() {
+        let name = BinaryName::from_internal("sample/Error");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(HashMap::from([(
+                name.clone(),
+                synthetic_class("sample/Error", None),
+            )])),
+            &mut store,
+        );
+        let identity = loader.ensure_class_identity(&name).unwrap();
+        loader.store.symbols.get_mut(identity).info = SymbolInfo::Error;
+        assert!(matches!(
+            loader.ensure_class_identity(&name),
+            Err(ClassLoadError::IdentityConflict { .. })
+        ));
+        assert!(!loader.session.resolved.contains_key(&name));
     }
 
     #[test]
