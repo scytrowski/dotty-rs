@@ -847,9 +847,10 @@ into one `LoadingSession`, and (when the file has target methods) one
 read-only classpath index is shared by the units. Per-file read, parser, namer,
 and typing failures are captured without stopping the corpus run. Per-file
 stores prevent unrelated source declarations from affecting each other's
-IDs. Audit-only instrumentation counts resolver requests and outcomes without
-changing production APIs. Session cache reuse across files is not counted
-because stores are intentionally independent.
+IDs. The audit counts resolver requests and outcomes; the classloader also
+offers an explicit, opt-in dependency-load profile that is disabled by default
+and kept separate from semantic success counters. Session cache reuse across
+files is not counted because stores are intentionally independent.
 
 Regenerate the checked report with one full audit run by default:
 
@@ -891,8 +892,10 @@ so the pinned published library/compiler jars provide compiled Scala symbols.
 The script runs the ignored corpus test twice, extracts only its normalized
 report section, compares the sections byte-for-byte, and then writes
 [`typer-classpath-corpus-audit-3.9.0.md`](typer-classpath-corpus-audit-3.9.0.md).
-In the recorded environment (JDK 21), one run took about five seconds; peak
-memory was not measured. The normal workspace test suite skips this audit.
+In the recorded environment (JDK 21), the profile-enabled audit test took
+about 173 seconds per run; peak memory was not measured. Determinism
+verification runs it twice, so it takes about six minutes on this worker. The
+normal workspace test suite skips this audit.
 
 The report keeps v1 counts and shows deltas, exact
 `UnsupportedExpression::<AST kind>` and
@@ -1007,6 +1010,46 @@ store and session state, and retries remain covered by the classloader and
 source-typing tests. Frozen cohort outcomes and the unchanged full pinned
 report are recorded in the #975 section of
 [`typer-classpath-corpus-audit-3.9.0.md`](typer-classpath-corpus-audit-3.9.0.md).
+
+### #976 classpath audit and transaction hardening
+
+The final pinned Scala 3.9/JDK 21 audit was run twice and the normalized
+reports matched byte-for-byte. It retains the #972 request-shape cohorts,
+#973 generic-signature regressions, #974 TASTy parent rows, #975 class/member
+gate, and frozen #946/#826–#829/#856–#858/#880/#899/#929 cohorts. The source
+typing retry regression now also checks the semantic-store checkpoint, typed
+tree and source-type mappings, package links, declaration scopes, and the
+reloaded class identity after rollback. Local methods remain 0/3,297; the
+largest first blocker is `ImportQualifierNotFound` at 2,908 observations in
+277 files. This remains classified as resolution/classpath environment, not a
+Typer semantic success or failure.
+
+Resolver request outcomes explain the dominant shapes at this boundary:
+3,771 requests lack complete class member scopes, 2,749 are unsupported
+package-term lookups, 503 have unsupported prefix shapes, and 402 are
+unresolved package-type members. These are aggregate request counts, not a
+one-to-one cause attribution for each `ImportQualifierNotFound` observation.
+
+The external class gate remains at 358 successes across 29 class identities;
+external non-class member successes remain zero, with 7,493 unresolved member
+requests and 217 load errors. Package-term lookup accounts for 2,749
+unsupported outcomes across 80 distinct request keys in 115 files even though
+type-side resources exist for 2,212 requests (51 keys) and companion `$`
+resources exist for 2,196 requests (46 keys). Resource presence does not yet
+provide a canonical module identity, so these are evidence for a bounded
+package term/object implementation, not permission to guess one.
+
+Opt-in dependency profiling observed 958 top-level class loads. Median nested
+dependency depth was 0, p95 was 140, maximum was 141, and the largest single
+request reached 1,048 distinct classes. The largest profile roots are
+`dotty/tools/io/AbstractFile` requests from classpath and TASTy operations.
+This skew is evidence that eager transitive loading has a pathological tail;
+the single next sprint recommendation is lazy/deferred dependency completion,
+with the profile used to bound and verify the reduction. Semantic ranking stays
+separate: `AnonymousClassInstantiationDeferred` remains the largest individual
+Typer-owned semantic gap at 32 observations in 15 files. The full normalized
+metrics, deterministic top-root list, frozen cohort rows, and source-state
+provenance are in the [#976 audit report](typer-classpath-corpus-audit-3.9.0.md).
 
 For the #610 feature comparison against #581, first-blocker counts moved from
 146 to 0 for `UnsupportedExpression::Parens`, 146 to 0 for

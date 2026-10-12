@@ -330,6 +330,19 @@ drain observations with `take_load_profiles()`. Profiles describe attempted
 work, including a load later rolled back by an enclosing typer transaction,
 and are kept separate from semantic session state.
 
+In the pinned Scala 3.9/JDK 21 source audit, 958 top-level class loads had a
+median dependency depth of 0, p95 of 140, and maximum of 141. One request
+touched 1,048 distinct classes; the largest roots were repeated
+`dotty/tools/io/AbstractFile` requests from classpath and TASTy code. The
+distribution is strongly skewed: most roots did no nested loading, while a
+small tail eagerly traversed large dependency graphs. The next classloader
+increment should investigate lazy/deferred dependency completion and retain
+these profiles as a bounded before/after measure. Package term/object
+materialization remains a separate identity boundary; a discovered `Foo$`
+resource is not itself sufficient to construct a canonical module symbol.
+The full measurements and the single next-sprint recommendation are recorded
+in [`typer-classpath-corpus-audit-3.9.0.md`](typer-classpath-corpus-audit-3.9.0.md).
+
 ### 4.4 `.tasty` convergence
 
 `tasty_symbol::decode` reconstructs a `DecodedTastyClass` (flags,
