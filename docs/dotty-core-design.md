@@ -1594,6 +1594,12 @@ operation. If the declaration is absent or ambiguous, completion is rolled back
 as part of the same call: `Ok(None)` and `Err` still leave the old shell unchanged.
 A successful prefix completion alone does not weaken the member request's
 atomicity contract. Already-complete prefixes do not need new completion work.
+The same atomicity applies when a package type-name lookup finds a previously
+identified external shell and completes it before returning the class symbol.
+Source-owned Missing identities remain the source frontend's responsibility.
+The [#1023 lifecycle/rollback matrix](typer-deferred-classpath-hardening-3.9.0.md)
+distinguishes persistent identity, loader-local Loading, completed session state,
+and observational profiles retained after rollback.
 
 `MemberSpace` says where the declaration is looked for. `Prefix` (ordinary
 references) searches the members of `prefix`. `Explicit(TypeId)` (Scala's

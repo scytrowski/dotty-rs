@@ -466,13 +466,14 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 if store.symbols.get(resolved_owner).kind == SymbolKind::Package
                     && request.name.is_type() =>
             {
-                let member = store.symbols.get(*symbol);
+                let symbol = *symbol;
+                let member = store.symbols.get(symbol);
                 if matches!(
                     member.kind,
                     SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
                 ) {
                     let owner_mismatch = member.owner != Some(resolved_owner)
-                        && !is_nested_class_indexed_in_package(store, *symbol, resolved_owner);
+                        && !is_nested_class_indexed_in_package(store, symbol, resolved_owner);
                     if owner_mismatch || member.name != request.name {
                         return Err(ResolutionError::Malformed {
                             reason: format!(
@@ -480,6 +481,13 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                             ),
                         });
                     }
+                    if matches!(member.info, SymbolInfo::Missing) {
+                        // Member dependencies can already have published this
+                        // package identity as a shell. Complete only identities
+                        // owned by this session, inside the member transaction.
+                        self.complete_class_inner(store, symbol)?;
+                    }
+                    let member = store.symbols.get(symbol);
                     let SymbolInfo::Complete(info) = member.info else {
                         // A source-owned class is already the canonical identity.
                         // This adapter cannot complete it in place, and loading a
@@ -500,9 +508,9 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                             ),
                         });
                     };
-                    if class_info.class != *symbol
+                    if class_info.class != symbol
                         || !store.scopes.contains(class_info.declarations)
-                        || store.scopes.get(class_info.declarations).owner != Some(*symbol)
+                        || store.scopes.get(class_info.declarations).owner != Some(symbol)
                     {
                         return Err(ResolutionError::Malformed {
                             reason: format!(
@@ -511,7 +519,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                         });
                     }
                 }
-                Ok(Some(*symbol))
+                Ok(Some(symbol))
             }
             [symbol] => Ok(Some(*symbol)),
             many => Err(ResolutionError::Ambiguous {
@@ -1968,6 +1976,64 @@ mod tests {
             2,
             "aliases occupy only the type namespace"
         );
+    }
+
+    #[test]
+    fn package_type_lookup_completes_an_owned_shell_atomically() {
+        for fail in [false, true] {
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let path = member_class_path();
+            let name = BinaryName::from_internal("sample/B");
+            let mut loader = ClassLoader::with_definitions(
+                path.clone(),
+                &mut store,
+                definitions,
+                LoadingSession::new(),
+            );
+            let b = loader.ensure_class_identity(&name).unwrap();
+            let session = loader.into_session();
+            let previous = store.symbols.get(b).clone();
+            let package = previous.owner.unwrap();
+            let scope = session.packages.scope_of(package).unwrap();
+            let prefix = store
+                .types
+                .alloc(Type::type_ref(definitions.no_prefix, package));
+            let request = MemberRequest {
+                prefix,
+                name: previous.name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let valid = path.classes.lock().unwrap()[&name].clone();
+            if fail {
+                // A malformed selected artifact must not destroy the existing shell.
+                path.classes.lock().unwrap().insert(name.clone(), vec![0]);
+            }
+            let mut resolver = ClasspathSymbolResolver::new(path.clone(), definitions, session);
+            let checkpoint = resolver.checkpoint();
+            let mark = store.checkpoint();
+            let result = resolver.resolve_member(&mut store, &request);
+            if fail {
+                assert!(matches!(result, Err(ResolutionError::Malformed { .. })));
+            } else {
+                assert_eq!(result, Ok(Some(b)));
+                assert!(matches!(store.symbols.get(b).info, SymbolInfo::Complete(_)));
+                resolver.rollback_to(&mut store, checkpoint);
+                store.rollback_to(mark);
+            }
+            assert_eq!(store.checkpoint(), mark);
+            assert_eq!(resolver.checkpoint(), checkpoint);
+            assert_eq!(store.symbols.get(b), &previous);
+            assert_eq!(resolver.session.identified.get(&name), Some(&b));
+            assert!(!resolver.session.resolved.contains_key(&name));
+            assert_eq!(store.scopes.get(scope).lookup_all(&previous.name), &[b]);
+            path.classes.lock().unwrap().insert(name.clone(), valid);
+            assert_eq!(resolver.resolve_member(&mut store, &request), Ok(Some(b)));
+            let calls = path.calls.load(Ordering::Relaxed);
+            assert_eq!(resolver.resolve_member(&mut store, &request), Ok(Some(b)));
+            assert_eq!(path.calls.load(Ordering::Relaxed), calls);
+        }
     }
 
     #[test]

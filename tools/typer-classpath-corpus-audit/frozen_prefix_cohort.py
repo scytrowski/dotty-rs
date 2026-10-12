@@ -58,7 +58,7 @@ def classify(text):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--report", type=Path, default=Path(__file__).resolve().parents[2] / "docs/typer-classpath-corpus-audit-3.9.0.md")
+    parser.add_argument("--report", type=Path, default=Path(__file__).resolve().parents[2] / "docs/typer-classpath-corpus-audit-976-3.9.0.md")
     args = parser.parse_args()
     rows = classify(args.report.read_text(encoding="utf-8"))
     writer = csv.writer(sys.stdout, delimiter="\t", lineterminator="\n")

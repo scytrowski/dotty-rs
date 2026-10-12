@@ -21,7 +21,7 @@ affected. Other historical resolution failures and the new shells introduced
 by #1019/#1020 require the separate #1023 remeasurement.
 
 The input remains the unchanged
-[pinned audit report](typer-classpath-corpus-audit-3.9.0.md), targeting Scala
+[pinned audit report](typer-classpath-corpus-audit-976-3.9.0.md), targeting Scala
 revision `777528f19a58e794c9954a42f433373472ec57f8`. To enumerate every frozen
 method, prefix, namespace, member key, request space, count, state/origin, and
 classification:

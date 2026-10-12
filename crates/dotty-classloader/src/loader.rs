@@ -289,12 +289,20 @@ pub struct ClassLoader<'store, E> {
 pub struct ClassLoadProfile {
     /// Binary name requested at the root of this load operation.
     pub root: String,
+    /// Whether the root was a persistent identified shell before this operation.
+    pub root_was_shell: bool,
     /// Greatest number of eager dependency-load edges traversed from the root.
     pub max_dependency_depth: usize,
     /// Sorted binary names of the root and every distinct class reached.
     pub classes: BTreeSet<String>,
     /// Classes newly completed in this request, excluding completed cache hits.
     pub full_completions: usize,
+    /// Sorted classes whose full load succeeded during this request.
+    pub completed_classes: BTreeSet<String>,
+    /// Identities created or reused while incomplete during this request.
+    pub identity_shells: BTreeSet<String>,
+    /// Full-load requests satisfied by an already completed session entry.
+    pub completed_cache_hits: usize,
     /// Newly allocated external identity shells (including enclosing owners).
     pub shells_created: usize,
     /// Requests reusing an incomplete external identity, including in-progress loads.
@@ -308,10 +316,14 @@ pub struct ClassLoadProfile {
 #[derive(Default)]
 struct ActiveLoadProfile {
     root: String,
+    root_was_shell: bool,
     depth: usize,
     max_dependency_depth: usize,
     classes: BTreeSet<String>,
     full_completions: usize,
+    completed_classes: BTreeSet<String>,
+    identity_shells: BTreeSet<String>,
+    completed_cache_hits: usize,
     shells_created: usize,
     shells_reused: usize,
     member_type_references: usize,
@@ -544,6 +556,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             Some(ClassEntry::Loading(symbol)) => {
                 if let Some(profile) = &mut self.active_load_profile {
                     profile.shells_reused += 1;
+                    profile
+                        .identity_shells
+                        .insert(name.as_internal().to_owned());
                 }
                 return Ok(*symbol);
             }
@@ -563,6 +578,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 SymbolInfo::Missing => {
                     if let Some(profile) = &mut self.active_load_profile {
                         profile.shells_reused += 1;
+                        profile
+                            .identity_shells
+                            .insert(name.as_internal().to_owned());
                     }
                 }
                 SymbolInfo::Complete(info)
@@ -706,6 +724,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.session.cache_identified(name.clone(), symbol);
                 if let Some(profile) = &mut self.active_load_profile {
                     profile.shells_reused += 1;
+                    profile
+                        .identity_shells
+                        .insert(name.as_internal().to_owned());
                 }
             }
             self.session.record_origin(symbol, origin);
@@ -760,6 +781,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.session.record_origin(symbol, origin);
         if let Some(profile) = &mut self.active_load_profile {
             profile.shells_created += 1;
+            profile
+                .identity_shells
+                .insert(name.as_internal().to_owned());
         }
         Ok(symbol)
     }
@@ -847,6 +871,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // never stored here -- only in the loader-local `self.repository`
         // consulted next.
         if let Some(&symbol) = self.session.resolved.get(name) {
+            if let Some(profile) = &mut self.active_load_profile {
+                profile.completed_cache_hits += 1;
+            }
             return Ok(symbol);
         }
 
@@ -908,6 +935,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 self.session.cache_resolved(name.clone(), symbol);
                 if let Some(profile) = &mut self.active_load_profile {
                     profile.full_completions += 1;
+                    profile
+                        .completed_classes
+                        .insert(name.as_internal().to_owned());
                 }
                 Ok(symbol)
             }
@@ -939,8 +969,20 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     ) -> Result<SymbolId, ClassLoadError> {
         let is_root = self.active_load_profile.is_none();
         if is_root {
+            let root_was_shell = self
+                .session
+                .identified
+                .get(name)
+                .is_some_and(|id| self.store.symbols.get(*id).info == SymbolInfo::Missing);
+            let root = name.as_internal().to_owned();
             self.active_load_profile = Some(ActiveLoadProfile {
-                root: name.as_internal().to_owned(),
+                root: root.clone(),
+                root_was_shell,
+                identity_shells: if root_was_shell {
+                    BTreeSet::from([root])
+                } else {
+                    BTreeSet::new()
+                },
                 ..ActiveLoadProfile::default()
             });
         }
@@ -966,9 +1008,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 .expect("top-level profile was initialized above");
             self.load_profiles.push(ClassLoadProfile {
                 root: profile.root,
+                root_was_shell: profile.root_was_shell,
                 max_dependency_depth: profile.max_dependency_depth,
                 classes: profile.classes,
                 full_completions: profile.full_completions,
+                completed_classes: profile.completed_classes,
+                identity_shells: profile.identity_shells,
+                completed_cache_hits: profile.completed_cache_hits,
                 shells_created: profile.shells_created,
                 shells_reused: profile.shells_reused,
                 member_type_references: profile.member_type_references,
@@ -5735,6 +5781,10 @@ mod tests {
             Some(&ClassOrigin::Directory(PathBuf::from("<memory>")))
         );
         assert!(!loader.session.resolved.contains_key(&name));
+        assert_eq!(loader.session.identified.get(&name), Some(&identity));
+        assert!(loader.repository.get(&name).is_none());
+        assert!(loader.metadata(identity).is_none());
+        assert!(!loader.session.identified.contains_key(&dependency));
 
         let package = loader.store.symbols.get(identity).owner.unwrap();
         let scope = loader.session.packages.scope_of(package).unwrap();
@@ -5751,6 +5801,15 @@ mod tests {
             SymbolInfo::Complete(_)
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 3);
+        assert_eq!(loader.session.identified.get(&name), Some(&identity));
+        assert_eq!(loader.session.resolved.get(&name), Some(&identity));
+        assert!(
+            matches!(loader.repository.get(&name), Some(ClassEntry::Loaded(id)) if *id == identity)
+        );
+        assert_eq!(
+            loader.store.scopes.get(scope).lookup_all(&symbol_name),
+            &[identity]
+        );
     }
 
     #[test]
@@ -5781,6 +5840,24 @@ mod tests {
             b
         );
         assert!(loader.metadata(b).is_none());
+        assert!(
+            !loader
+                .session
+                .resolved
+                .contains_key(&BinaryName::from_internal("B"))
+        );
+        let previous = loader.store.symbols.get(b).clone();
+        let checkpoint = loader.store.checkpoint();
+        let error = loader
+            .load_class(&BinaryName::from_internal("B"))
+            .unwrap_err();
+        assert!(
+            matches!(error, ClassLoadError::DependencyFailure { owner, dependency, source }
+            if owner.as_internal() == "B" && dependency.as_internal() == "MissingParent"
+                && matches!(*source, ClassLoadError::NotFound(ref name) if name.as_internal() == "MissingParent"))
+        );
+        assert_eq!(loader.store.checkpoint(), checkpoint);
+        assert_eq!(loader.store.symbols.get(b), &previous);
         assert!(
             !loader
                 .session
@@ -6197,7 +6274,13 @@ mod tests {
         }
         let profile = loader.take_load_profiles().pop().unwrap();
         assert_eq!(profile.full_completions, 1);
+        assert_eq!(profile.completed_classes, BTreeSet::from(["A".to_owned()]));
+        assert_eq!(profile.completed_cache_hits, 0);
         assert_eq!(profile.shells_created, 20);
+        assert_eq!(
+            profile.identity_shells,
+            (1..=20).map(|i| format!("B{i}")).collect()
+        );
         assert_eq!(profile.shells_reused, 1);
         assert_eq!(profile.member_type_references, 21);
         assert_eq!(profile.hierarchy_loads, 0);
@@ -6206,6 +6289,8 @@ mod tests {
         assert_eq!(loader.load_class(&a_name).unwrap(), a);
         let cached = loader.take_load_profiles().pop().unwrap();
         assert_eq!(cached.full_completions, 0);
+        assert!(cached.completed_classes.is_empty());
+        assert_eq!(cached.completed_cache_hits, 1);
         assert_eq!(cached.shells_created, 0);
         assert_eq!(cached.shells_reused, 0);
         assert_eq!(calls.load(Ordering::Relaxed), 21);
@@ -6502,12 +6587,25 @@ mod tests {
             definitions,
             session,
         );
+        second.set_load_profile_collection(true);
         assert_eq!(second.ensure_class_identity(&name).unwrap(), identity);
         assert_eq!(second.load_class(&name).unwrap(), identity);
         assert!(matches!(
             second.store.symbols.get(identity).info,
             SymbolInfo::Complete(_)
         ));
+        let profile = second.take_load_profiles().pop().unwrap();
+        assert!(profile.root_was_shell);
+        assert!(profile.identity_shells.contains("sample/Shared"));
+        assert_eq!(
+            profile.completed_classes,
+            BTreeSet::from(["sample/Shared".to_owned()])
+        );
+        assert_eq!(second.load_class(&name).unwrap(), identity);
+        let cached = second.take_load_profiles().pop().unwrap();
+        assert!(!cached.root_was_shell);
+        assert_eq!(cached.completed_cache_hits, 1);
+        assert!(cached.completed_classes.is_empty());
     }
 
     #[test]
@@ -8419,6 +8517,17 @@ mod tests {
                 ClassRef::Unresolved(_) => None,
             })
             .expect("NestedSample$Inner should carry a resolved @Deprecated annotation");
+        assert_eq!(
+            loader.store.symbols.get(deprecated_symbol).info,
+            SymbolInfo::Missing
+        );
+        assert!(loader.metadata(deprecated_symbol).is_none());
+        assert!(
+            !loader
+                .session
+                .resolved
+                .contains_key(&BinaryName::from_internal("java/lang/Deprecated"))
+        );
         let deprecated = annotations
             .iter()
             .find(|annotation| annotation.annotation_type == ClassRef::Resolved(deprecated_symbol))
@@ -8855,6 +8964,11 @@ mod tests {
             assert_eq!(
                 symbol_name(&store, parent_symbol(&store, core_annotation.ty)),
                 "Ann"
+            );
+            let annotation_identity = parent_symbol(&store, core_annotation.ty);
+            assert_eq!(
+                store.symbols.get(annotation_identity).info,
+                SymbolInfo::Missing
             );
         }
     }
