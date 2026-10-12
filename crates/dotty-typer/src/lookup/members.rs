@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use dotty_core::types::{ClassInfo, Type, TypeRefTarget};
-use dotty_core::{Name, ScopeId, SemanticStore, SymbolId, SymbolInfo, SymbolKind, TypeId};
+use dotty_core::{
+    Name, ResolutionError, ScopeId, SemanticStore, SymbolId, SymbolInfo, SymbolKind, TypeId,
+};
 
 use crate::types::{SymbolInfoState, TypeNormalizeError, TypeNormalizer};
 use crate::{SourceTyper, TyperError};
@@ -62,6 +64,11 @@ pub enum MemberLookupError {
     },
     /// Source completion for a current-unit class failed before lookup.
     SourceClassCompletion { symbol: SymbolId, error: TyperError },
+    /// The resolver failed to complete an external identity soundly.
+    ExternalClassCompletion {
+        symbol: SymbolId,
+        error: ResolutionError,
+    },
     /// Source completion for a current-unit receiver alias failed before lookup.
     SourceAliasCompletion { symbol: SymbolId, error: TyperError },
     /// A source class's declared parent view could not be instantiated.
@@ -94,8 +101,8 @@ impl SourceTyper<'_> {
     /// by inheritance depth and then by parent traversal order. Exact repeated
     /// symbols reached through a diamond are returned once. This does not
     /// choose or merge overloads. Missing classes from this source unit are
-    /// completed through `complete_symbol`; external symbols are never loaded
-    /// from a classpath here.
+    /// completed through source completion; external Missing identities are
+    /// offered to the resolver's bounded completion hook when ClassInfo is needed.
     pub fn lookup_members(
         &mut self,
         receiver: TypeId,
@@ -261,11 +268,37 @@ impl SourceTyper<'_> {
         if !self.store.symbols.contains(symbol) {
             return Err(MemberLookupError::UnknownClassSymbol { symbol });
         }
-        if matches!(*self.store.symbols.info(symbol), SymbolInfo::Missing)
-            && self.is_current_source_symbol(symbol)
-        {
-            self.complete_symbol_inner(symbol, journal)
-                .map_err(|error| MemberLookupError::SourceClassCompletion { symbol, error })?;
+        if matches!(*self.store.symbols.info(symbol), SymbolInfo::Missing) {
+            if self.is_current_source_symbol(symbol) {
+                self.complete_symbol_inner(symbol, journal)
+                    .map_err(|error| MemberLookupError::SourceClassCompletion { symbol, error })?;
+            } else {
+                let completed =
+                    self.resolver
+                        .complete_class(self.store, symbol)
+                        .map_err(|error| MemberLookupError::ExternalClassCompletion {
+                            symbol,
+                            error,
+                        })?;
+                if !self.store.symbols.contains(symbol) {
+                    return Err(MemberLookupError::UnknownClassSymbol { symbol });
+                }
+                if !completed {
+                    return Err(MemberLookupError::ClassInfoUnavailable {
+                        symbol,
+                        state: SymbolInfoState::Missing,
+                    });
+                }
+                if !matches!(*self.store.symbols.info(symbol), SymbolInfo::Complete(_)) {
+                    return Err(MemberLookupError::ExternalClassCompletion {
+                        symbol,
+                        error: ResolutionError::Malformed {
+                            reason: "resolver reported completion without Complete ClassInfo"
+                                .to_owned(),
+                        },
+                    });
+                }
+            }
         }
         let info_type = match *self.store.symbols.info(symbol) {
             SymbolInfo::Complete(info) => info,
@@ -512,6 +545,210 @@ mod tests {
         AstArena, Definitions, Name, Namespace, Packages, SemanticStore, SourceId, Symbol,
         SymbolFlags, SymbolLinks, SymbolOrigin, Visibility,
     };
+
+    struct TestCompletionResolver {
+        class: SymbolId,
+        info: Option<TypeId>,
+        fail: bool,
+        calls: std::rc::Rc<std::cell::RefCell<Vec<SymbolId>>>,
+        undo: Vec<SymbolInfo>,
+    }
+
+    impl dotty_core::SymbolResolver for TestCompletionResolver {
+        fn checkpoint(&self) -> dotty_core::ResolverCheckpoint {
+            dotty_core::ResolverCheckpoint::new(self.undo.len() as u64)
+        }
+        fn rollback_to(&mut self, store: &mut SemanticStore, mark: dotty_core::ResolverCheckpoint) {
+            while self.undo.len() > mark.token() as usize {
+                store.symbols.set_info(self.class, self.undo.pop().unwrap());
+            }
+        }
+        fn complete_class(
+            &mut self,
+            store: &mut SemanticStore,
+            class: SymbolId,
+        ) -> Result<bool, ResolutionError> {
+            self.calls.borrow_mut().push(class);
+            if class != self.class {
+                return Ok(false);
+            }
+            if self.fail {
+                return Err(ResolutionError::Malformed {
+                    reason: "completion failed".to_owned(),
+                });
+            }
+            if let Some(info) = self.info {
+                self.undo.push(*store.symbols.info(class));
+                store.symbols.set_info(class, SymbolInfo::Complete(info));
+            }
+            Ok(true)
+        }
+        fn resolve_member(
+            &mut self,
+            _store: &mut SemanticStore,
+            _request: &dotty_core::MemberRequest,
+        ) -> Result<Option<SymbolId>, ResolutionError> {
+            Ok(None)
+        }
+        fn resolve_package(
+            &mut self,
+            _store: &mut SemanticStore,
+            _path: &[&str],
+        ) -> Result<Option<SymbolId>, ResolutionError> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn completion_preserves_applied_receiver_and_runs_only_once() {
+        let mut w = World::new();
+        let class = w.class("External");
+        let scope = w.scope(class);
+        let field = w.symbol(
+            "value",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Complete(w.definitions.int),
+        );
+        let name = w.store.symbols.get(field).name;
+        w.store.scopes.get_mut(scope).enter(name, field);
+        let info = w.publish_class(class, scope, Vec::new());
+        w.store.symbols.set_info(class, SymbolInfo::Missing);
+        let tycon = w.class_ref(class);
+        let receiver = w.store.types.alloc(Type::Applied {
+            tycon,
+            args: vec![w.definitions.int],
+        });
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let resolver = TestCompletionResolver {
+            class,
+            info: Some(info),
+            fail: false,
+            calls: calls.clone(),
+            undo: Vec::new(),
+        };
+        let mut typer = SourceTyper::new(
+            &w.arena,
+            w.source,
+            &w.index,
+            &mut w.store,
+            w.definitions,
+            &w.packages,
+        )
+        .with_resolver(Box::new(resolver));
+        for _ in 0..2 {
+            let candidates = typer.lookup_members(receiver, name).unwrap();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].symbol, field);
+            assert_eq!(candidates[0].receiver_view, receiver);
+        }
+        assert_eq!(*calls.borrow(), [class]);
+    }
+
+    #[test]
+    fn parent_shell_completion_occurs_only_when_lookup_traverses_it() {
+        let mut w = World::new();
+        let child = w.class("Child");
+        let parent = w.class("Parent");
+        let child_scope = w.scope(child);
+        let parent_scope = w.scope(parent);
+        let direct = w.symbol(
+            "direct",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Complete(w.definitions.int),
+        );
+        let inherited = w.symbol(
+            "inherited",
+            Namespace::Term,
+            SymbolKind::Field,
+            SymbolInfo::Complete(w.definitions.int),
+        );
+        let direct_name = w.store.symbols.get(direct).name;
+        let inherited_name = w.store.symbols.get(inherited).name;
+        w.store
+            .scopes
+            .get_mut(child_scope)
+            .enter(direct_name, direct);
+        w.store
+            .scopes
+            .get_mut(parent_scope)
+            .enter(inherited_name, inherited);
+        let parent_info = w.publish_class(parent, parent_scope, Vec::new());
+        w.store.symbols.set_info(parent, SymbolInfo::Missing);
+        let parent_view = w.class_ref(parent);
+        w.publish_class(child, child_scope, vec![parent_view]);
+        let receiver = w.class_ref(child);
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let resolver = TestCompletionResolver {
+            class: parent,
+            info: Some(parent_info),
+            fail: false,
+            calls: calls.clone(),
+            undo: Vec::new(),
+        };
+        let mut typer = SourceTyper::new(
+            &w.arena,
+            w.source,
+            &w.index,
+            &mut w.store,
+            w.definitions,
+            &w.packages,
+        )
+        .with_resolver(Box::new(resolver));
+        assert_eq!(
+            typer.lookup_members(receiver, direct_name).unwrap()[0].symbol,
+            direct
+        );
+        assert!(calls.borrow().is_empty());
+        assert_eq!(typer.store().symbols.get(parent).info, SymbolInfo::Missing);
+        let candidate = typer.lookup_members(receiver, inherited_name).unwrap()[0];
+        assert_eq!(candidate.symbol, inherited);
+        assert_eq!(candidate.receiver_view, parent_view);
+        assert_eq!(candidate.inheritance_depth, 1);
+        assert_eq!(*calls.borrow(), [parent]);
+    }
+
+    #[test]
+    fn failed_or_invalid_reported_completion_keeps_focused_errors_and_rolls_back() {
+        for mode in 0..3 {
+            let mut w = World::new();
+            let class = w.class("External");
+            let receiver = w.class_ref(class);
+            let name = Name::new(w.store.names.intern("value"), Namespace::Term);
+            let resolver = TestCompletionResolver {
+                class,
+                info: (mode == 2).then_some(w.definitions.no_prefix),
+                fail: mode == 0,
+                calls: Default::default(),
+                undo: Vec::new(),
+            };
+            let mut typer = SourceTyper::new(
+                &w.arena,
+                w.source,
+                &w.index,
+                &mut w.store,
+                w.definitions,
+                &w.packages,
+            )
+            .with_resolver(Box::new(resolver));
+            let mark = typer.store().checkpoint();
+            let result = typer.lookup_members(receiver, name);
+            match mode {
+                0 => assert!(
+                    matches!(result, Err(MemberLookupError::ExternalClassCompletion { error: ResolutionError::Malformed { reason }, .. }) if reason == "completion failed")
+                ),
+                1 => assert!(
+                    matches!(result, Err(MemberLookupError::ExternalClassCompletion { error: ResolutionError::Malformed { reason }, .. }) if reason.contains("without Complete ClassInfo"))
+                ),
+                _ => assert!(
+                    matches!(result, Err(MemberLookupError::ClassInfoNotClassInfo { symbol, .. }) if symbol == class)
+                ),
+            }
+            assert_eq!(typer.store().symbols.get(class).info, SymbolInfo::Missing);
+            assert_eq!(typer.store().checkpoint(), mark);
+        }
+    }
 
     struct World {
         arena: AstArena<Untyped>,
