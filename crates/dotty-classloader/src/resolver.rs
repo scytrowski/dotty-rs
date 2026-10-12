@@ -2637,6 +2637,64 @@ mod tests {
     }
 
     #[test]
+    fn inner_classes_metadata_does_not_invent_type_declarations() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut loader = ClassLoader::with_definitions(
+            EnclosingGenericRetryClassPath(Mutex::new(false)),
+            &mut store,
+            definitions,
+            LoadingSession::new(),
+        );
+        let outer = loader
+            .ensure_class_identity(&BinaryName::from_internal("enclosing_generics/Outer"))
+            .unwrap();
+        let (path, session) = loader.into_parts();
+        let prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, outer));
+        let k_name = Name::new(store.names.intern("K"), Namespace::Type);
+        let inner_name = Name::new(store.names.intern("Inner"), Namespace::Type);
+        let mut resolver = ClasspathSymbolResolver::new(path, definitions, session);
+        let k = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix,
+                    name: k_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.symbols.get(k).kind, SymbolKind::TypeParameter);
+        assert!(!resolver.session.metadata[&outer].inner_classes.is_empty());
+        let mark = store.checkpoint();
+        assert_eq!(
+            resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix,
+                        name: inner_name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix
+                    }
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(store.checkpoint(), mark);
+        let path = resolver.class_path.take().unwrap();
+        let session = resolver.into_session();
+        let mut loader = ClassLoader::with_definitions(path, &mut store, definitions, session);
+        let binary = BinaryName::from_internal("enclosing_generics/Outer$Inner");
+        let identity = loader.ensure_class_identity(&binary).unwrap();
+        assert_eq!(loader.load_class(&binary).unwrap(), identity);
+    }
+
+    #[test]
     fn real_jdk_package_type_materializes_from_checked_in_classfile() {
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);

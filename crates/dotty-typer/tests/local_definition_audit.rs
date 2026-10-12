@@ -70,6 +70,11 @@ struct ResolverMetrics {
     package_type_class_resource: usize,
     package_type_class_targets: BTreeSet<String>,
     dependency_profiles: Vec<DependencyObservation>,
+    class_member_successes_by_kind: BTreeMap<&'static str, usize>,
+    class_member_after_shell_completion: usize,
+    class_member_completed_prefix_reuse: usize,
+    class_member_prefixes: BTreeSet<String>,
+    class_member_keys: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -423,6 +428,25 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 .entry(key)
                 .or_default() += 1;
         }
+        let target_type = match request.space {
+            MemberSpace::Explicit(owner) => owner,
+            _ => request.prefix,
+        };
+        let actual_target = prefix_profile(store, target_type);
+        let target_info_before = actual_target
+            .symbol
+            .filter(|id| store.symbols.contains(*id))
+            .map(|id| store.symbols.get(id).info);
+        let external_class_target = actual_target.symbol.is_some_and(|id| {
+            store.symbols.contains(id)
+                && is_external_symbol(store.symbols.get(id).origin)
+                && matches!(
+                    store.symbols.get(id).kind,
+                    dotty_core::SymbolKind::Class
+                        | dotty_core::SymbolKind::Trait
+                        | dotty_core::SymbolKind::ModuleClass
+                )
+        });
         let result = self.inner.resolve_member(store, request);
         let load_profiles = self.inner.take_load_profiles();
         let mut metrics = self.metrics.borrow_mut();
@@ -451,6 +475,16 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         if let Ok(Some(symbol)) = &result {
             let entry = store.symbols.get(*symbol);
             if is_external_symbol(entry.origin) {
+                if external_class_target {
+                    record_external_class_member_success(
+                        &mut metrics,
+                        &actual_target.identity,
+                        &name,
+                        namespace,
+                        entry.kind,
+                        target_info_before,
+                    );
+                }
                 let identity = format!("{current_file}::{}", audit_symbol_path(store, *symbol));
                 if metrics.seen_external_symbols.insert(identity) {
                     metrics.external_member_first_seen += 1;
@@ -772,6 +806,160 @@ fn audit_binary_candidate(store: &SemanticStore, symbol: SymbolId) -> Option<Str
     } else {
         format!("{package}/{class}")
     })
+}
+
+fn record_external_class_member_success(
+    metrics: &mut ResolverMetrics,
+    prefix: &str,
+    name: &str,
+    namespace: &str,
+    kind: dotty_core::SymbolKind,
+    before: Option<dotty_core::SymbolInfo>,
+) {
+    let label = match kind {
+        dotty_core::SymbolKind::Field => "field",
+        dotty_core::SymbolKind::Method => "method",
+        dotty_core::SymbolKind::Constructor => "constructor",
+        _ if namespace == "type" => "type_or_nested_class",
+        _ => "other",
+    };
+    *metrics
+        .class_member_successes_by_kind
+        .entry(label)
+        .or_default() += 1;
+    metrics.class_member_prefixes.insert(prefix.to_owned());
+    metrics
+        .class_member_keys
+        .insert(format!("{prefix}::namespace={namespace}::name={name}"));
+    match before {
+        Some(dotty_core::SymbolInfo::Missing) => metrics.class_member_after_shell_completion += 1,
+        Some(dotty_core::SymbolInfo::Complete(_)) => {
+            metrics.class_member_completed_prefix_reuse += 1
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn class_member_success_metrics_distinguish_declarations_and_canonical_keys() {
+    use dotty_core::{SymbolInfo, SymbolKind};
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut metrics = ResolverMetrics::default();
+    let complete = Some(SymbolInfo::Complete(definitions.no_prefix));
+    let missing = Some(SymbolInfo::Missing);
+    for (name, namespace, kind, state) in [
+        ("value", "term", SymbolKind::Field, missing),
+        ("value", "term", SymbolKind::Field, complete),
+        ("get", "term", SymbolKind::Method, missing),
+        ("<init>", "term", SymbolKind::Constructor, complete),
+        ("T", "type", SymbolKind::TypeParameter, complete),
+        ("Nested", "type", SymbolKind::Class, complete),
+        ("other", "term", SymbolKind::Value, complete),
+    ] {
+        record_external_class_member_success(&mut metrics, "p.Owner", name, namespace, kind, state);
+    }
+    record_external_class_member_success(
+        &mut metrics,
+        "p.Other",
+        "value",
+        "term",
+        SymbolKind::Field,
+        missing,
+    );
+    assert_eq!(
+        metrics.class_member_successes_by_kind,
+        BTreeMap::from([
+            ("field", 3),
+            ("method", 1),
+            ("constructor", 1),
+            ("type_or_nested_class", 2),
+            ("other", 1),
+        ])
+    );
+    assert_eq!(metrics.class_member_after_shell_completion, 3);
+    assert_eq!(metrics.class_member_completed_prefix_reuse, 5);
+    assert_eq!(metrics.class_member_prefixes.len(), 2);
+    assert_eq!(metrics.class_member_keys.len(), 7);
+}
+
+#[test]
+fn class_member_metrics_use_explicit_owner_and_observe_real_shell_transition() {
+    use dotty_classloader::classloader::{
+        BinaryName, ClassFormat, ClassLoader, ClassOrigin, ClassPathError, ClassResource,
+    };
+    struct MetricPath;
+    impl ClassPathEntry for MetricPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            let bytes = match name.as_internal() {
+                "Ping" | "Pong" => fs::read(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../dotty-classloader/tests/fixtures/ping_pong")
+                        .join(format!("{}.class", name.simple_name())),
+                )
+                .unwrap(),
+                "java/lang/Object" => {
+                    let name = b"java/lang/Object";
+                    let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 61, 0, 3, 1];
+                    bytes.extend_from_slice(&(name.len() as u16).to_be_bytes());
+                    bytes.extend_from_slice(name);
+                    bytes.extend_from_slice(&[7, 0, 1, 0, 0x21, 0, 2, 0, 0]);
+                    bytes.extend_from_slice(&[0; 8]);
+                    bytes
+                }
+                _ => return Ok(None),
+            };
+            Ok(Some(ClassResource::new(
+                bytes,
+                ClassFormat::Class,
+                ClassOrigin::Directory("<metrics>".into()),
+            )))
+        }
+    }
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut loader =
+        ClassLoader::with_definitions(MetricPath, &mut store, definitions, LoadingSession::new());
+    let b = loader
+        .ensure_class_identity(&BinaryName::from_internal("Ping"))
+        .unwrap();
+    let (path, session) = loader.into_parts();
+    let owner = store.types.alloc(Type::type_ref(definitions.no_prefix, b));
+    let metrics = Rc::new(RefCell::new(ResolverMetrics::default()));
+    let mut resolver = AuditResolver {
+        inner: ClasspathSymbolResolver::new(path, definitions, session),
+        metrics: metrics.clone(),
+        class_path_probe: None,
+    };
+    let request = MemberRequest {
+        prefix: definitions.int,
+        name: dotty_core::Name::new(store.names.intern("other"), Namespace::Term),
+        selector: MemberSelector::Unique,
+        space: MemberSpace::Explicit(owner),
+    };
+    let first = resolver
+        .resolve_member(&mut store, &request)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resolver.resolve_member(&mut store, &request).unwrap(),
+        Some(first)
+    );
+    let metrics = metrics.borrow();
+    assert_eq!(metrics.class_member_after_shell_completion, 1);
+    assert_eq!(metrics.class_member_completed_prefix_reuse, 1);
+    assert_eq!(
+        metrics.class_member_successes_by_kind.get("field"),
+        Some(&2)
+    );
+    assert_eq!(
+        metrics.class_member_prefixes,
+        BTreeSet::from(["Ping".to_owned()])
+    );
+    assert_eq!(
+        metrics.class_member_keys,
+        BTreeSet::from(["Ping::namespace=term::name=other".to_owned()])
+    );
 }
 
 fn is_external_symbol(origin: dotty_core::SymbolOrigin) -> bool {
@@ -7415,6 +7603,26 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         metrics
             .member_successes
             .saturating_sub(metrics.class_symbol_successes)
+    );
+    println!(
+        "  class_prefix_member_successes_by_kind={:?}",
+        metrics.class_member_successes_by_kind
+    );
+    println!(
+        "  class_prefix_requests_after_shell_completion={}",
+        metrics.class_member_after_shell_completion
+    );
+    println!(
+        "  class_prefix_distinct_classes={}",
+        metrics.class_member_prefixes.len()
+    );
+    println!(
+        "  class_prefix_distinct_member_keys={}",
+        metrics.class_member_keys.len()
+    );
+    println!(
+        "  class_prefix_completed_reuse_requests={}",
+        metrics.class_member_completed_prefix_reuse
     );
     println!("  source_member_reuse={}", metrics.member_source_reuse);
     println!("  external_member_unresolved={}", metrics.member_unresolved);

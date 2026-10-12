@@ -1587,6 +1587,14 @@ source or arbitrary synthetic symbols, and is bounded to external classes;
 a general `CompletionId` engine remains a separate design increment.
 
 
+For example, a classpath resolver receiving a member request on an owned
+Missing external class can first complete that class in place. If it finds the
+requested declaration, it returns its canonical symbol and journals the whole
+operation. If the declaration is absent or ambiguous, completion is rolled back
+as part of the same call: `Ok(None)` and `Err` still leave the old shell unchanged.
+A successful prefix completion alone does not weaken the member request's
+atomicity contract. Already-complete prefixes do not need new completion work.
+
 `MemberSpace` says where the declaration is looked for. `Prefix` (ordinary
 references) searches the members of `prefix`. `Explicit(TypeId)` (Scala's
 `TYPEREFin` / `TERMREFin`, written for private or shadowed symbols) searches
