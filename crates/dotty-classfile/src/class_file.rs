@@ -6,9 +6,11 @@ use crate::attribute::{
 use crate::constant_pool::{
     ConstantPool, ConstantPoolError, ConstantPoolIndex, PoolRefError, read_index,
 };
+use crate::encode_error::EncodeError;
 use crate::field::FieldInfo;
 use crate::method::MethodInfo;
 use crate::reader::{ReadError, Reader};
+use crate::writer::Writer;
 use std::fmt;
 
 /// The `ClassFile` magic number (JVMS §4.1).
@@ -176,6 +178,65 @@ impl From<AttributeError> for ClassFileError {
 }
 
 impl<'a> ClassFile<'a> {
+    /// Encodes a complete class file in JVMS §4.1 order.
+    ///
+    /// This structural serializer preserves constant-pool slots, duplicate
+    /// entries, flags, indices, and attribute order. It accepts the project's
+    /// supported non-preview versions (major 45 through 70), and does not
+    /// synthesize constants or JVM metadata.
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
+        if !self.version.is_compatible() {
+            return Err(EncodeError::UnsupportedVersion {
+                major: self.version.major,
+                minor: self.version.minor,
+            });
+        }
+
+        crate::writer::checked_u16_len(self.interfaces.len())?;
+        crate::writer::checked_u16_len(self.fields.len())?;
+        crate::writer::checked_u16_len(self.methods.len())?;
+        self.validate_references()
+            .map_err(|error| encode_pool_ref_error(error, self.constant_pool.entry_count()))?;
+
+        // Prepare every fallible section before assembling the final bytes.
+        let constant_pool = self.constant_pool.encode()?;
+        let fields = self
+            .fields
+            .iter()
+            .map(|field| field.encode(&self.constant_pool))
+            .collect::<Result<Vec<_>, _>>()?;
+        let methods = self
+            .methods
+            .iter()
+            .map(|method| method.encode(&self.constant_pool))
+            .collect::<Result<Vec<_>, _>>()?;
+        let attributes =
+            crate::attribute::encode_attributes(&self.attributes, &self.constant_pool)?;
+
+        let mut writer = Writer::new();
+        writer.write_bytes(&CLASS_MAGIC);
+        writer.write_u2(self.version.minor);
+        writer.write_u2(self.version.major);
+        writer.write_bytes(&constant_pool);
+        writer.write_u2(self.access_flags.0);
+        writer.write_u2(self.this_class.0);
+        writer.write_u2(self.super_class.map_or(0, |index| index.0));
+        writer.write_u2_length(self.interfaces.len())?;
+        for interface in &self.interfaces {
+            writer.write_u2(interface.0);
+        }
+        writer.write_u2_length(fields.len())?;
+        for field in fields {
+            writer.write_bytes(&field);
+        }
+        writer.write_u2_length(methods.len())?;
+        for method in methods {
+            writer.write_bytes(&method);
+        }
+        writer.write_bytes(&attributes);
+        Ok(writer.into_bytes())
+    }
+
     /// Decodes a complete `ClassFile` (JVMS §4.1): header, constant pool,
     /// access flags, `this_class`/`super_class`/interfaces, fields, methods,
     /// and top-level attributes.
@@ -236,6 +297,20 @@ impl<'a> ClassFile<'a> {
             method.validate_references(pool)?;
         }
         validate_attributes(&self.attributes, pool)
+    }
+}
+
+fn encode_pool_ref_error(error: PoolRefError, constant_pool_count: usize) -> EncodeError {
+    match error {
+        PoolRefError::InvalidIndex { index } => EncodeError::InvalidIndex {
+            index: usize::from(index.0),
+            count: constant_pool_count,
+        },
+        PoolRefError::WrongKind { index, .. } => EncodeError::InvalidReference {
+            index: usize::from(index.0),
+        },
+        PoolRefError::TooDeeplyNestedAttribute => EncodeError::TooDeeplyNestedAttribute,
+        PoolRefError::TooDeeplyNestedAnnotation => EncodeError::TooDeeplyNestedAnnotation,
     }
 }
 
@@ -314,6 +389,122 @@ mod tests {
         let class_file = ClassFile::decode(&mut reader).unwrap();
 
         assert_eq!(class_file.validate_references(), Ok(()));
+    }
+
+    #[test]
+    fn encodes_a_minimal_complete_class_file_exactly() {
+        let mut reader = Reader::new(MINIMAL_CLASS_FILE);
+        let class_file = ClassFile::decode(&mut reader).unwrap();
+
+        assert_eq!(class_file.encode().unwrap(), MINIMAL_CLASS_FILE);
+    }
+
+    #[test]
+    fn encode_rejects_an_invalid_mandatory_class_index() {
+        let mut reader = Reader::new(MINIMAL_CLASS_FILE);
+        let mut class_file = ClassFile::decode(&mut reader).unwrap();
+        class_file.this_class = ConstantPoolIndex(0);
+
+        assert_eq!(
+            class_file.encode(),
+            Err(EncodeError::InvalidIndex { index: 0, count: 2 })
+        );
+    }
+
+    #[test]
+    fn encode_rejects_invalid_superclass_and_member_references() {
+        let mut reader = Reader::new(MINIMAL_CLASS_FILE);
+        let mut class_file = ClassFile::decode(&mut reader).unwrap();
+        class_file.super_class = Some(ConstantPoolIndex(0));
+        assert_eq!(
+            class_file.encode(),
+            Err(EncodeError::InvalidIndex { index: 0, count: 2 })
+        );
+
+        class_file.super_class = None;
+        class_file.fields.push(FieldInfo {
+            access_flags: crate::access_flags::FieldAccessFlags(0),
+            name_index: ConstantPoolIndex(0),
+            descriptor_index: ConstantPoolIndex(1),
+            attributes: vec![],
+        });
+        assert_eq!(
+            class_file.encode(),
+            Err(EncodeError::InvalidIndex { index: 0, count: 2 })
+        );
+
+        class_file.fields.clear();
+        class_file.methods.push(MethodInfo {
+            access_flags: crate::access_flags::MethodAccessFlags(0),
+            name_index: ConstantPoolIndex(1),
+            descriptor_index: ConstantPoolIndex(0),
+            attributes: vec![],
+        });
+        assert_eq!(
+            class_file.encode(),
+            Err(EncodeError::InvalidIndex { index: 0, count: 2 })
+        );
+    }
+
+    #[test]
+    fn duplicate_attribute_name_entries_remain_structurally_equivalent() {
+        let mut reader = Reader::new(MINIMAL_CLASS_FILE);
+        let mut class_file = ClassFile::decode(&mut reader).unwrap();
+        class_file.constant_pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("Foo".to_owned())),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(1),
+            }),
+            Some(ConstantPoolEntry::Utf8("Deprecated".to_owned())),
+            Some(ConstantPoolEntry::Utf8("Deprecated".to_owned())),
+        ]);
+        class_file.attributes = vec![Attribute::Deprecated];
+
+        let encoded = class_file.encode().unwrap();
+        let mut encoded_reader = Reader::new(&encoded);
+        let decoded = ClassFile::decode(&mut encoded_reader).unwrap();
+        assert_eq!(decoded, class_file);
+    }
+
+    #[test]
+    fn encode_rejects_a_preview_or_out_of_range_version() {
+        let mut reader = Reader::new(MINIMAL_CLASS_FILE);
+        let mut class_file = ClassFile::decode(&mut reader).unwrap();
+        class_file.version.minor = PREVIEW_MINOR_VERSION;
+        assert_eq!(
+            class_file.encode(),
+            Err(EncodeError::UnsupportedVersion {
+                major: 69,
+                minor: PREVIEW_MINOR_VERSION,
+            })
+        );
+
+        class_file.version = ClassFileVersion {
+            major: 71,
+            minor: 0,
+        };
+        assert_eq!(
+            class_file.encode(),
+            Err(EncodeError::UnsupportedVersion {
+                major: 71,
+                minor: 0
+            })
+        );
+    }
+
+    #[test]
+    fn encode_rejects_oversized_interface_lists() {
+        let mut reader = Reader::new(MINIMAL_CLASS_FILE);
+        let mut class_file = ClassFile::decode(&mut reader).unwrap();
+        class_file.interfaces = vec![class_file.this_class; usize::from(u16::MAX) + 1];
+
+        assert_eq!(
+            class_file.encode(),
+            Err(EncodeError::CountOverflow {
+                value: usize::from(u16::MAX) + 1,
+                width: crate::encode_error::LengthWidth::U16,
+            })
+        );
     }
 
     #[test]

@@ -6,16 +6,18 @@
 //! and 26 corpora. See `docs/classfile-format-jdk25.md` for the wire-format
 //! reference and compatibility audit this type model follows.
 //!
-//! [`constant_pool::ConstantPool::encode`] serializes constant-pool entries,
+//! [`class_file::ClassFile::encode`] serializes complete class files for
+//! supported non-preview major versions 45 through 70. It preserves the
+//! constant pool, member flags and indices, raw code bytes, and attribute
+//! ordering. [`constant_pool::ConstantPool::encode`] serializes constant-pool entries,
 //! and [`attribute::Attribute::encode`] plus [`attribute::encode_attributes`]
 //! serialize modeled scalar, list-based, code, record, annotation, and opaque
 //! attribute forms. Bytecode remains byte-for-byte opaque, and recursive
 //! annotation values and nested Code/Record attributes are bounded by
 //! explicit depth limits.
 //! [`writer::Writer`] provides primitive JVM-format writes and checked length
-//! prefixes. The crate does not encode complete [`class_file::ClassFile`]
-//! values, perform semantic JVM verification, or generate JVM code from Scala
-//! programs.
+//! prefixes. The crate does not perform semantic JVM verification or generate
+//! JVM code from Scala programs.
 
 pub mod access_flags;
 pub mod attribute;
