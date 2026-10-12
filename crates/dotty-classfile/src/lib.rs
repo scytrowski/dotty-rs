@@ -19,6 +19,9 @@
 //! constant pool with stable first-insertion indices. It currently omits
 //! method handles, method types, dynamic/invokedynamic entries, and bootstrap
 //! method table construction.
+//! [`class_file_builder::ClassFileBuilder`] owns class and member metadata,
+//! interns symbolic references during final encoding, and keeps raw method
+//! code opaque without claiming JVM verifier correctness.
 //! [`writer::Writer`] provides primitive JVM-format writes and checked length
 //! prefixes. The crate does not perform semantic JVM verification or generate
 //! JVM code from Scala programs.
@@ -26,6 +29,7 @@
 pub mod access_flags;
 pub mod attribute;
 pub mod class_file;
+pub mod class_file_builder;
 pub mod constant_pool;
 pub mod constant_pool_builder;
 pub mod descriptor;
@@ -42,6 +46,7 @@ pub mod classfile {
     pub use super::access_flags::*;
     pub use super::attribute::*;
     pub use super::class_file::*;
+    pub use super::class_file_builder::*;
     pub use super::constant_pool::*;
     pub use super::constant_pool_builder::*;
     pub use super::descriptor::*;
