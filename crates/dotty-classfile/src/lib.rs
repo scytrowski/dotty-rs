@@ -18,6 +18,7 @@ pub mod descriptor;
 pub mod encode_error;
 pub mod field;
 pub mod method;
+pub mod modified_utf8;
 pub mod reader;
 pub mod signature;
 pub mod writer;
@@ -32,6 +33,7 @@ pub mod classfile {
     pub use super::encode_error::*;
     pub use super::field::*;
     pub use super::method::*;
+    pub use super::modified_utf8::*;
     pub use super::reader::*;
     pub use super::signature::*;
     pub use super::writer::*;

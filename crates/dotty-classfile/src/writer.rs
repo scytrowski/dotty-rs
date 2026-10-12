@@ -38,6 +38,19 @@ impl Writer {
         self.bytes.extend_from_slice(bytes);
     }
 
+    /// Encodes and appends a JVM modified UTF-8 string as a `u2` byte length
+    /// followed by its payload. No constant-pool tag is written.
+    ///
+    /// The string is encoded completely before this writer is changed. If its
+    /// modified UTF-8 payload exceeds the `u2` limit, this returns an error
+    /// and leaves the writer unchanged.
+    pub fn write_modified_utf8(&mut self, value: &str) -> Result<(), EncodeError> {
+        let bytes = crate::modified_utf8::encode_modified_utf8(value)?;
+        self.write_u2_length(bytes.len())?;
+        self.write_bytes(&bytes);
+        Ok(())
+    }
+
     /// Checks and appends a value as a JVM `u2` count or length prefix.
     ///
     /// If `length` does not fit in `u16`, this returns [`EncodeError`] without
