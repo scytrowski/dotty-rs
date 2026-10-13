@@ -150,11 +150,7 @@ impl StackMapTable {
             {
                 payload_length = add_payload_length(
                     payload_length,
-                    if matches!(verification_type, VerificationTypeInfo::Object(_)) {
-                        3
-                    } else {
-                        1
-                    },
+                    verification_type_encoded_length(*verification_type),
                 )?;
                 match verification_type {
                     VerificationTypeInfo::Object(index) => match constant_pool.get(*index) {
@@ -218,12 +214,21 @@ impl StackMapTable {
 }
 
 fn add_payload_length(length: usize, additional: usize) -> Result<usize, EncodeError> {
-    length
+    let length = length
         .checked_add(additional)
         .ok_or(EncodeError::CountOverflow {
             value: usize::MAX,
             width: crate::encode_error::LengthWidth::U32,
-        })
+        })?;
+    checked_u32_len(length)?;
+    Ok(length)
+}
+
+const fn verification_type_encoded_length(verification_type: VerificationTypeInfo) -> usize {
+    match verification_type {
+        VerificationTypeInfo::Object(_) | VerificationTypeInfo::Uninitialized(_) => 3,
+        _ => 1,
+    }
 }
 
 fn write_verification_type(writer: &mut Writer, verification_type: VerificationTypeInfo) {
@@ -243,5 +248,39 @@ fn write_verification_type(writer: &mut Writer, verification_type: VerificationT
             writer.write_u1(8);
             writer.write_u2(pc);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VerificationTypeInfo, add_payload_length, verification_type_encoded_length};
+    use crate::encode_error::{EncodeError, LengthWidth};
+
+    #[test]
+    fn payload_size_preflight_counts_uninitialized_offsets_and_detects_u4_overflow() {
+        assert_eq!(
+            verification_type_encoded_length(VerificationTypeInfo::Uninitialized(0)),
+            3
+        );
+
+        let uninitialized_entries_per_frame = 2 * usize::from(u16::MAX);
+        let frame_payload_length = 7 + 3 * uninitialized_entries_per_frame;
+        let mut payload_length = 2;
+        for _ in 0..10_923 {
+            payload_length = match add_payload_length(payload_length, frame_payload_length) {
+                Ok(length) => length,
+                Err(error) => {
+                    assert_eq!(
+                        error,
+                        EncodeError::CountOverflow {
+                            value: 4_295_109_293,
+                            width: LengthWidth::U32,
+                        }
+                    );
+                    return;
+                }
+            };
+        }
+        panic!("oversized payload was not rejected");
     }
 }
