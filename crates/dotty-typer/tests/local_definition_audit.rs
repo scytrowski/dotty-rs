@@ -71,6 +71,8 @@ struct ResolverMetrics {
     package_term_object_looking_targets: BTreeSet<String>,
     package_term_request_rows: Vec<PackageTermRequestObservation>,
     module_package_term_observations: Vec<ModulePackageTermObservation>,
+    module_operation_observations: Vec<ModuleOperationObservation>,
+    module_objects_by_class: BTreeMap<String, String>,
     package_type_class_resource: usize,
     package_type_class_targets: BTreeSet<String>,
     dependency_profiles: Vec<DependencyObservation>,
@@ -186,6 +188,18 @@ struct ModulePackageTermObservation {
     resolution: &'static str,
     object_identity: String,
     module_class_identity: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ModuleOperationObservation {
+    operation: &'static str,
+    source_file: String,
+    enclosing_attempt: String,
+    object_identity: String,
+    module_class_identity: String,
+    result: &'static str,
+    result_state: &'static str,
+    error_category: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -392,7 +406,73 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &SemanticStore,
         object: SymbolId,
     ) -> Result<Option<SymbolId>, ResolutionError> {
-        self.inner.module_class_of_object(store, object)
+        let result = self.inner.module_class_of_object(store, object);
+        let object_identity = if store.symbols.contains(object) {
+            audit_module_object_candidate(store, object)
+                .unwrap_or_else(|| "<unknown-object>".to_owned())
+        } else {
+            "<unknown-object>".to_owned()
+        };
+        let (module_class_identity, outcome, result_state, error_category) = match &result {
+            Ok(Some(module_class))
+                if store.symbols.contains(*module_class)
+                    && store.symbols.get(*module_class).kind
+                        == dotty_core::SymbolKind::ModuleClass =>
+            {
+                let module_class_identity = audit_binary_candidate(store, *module_class)
+                    .unwrap_or_else(|| "<unknown-module-class>".to_owned());
+                (
+                    module_class_identity,
+                    "resolved",
+                    "validated_module_class",
+                    None,
+                )
+            }
+            Ok(Some(module_class)) if store.symbols.contains(*module_class) => (
+                audit_binary_candidate(store, *module_class)
+                    .unwrap_or_else(|| "<unknown-module-class>".to_owned()),
+                "resolved_wrong_kind",
+                "wrong_symbol_kind",
+                None,
+            ),
+            Ok(Some(_)) => (
+                "<unknown-module-class>".to_owned(),
+                "resolved_unknown_symbol",
+                "unknown_symbol",
+                None,
+            ),
+            Ok(None) => (String::new(), "unresolved", "no_module_class", None),
+            Err(error) => (
+                String::new(),
+                "error",
+                "lookup_error",
+                Some(resolution_error_category(error)),
+            ),
+        };
+        let mut metrics = self.metrics.borrow_mut();
+        if outcome == "resolved"
+            && !object_identity.starts_with('<')
+            && !module_class_identity.starts_with('<')
+        {
+            metrics
+                .module_objects_by_class
+                .insert(module_class_identity.clone(), object_identity.clone());
+        }
+        let source_file = metrics.current_file.clone();
+        let enclosing_attempt = metrics.current_method.clone();
+        metrics
+            .module_operation_observations
+            .push(ModuleOperationObservation {
+                operation: "module_class_of_object",
+                source_file,
+                enclosing_attempt,
+                object_identity,
+                module_class_identity,
+                result: outcome,
+                result_state,
+                error_category,
+            });
+        result
     }
 
     fn complete_module_class(
@@ -400,16 +480,29 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &mut SemanticStore,
         module_class: SymbolId,
     ) -> Result<bool, ResolutionError> {
-        let request = if store.symbols.contains(module_class) {
-            format!(
-                "module-completion::{}",
-                audit_symbol_path(store, module_class)
-            )
+        let module_class_identity = if store.symbols.contains(module_class) {
+            audit_binary_candidate(store, module_class)
+                .unwrap_or_else(|| "<unknown-module-class>".to_owned())
         } else {
-            "module-completion::unknown-symbol".to_owned()
+            "<unknown-module-class>".to_owned()
         };
+        let object_identity = self
+            .metrics
+            .borrow()
+            .module_objects_by_class
+            .get(&module_class_identity)
+            .cloned()
+            .unwrap_or_default();
+        let request = format!("module-completion::{module_class_identity}");
         let result = self.inner.complete_module_class(store, module_class);
         let profiles = self.inner.take_load_profiles();
+        let result_state = module_class_observed_state(store, module_class);
+        let (outcome, error_category) = match &result {
+            Ok(true) if result_state == "Complete(ClassInfo)" => ("completed", None),
+            Ok(true) => ("invalid_success", None),
+            Ok(false) => ("unsupported", None),
+            Err(error) => ("error", Some(resolution_error_category(error))),
+        };
         let mut metrics = self.metrics.borrow_mut();
         let file = metrics.current_file.clone();
         let method = metrics.current_method.clone();
@@ -421,6 +514,18 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 profile,
             });
         }
+        metrics
+            .module_operation_observations
+            .push(ModuleOperationObservation {
+                operation: "complete_module_class",
+                source_file: file,
+                enclosing_attempt: method,
+                object_identity,
+                module_class_identity,
+                result: outcome,
+                result_state,
+                error_category,
+            });
         result
     }
 
@@ -642,11 +747,21 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 Ok(Some(symbol)) if store.symbols.contains(*symbol) => {
                     if store.symbols.get(*symbol).kind == dotty_core::SymbolKind::Object {
                         match self.inner.module_class_of_object(store, *symbol) {
-                            Ok(Some(module_class)) if store.symbols.contains(module_class) => (
-                                "validated_module_identity",
-                                audit_symbol_path(store, *symbol),
-                                audit_symbol_path(store, module_class),
-                            ),
+                            Ok(Some(module_class)) if store.symbols.contains(module_class) => {
+                                if let (Some(object_target), Some(module_class_target)) = (
+                                    audit_module_object_candidate(store, *symbol),
+                                    audit_binary_candidate(store, module_class),
+                                ) {
+                                    metrics
+                                        .module_objects_by_class
+                                        .insert(module_class_target, object_target);
+                                }
+                                (
+                                    "validated_module_identity",
+                                    audit_symbol_path(store, *symbol),
+                                    audit_symbol_path(store, module_class),
+                                )
+                            }
                             Ok(_) => (
                                 "object_without_validated_module_identity",
                                 audit_symbol_path(store, *symbol),
@@ -1047,6 +1162,55 @@ fn audit_binary_candidate(store: &SemanticStore, symbol: SymbolId) -> Option<Str
     })
 }
 
+fn audit_module_object_candidate(store: &SemanticStore, object: SymbolId) -> Option<String> {
+    if !store.symbols.contains(object)
+        || store.symbols.get(object).kind != dotty_core::SymbolKind::Object
+    {
+        return None;
+    }
+    let object_name = store.names.resolve(store.symbols.get(object).name.text());
+    if object_name.is_empty() {
+        return None;
+    }
+    let mut packages = Vec::new();
+    let mut enclosing_classes = Vec::new();
+    let mut current = store.symbols.get(object).owner;
+    let mut visited = HashSet::from([object]);
+    while let Some(symbol) = current {
+        if !visited.insert(symbol) || !store.symbols.contains(symbol) {
+            return None;
+        }
+        let entry = store.symbols.get(symbol);
+        let name = store.names.resolve(entry.name.text());
+        match entry.kind {
+            dotty_core::SymbolKind::Package => {
+                if !name.is_empty() {
+                    packages.push(name.to_owned());
+                }
+            }
+            dotty_core::SymbolKind::Class
+            | dotty_core::SymbolKind::Trait
+            | dotty_core::SymbolKind::ModuleClass => {
+                if !name.is_empty() {
+                    enclosing_classes.push(name.to_owned());
+                }
+            }
+            _ => return None,
+        }
+        current = entry.owner;
+    }
+    packages.reverse();
+    enclosing_classes.reverse();
+    enclosing_classes.push(object_name.to_owned());
+    let class = enclosing_classes.join("$");
+    let package = packages.join("/");
+    Some(if package.is_empty() {
+        class
+    } else {
+        format!("{package}/{class}")
+    })
+}
+
 fn record_external_class_member_success(
     metrics: &mut ResolverMetrics,
     prefix: &str,
@@ -1384,6 +1548,116 @@ fn audit_module_completion_failure_is_atomic() {
         store.symbols.get(module_class).info,
         dotty_core::SymbolInfo::Missing
     );
+    let observations = &resolver.metrics.borrow().module_operation_observations;
+    assert_eq!(observations.len(), 2);
+    assert_eq!(observations[1].operation, "complete_module_class");
+    assert_eq!(observations[1].result, "error");
+    assert_eq!(observations[1].result_state, "Missing");
+    assert_eq!(observations[1].error_category, Some("malformed"));
+}
+
+#[test]
+fn audit_module_operations_keep_stable_attribution_and_deduplicate_completion() {
+    let mut store = SemanticStore::new();
+    let (definitions, mut resolver) =
+        module_audit_resolver(&mut store, true, "src/Fixture.scala", "Fixture.run()");
+    let object = module_audit_object(&mut store, definitions, &mut resolver);
+    let module_class = resolver
+        .module_class_of_object(&store, object)
+        .unwrap()
+        .unwrap();
+    let module_prefix = store
+        .types
+        .alloc(Type::type_ref(definitions.no_prefix, module_class));
+    let make = dotty_core::Name::new(store.names.intern("make"), Namespace::Term);
+    let member_request = MemberRequest {
+        prefix: module_prefix,
+        name: make,
+        selector: MemberSelector::Unique,
+        space: MemberSpace::Prefix,
+    };
+    let store_checkpoint = store.checkpoint();
+    let resolver_checkpoint = resolver.checkpoint();
+
+    assert!(
+        resolver
+            .resolve_member(&mut store, &member_request)
+            .unwrap()
+            .is_some()
+    );
+    assert!(valid_module_class_info(&store, module_class));
+    assert_eq!(
+        resolver
+            .metrics
+            .borrow()
+            .module_resolution
+            .module_member_successes,
+        1
+    );
+    assert!(
+        completed_module_class_targets(&resolver.metrics.borrow())
+            .contains("me/cytrowski/tastyfixtures/semantic/Both$")
+    );
+
+    resolver.rollback_to(&mut store, resolver_checkpoint);
+    store.rollback_to(store_checkpoint);
+    assert_eq!(
+        store.symbols.get(module_class).info,
+        dotty_core::SymbolInfo::Missing
+    );
+    assert_eq!(
+        resolver.complete_module_class(&mut store, module_class),
+        Ok(true)
+    );
+    assert!(valid_module_class_info(&store, module_class));
+    assert_eq!(
+        resolver
+            .metrics
+            .borrow()
+            .module_resolution
+            .module_member_successes,
+        1,
+        "completion observation must not manufacture a module-member success"
+    );
+
+    let metrics = resolver.metrics.borrow();
+    let mut observations = metrics.module_operation_observations.clone();
+    observations.sort();
+    assert_eq!(observations.len(), 2);
+    let identity = observations
+        .iter()
+        .find(|observation| observation.operation == "module_class_of_object")
+        .unwrap();
+    assert_eq!(identity.source_file, "src/Fixture.scala");
+    assert_eq!(identity.enclosing_attempt, "Fixture.run()");
+    assert_eq!(identity.result, "resolved");
+    assert_eq!(identity.result_state, "validated_module_class");
+    assert_eq!(
+        identity.object_identity,
+        "me/cytrowski/tastyfixtures/semantic/Both"
+    );
+    assert_eq!(
+        identity.module_class_identity,
+        "me/cytrowski/tastyfixtures/semantic/Both$"
+    );
+    let completion = observations
+        .iter()
+        .find(|observation| observation.operation == "complete_module_class")
+        .unwrap();
+    assert_eq!(completion.source_file, identity.source_file);
+    assert_eq!(completion.enclosing_attempt, identity.enclosing_attempt);
+    assert_eq!(completion.result, "completed");
+    assert_eq!(completion.result_state, "Complete(ClassInfo)");
+    assert_eq!(completion.object_identity, identity.object_identity);
+    assert_eq!(
+        completion.module_class_identity,
+        identity.module_class_identity
+    );
+    assert_eq!(completion.error_category, None);
+    assert_eq!(
+        completed_module_class_targets(&metrics),
+        BTreeSet::from(["me/cytrowski/tastyfixtures/semantic/Both$".to_owned()])
+    );
 }
 
 fn valid_module_class_info(store: &SemanticStore, module_class: SymbolId) -> bool {
@@ -1404,6 +1678,66 @@ fn valid_module_class_info(store: &SemanticStore, module_class: SymbolId) -> boo
     info.class == module_class
         && store.scopes.contains(info.declarations)
         && store.scopes.get(info.declarations).owner == Some(module_class)
+}
+
+fn resolution_error_category(error: &ResolutionError) -> &'static str {
+    match error {
+        ResolutionError::Ambiguous { .. } => "ambiguous",
+        ResolutionError::Malformed { .. } => "malformed",
+        _ => "other",
+    }
+}
+
+fn module_class_observed_state(store: &SemanticStore, module_class: SymbolId) -> &'static str {
+    if !store.symbols.contains(module_class) {
+        return "UnknownSymbol";
+    }
+    if store.symbols.get(module_class).kind != dotty_core::SymbolKind::ModuleClass {
+        return "WrongSymbolKind";
+    }
+    match store.symbols.get(module_class).info {
+        dotty_core::SymbolInfo::Missing => "Missing",
+        dotty_core::SymbolInfo::Error => "Error",
+        dotty_core::SymbolInfo::Deferred(_) => "Deferred",
+        dotty_core::SymbolInfo::Complete(info) if !store.types.contains(info) => {
+            "Complete(InvalidType)"
+        }
+        dotty_core::SymbolInfo::Complete(info) => match store.types.get(info) {
+            Type::ClassInfo(info)
+                if info.class == module_class
+                    && store.scopes.contains(info.declarations)
+                    && store.scopes.get(info.declarations).owner == Some(module_class) =>
+            {
+                "Complete(ClassInfo)"
+            }
+            Type::ClassInfo(_) => "Complete(InvalidClassInfo)",
+            _ => "Complete(NonClassInfo)",
+        },
+    }
+}
+
+fn completed_module_class_targets(metrics: &ResolverMetrics) -> BTreeSet<String> {
+    let mut targets = metrics
+        .module_resolution
+        .completed_module_classes
+        .iter()
+        // The resolver profile stores the canonical Object binary name;
+        // ModuleClass has that same name with Scala's module suffix.
+        .map(|object| format!("{object}$"))
+        .collect::<BTreeSet<_>>();
+    targets.extend(
+        metrics
+            .module_operation_observations
+            .iter()
+            .filter(|observation| {
+                observation.operation == "complete_module_class"
+                    && observation.result == "completed"
+                    && observation.result_state == "Complete(ClassInfo)"
+                    && !observation.module_class_identity.starts_with('<')
+            })
+            .map(|observation| observation.module_class_identity.clone()),
+    );
+    targets
 }
 
 impl ClassPathEntry for MetricPath {
@@ -8482,6 +8816,7 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         metrics.package_term_object_looking_targets.len()
     );
     let module_profile = &metrics.module_resolution;
+    let completed_module_classes = completed_module_class_targets(metrics);
     println!("module_resolution_profile:");
     println!(
         "  package_term_requests={} object_successes={} non_object_results={} unresolved={} errors={}",
@@ -8497,7 +8832,7 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     );
     println!(
         "  completed_module_classes={} module_member_successes={}",
-        module_profile.completed_module_classes.len(),
+        completed_module_classes.len(),
         module_profile.module_member_successes
     );
     println!(
@@ -8507,7 +8842,7 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     );
     println!(
         "  external_module_class_completions={} external_module_member_successes={} distinct_external_module_members={}",
-        module_profile.completed_module_classes.len(),
+        completed_module_classes.len(),
         module_profile.module_member_successes,
         module_profile.resolved_member_targets.len()
     );
@@ -8540,6 +8875,26 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
             observation.source_file,
             observation.enclosing_attempt,
             observation.resolution,
+            tsv_or_dash(&observation.object_identity),
+            tsv_or_dash(&observation.module_class_identity)
+        );
+    }
+    let mut module_operation_observations = metrics.module_operation_observations.clone();
+    module_operation_observations.sort();
+    println!("module_operation_observations:");
+    println!("  observations={}", module_operation_observations.len());
+    println!(
+        "  operation\tsource_file\tenclosing_attempt\tresult\tresult_state\terror_category\tobject_identity\tmodule_class_identity"
+    );
+    for observation in module_operation_observations {
+        println!(
+            "  {}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            observation.operation,
+            observation.source_file,
+            observation.enclosing_attempt,
+            observation.result,
+            observation.result_state,
+            observation.error_category.unwrap_or("-"),
             tsv_or_dash(&observation.object_identity),
             tsv_or_dash(&observation.module_class_identity)
         );
