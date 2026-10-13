@@ -1296,6 +1296,10 @@ struct ModuleAuditPath {
     include_object_class: bool,
 }
 
+// Source.tasty and scala/package.tasty are the checked-in Scala 3.9.0 bytes
+// pinned by the fixture manifest. The few Java/collection dependencies below
+// are intentionally class stubs, matching the classloader fixture setup; the
+// module and its declarations themselves are never synthesized.
 struct ScalaSourceAuditPath;
 
 impl ClassPathEntry for ModuleAuditPath {
@@ -1972,6 +1976,8 @@ struct ModuleFailureSnapshot {
     unowned_result: String,
     unknown_error: String,
     malformed_error: String,
+    malformed_owner_error: String,
+    wrong_kind_result: String,
     missing_member: bool,
 }
 
@@ -1982,7 +1988,8 @@ fn module_failure_snapshot(
 ) -> ModuleFailureSnapshot {
     let resolver: &mut dyn SymbolResolver = resolver;
     let object = module_audit_object(store, definitions, resolver);
-    let unowned_result = match resolver.module_class_of_object(store, definitions.object_class) {
+    let orphan_object = store.symbols.alloc(store.symbols.get(object).clone());
+    let unowned_result = match resolver.module_class_of_object(store, orphan_object) {
         Ok(None) => "unresolved".to_owned(),
         Ok(Some(module_class)) => format!("resolved:{}", audit_symbol_path(store, module_class)),
         Err(error) => format!("error:{}", resolution_error_category(&error)),
@@ -2008,6 +2015,25 @@ fn module_failure_snapshot(
     let malformed_error = resolution_error_category(&malformed_error).to_owned();
     assert_eq!(store.checkpoint(), malformed_checkpoint);
     store.symbols.get_mut(object).name = original_name;
+
+    let original_owner = store.symbols.get(object).owner;
+    store.symbols.get_mut(object).owner = Some(definitions.object_class);
+    let malformed_owner_checkpoint = store.checkpoint();
+    let malformed_owner_error = resolver
+        .module_class_of_object(store, object)
+        .expect_err("a module object with an incompatible owner must be rejected");
+    let malformed_owner_error = resolution_error_category(&malformed_owner_error).to_owned();
+    assert_eq!(store.checkpoint(), malformed_owner_checkpoint);
+    store.symbols.get_mut(object).owner = original_owner;
+
+    let original_kind = store.symbols.get(object).kind;
+    store.symbols.get_mut(object).kind = dotty_core::SymbolKind::Class;
+    let wrong_kind_result = match resolver.module_class_of_object(store, object) {
+        Ok(None) => "unresolved".to_owned(),
+        Ok(Some(module_class)) => format!("resolved:{}", audit_symbol_path(store, module_class)),
+        Err(error) => format!("error:{}", resolution_error_category(&error)),
+    };
+    store.symbols.get_mut(object).kind = original_kind;
 
     let module_class = resolver
         .module_class_of_object(store, object)
@@ -2038,6 +2064,8 @@ fn module_failure_snapshot(
         unowned_result,
         unknown_error,
         malformed_error,
+        malformed_owner_error,
+        wrong_kind_result,
         missing_member,
     }
 }
@@ -2057,6 +2085,8 @@ fn audit_and_classpath_resolvers_match_for_module_failures_and_atomicity() {
     assert_eq!(actual.unowned_result, "unresolved");
     assert_eq!(actual.unknown_error, "malformed");
     assert_eq!(actual.malformed_error, "malformed");
+    assert_eq!(actual.malformed_owner_error, "malformed");
+    assert_eq!(actual.wrong_kind_result, "unresolved");
 
     let observations = &audit.metrics.borrow().module_operation_observations;
     assert!(observations.iter().any(|observation| {
