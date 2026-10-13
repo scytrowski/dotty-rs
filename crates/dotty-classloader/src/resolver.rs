@@ -1008,7 +1008,7 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
             store
                 .symbols
                 .contains(*module_class)
-                .then(|| store.symbols.get(*module_class).info.clone())
+                .then(|| store.symbols.get(*module_class).info)
         });
         if let Some(target) = &package_target {
             self.module_profile.package_term_requests += 1;
@@ -1060,28 +1060,28 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
                 Err(_) => self.module_profile.package_term_errors += 1,
             }
         }
-        if let Some((module_class, binary_name)) = module_target {
-            if let Ok(Some(member)) = &result {
-                let symbol = store.symbols.get(*member);
-                if symbol.owner == Some(module_class)
-                    && matches!(
-                        symbol.kind,
-                        SymbolKind::Field | SymbolKind::Method | SymbolKind::TypeAlias
-                    )
-                {
-                    self.module_profile.module_member_successes += 1;
-                }
-                if matches!(
-                    module_info_before,
-                    Some(SymbolInfo::Missing | SymbolInfo::Deferred(_))
-                ) && matches!(
-                    store.symbols.get(module_class).info,
-                    SymbolInfo::Complete(_)
-                ) {
-                    self.module_profile
-                        .completed_module_classes
-                        .insert(binary_name);
-                }
+        if let Some((module_class, binary_name)) = module_target
+            && let Ok(Some(member)) = &result
+        {
+            let symbol = store.symbols.get(*member);
+            if symbol.owner == Some(module_class)
+                && matches!(
+                    symbol.kind,
+                    SymbolKind::Field | SymbolKind::Method | SymbolKind::TypeAlias
+                )
+            {
+                self.module_profile.module_member_successes += 1;
+            }
+            if matches!(
+                module_info_before,
+                Some(SymbolInfo::Missing | SymbolInfo::Deferred(_))
+            ) && matches!(
+                store.symbols.get(module_class).info,
+                SymbolInfo::Complete(_)
+            ) {
+                self.module_profile
+                    .completed_module_classes
+                    .insert(binary_name);
             }
         }
         result
