@@ -57,3 +57,34 @@ errors. Unknown types never fall back to `java/lang/Object`.
 No general Scala type erasure, boxing, Unit-as-value, raw bytecode, source
 pipeline orchestration, TASTy integration, or macro support is part of this
 contract.
+
+## Class and method metadata subset
+
+`JvmClassPlan::identity` derives top-level class names by following canonical
+package owner symbols to the unnamed root. It supports `Answer` and
+`example/api/Answer`, public concrete non-generic classes, and the JVM `final`
+class flag. Nested/local classes, traits, objects, module classes, enums,
+synthetic/case/sealed/abstract classes, malformed class info, and non-package
+owner chains return typed errors. Names are kept unmangled; only simple
+identifier names are accepted, so Scala operators and encoded names such as
+`$plus` are rejected.
+
+`JvmClassPlan::metadata` combines that identity with selected method plans.
+It accepts public ordinary instance methods and maps `final` where present.
+Static, abstract, synthetic, or otherwise unsupported method flags and
+non-public visibility are rejected. The method name and descriptor come from
+the exact method `SymbolId`; overload identity is the pair of JVM name and
+descriptor, and duplicate pairs on a class are rejected. A compilation unit
+also rejects distinct class symbols with the same emitted internal name.
+
+Formal parameter identities stay in the plan's explicit order and are checked
+against the canonical method owner, completed parameter info, and descriptor
+types. Instance local slot zero is reserved for `this`; supported `Int` and
+`Boolean` parameters occupy one slot each, beginning at slot one. Each output
+parameter records its type, first slot, and width so later category-two types
+can extend the layout contract without changing identity semantics.
+
+This metadata layer does not encode Scala operator names, nested-class `$`
+names, companion/module classes, trait forwarders, bridges, private-access
+semantics, constructors, classfile hierarchy, or bytecode. Unsupported ABI
+forms must be handled by a separate contract before they can be emitted.

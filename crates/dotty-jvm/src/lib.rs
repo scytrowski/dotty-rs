@@ -3,8 +3,9 @@
 //! This crate currently defines and validates a borrowed compilation plan. It
 //! does not assemble a source frontend, infer identities from names, mutate
 //! the caller's stores, or emit bytecode. See `docs/jvm-backend.md` for the
-//! boundary and validation assumptions. Its first descriptor projection is
-//! limited to primitive `Int`, `Boolean`, and result-only `Unit` methods.
+//! boundary and validation assumptions. Its bounded metadata projection
+//! covers public ordinary classes and instance methods whose signatures use
+//! primitive `Int`, `Boolean`, and result-only `Unit`.
 
 use std::collections::HashSet;
 use std::error::Error;
@@ -18,6 +19,7 @@ use dotty_core::symbols::{SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
 
 mod descriptor;
+mod identity;
 
 /// JVMS limit for a method's parameter slots, including `this` for instance
 /// methods.
@@ -55,6 +57,94 @@ pub struct JvmMethodDescriptor {
     parameters: Vec<JvmType>,
     /// Primitive result, or JVM `void` for Scala `Unit`.
     result: JvmReturnType,
+}
+
+/// A JVM class identity derived from the class symbol and its package owners.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmClassIdentity {
+    symbol: SymbolId,
+    internal_name: String,
+    access_flags: dotty_classfile::access_flags::ClassAccessFlags,
+}
+
+/// One canonical parameter's JVM local-variable layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JvmParameterLocal {
+    symbol: SymbolId,
+    ty: JvmType,
+    slot: u16,
+    width: u8,
+}
+
+/// JVM method identity and parameter layout for an ordinary instance method.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmMethodMetadata {
+    symbol: SymbolId,
+    name: String,
+    descriptor: JvmMethodDescriptor,
+    access_flags: dotty_classfile::access_flags::MethodAccessFlags,
+    parameters: Vec<JvmParameterLocal>,
+}
+
+/// Class identity paired with its selected method metadata in plan order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmClassMetadata {
+    identity: JvmClassIdentity,
+    methods: Vec<JvmMethodMetadata>,
+}
+
+/// Why a class symbol is outside the supported top-level class subset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsupportedJvmClassKind {
+    Abstract,
+    Generic,
+    Enum,
+    Synthetic,
+    Case,
+    Sealed,
+}
+
+/// A symbol flag with no conservative mapping in this JVM metadata subset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsupportedJvmSymbolFlag {
+    Abstract,
+    Sealed,
+    Case,
+    Implicit,
+    Given,
+    Lazy,
+    Mutable,
+    Inline,
+    Transparent,
+    Opaque,
+    Extension,
+    Static,
+    Synthetic,
+    JavaDefined,
+    Erased,
+    Override,
+    Enum,
+    Exported,
+}
+
+/// The name component that failed the bounded Scala/JVM identifier check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmNameKind {
+    PackageSegment,
+    Class,
+    Method,
+}
+
+/// Why a class's semantic class information cannot establish a simple class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidJvmClassInfoKind {
+    MissingOrUnfilled,
+    Error,
+    NotClassInfo,
+    WrongClassSymbol,
+    MissingDeclarationScope,
+    WrongDeclarationScopeOwner,
+    InvalidDeclaration,
 }
 
 /// Borrowed input for validating one or more class plans.
@@ -197,6 +287,59 @@ pub enum JvmCodegenError {
         builtin: PrimitiveBuiltin,
         ty: TypeId,
     },
+    /// The symbol owner is not part of the supported package-only class path.
+    UnsupportedOwnerKind {
+        class: SymbolId,
+        owner: SymbolId,
+        found: SymbolKind,
+    },
+    /// A declared owner identity is not in the supplied semantic store.
+    UnknownOwner { class: SymbolId, owner: SymbolId },
+    /// The package owner chain is cyclic or has no valid unnamed root.
+    InvalidPackageOwnerChain { class: SymbolId, owner: SymbolId },
+    /// A class name or package segment is not a supported simple identifier.
+    InvalidJvmName {
+        symbol: SymbolId,
+        kind: JvmNameKind,
+        text: String,
+    },
+    /// The class form is outside the ordinary, concrete, non-generic subset.
+    UnsupportedJvmClass {
+        class: SymbolId,
+        kind: UnsupportedJvmClassKind,
+    },
+    /// A class or method has visibility other than public.
+    UnsupportedJvmVisibility {
+        symbol: SymbolId,
+        visibility: dotty_core::symbols::Visibility,
+    },
+    /// A symbol flag has no mapping in the bounded JVM metadata subset.
+    UnsupportedJvmSymbolFlag {
+        symbol: SymbolId,
+        flag: UnsupportedJvmSymbolFlag,
+    },
+    /// Completed class info is malformed or cannot establish a simple class.
+    InvalidJvmClassInfo {
+        class: SymbolId,
+        ty: Option<TypeId>,
+        kind: InvalidJvmClassInfoKind,
+    },
+    /// A class declaration scope contains a symbol ID outside the symbol table.
+    InvalidClassDeclaration { class: SymbolId, symbol: SymbolId },
+    /// Two methods on one class project to the same JVM name and descriptor.
+    DuplicateJvmMethodIdentity {
+        class: SymbolId,
+        method: SymbolId,
+        previous: SymbolId,
+        name: String,
+        descriptor: String,
+    },
+    /// Two class symbols in one compilation unit project to the same internal name.
+    DuplicateJvmClassIdentity {
+        class: SymbolId,
+        previous: SymbolId,
+        internal_name: String,
+    },
 }
 
 /// Semantic role required by a compilation plan.
@@ -271,6 +414,101 @@ impl fmt::Display for JvmCodegenError {
 
 impl Error for JvmCodegenError {}
 
+impl JvmClassIdentity {
+    /// Canonical class symbol retained by this projected identity.
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+
+    /// JVM internal class name, such as `Answer` or `example/Answer`.
+    pub fn internal_name(&self) -> &str {
+        &self.internal_name
+    }
+
+    /// Conservative class-file access flags for a public ordinary class.
+    pub const fn access_flags(&self) -> dotty_classfile::access_flags::ClassAccessFlags {
+        self.access_flags
+    }
+}
+
+impl JvmClassPlan {
+    /// Derives this class's JVM internal name from its canonical package-owner
+    /// chain and validates its public, concrete, non-generic class shape.
+    pub fn identity(&self, store: &SemanticStore) -> Result<JvmClassIdentity, JvmCodegenError> {
+        identity::class_identity(store, self.class)
+    }
+
+    /// Derives this class and its selected public instance-method metadata.
+    pub fn metadata(
+        &self,
+        store: &SemanticStore,
+        definitions: &Definitions,
+    ) -> Result<JvmClassMetadata, JvmCodegenError> {
+        identity::class_metadata(self, store, definitions)
+    }
+}
+
+impl JvmClassMetadata {
+    /// Class identity, preserving its canonical semantic symbol.
+    pub const fn identity(&self) -> &JvmClassIdentity {
+        &self.identity
+    }
+
+    /// Selected method metadata in the class plan's order.
+    pub fn methods(&self) -> &[JvmMethodMetadata] {
+        &self.methods
+    }
+}
+
+impl JvmMethodMetadata {
+    /// Canonical method symbol used to derive this metadata.
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+
+    /// JVM-safe, unmangled method name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Validated JVM method descriptor projected from semantic types.
+    pub const fn descriptor(&self) -> &JvmMethodDescriptor {
+        &self.descriptor
+    }
+
+    /// Conservative flags for a public ordinary instance method.
+    pub const fn access_flags(&self) -> dotty_classfile::access_flags::MethodAccessFlags {
+        self.access_flags
+    }
+
+    /// Formal parameter identities and local slots in JVM/source order.
+    pub fn parameters(&self) -> &[JvmParameterLocal] {
+        &self.parameters
+    }
+}
+
+impl JvmParameterLocal {
+    /// Canonical parameter symbol supplied by the class plan.
+    pub const fn symbol(self) -> SymbolId {
+        self.symbol
+    }
+
+    /// JVM type currently assigned to this local.
+    pub const fn ty(self) -> JvmType {
+        self.ty
+    }
+
+    /// First JVM local slot occupied by this parameter.
+    pub const fn slot(self) -> u16 {
+        self.slot
+    }
+
+    /// Number of JVM local slots occupied by this parameter.
+    pub const fn width(self) -> u8 {
+        self.width
+    }
+}
+
 impl JvmMethodPlan {
     /// Extracts this method's primitive-only JVM signature from canonical
     /// semantic types and this plan's explicitly ordered parameter symbols.
@@ -290,6 +528,17 @@ impl JvmMethodPlan {
 }
 
 impl JvmCompilationUnit<'_> {
+    /// Projects all planned class identities and method metadata in plan order.
+    ///
+    /// Duplicate JVM class names and duplicate `(method name, descriptor)`
+    /// pairs are rejected before the metadata is returned.
+    pub fn metadata(
+        &self,
+        definitions: &Definitions,
+    ) -> Result<Vec<JvmClassMetadata>, JvmCodegenError> {
+        identity::unit_metadata(self, definitions)
+    }
+
     /// Validates the plan without mutating or copying semantic state.
     ///
     /// The first error follows class order, method order, parameter order,

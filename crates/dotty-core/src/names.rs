@@ -119,6 +119,15 @@ impl NameInterner {
     pub fn resolve(&self, id: NameId) -> &str {
         &self.strings[id.index() as usize]
     }
+
+    /// Resolves `id` when its index exists in this interner.
+    ///
+    /// This is useful at adapter boundaries where a public semantic value may
+    /// contain a stale name index. Unlike [`Self::resolve`], it reports an
+    /// out-of-range index instead of indexing past this interner.
+    pub fn try_resolve(&self, id: NameId) -> Option<&str> {
+        self.strings.get(id.index() as usize).map(Box::as_ref)
+    }
 }
 
 #[cfg(test)]
@@ -160,6 +169,18 @@ mod tests {
         let id = interner.intern("scala");
 
         assert_eq!(interner.resolve(id), "scala");
+    }
+
+    #[test]
+    fn try_resolve_reports_a_name_from_another_interner() {
+        let mut first = NameInterner::new();
+        first.intern("unused");
+        let id = first.intern("foo");
+        let mut second = NameInterner::new();
+        second.intern("bar");
+
+        assert_eq!(second.try_resolve(id), None);
+        assert_eq!(first.try_resolve(id), Some("foo"));
     }
 
     #[test]
