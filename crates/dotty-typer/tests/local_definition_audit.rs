@@ -401,6 +401,10 @@ impl ClassPathEntry for SharedClassPath {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
+    // Module-port maintenance contract: module_class_of_object and
+    // complete_module_class are forwarded here. The trait also has default
+    // hooks, so changes to module-specific SymbolResolver operations must be
+    // reviewed against the dyn SymbolResolver regression tests below.
     fn module_class_of_object(
         &self,
         store: &SemanticStore,
@@ -1401,6 +1405,23 @@ fn module_audit_resolver(
     )
 }
 
+fn direct_module_resolver(
+    store: &mut SemanticStore,
+    include_object_class: bool,
+) -> (Definitions, ClasspathSymbolResolver<ModuleAuditPath>) {
+    let definitions = Definitions::bootstrap(store);
+    (
+        definitions,
+        ClasspathSymbolResolver::new(
+            ModuleAuditPath {
+                include_object_class,
+            },
+            definitions,
+            LoadingSession::new(),
+        ),
+    )
+}
+
 fn source_audit_resolver(
     store: &mut SemanticStore,
     file: &str,
@@ -1633,6 +1654,26 @@ fn scala_source_module_snapshot(
         )
         .unwrap()
         .expect("the real Source module declares stdin");
+    let missing_name = dotty_core::Name::new(store.names.intern("noSuchMember"), Namespace::Term);
+    let missing_checkpoint = store.checkpoint();
+    assert_eq!(
+        resolver.resolve_member(
+            store,
+            &MemberRequest {
+                prefix: module_prefix,
+                name: missing_name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            },
+        ),
+        Ok(None),
+        "a missing Source member stays unresolved"
+    );
+    assert_eq!(
+        store.checkpoint(),
+        missing_checkpoint,
+        "missing lookup is atomic"
+    );
 
     let describe = |symbol: SymbolId| {
         let entry = store.symbols.get(symbol);
@@ -1708,7 +1749,7 @@ fn audit_and_classpath_resolvers_match_for_real_scala_source_module() {
 fn module_audit_object(
     store: &mut SemanticStore,
     definitions: Definitions,
-    resolver: &mut impl SymbolResolver,
+    resolver: &mut dyn SymbolResolver,
 ) -> SymbolId {
     let package = resolver
         .resolve_package(store, &["me", "cytrowski", "tastyfixtures", "semantic"])
@@ -1925,6 +1966,276 @@ fn audit_module_completion_failure_is_atomic() {
     assert_eq!(observations[1].result, "error");
     assert_eq!(observations[1].result_state, "Missing");
     assert_eq!(observations[1].error_category, Some("malformed"));
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ModuleFailureSnapshot {
+    unowned_result: String,
+    unknown_error: String,
+    malformed_error: String,
+    missing_member: bool,
+}
+
+fn module_failure_snapshot(
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    resolver: &mut impl SymbolResolver,
+) -> ModuleFailureSnapshot {
+    let resolver: &mut dyn SymbolResolver = resolver;
+    let object = module_audit_object(store, definitions, resolver);
+    let unowned_result = match resolver.module_class_of_object(store, definitions.object_class) {
+        Ok(None) => "unresolved".to_owned(),
+        Ok(Some(module_class)) => format!("resolved:{}", audit_symbol_path(store, module_class)),
+        Err(error) => format!("error:{}", resolution_error_category(&error)),
+    };
+
+    let symbol_checkpoint = store.checkpoint();
+    let resolver_checkpoint = resolver.checkpoint();
+    let unknown = store.symbols.alloc(store.symbols.get(object).clone());
+    resolver.rollback_to(store, resolver_checkpoint);
+    store.rollback_to(symbol_checkpoint);
+    let unknown_error = resolver
+        .module_class_of_object(store, unknown)
+        .expect_err("an unknown symbol ID must not be accepted");
+    let unknown_error = resolution_error_category(&unknown_error).to_owned();
+
+    let original_name = store.symbols.get(object).name;
+    let wrong_name = dotty_core::Name::new(store.names.intern("WrongObjectName"), Namespace::Term);
+    store.symbols.get_mut(object).name = wrong_name;
+    let malformed_checkpoint = store.checkpoint();
+    let malformed_error = resolver
+        .module_class_of_object(store, object)
+        .expect_err("an object whose name disagrees with module identity must be rejected");
+    let malformed_error = resolution_error_category(&malformed_error).to_owned();
+    assert_eq!(store.checkpoint(), malformed_checkpoint);
+    store.symbols.get_mut(object).name = original_name;
+
+    let module_class = resolver
+        .module_class_of_object(store, object)
+        .unwrap()
+        .expect("restoring the object identity restores module lookup");
+    assert!(resolver.complete_module_class(store, module_class).unwrap());
+    let prefix = store
+        .types
+        .alloc(Type::type_ref(definitions.no_prefix, module_class));
+    let missing_checkpoint = store.checkpoint();
+    let missing_name = dotty_core::Name::new(store.names.intern("notDeclared"), Namespace::Term);
+    let missing_member = resolver
+        .resolve_member(
+            store,
+            &MemberRequest {
+                prefix,
+                name: missing_name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            },
+        )
+        .unwrap()
+        .is_none();
+    assert!(missing_member);
+    assert_eq!(store.checkpoint(), missing_checkpoint);
+
+    ModuleFailureSnapshot {
+        unowned_result,
+        unknown_error,
+        malformed_error,
+        missing_member,
+    }
+}
+
+#[test]
+fn audit_and_classpath_resolvers_match_for_module_failures_and_atomicity() {
+    let mut direct_store = SemanticStore::new();
+    let (direct_definitions, mut direct) = direct_module_resolver(&mut direct_store, true);
+    let expected = module_failure_snapshot(&mut direct_store, direct_definitions, &mut direct);
+
+    let mut audit_store = SemanticStore::new();
+    let (audit_definitions, mut audit) =
+        module_audit_resolver(&mut audit_store, true, "fixture.scala", "failure-parity()");
+    let actual = module_failure_snapshot(&mut audit_store, audit_definitions, &mut audit);
+
+    assert_eq!(actual, expected);
+    assert_eq!(actual.unowned_result, "unresolved");
+    assert_eq!(actual.unknown_error, "malformed");
+    assert_eq!(actual.malformed_error, "malformed");
+
+    let observations = &audit.metrics.borrow().module_operation_observations;
+    assert!(observations.iter().any(|observation| {
+        observation.result == "error" && observation.error_category == Some("malformed")
+    }));
+    assert!(observations.iter().any(|observation| {
+        observation.operation == "module_class_of_object"
+            && observation.result == "unresolved"
+            && observation.error_category.is_none()
+    }));
+    assert!(observations.iter().all(|observation| {
+        observation.result != "resolved" || observation.result_state == "validated_module_class"
+    }));
+}
+
+fn new_module_pair_rollback_snapshot(
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    resolver: &mut dyn SymbolResolver,
+) -> String {
+    let package = resolver
+        .resolve_package(store, &["me", "cytrowski", "tastyfixtures", "semantic"])
+        .unwrap()
+        .unwrap();
+    let prefix = store
+        .types
+        .alloc(Type::type_ref(definitions.no_prefix, package));
+    let object_name = dotty_core::Name::new(store.names.intern("Both"), Namespace::Term);
+    let request = MemberRequest {
+        prefix,
+        name: object_name,
+        selector: MemberSelector::Unique,
+        space: MemberSpace::Prefix,
+    };
+    let store_checkpoint = store.checkpoint();
+    let resolver_checkpoint = resolver.checkpoint();
+    let first_object = resolver
+        .resolve_member(store, &request)
+        .unwrap()
+        .expect("Both object should be created inside the transaction");
+    let first_module_class = resolver
+        .module_class_of_object(store, first_object)
+        .unwrap()
+        .unwrap();
+    resolver.rollback_to(store, resolver_checkpoint);
+    store.rollback_to(store_checkpoint);
+    assert_eq!(store.checkpoint(), store_checkpoint);
+    assert!(!store.symbols.contains(first_object));
+    assert!(!store.symbols.contains(first_module_class));
+
+    let object = resolver
+        .resolve_member(store, &request)
+        .unwrap()
+        .expect("retry should create the canonical Object");
+    let module_class = resolver
+        .module_class_of_object(store, object)
+        .unwrap()
+        .unwrap();
+    let repeated_object = resolver.resolve_member(store, &request).unwrap().unwrap();
+    let repeated_module_class = resolver
+        .module_class_of_object(store, repeated_object)
+        .unwrap()
+        .unwrap();
+    assert_eq!(object, repeated_object);
+    assert_eq!(module_class, repeated_module_class);
+    format!(
+        "{}|{}|{:?}|{:?}",
+        audit_symbol_path(store, object),
+        audit_symbol_path(store, module_class),
+        store.symbols.get(object).kind,
+        store.symbols.get(module_class).kind
+    )
+}
+
+fn existing_module_shell_rollback_snapshot(
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    resolver: &mut dyn SymbolResolver,
+) -> String {
+    let object = module_audit_object(store, definitions, resolver);
+    let module_class = resolver
+        .module_class_of_object(store, object)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.symbols.get(module_class).info,
+        dotty_core::SymbolInfo::Missing
+    );
+    let store_checkpoint = store.checkpoint();
+    let resolver_checkpoint = resolver.checkpoint();
+    assert!(resolver.complete_module_class(store, module_class).unwrap());
+    assert!(valid_module_class_info(store, module_class));
+    resolver.rollback_to(store, resolver_checkpoint);
+    store.rollback_to(store_checkpoint);
+    assert_eq!(store.checkpoint(), store_checkpoint);
+    assert_eq!(
+        store.symbols.get(module_class).info,
+        dotty_core::SymbolInfo::Missing,
+        "rollback restores the existing module shell"
+    );
+    assert!(resolver.complete_module_class(store, module_class).unwrap());
+    let completed_checkpoint = store.checkpoint();
+    assert!(resolver.complete_module_class(store, module_class).unwrap());
+    assert_eq!(store.checkpoint(), completed_checkpoint);
+    format!(
+        "{}|{}|{:?}",
+        audit_symbol_path(store, object),
+        audit_symbol_path(store, module_class),
+        store.symbols.get(module_class).kind
+    )
+}
+
+#[test]
+fn audit_and_classpath_resolvers_match_for_module_rollbacks_and_retry() {
+    let mut direct_new_store = SemanticStore::new();
+    let (direct_new_definitions, mut direct_new) =
+        direct_module_resolver(&mut direct_new_store, true);
+    let expected_new = new_module_pair_rollback_snapshot(
+        &mut direct_new_store,
+        direct_new_definitions,
+        &mut direct_new,
+    );
+
+    let mut audit_new_store = SemanticStore::new();
+    let (audit_new_definitions, mut audit_new) = module_audit_resolver(
+        &mut audit_new_store,
+        true,
+        "fixture.scala",
+        "new-pair-rollback()",
+    );
+    let actual_new = new_module_pair_rollback_snapshot(
+        &mut audit_new_store,
+        audit_new_definitions,
+        &mut audit_new,
+    );
+    assert_eq!(actual_new, expected_new);
+    assert!(
+        audit_new
+            .metrics
+            .borrow()
+            .module_operation_observations
+            .iter()
+            .any(
+                |observation| observation.operation == "module_class_of_object"
+                    && observation.result == "resolved"
+            )
+    );
+
+    let mut direct_existing_store = SemanticStore::new();
+    let (direct_existing_definitions, mut direct_existing) =
+        direct_module_resolver(&mut direct_existing_store, true);
+    let expected_existing = existing_module_shell_rollback_snapshot(
+        &mut direct_existing_store,
+        direct_existing_definitions,
+        &mut direct_existing,
+    );
+
+    let mut audit_existing_store = SemanticStore::new();
+    let (audit_existing_definitions, mut audit_existing) = module_audit_resolver(
+        &mut audit_existing_store,
+        true,
+        "fixture.scala",
+        "existing-shell-rollback()",
+    );
+    let actual_existing = existing_module_shell_rollback_snapshot(
+        &mut audit_existing_store,
+        audit_existing_definitions,
+        &mut audit_existing,
+    );
+    assert_eq!(actual_existing, expected_existing);
+    let completion_observations = audit_existing
+        .metrics
+        .borrow()
+        .module_operation_observations
+        .iter()
+        .filter(|observation| observation.operation == "complete_module_class")
+        .count();
+    assert_eq!(completion_observations, 3);
 }
 
 #[test]
