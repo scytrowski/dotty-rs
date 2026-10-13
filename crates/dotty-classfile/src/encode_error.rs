@@ -84,6 +84,33 @@ pub enum EncodeError {
     TooDeeplyNestedAttribute,
     /// The provided byte layout violates a structural requirement.
     InvalidLayout,
+    /// A StackMapTable full_frame PC cannot be represented by a JVM `u2`.
+    InvalidStackMapFrameOffset {
+        /// Zero-based frame index.
+        frame_index: usize,
+        /// Absolute bytecode PC supplied by the caller.
+        pc: u32,
+    },
+    /// StackMapTable frames must be ordered by strictly increasing absolute PC.
+    InvalidStackMapFrameOrder {
+        /// Zero-based frame index of the offending frame.
+        frame_index: usize,
+        /// PC of the preceding frame.
+        previous_pc: u32,
+        /// PC of the offending frame.
+        pc: u32,
+    },
+    /// Supplied code bytes and instruction layout do not describe the same code array.
+    InvalidStackMapCodeLayout,
+    /// An uninitialized verification type does not point at a `new` instruction.
+    InvalidStackMapUninitializedOffset {
+        /// Zero-based frame index.
+        frame_index: usize,
+        /// Index of the verification type in its locals or operand stack list.
+        verification_type_index: usize,
+        /// Bytecode PC encoded by the verification type.
+        pc: u16,
+    },
     /// A UTF-8 byte length does not fit a JVM `u2` length field.
     Utf8LengthOverflow {
         /// The encoded UTF-8 byte length.
@@ -152,6 +179,29 @@ impl fmt::Display for EncodeError {
                 crate::attribute::DEFAULT_MAX_ATTRIBUTE_DEPTH
             ),
             Self::InvalidLayout => formatter.write_str("invalid class-file layout"),
+            Self::InvalidStackMapFrameOffset { frame_index, pc } => write!(
+                formatter,
+                "StackMapTable frame {frame_index} PC {pc} does not fit in a JVM u2"
+            ),
+            Self::InvalidStackMapFrameOrder {
+                frame_index,
+                previous_pc,
+                pc,
+            } => write!(
+                formatter,
+                "StackMapTable frame {frame_index} PC {pc} is not greater than preceding PC {previous_pc}"
+            ),
+            Self::InvalidStackMapCodeLayout => {
+                formatter.write_str("StackMapTable code bytes and instruction layout do not match")
+            }
+            Self::InvalidStackMapUninitializedOffset {
+                frame_index,
+                verification_type_index,
+                pc,
+            } => write!(
+                formatter,
+                "StackMapTable frame {frame_index} verification type {verification_type_index} has uninitialized PC {pc} that does not point to new"
+            ),
             Self::Utf8LengthOverflow { byte_len, max } => write!(
                 formatter,
                 "UTF-8 byte length {byte_len} exceeds the maximum {max}"

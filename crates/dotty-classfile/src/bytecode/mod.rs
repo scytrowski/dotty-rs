@@ -74,6 +74,7 @@ pub mod assembler;
 pub(crate) mod code_builder;
 pub mod code_sequence;
 pub mod control_flow;
+pub mod stack_map;
 
 pub(crate) use analysis::analyze_validated;
 pub use analysis::{
@@ -90,6 +91,7 @@ pub use code_sequence::{
     CodeSequenceErrorKind, LabelId, ValidatedCodeSequence,
 };
 pub use control_flow::{BasicBlock, BasicBlockId, ControlFlowGraph, ControlFlowGraphError};
+pub use stack_map::{FullFrame, StackMapTable, VerificationTypeInfo};
 
 use crate::constant_pool::ConstantPoolIndex;
 use std::fmt;
