@@ -1222,6 +1222,27 @@ impl FlowAnalysis {
 pub struct CfgCodeAnalyzer;
 
 impl CfgCodeAnalyzer {
+    pub(crate) fn validate_all_instructions(graph: &ControlFlowGraph) -> Result<(), AnalysisError> {
+        for block in graph.blocks() {
+            for (offset, element) in block.instructions.iter().enumerate() {
+                let instruction_index = block.instruction_range.start + offset;
+                match element {
+                    CodeElement::Instruction(instruction) => {
+                        validate_flow_instruction(instruction_index, *instruction)?;
+                    }
+                    CodeElement::Branch(_) => {}
+                    CodeElement::Label(_) => {
+                        return Err(AnalysisError::UnsupportedFlowInstruction {
+                            instruction: instruction_index,
+                            kind: UnsupportedFlowInstructionKind::Operation,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Analyzes reachable instructions in a control-flow graph.
     ///
     /// Int-like parameters initialize integer locals. A receiver in an

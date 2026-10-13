@@ -86,7 +86,7 @@ pub(crate) use assembler::assemble_validated;
 pub use assembler::{
     AssembleError, AssembledCode, CodeLayout, ConstantPoolOperandKind, assemble, assemble_labeled,
 };
-pub use code_builder::{CodeBuilder, CodeBuilderError};
+pub use code_builder::{CodeBuilder, CodeBuilderError, CodeLabel};
 pub use code_sequence::{
     BranchCondition, BranchInstruction, CodeElement, CodeSequence, CodeSequenceError,
     CodeSequenceErrorKind, LabelId, ValidatedCodeSequence,
