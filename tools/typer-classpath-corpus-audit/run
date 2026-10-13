@@ -164,18 +164,20 @@ PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/compare_deferred_audit.py" \
     "$tmp_dir/first.report" --rows "$tmp_dir/cohorts.tsv" >"$tmp_dir/gate.txt"
 module_profile_path="${output_path%.md}-package-term-profile.tsv"
 module_blockers_path="${output_path%.md}-package-term-first-blockers.tsv"
-PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/module_profile.py" \
-    "$tmp_dir/first.report" "$module_profile_path" "$module_blockers_path" \
-    >"$tmp_dir/module-profile-summary.txt"
-if [[ "$verify_determinism" == 1 ]]; then
-    PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/module_profile.py" \
-        "$tmp_dir/second.report" "$tmp_dir/second-package-term-profile.tsv" \
-        "$tmp_dir/second-package-term-first-blockers.tsv" \
-        >"$tmp_dir/second-module-profile-summary.txt"
-    cmp -s "$module_profile_path" "$tmp_dir/second-package-term-profile.tsv"
-    cmp -s "$module_blockers_path" "$tmp_dir/second-package-term-first-blockers.tsv"
-    cmp -s "$tmp_dir/module-profile-summary.txt" "$tmp_dir/second-module-profile-summary.txt"
+frozen_module_profile="$repo_root/docs/typer-classpath-corpus-audit-3.9.0-package-term-profile.tsv"
+frozen_module_blockers="$repo_root/docs/typer-classpath-corpus-audit-3.9.0-package-term-first-blockers.tsv"
+if [[ ! -f "$frozen_module_profile" || ! -f "$frozen_module_blockers" ]]; then
+    printf 'frozen #1046 package-term cohort files are missing\n' >&2
+    exit 1
 fi
+if [[ "$module_profile_path" != "$frozen_module_profile" ]]; then
+    cp "$frozen_module_profile" "$module_profile_path"
+fi
+if [[ "$module_blockers_path" != "$frozen_module_blockers" ]]; then
+    cp "$frozen_module_blockers" "$module_blockers_path"
+fi
+printf 'Frozen #1046 baseline: 2,749 package-term observations across 80 keys; 369 first blockers (361 imports, 8 term names). Runtime resolver outcomes and distinct targets are reported separately in the audit report.\n' \
+    >"$tmp_dir/module-profile-summary.txt"
 
 {
     printf '# Typer classpath corpus audit: Scala 3.9.0\n\n'
@@ -183,7 +185,7 @@ fi
     printf 'Run `tools/typer-classpath-corpus-audit/run` with the environment documented in `docs/typer-v0.1-compatibility.md` to regenerate this report.\n\n'
     printf '## #1046 Package-term and module identity profile\n\n'
     cat "$tmp_dir/module-profile-summary.txt"
-    printf '\n\nThe [request profile](%s) preserves each observed package-term request and joins its exact `.tasty` / `.class` and companion-resource probes to semantic TASTy object evidence. The [first-blocker cohort](%s) retains the 361 module-gap `ImportQualifierNotFound` and eight additional term/object `TermNameNotFound` observations with source method, direct/inherited attribution, exact failed qualifier, and request targets. Resource names alone are not classified as object proof. These are audit artifacts only; production resolution and typing behavior are unchanged.\n\n' "$(basename -- "$module_profile_path")" "$(basename -- "$module_blockers_path")"
+    printf '\n\nThe [frozen request profile](%s) retains the pre-#1049 package-term observations and joins them to exact `.tasty` / `.class` and companion-resource evidence. The [frozen first-blocker cohort](%s) retains the 361 module-gap `ImportQualifierNotFound` and eight additional term/object `TermNameNotFound` observations with source method, direct/inherited attribution, exact failed qualifier, and request targets. Current package-term outcomes, module completion, and distinct targets appear in `module_resolution_profile` above; resource names alone are not object proof.\n\n' "$(basename -- "$module_profile_path")" "$(basename -- "$module_blockers_path")"
 printf '## #946–#950 impure function hardening and next sprint\n\n'
 printf 'Historical #950 snapshot: the frozen #946 cohort retained all 13 method observations across 3 `FunctionWithMods` trees in 2 files, with the original one-argument `[Impure]` ordinary-arrow shape and 1 direct / 12 inherited attributions. The old first-blocker count was 13 / 2 files; after #949 it was 0 / 0. Per-row accounting in that snapshot showed all 13 stopping at `SymbolResolution`; none was fully typed. The source-type cache was rolled back with each enclosing failed method transaction, so the snapshot’s `projection=not_completed` column meant no projected root type was published after that method attempt. Focused source projection regressions verified that the impure alias was selected and preserved before normalization; the corpus result was bounded by symbol resolution. The figures and recommendation in this section record the #950 snapshot and are not recalculated by this script.\n\n'
 printf 'The full structural census still contains `FunctionWithMods` trees independently of first blockers. It also counts plain ordinary `Function` trees, which represent pure ordinary arrows in the parser. Modifier and family distributions, erased-parameter count, and `CapturesAndResult` adjacency appear in `function_with_mods_structural_inventory` below. Structural presence is not counted as a first-blocker failure.\n\n'
