@@ -1184,6 +1184,7 @@ pub struct FlowAnalysis {
     block_entries: Vec<Option<BlockEntryState>>,
     initial_state: BlockEntryState,
     sequence_scope: Arc<()>,
+    sequence_revision: Arc<()>,
     is_static: bool,
 }
 
@@ -1206,6 +1207,10 @@ impl FlowAnalysis {
 
     pub(crate) fn shares_sequence_scope(&self, scope: &Arc<()>) -> bool {
         Arc::ptr_eq(&self.sequence_scope, scope)
+    }
+
+    pub(crate) fn shares_sequence_revision(&self, revision: &Arc<()>) -> bool {
+        Arc::ptr_eq(&self.sequence_revision, revision)
     }
 
     pub(crate) const fn is_static(&self) -> bool {
@@ -1403,6 +1408,7 @@ impl CfgCodeAnalyzer {
             block_entries,
             initial_state,
             sequence_scope: Arc::clone(graph.sequence_scope()),
+            sequence_revision: Arc::clone(graph.sequence_revision()),
             is_static,
         })
     }

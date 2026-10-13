@@ -91,6 +91,7 @@ pub struct ControlFlowGraph {
     blocks: Vec<BasicBlock>,
     label_blocks: HashMap<LabelId, BasicBlockId>,
     sequence_scope: Arc<()>,
+    sequence_revision: Arc<()>,
 }
 
 impl ControlFlowGraph {
@@ -249,6 +250,7 @@ impl ControlFlowGraph {
             blocks,
             label_blocks,
             sequence_scope: Arc::clone(validated.sequence_scope()),
+            sequence_revision: Arc::clone(validated.sequence_revision()),
         })
     }
 
@@ -274,6 +276,10 @@ impl ControlFlowGraph {
 
     pub(crate) fn sequence_scope(&self) -> &Arc<()> {
         &self.sequence_scope
+    }
+
+    pub(crate) fn sequence_revision(&self) -> &Arc<()> {
+        &self.sequence_revision
     }
 }
 

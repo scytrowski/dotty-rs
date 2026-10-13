@@ -153,6 +153,7 @@ pub struct CodeLayout {
     label_offsets: HashMap<LabelId, usize>,
     code_length: usize,
     sequence_scope: Arc<()>,
+    sequence_revision: Arc<()>,
 }
 
 impl CodeLayout {
@@ -185,6 +186,10 @@ impl CodeLayout {
 
     pub(crate) fn shares_sequence_scope(&self, scope: &Arc<()>) -> bool {
         Arc::ptr_eq(&self.sequence_scope, scope)
+    }
+
+    pub(crate) fn shares_sequence_revision(&self, revision: &Arc<()>) -> bool {
+        Arc::ptr_eq(&self.sequence_revision, revision)
     }
 }
 
@@ -326,6 +331,7 @@ fn assemble_labeled_validated(
             label_offsets,
             code_length: pc,
             sequence_scope: Arc::clone(sequence.sequence_scope()),
+            sequence_revision: Arc::clone(sequence.sequence_revision()),
         },
     })
 }

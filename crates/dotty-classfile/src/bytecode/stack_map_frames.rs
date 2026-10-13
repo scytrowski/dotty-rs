@@ -31,7 +31,7 @@ pub enum UnsupportedStackMapState {
 /// A typed inconsistency while combining CFG states with final code offsets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StackMapFrameGenerationError {
-    /// CFG, analysis, and assembled layout were not derived from one sequence.
+    /// CFG, analysis, and assembled layout were not derived from one sequence revision.
     DifferentCodeSequence,
     /// The analyzed state vector does not correspond to the CFG's blocks.
     FlowBlockCountMismatch {
@@ -130,9 +130,8 @@ pub enum StackMapFrameGenerationError {
 impl fmt::Display for StackMapFrameGenerationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::DifferentCodeSequence => {
-                formatter.write_str("CFG, flow analysis, and layout use different code sequences")
-            }
+            Self::DifferentCodeSequence => formatter
+                .write_str("CFG, flow analysis, and layout use different code sequence snapshots"),
             Self::FlowBlockCountMismatch {
                 cfg_blocks,
                 flow_blocks,
@@ -237,8 +236,8 @@ pub struct GeneratedStackMapFrames {
 /// code sequence.
 ///
 /// The CFG and flow result must come from `CfgCodeAnalyzer`, and the layout
-/// must come from `assemble_labeled` on the same sequence. A private sequence
-/// identity enforces this relationship. The method emits no frame at PC 0;
+/// must come from `assemble_labeled` on the same immutable sequence revision.
+/// A private snapshot identity enforces this relationship. The method emits no frame at PC 0;
 /// loops back to PC 0 must preserve the analyzer's implicit initial state.
 /// Only integer stack values and integer/Top locals are representable. An
 /// instance receiver still represented as `Top` is rejected because its class
@@ -255,6 +254,10 @@ pub fn generate_stack_map_frames(
         || !assembled
             .layout
             .shares_sequence_scope(graph.sequence_scope())
+        || !flow.shares_sequence_revision(graph.sequence_revision())
+        || !assembled
+            .layout
+            .shares_sequence_revision(graph.sequence_revision())
     {
         return Err(StackMapFrameGenerationError::DifferentCodeSequence);
     }
@@ -741,6 +744,54 @@ mod tests {
         let second_assembled = assemble_labeled(&second, &ConstantPool::default()).unwrap();
         assert_eq!(
             generate_stack_map_frames(&first_flow, &first_graph, &second_assembled),
+            Err(StackMapFrameGenerationError::DifferentCodeSequence)
+        );
+    }
+
+    #[test]
+    fn rejects_flow_analysis_from_an_earlier_revision_of_the_same_sequence() {
+        let mut sequence = CodeSequence::new();
+        let target = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::IConst(SmallIntConstant::Zero))
+            .branch(BranchInstruction::IfEq(target.clone()))
+            .instruction(Instruction::Return)
+            .bind(target)
+            .unwrap()
+            .instruction(Instruction::Return)
+            // This block is unreachable, but keeps the block count stable
+            // when more instructions are appended to the same revision.
+            .instruction(Instruction::IConst(SmallIntConstant::Zero));
+
+        let pool = ConstantPool::default();
+        let old_graph = ControlFlowGraph::build(&sequence).unwrap();
+        let old_flow = CfgCodeAnalyzer::analyze(&old_graph, "()V", true, &pool).unwrap();
+
+        sequence
+            .instruction(Instruction::IStore(crate::bytecode::LocalIndex::new(256)))
+            .instruction(Instruction::Return);
+        let new_graph = ControlFlowGraph::build(&sequence).unwrap();
+        let new_flow = CfgCodeAnalyzer::analyze(&new_graph, "()V", true, &pool).unwrap();
+        let new_assembled = assemble_labeled(&sequence, &pool).unwrap();
+
+        // Structural checks alone cannot distinguish these snapshots.
+        assert_eq!(old_graph.blocks().len(), new_graph.blocks().len());
+        assert_eq!(
+            old_flow
+                .block_entries()
+                .iter()
+                .map(Option::is_some)
+                .collect::<Vec<_>>(),
+            new_flow
+                .block_entries()
+                .iter()
+                .map(Option::is_some)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(old_flow.max_locals, 0);
+        assert_eq!(new_flow.max_locals, 257);
+        assert_eq!(
+            generate_stack_map_frames(&old_flow, &new_graph, &new_assembled),
             Err(StackMapFrameGenerationError::DifferentCodeSequence)
         );
     }

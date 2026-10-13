@@ -237,6 +237,7 @@ impl std::error::Error for CodeSequenceError {}
 #[derive(Debug)]
 pub struct CodeSequence {
     scope: Arc<()>,
+    revision: Arc<()>,
     next_label: usize,
     elements: Vec<CodeElement>,
     definitions: HashSet<LabelId>,
@@ -253,6 +254,7 @@ impl CodeSequence {
     pub fn new() -> Self {
         Self {
             scope: Arc::new(()),
+            revision: Arc::new(()),
             next_label: 0,
             elements: Vec::new(),
             definitions: HashSet::new(),
@@ -282,6 +284,7 @@ impl CodeSequence {
             return Err(CodeSequenceError::DuplicateLabelDefinition { label });
         }
         self.elements.push(CodeElement::Label(label));
+        self.revision = Arc::new(());
         Ok(self)
     }
 
@@ -289,12 +292,14 @@ impl CodeSequence {
     /// representation.
     pub fn instruction(&mut self, instruction: Instruction) -> &mut Self {
         self.elements.push(CodeElement::Instruction(instruction));
+        self.revision = Arc::new(());
         self
     }
 
     /// Appends a symbolic branch. Its target is checked by [`Self::validate`].
     pub fn branch(&mut self, branch: BranchInstruction) -> &mut Self {
         self.elements.push(CodeElement::Branch(branch));
+        self.revision = Arc::new(());
         self
     }
 
@@ -342,6 +347,7 @@ impl CodeSequence {
 
         Ok(ValidatedCodeSequence {
             scope: Arc::clone(&self.scope),
+            revision: Arc::clone(&self.revision),
             elements: self.elements.clone(),
             positions,
             instruction_count: instruction_index,
@@ -354,6 +360,7 @@ impl CodeSequence {
 #[derive(Debug)]
 pub struct ValidatedCodeSequence {
     scope: Arc<()>,
+    revision: Arc<()>,
     elements: Vec<CodeElement>,
     positions: HashMap<LabelId, usize>,
     instruction_count: usize,
@@ -362,6 +369,10 @@ pub struct ValidatedCodeSequence {
 impl ValidatedCodeSequence {
     pub(crate) fn sequence_scope(&self) -> &Arc<()> {
         &self.scope
+    }
+
+    pub(crate) fn sequence_revision(&self) -> &Arc<()> {
+        &self.revision
     }
 
     /// Returns the sequence in source order, including zero-width labels.
