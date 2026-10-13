@@ -1,18 +1,22 @@
-//! Encoding for the typed straight-line bytecode subset.
+//! Encoding for the typed straight-line and symbolic-branch bytecode subsets.
 //!
 //! `assemble` uses existing constant-pool indices and never mutates the pool.
-//! It returns a complete code array or a typed error; partial bytes are never
-//! exposed. Local forms are selected from the instruction's `LocalIndex`, and
-//! `ldc` selects `ldc` or `ldc_w` from its actual pool index.
+//! Both [`assemble`] and [`assemble_labeled`] return complete code arrays or
+//! typed errors; partial bytes are never exposed. Local forms are selected
+//! from the instruction's `LocalIndex`, and `ldc` selects `ldc` or `ldc_w`
+//! from its actual pool index.
 
 use super::{
-    ClassReference, ConstantPoolIndexOperand, FieldReference, Instruction, Ldc2Constant,
-    LdcConstant, LocalIndex, SpecialMethodReference, StaticMethodReference, VirtualMethodReference,
+    BranchInstruction, ClassReference, CodeElement, CodeSequence, CodeSequenceErrorKind,
+    ConstantPoolIndexOperand, FieldReference, Instruction, LabelId, Ldc2Constant, LdcConstant,
+    LocalIndex, SpecialMethodReference, StaticMethodReference, ValidatedCodeSequence,
+    VirtualMethodReference,
 };
 use crate::constant_pool::{ConstantPool, ConstantPoolEntry, ConstantPoolIndex, PoolRefError};
 use crate::descriptor::{DescriptorError, FieldType};
 use crate::encode_error::EncodeError;
 use crate::writer::Writer;
+use std::collections::HashMap;
 use std::fmt;
 
 /// The expected constant-pool tag family for an instruction operand.
@@ -77,6 +81,21 @@ pub enum AssembleError {
         /// The final code length, or the first length that exceeds the limit.
         length: usize,
     },
+    /// Symbolic labels or branch targets are invalid.
+    InvalidCodeSequence(CodeSequenceErrorKind),
+    /// A branch displacement cannot be represented by its signed operand.
+    BranchOffsetOutOfRange {
+        /// Zero-based index of the branch among executable code elements.
+        instruction: usize,
+        /// The checked displacement from the branch opcode address.
+        offset: i64,
+        /// The smallest permitted displacement for this branch.
+        min: i64,
+        /// The largest permitted displacement for this branch.
+        max: i64,
+    },
+    /// The program counter could not be advanced without overflowing `usize`.
+    ProgramCounterOverflow,
 }
 
 impl fmt::Display for AssembleError {
@@ -105,11 +124,72 @@ impl fmt::Display for AssembleError {
                 formatter,
                 "assembled code length {length} is outside the JVM range 1..=65535"
             ),
+            Self::InvalidCodeSequence(error) => {
+                write!(formatter, "invalid symbolic code sequence: {error}")
+            }
+            Self::BranchOffsetOutOfRange {
+                instruction,
+                offset,
+                min,
+                max,
+            } => write!(
+                formatter,
+                "branch at instruction {instruction} has offset {offset}, outside {min}..={max}"
+            ),
+            Self::ProgramCounterOverflow => {
+                formatter.write_str("bytecode program counter overflowed usize")
+            }
         }
     }
 }
 
 impl std::error::Error for AssembleError {}
+
+/// Stable byte offsets for one assembled symbolic code sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeLayout {
+    instruction_offsets: Vec<usize>,
+    label_offsets: HashMap<LabelId, usize>,
+    code_length: usize,
+}
+
+impl CodeLayout {
+    /// Returns the byte offsets for executable instructions in sequence
+    /// order. Branches are instructions in this list.
+    pub fn instruction_offsets(&self) -> &[usize] {
+        &self.instruction_offsets
+    }
+
+    /// Returns the byte offset for an instruction by its zero-based sequence
+    /// index.
+    pub fn instruction_offset(&self, instruction: usize) -> Option<usize> {
+        self.instruction_offsets.get(instruction).copied()
+    }
+
+    /// Returns the number of executable instructions and branches.
+    pub fn instruction_count(&self) -> usize {
+        self.instruction_offsets.len()
+    }
+
+    /// Returns the byte offset for a label defined in the assembled sequence.
+    pub fn label_offset(&self, label: &LabelId) -> Option<usize> {
+        self.label_offsets.get(label).copied()
+    }
+
+    /// Returns the encoded byte length.
+    pub const fn code_length(&self) -> usize {
+        self.code_length
+    }
+}
+
+/// Complete bytes and their stable symbolic layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssembledCode {
+    /// Encoded JVM instruction bytes.
+    pub bytes: Vec<u8>,
+    /// Instruction and label byte offsets in the encoded code array.
+    pub layout: CodeLayout,
+}
 
 /// Assembles typed instructions into JVM code bytes.
 ///
@@ -145,6 +225,210 @@ pub fn assemble(
         .map_err(AssembleError::InvalidConstantPool)?;
 
     assemble_validated(instructions, constant_pool)
+}
+
+/// Assembles a symbolic sequence with labels into JVM code bytes and a stable
+/// instruction/label layout.
+///
+/// `goto` and conditional branches use signed 16-bit offsets; `goto_w` uses a
+/// signed 32-bit offset. Every displacement is relative to the branch opcode
+/// address. No branch is automatically widened and the constant pool is never
+/// modified. The input sequence is validated before any result bytes are
+/// returned.
+pub fn assemble_labeled(
+    sequence: &CodeSequence,
+    constant_pool: &ConstantPool,
+) -> Result<AssembledCode, AssembleError> {
+    constant_pool
+        .validate_for_encoding()
+        .map_err(AssembleError::InvalidConstantPool)?;
+    let validated = sequence
+        .validate()
+        .map_err(|error| AssembleError::InvalidCodeSequence(error.kind()))?;
+    assemble_labeled_validated(&validated, constant_pool)
+}
+
+fn assemble_labeled_validated(
+    sequence: &ValidatedCodeSequence,
+    constant_pool: &ConstantPool,
+) -> Result<AssembledCode, AssembleError> {
+    let mut instruction_offsets = Vec::with_capacity(sequence.instruction_count());
+    let mut label_offsets = HashMap::new();
+    let mut operation_bytes = Vec::with_capacity(sequence.instruction_count());
+    let mut branches = Vec::new();
+    let mut pc = 0usize;
+    let mut instruction_index = 0usize;
+
+    for element in sequence.elements() {
+        match element {
+            CodeElement::Label(label) => {
+                label_offsets.insert(label.clone(), pc);
+            }
+            CodeElement::Instruction(instruction) => {
+                instruction_offsets.push(pc);
+                let mut writer = Writer::new();
+                write_instruction(&mut writer, *instruction, constant_pool)?;
+                let encoded = writer.into_bytes();
+                pc = advance_pc(pc, encoded.len())?;
+                ensure_code_limit(pc)?;
+                operation_bytes.push(Some(encoded));
+                instruction_index = instruction_index
+                    .checked_add(1)
+                    .ok_or(AssembleError::ProgramCounterOverflow)?;
+            }
+            CodeElement::Branch(branch) => {
+                instruction_offsets.push(pc);
+                branches.push((instruction_index, pc, branch.clone()));
+                let branch_size = branch_size(branch);
+                pc = advance_pc(pc, branch_size)?;
+                ensure_code_limit(pc)?;
+                operation_bytes.push(None);
+                instruction_index = instruction_index
+                    .checked_add(1)
+                    .ok_or(AssembleError::ProgramCounterOverflow)?;
+            }
+        }
+    }
+
+    if pc == 0 {
+        return Err(AssembleError::InvalidCodeLength { length: 0 });
+    }
+
+    for (branch_index, source_pc, branch) in branches {
+        let target_pc = label_offsets.get(branch.target()).copied().ok_or(
+            AssembleError::InvalidCodeSequence(CodeSequenceErrorKind::UnboundLabel),
+        )?;
+        let encoded = encode_branch(&branch, branch_index, source_pc, target_pc)?;
+        let Some(slot) = operation_bytes.get_mut(branch_index) else {
+            return Err(AssembleError::ProgramCounterOverflow);
+        };
+        *slot = Some(encoded);
+    }
+
+    let mut bytes = Vec::with_capacity(pc);
+    for encoded in operation_bytes {
+        let Some(encoded) = encoded else {
+            return Err(AssembleError::ProgramCounterOverflow);
+        };
+        bytes.extend_from_slice(&encoded);
+    }
+
+    Ok(AssembledCode {
+        bytes,
+        layout: CodeLayout {
+            instruction_offsets,
+            label_offsets,
+            code_length: pc,
+        },
+    })
+}
+
+fn branch_size(branch: &BranchInstruction) -> usize {
+    match branch {
+        BranchInstruction::GotoWide(_) => 5,
+        BranchInstruction::Goto(_)
+        | BranchInstruction::IfEq(_)
+        | BranchInstruction::IfNe(_)
+        | BranchInstruction::IfICmpEq(_)
+        | BranchInstruction::IfICmpNe(_)
+        | BranchInstruction::IfICmpLt(_)
+        | BranchInstruction::IfICmpGe(_)
+        | BranchInstruction::IfICmpGt(_)
+        | BranchInstruction::IfICmpLe(_) => 3,
+    }
+}
+
+fn advance_pc(pc: usize, length: usize) -> Result<usize, AssembleError> {
+    pc.checked_add(length)
+        .ok_or(AssembleError::ProgramCounterOverflow)
+}
+
+fn ensure_code_limit(length: usize) -> Result<(), AssembleError> {
+    if length > usize::from(u16::MAX) {
+        return Err(AssembleError::InvalidCodeLength { length });
+    }
+    Ok(())
+}
+
+fn encode_branch(
+    branch: &BranchInstruction,
+    instruction: usize,
+    source_pc: usize,
+    target_pc: usize,
+) -> Result<Vec<u8>, AssembleError> {
+    let source_pc = i64::try_from(source_pc).map_err(|_| AssembleError::ProgramCounterOverflow)?;
+    let target_pc = i64::try_from(target_pc).map_err(|_| AssembleError::ProgramCounterOverflow)?;
+    let offset = target_pc
+        .checked_sub(source_pc)
+        .ok_or(AssembleError::ProgramCounterOverflow)?;
+    let mut writer = Writer::new();
+    match branch {
+        BranchInstruction::Goto(_) => {
+            writer.write_u1(0xa7);
+            write_i16_branch_offset(&mut writer, instruction, offset)?;
+        }
+        BranchInstruction::GotoWide(_) => {
+            let offset =
+                i32::try_from(offset).map_err(|_| AssembleError::BranchOffsetOutOfRange {
+                    instruction,
+                    offset,
+                    min: i64::from(i32::MIN),
+                    max: i64::from(i32::MAX),
+                })?;
+            writer.write_u1(0xc8);
+            writer.write_bytes(&offset.to_be_bytes());
+        }
+        BranchInstruction::IfEq(_) => {
+            write_conditional_branch(&mut writer, instruction, offset, 0x99)?;
+        }
+        BranchInstruction::IfNe(_) => {
+            write_conditional_branch(&mut writer, instruction, offset, 0x9a)?;
+        }
+        BranchInstruction::IfICmpEq(_) => {
+            write_conditional_branch(&mut writer, instruction, offset, 0x9f)?;
+        }
+        BranchInstruction::IfICmpNe(_) => {
+            write_conditional_branch(&mut writer, instruction, offset, 0xa0)?;
+        }
+        BranchInstruction::IfICmpLt(_) => {
+            write_conditional_branch(&mut writer, instruction, offset, 0xa1)?;
+        }
+        BranchInstruction::IfICmpGe(_) => {
+            write_conditional_branch(&mut writer, instruction, offset, 0xa2)?;
+        }
+        BranchInstruction::IfICmpGt(_) => {
+            write_conditional_branch(&mut writer, instruction, offset, 0xa3)?;
+        }
+        BranchInstruction::IfICmpLe(_) => {
+            write_conditional_branch(&mut writer, instruction, offset, 0xa4)?;
+        }
+    }
+    Ok(writer.into_bytes())
+}
+
+fn write_conditional_branch(
+    writer: &mut Writer,
+    instruction: usize,
+    offset: i64,
+    opcode: u8,
+) -> Result<(), AssembleError> {
+    writer.write_u1(opcode);
+    write_i16_branch_offset(writer, instruction, offset)
+}
+
+fn write_i16_branch_offset(
+    writer: &mut Writer,
+    instruction: usize,
+    offset: i64,
+) -> Result<(), AssembleError> {
+    let offset = i16::try_from(offset).map_err(|_| AssembleError::BranchOffsetOutOfRange {
+        instruction,
+        offset,
+        min: i64::from(i16::MIN),
+        max: i64::from(i16::MAX),
+    })?;
+    writer.write_bytes(&offset.to_be_bytes());
+    Ok(())
 }
 
 /// Assembles against a pool whose complete layout was already validated.

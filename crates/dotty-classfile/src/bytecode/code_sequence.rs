@@ -3,8 +3,9 @@
 //! This module validates branch targets without assigning byte offsets or
 //! encoding branch instructions. Labels identify positions between elements;
 //! multiple labels may identify the same position. A validated sequence is
-//! ready for a future layout step, but does not perform control-flow analysis
-//! or change the existing straight-line [`super::Instruction`] APIs.
+//! ready for [`super::assembler::assemble_labeled`], but does not perform
+//! control-flow analysis or change the existing straight-line
+//! [`super::Instruction`] APIs.
 
 use super::Instruction;
 use std::collections::{HashMap, HashSet};
@@ -51,13 +52,16 @@ impl Hash for LabelId {
 
 /// A symbolic JVM branch with a label target and no encoded offset.
 ///
-/// `Goto` leaves the eventual choice between `goto` and `goto_w` to a future
-/// layout/assembler. Conditional variants correspond to the JVM's `ifeq`,
-/// `ifne`, and integer comparison branch family.
+/// `Goto` is the short `goto` form; [`Self::GotoWide`] is the explicit wide
+/// form. Neither form is automatically widened. Conditional variants
+/// correspond to the JVM's `ifeq`, `ifne`, and integer comparison branch
+/// family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BranchInstruction {
-    /// Unconditional branch, eventually encoded as `goto` or `goto_w`.
+    /// Unconditional short branch (`goto`), with a signed 16-bit offset.
     Goto(LabelId),
+    /// Unconditional wide branch (`goto_w`), with a signed 32-bit offset.
+    GotoWide(LabelId),
     /// Branch when the top integer value is zero (`ifeq`).
     IfEq(LabelId),
     /// Branch when the top integer value is nonzero (`ifne`).
@@ -81,6 +85,7 @@ impl BranchInstruction {
     pub fn target(&self) -> &LabelId {
         match self {
             Self::Goto(target)
+            | Self::GotoWide(target)
             | Self::IfEq(target)
             | Self::IfNe(target)
             | Self::IfICmpEq(target)
@@ -95,7 +100,7 @@ impl BranchInstruction {
     /// Returns the JVM comparison represented by this branch.
     pub const fn condition(&self) -> BranchCondition {
         match self {
-            Self::Goto(_) => BranchCondition::Always,
+            Self::Goto(_) | Self::GotoWide(_) => BranchCondition::Always,
             Self::IfEq(_) => BranchCondition::EqualZero,
             Self::IfNe(_) => BranchCondition::NotEqualZero,
             Self::IfICmpEq(_) => BranchCondition::IntEqual,
@@ -109,7 +114,7 @@ impl BranchInstruction {
 
     /// Whether this branch has a comparison condition.
     pub const fn is_conditional(&self) -> bool {
-        !matches!(self, Self::Goto(_))
+        !matches!(self, Self::Goto(_) | Self::GotoWide(_))
     }
 }
 
@@ -160,6 +165,48 @@ pub enum CodeSequenceError {
     BranchToTerminalEnd { label: LabelId },
     /// The sequence has exhausted its available local label indexes.
     LabelIdExhausted,
+}
+
+/// The category of a [`CodeSequenceError`], without its sequence-scoped label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CodeSequenceErrorKind {
+    /// The label belongs to another sequence.
+    ForeignLabel,
+    /// The label has more than one definition.
+    DuplicateLabelDefinition,
+    /// A branch refers to an undefined label.
+    UnboundLabel,
+    /// A branch targets the position after the last instruction.
+    BranchToTerminalEnd,
+    /// The sequence exhausted its local label indexes.
+    LabelIdExhausted,
+}
+
+impl CodeSequenceError {
+    /// Returns this error's category without its sequence-scoped label.
+    pub const fn kind(&self) -> CodeSequenceErrorKind {
+        match self {
+            Self::ForeignLabel { .. } => CodeSequenceErrorKind::ForeignLabel,
+            Self::DuplicateLabelDefinition { .. } => {
+                CodeSequenceErrorKind::DuplicateLabelDefinition
+            }
+            Self::UnboundLabel { .. } => CodeSequenceErrorKind::UnboundLabel,
+            Self::BranchToTerminalEnd { .. } => CodeSequenceErrorKind::BranchToTerminalEnd,
+            Self::LabelIdExhausted => CodeSequenceErrorKind::LabelIdExhausted,
+        }
+    }
+}
+
+impl fmt::Display for CodeSequenceErrorKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ForeignLabel => "foreign label",
+            Self::DuplicateLabelDefinition => "duplicate label definition",
+            Self::UnboundLabel => "unbound branch target",
+            Self::BranchToTerminalEnd => "branch target is at code end",
+            Self::LabelIdExhausted => "label IDs exhausted",
+        })
+    }
 }
 
 impl fmt::Display for CodeSequenceError {
@@ -252,11 +299,12 @@ impl CodeSequence {
     }
 
     /// Validates branch ownership, definitions, and executable target
-    /// positions, producing a sequence ready for a future layout step.
+    /// positions, producing a sequence ready for
+    /// [`super::assembler::assemble_labeled`].
     ///
     /// This does not assign byte offsets, encode branch bytes, or perform
     /// control-flow or stack analysis.
-    pub fn validate(self) -> Result<ValidatedCodeSequence, CodeSequenceError> {
+    pub fn validate(&self) -> Result<ValidatedCodeSequence, CodeSequenceError> {
         let mut positions = HashMap::with_capacity(self.definitions.len());
         let mut instruction_index = 0usize;
         for element in &self.elements {
@@ -293,8 +341,8 @@ impl CodeSequence {
         }
 
         Ok(ValidatedCodeSequence {
-            scope: self.scope,
-            elements: self.elements,
+            scope: Arc::clone(&self.scope),
+            elements: self.elements.clone(),
             positions,
             instruction_count: instruction_index,
         })
