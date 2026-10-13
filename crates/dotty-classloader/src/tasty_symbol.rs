@@ -4,15 +4,16 @@ use dotty_classfile::access_flags::{
     ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
     ACC_SYNTHETIC, ClassAccessFlags, FieldAccessFlags, MethodAccessFlags,
 };
+use dotty_core::{SymbolFlags, SymbolKind};
 use dotty_tasty::tasty::{
     ABSTRACT_TAG, APPLIEDTPT_TAG, APPLIEDTYPE_TAG, ARTIFACT_TAG, AppliedTypeNode, ApplyNode,
     AstError, CASEACCESSOR_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionTail,
-    FIELDACCESSOR_TAG, FINAL_TAG, IdentNode, LOCAL_TAG, MUTABLE_TAG, PRIVATE_TAG,
-    PRIVATEQUALIFIED_TAG, PROTECTED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode, RawName, RawTree,
-    Reader, ReferenceNode, SHAREDTERM_TAG, SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG, SelectNode,
-    StandardSection, StructuredNode, StructuredTree, TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG,
-    TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG, TYPEREF_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG,
-    TastyFile, TastyFileError, TermValue, VALDEF_TAG,
+    FIELDACCESSOR_TAG, FINAL_TAG, IdentNode, LOCAL_TAG, MUTABLE_TAG, OBJECT_TAG, PACKAGE_TAG,
+    PRIVATE_TAG, PRIVATEQUALIFIED_TAG, PROTECTED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode,
+    RawName, RawTree, Reader, ReferenceNode, SHAREDTERM_TAG, SHAREDTYPE_TAG, STATIC_TAG,
+    SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode, StructuredTree, TEMPLATE_TAG,
+    TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG, TYPEREF_TAG,
+    TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError, TermValue, VALDEF_TAG,
 };
 use std::collections::HashSet;
 use std::fmt;
@@ -57,6 +58,17 @@ pub(crate) struct DecodedTastyClass {
 pub(crate) struct DecodedTastyIdentity {
     pub flags: ClassAccessFlags,
     pub visibility: Option<DeclaredVisibility>,
+}
+
+/// The authoritative top-level module identities found in one `.tasty`
+/// resource. This deliberately records identity only; it does not decode the
+/// module class's parents or members.
+pub(crate) struct DecodedTastyModuleIdentity {
+    pub object_flags: SymbolFlags,
+    pub object_visibility: Option<DeclaredVisibility>,
+    pub module_class_flags: SymbolFlags,
+    pub module_class_visibility: Option<DeclaredVisibility>,
+    pub companion_class_kind: Option<SymbolKind>,
 }
 
 /// Stable detail for a TASTy parent whose binary identity could not be
@@ -185,6 +197,9 @@ pub enum TastyDecodeError {
     /// name this decoder can resolve — see `resolve_parent_name_with_bare`'s
     /// doc comment for exactly which shapes are and are not resolved.
     UnresolvedSupertype(Box<UnresolvedParentReference>),
+    /// More than one top-level definition claims the requested module
+    /// identity in the same TASTy package.
+    AmbiguousModuleIdentity,
 }
 
 impl fmt::Display for TastyDecodeError {
@@ -196,6 +211,9 @@ impl fmt::Display for TastyDecodeError {
                 write!(formatter, "no matching TypeDef found in .tasty file")
             }
             Self::NoTemplateBody => write!(formatter, "TypeDef has no Template body"),
+            Self::AmbiguousModuleIdentity => {
+                write!(formatter, "TASTy has ambiguous top-level module identities")
+            }
             Self::UnresolvedSupertype(parent) => write!(
                 formatter,
                 "unresolved supertype reference at parent {}: shape={}, semantic_reference={}, reference_prefix={}, names={:?}, raw={}",
@@ -215,7 +233,10 @@ impl std::error::Error for TastyDecodeError {
         match self {
             Self::Parse(source) => Some(source),
             Self::Ast(source) => Some(source),
-            Self::MissingTypeDef | Self::NoTemplateBody | Self::UnresolvedSupertype(_) => None,
+            Self::MissingTypeDef
+            | Self::NoTemplateBody
+            | Self::UnresolvedSupertype(_)
+            | Self::AmbiguousModuleIdentity => None,
         }
     }
 }
@@ -229,6 +250,7 @@ impl TastyDecodeError {
             Self::MissingTypeDef => "tasty.missing_type_def",
             Self::NoTemplateBody => "tasty.no_template_body",
             Self::UnresolvedSupertype(_) => "tasty.unresolved_supertype",
+            Self::AmbiguousModuleIdentity => "tasty.ambiguous_module_identity",
         }
     }
 
@@ -264,9 +286,10 @@ impl TastyDecodeError {
                 ast_error_category(error)
             }
             Self::Parse(_) => ClassLoadCategory::MalformedArtifact,
-            Self::MissingTypeDef | Self::NoTemplateBody | Self::UnresolvedSupertype(_) => {
-                ClassLoadCategory::Conditional
-            }
+            Self::MissingTypeDef
+            | Self::NoTemplateBody
+            | Self::UnresolvedSupertype(_)
+            | Self::AmbiguousModuleIdentity => ClassLoadCategory::Conditional,
         }
     }
 }
@@ -416,6 +439,170 @@ pub(crate) fn decode_identity(
     Ok(DecodedTastyIdentity {
         flags: decode_flags(&tail),
         visibility: decode_visibility(&file, &tail),
+    })
+}
+
+/// Finds a Scala object and its module class only when both exact definitions
+/// are direct members of the requested package in the authoritative TASTy
+/// file. A classfile or a `$`-suffixed spelling alone is never evidence.
+pub(crate) fn decode_module_identity(
+    bytes: &[u8],
+    requested: &BinaryName,
+) -> Result<Option<DecodedTastyModuleIdentity>, TastyDecodeError> {
+    let file = TastyFile::parse_scala_3_9(bytes)?;
+    let index = file.ast_address_index()?;
+    let package_path = requested.package_path();
+    let object_name = requested.simple_name();
+    let module_class_name = format!("{object_name}$");
+
+    let mut objects = Vec::new();
+    let mut module_classes = Vec::new();
+    let mut companion_classes = Vec::new();
+
+    for node in index.iter() {
+        if !is_in_requested_top_level_package(&file, &index, node.offset, package_path) {
+            continue;
+        }
+        match node.tag {
+            VALDEF_TAG => {
+                let StructuredNode::ValDef(DefinitionBody::ValDef { name, tail, .. }) =
+                    node.decode_structured()?
+                else {
+                    continue;
+                };
+                if wire_name(&file, name).as_deref() == Some(object_name)
+                    && has_modifier(&tail, OBJECT_TAG)
+                {
+                    objects.push((symbol_flags(&tail), decode_visibility(&file, &tail)));
+                }
+            }
+            TYPEDEF_TAG => {
+                let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                    name,
+                    type_or_template,
+                    tail,
+                }) = node.decode_structured()?
+                else {
+                    continue;
+                };
+                let Some(name) = module_class_wire_name(&file, name) else {
+                    continue;
+                };
+                let has_template = matches!(
+                    type_or_template,
+                    RawTree::LengthNode(ref template) if template.tag == TEMPLATE_TAG
+                );
+                if name == module_class_name && has_template && has_modifier(&tail, OBJECT_TAG) {
+                    module_classes.push((symbol_flags(&tail), decode_visibility(&file, &tail)));
+                } else if name == object_name && has_template && !has_modifier(&tail, OBJECT_TAG) {
+                    companion_classes.push(if has_modifier(&tail, TRAIT_TAG) {
+                        SymbolKind::Trait
+                    } else {
+                        SymbolKind::Class
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let [object] = objects.as_slice() else {
+        return if objects.len() > 1 {
+            Err(TastyDecodeError::AmbiguousModuleIdentity)
+        } else {
+            Ok(None)
+        };
+    };
+    let [module_class] = module_classes.as_slice() else {
+        return if module_classes.len() > 1 {
+            Err(TastyDecodeError::AmbiguousModuleIdentity)
+        } else {
+            Ok(None)
+        };
+    };
+    if companion_classes.len() > 1 {
+        return Err(TastyDecodeError::AmbiguousModuleIdentity);
+    }
+
+    Ok(Some(DecodedTastyModuleIdentity {
+        object_flags: object.0,
+        object_visibility: object.1.clone(),
+        module_class_flags: module_class.0,
+        module_class_visibility: module_class.1.clone(),
+        companion_class_kind: companion_classes.first().copied(),
+    }))
+}
+
+fn is_in_requested_top_level_package(
+    file: &TastyFile<'_>,
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    address: usize,
+    requested_package: &str,
+) -> bool {
+    let Ok(address) = u32::try_from(address) else {
+        return false;
+    };
+    let Some(parent) = index.parent_of(address) else {
+        return requested_package.is_empty();
+    };
+    if parent.tag != PACKAGE_TAG {
+        return false;
+    }
+    let Some(package_node) = index.get(parent.offset as u32) else {
+        return false;
+    };
+    let Ok(package) = package_node.decode_package() else {
+        return false;
+    };
+    let RawTree::Leaf(term) = package.path else {
+        return false;
+    };
+    if term.tag != TERMREFPKG_TAG {
+        return false;
+    }
+    let TermValue::NameRef(reference) = term.value else {
+        return false;
+    };
+    resolve_qualified_name(file, reference).as_deref() == Some(requested_package)
+}
+
+fn has_modifier(tail: &[DefinitionTail<'_>], tag: u8) -> bool {
+    tail.iter()
+        .any(|item| matches!(item, DefinitionTail::Modifier(found) if *found == tag))
+}
+
+fn symbol_flags(tail: &[DefinitionTail<'_>]) -> SymbolFlags {
+    use dotty_tasty::tasty::{
+        CASE_TAG, ENUM_TAG, ERASED_TAG, EXPORTED_TAG, EXTENSION_TAG, GIVEN_TAG, IMPLICIT_TAG,
+        INLINE_TAG, LAZY_TAG, OPAQUE_TAG, OVERRIDE_TAG, SEALED_TAG, TRANSPARENT_TAG,
+    };
+
+    tail.iter().fold(SymbolFlags::EMPTY, |flags, item| {
+        let DefinitionTail::Modifier(tag) = item else {
+            return flags;
+        };
+        flags
+            | match *tag {
+                ABSTRACT_TAG => SymbolFlags::ABSTRACT,
+                FINAL_TAG => SymbolFlags::FINAL,
+                SEALED_TAG => SymbolFlags::SEALED,
+                CASE_TAG => SymbolFlags::CASE,
+                IMPLICIT_TAG => SymbolFlags::IMPLICIT,
+                GIVEN_TAG => SymbolFlags::GIVEN,
+                LAZY_TAG => SymbolFlags::LAZY,
+                MUTABLE_TAG => SymbolFlags::MUTABLE,
+                INLINE_TAG => SymbolFlags::INLINE,
+                TRANSPARENT_TAG => SymbolFlags::TRANSPARENT,
+                OPAQUE_TAG => SymbolFlags::OPAQUE,
+                EXTENSION_TAG => SymbolFlags::EXTENSION,
+                STATIC_TAG => SymbolFlags::STATIC,
+                SYNTHETIC_TAG => SymbolFlags::SYNTHETIC,
+                ERASED_TAG => SymbolFlags::ERASED,
+                OVERRIDE_TAG => SymbolFlags::OVERRIDE,
+                ENUM_TAG => SymbolFlags::ENUM,
+                EXPORTED_TAG => SymbolFlags::EXPORTED,
+                _ => SymbolFlags::EMPTY,
+            }
     })
 }
 
@@ -2093,6 +2280,16 @@ fn wire_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
     file.names().get_utf8(reference).map(str::to_owned)
 }
 
+fn module_class_wire_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
+    match file.names().get(reference)? {
+        dotty_tasty::tasty::RawName::ObjectClass { underlying } => {
+            Some(format!("{}$", wire_name(file, *underlying)?))
+        }
+        dotty_tasty::tasty::RawName::Utf8(name) => Some(name.clone()),
+        _ => None,
+    }
+}
+
 fn render_tree_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
     resolve_qualified_name(file, reference)
 }
@@ -2109,6 +2306,55 @@ mod tests {
                 .join(relative_path),
         )
         .unwrap_or_else(|error| panic!("fixture {relative_path} should exist: {error}"))
+    }
+
+    fn unpickler_fixture_bytes(relative_path: &str) -> Vec<u8> {
+        std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty-unpickler/tests/fixtures/semantic")
+                .join(relative_path),
+        )
+        .unwrap_or_else(|error| panic!("fixture {relative_path} should exist: {error}"))
+    }
+
+    #[test]
+    fn decodes_a_proven_module_pair_and_its_real_companion_class() {
+        let bytes = unpickler_fixture_bytes("Both.tasty");
+        let identity = decode_module_identity(
+            &bytes,
+            &BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both"),
+        )
+        .unwrap()
+        .expect("Both.tasty contains an object");
+
+        assert_eq!(identity.companion_class_kind, Some(SymbolKind::Class));
+    }
+
+    #[test]
+    fn a_standalone_standard_library_object_has_no_companion_class() {
+        let bytes = fixture_bytes("scala3-library/scala/jdk/CollectionConverters.tasty");
+        let identity = decode_module_identity(
+            &bytes,
+            &BinaryName::from_internal("scala/jdk/CollectionConverters"),
+        )
+        .unwrap()
+        .expect("CollectionConverters.tasty contains an object");
+
+        assert_eq!(identity.companion_class_kind, None);
+    }
+
+    #[test]
+    fn a_class_tasty_without_an_object_is_not_module_evidence() {
+        let bytes = fixture_bytes("scala3-library/scala/annotation/StaticAnnotation.tasty");
+
+        assert!(
+            decode_module_identity(
+                &bytes,
+                &BinaryName::from_internal("scala/annotation/StaticAnnotation")
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]
