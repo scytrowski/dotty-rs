@@ -387,6 +387,43 @@ impl ClassPathEntry for SharedClassPath {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
+    fn module_class_of_object(
+        &self,
+        store: &SemanticStore,
+        object: SymbolId,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner.module_class_of_object(store, object)
+    }
+
+    fn complete_module_class(
+        &mut self,
+        store: &mut SemanticStore,
+        module_class: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        let request = if store.symbols.contains(module_class) {
+            format!(
+                "module-completion::{}",
+                audit_symbol_path(store, module_class)
+            )
+        } else {
+            "module-completion::unknown-symbol".to_owned()
+        };
+        let result = self.inner.complete_module_class(store, module_class);
+        let profiles = self.inner.take_load_profiles();
+        let mut metrics = self.metrics.borrow_mut();
+        let file = metrics.current_file.clone();
+        let method = metrics.current_method.clone();
+        for profile in profiles {
+            metrics.dependency_profiles.push(DependencyObservation {
+                file: file.clone(),
+                method: method.clone(),
+                request: request.clone(),
+                profile,
+            });
+        }
+        result
+    }
+
     fn complete_class(
         &mut self,
         store: &mut SemanticStore,
@@ -1086,6 +1123,289 @@ fn class_member_success_metrics_distinguish_declarations_and_canonical_keys() {
 }
 
 struct MetricPath;
+
+struct ModuleAuditPath {
+    include_object_class: bool,
+}
+
+impl ClassPathEntry for ModuleAuditPath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        let (bytes, format) = match name.as_internal() {
+            "me/cytrowski/tastyfixtures/semantic/Both" => (
+                fs::read(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../dotty-tasty-unpickler/tests/fixtures/semantic/Both.tasty"),
+                )
+                .unwrap(),
+                ClassFormat::Tasty,
+            ),
+            "java/lang/Object" if self.include_object_class => {
+                let internal_name = b"java/lang/Object";
+                let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 61, 0, 3, 1];
+                bytes.extend_from_slice(&(internal_name.len() as u16).to_be_bytes());
+                bytes.extend_from_slice(internal_name);
+                bytes.extend_from_slice(&[7, 0, 1, 0, 0x21, 0, 2, 0, 0]);
+                bytes.extend_from_slice(&[0; 8]);
+                (bytes, ClassFormat::Class)
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(ClassResource::new(
+            bytes,
+            format,
+            ClassOrigin::Directory("<module-audit>".into()),
+        )))
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        Ok(package == ["me", "cytrowski", "tastyfixtures", "semantic"])
+    }
+}
+
+fn module_audit_resolver(
+    store: &mut SemanticStore,
+    include_object_class: bool,
+    file: &str,
+    method: &str,
+) -> (Definitions, AuditResolver<ModuleAuditPath>) {
+    let definitions = Definitions::bootstrap(store);
+    (
+        definitions,
+        AuditResolver {
+            inner: ClasspathSymbolResolver::new(
+                ModuleAuditPath {
+                    include_object_class,
+                },
+                definitions,
+                LoadingSession::new(),
+            )
+            .with_load_profile_collection()
+            .with_module_resolution_profile_collection(),
+            metrics: Rc::new(RefCell::new(ResolverMetrics {
+                current_file: file.to_owned(),
+                current_method: method.to_owned(),
+                ..ResolverMetrics::default()
+            })),
+            class_path_probe: None,
+        },
+    )
+}
+
+fn module_audit_object(
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    resolver: &mut impl SymbolResolver,
+) -> SymbolId {
+    let package = resolver
+        .resolve_package(store, &["me", "cytrowski", "tastyfixtures", "semantic"])
+        .unwrap()
+        .unwrap();
+    let prefix = store
+        .types
+        .alloc(Type::type_ref(definitions.no_prefix, package));
+    let name = dotty_core::Name::new(store.names.intern("Both"), Namespace::Term);
+    resolver
+        .resolve_member(
+            store,
+            &MemberRequest {
+                prefix,
+                name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            },
+        )
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn audit_resolver_forwards_authoritative_module_identity_lookup() {
+    let mut store = SemanticStore::new();
+    let (definitions, mut resolver) =
+        module_audit_resolver(&mut store, true, "fixture.scala", "fixture()");
+    let package = resolver
+        .resolve_package(
+            &mut store,
+            &["me", "cytrowski", "tastyfixtures", "semantic"],
+        )
+        .unwrap()
+        .unwrap();
+    let prefix = store
+        .types
+        .alloc(Type::type_ref(definitions.no_prefix, package));
+    let request = MemberRequest {
+        prefix,
+        name: dotty_core::Name::new(store.names.intern("Both"), Namespace::Term),
+        selector: MemberSelector::Unique,
+        space: MemberSpace::Prefix,
+    };
+    let store_checkpoint = store.checkpoint();
+    let resolver_checkpoint = resolver.checkpoint();
+    let object = resolver
+        .resolve_member(&mut store, &request)
+        .unwrap()
+        .unwrap();
+
+    let direct = resolver.inner.module_class_of_object(&store, object);
+    assert!(direct.as_ref().unwrap().is_some());
+    assert_eq!(
+        resolver.module_class_of_object(&store, object),
+        direct,
+        "the audit adapter must return the authoritative identity unchanged"
+    );
+
+    let unowned = definitions.object_class;
+    assert_eq!(
+        resolver.module_class_of_object(&store, unowned),
+        resolver.inner.module_class_of_object(&store, unowned)
+    );
+    resolver.rollback_to(&mut store, resolver_checkpoint);
+    store.rollback_to(store_checkpoint);
+    let unknown = object;
+    assert!(!store.symbols.contains(unknown));
+    assert_eq!(
+        resolver.module_class_of_object(&store, unknown),
+        resolver.inner.module_class_of_object(&store, unknown)
+    );
+}
+
+#[test]
+fn audit_resolver_forwards_module_completion_and_preserves_caller_rollback() {
+    let mut store = SemanticStore::new();
+    let (definitions, mut resolver) =
+        module_audit_resolver(&mut store, true, "fixture.scala", "fixture()");
+    let object = module_audit_object(&mut store, definitions, &mut resolver);
+    let module_class = resolver
+        .module_class_of_object(&store, object)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.symbols.get(module_class).info,
+        dotty_core::SymbolInfo::Missing
+    );
+
+    let store_checkpoint = store.checkpoint();
+    let resolver_checkpoint = resolver.checkpoint();
+    assert_eq!(
+        resolver
+            .inner
+            .complete_module_class(&mut store, module_class),
+        Ok(true),
+        "the direct resolver establishes the expected completion result"
+    );
+    assert!(valid_module_class_info(&store, module_class));
+    resolver.rollback_to(&mut store, resolver_checkpoint);
+    store.rollback_to(store_checkpoint);
+    assert_eq!(
+        store.symbols.get(module_class).info,
+        dotty_core::SymbolInfo::Missing
+    );
+
+    assert_eq!(
+        resolver.complete_module_class(&mut store, module_class),
+        Ok(true)
+    );
+    assert!(valid_module_class_info(&store, module_class));
+    let completed_checkpoint = store.checkpoint();
+    assert_eq!(
+        resolver.complete_module_class(&mut store, module_class),
+        Ok(true)
+    );
+    assert_eq!(store.checkpoint(), completed_checkpoint);
+
+    resolver.rollback_to(&mut store, resolver_checkpoint);
+    store.rollback_to(store_checkpoint);
+    assert_eq!(
+        store.symbols.get(module_class).info,
+        dotty_core::SymbolInfo::Missing,
+        "caller rollback restores the preexisting module shell"
+    );
+}
+
+#[test]
+fn audit_resolver_rolls_back_a_newly_created_module_identity_pair() {
+    let mut store = SemanticStore::new();
+    let (definitions, mut resolver) =
+        module_audit_resolver(&mut store, true, "fixture.scala", "fixture()");
+    let package = resolver
+        .resolve_package(
+            &mut store,
+            &["me", "cytrowski", "tastyfixtures", "semantic"],
+        )
+        .unwrap()
+        .unwrap();
+    let prefix = store
+        .types
+        .alloc(Type::type_ref(definitions.no_prefix, package));
+    let request = MemberRequest {
+        prefix,
+        name: dotty_core::Name::new(store.names.intern("Both"), Namespace::Term),
+        selector: MemberSelector::Unique,
+        space: MemberSpace::Prefix,
+    };
+    let store_checkpoint = store.checkpoint();
+    let resolver_checkpoint = resolver.checkpoint();
+
+    let object = resolver
+        .resolve_member(&mut store, &request)
+        .unwrap()
+        .unwrap();
+    let module_class = resolver
+        .module_class_of_object(&store, object)
+        .unwrap()
+        .unwrap();
+    resolver.rollback_to(&mut store, resolver_checkpoint);
+    store.rollback_to(store_checkpoint);
+
+    assert_eq!(store.checkpoint(), store_checkpoint);
+    assert!(!store.symbols.contains(object));
+    assert!(!store.symbols.contains(module_class));
+}
+
+#[test]
+fn audit_module_completion_failure_is_atomic() {
+    let mut store = SemanticStore::new();
+    let (definitions, mut resolver) =
+        module_audit_resolver(&mut store, false, "fixture.scala", "fixture()");
+    let object = module_audit_object(&mut store, definitions, &mut resolver);
+    let module_class = resolver
+        .module_class_of_object(&store, object)
+        .unwrap()
+        .unwrap();
+    let checkpoint = store.checkpoint();
+
+    assert!(
+        resolver
+            .complete_module_class(&mut store, module_class)
+            .is_err()
+    );
+    assert_eq!(store.checkpoint(), checkpoint);
+    assert_eq!(
+        store.symbols.get(module_class).info,
+        dotty_core::SymbolInfo::Missing
+    );
+}
+
+fn valid_module_class_info(store: &SemanticStore, module_class: SymbolId) -> bool {
+    if !store.symbols.contains(module_class)
+        || store.symbols.get(module_class).kind != dotty_core::SymbolKind::ModuleClass
+    {
+        return false;
+    }
+    let dotty_core::SymbolInfo::Complete(info) = store.symbols.get(module_class).info else {
+        return false;
+    };
+    if !store.types.contains(info) {
+        return false;
+    }
+    let Type::ClassInfo(info) = store.types.get(info) else {
+        return false;
+    };
+    info.class == module_class
+        && store.scopes.contains(info.declarations)
+        && store.scopes.get(info.declarations).owner == Some(module_class)
+}
+
 impl ClassPathEntry for MetricPath {
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
         let bytes = match name.as_internal() {
