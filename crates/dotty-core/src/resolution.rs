@@ -126,6 +126,31 @@ impl std::error::Error for ResolutionError {}
 /// Supplies symbols an adapter did not enter itself. See the module docs for
 /// the contract.
 pub trait SymbolResolver {
+    /// Returns the canonical ModuleClass for an externally validated Object.
+    ///
+    /// Resolvers must return `Some` only when their authoritative identity
+    /// cache proves the Object/ModuleClass relationship. Matching names or
+    /// symbol kinds alone are not sufficient evidence.
+    fn module_class_of_object(
+        &self,
+        _store: &SemanticStore,
+        _object: SymbolId,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        Ok(None)
+    }
+
+    /// Completes a ModuleClass owned by this resolver in place.
+    /// `true` requires valid `Complete(ClassInfo)` for the same symbol;
+    /// `false` means unowned/unsupported. False and errors are atomic, and
+    /// successful in-place updates participate in caller checkpoints.
+    fn complete_module_class(
+        &mut self,
+        store: &mut SemanticStore,
+        module_class: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        self.complete_class(store, module_class)
+    }
+
     /// Completes a class identity owned by this resolver in place.
     /// `true` requires valid Complete(ClassInfo) for the same symbol;
     /// `false` means unowned/unsupported. False and errors are atomic, and

@@ -954,6 +954,75 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
+    fn module_class_of_object(
+        &self,
+        store: &SemanticStore,
+        object: SymbolId,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        if !store.symbols.contains(object) {
+            return Err(ResolutionError::Malformed {
+                reason: format!("module object {object:?} is missing from the semantic store"),
+            });
+        }
+        if store.symbols.get(object).kind != SymbolKind::Object {
+            return Ok(None);
+        }
+        let Some(package) = store.symbols.get(object).owner else {
+            return Ok(None);
+        };
+        let Some(identity) = self
+            .session
+            .modules
+            .values()
+            .find(|identity| identity.object == object)
+        else {
+            return Ok(None);
+        };
+        self.validate_module_object(store, package, object)?;
+        Ok(Some(identity.module_class))
+    }
+
+    fn complete_module_class(
+        &mut self,
+        store: &mut SemanticStore,
+        module_class: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        self.transact(store, |resolver, store| {
+            let Some(identity) = resolver
+                .session
+                .modules
+                .values()
+                .find(|identity| identity.module_class == module_class)
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            resolver.validate_module_object(
+                store,
+                store.symbols.get(identity.object).owner.ok_or_else(|| {
+                    ResolutionError::Malformed {
+                        reason: format!("module object {:?} has no owner", identity.object),
+                    }
+                })?,
+                identity.object,
+            )?;
+            let completed = resolver
+                .complete_module(store, &identity.object_name)
+                .map_err(|error| ResolutionError::Malformed {
+                    reason: format!("module completion failed: {error}"),
+                })?;
+            if completed.object != identity.object || completed.module_class != module_class {
+                return Err(ResolutionError::Malformed {
+                    reason: format!(
+                        "module completion changed canonical identity for {module_class:?}"
+                    ),
+                });
+            }
+            Ok(Some(true))
+        })
+        .map(|completed| completed.unwrap_or(false))
+    }
+
     fn complete_class(
         &mut self,
         store: &mut SemanticStore,
@@ -1561,6 +1630,11 @@ mod tests {
             store.symbols.get(identity.module_class).kind,
             SymbolKind::ModuleClass
         );
+        assert_eq!(
+            resolver.module_class_of_object(&store, object),
+            Ok(Some(identity.module_class)),
+            "only the cached TASTy-proven identity is exposed"
+        );
 
         let checkpoint = store.checkpoint();
         assert_eq!(
@@ -1589,6 +1663,71 @@ mod tests {
         assert_eq!(profile.new_object_identities, 1);
         assert_eq!(profile.reused_object_identities, 1);
         assert_eq!(profile.package_term_targets.len(), 1);
+    }
+
+    #[test]
+    fn resolver_completes_a_validated_module_class_in_place() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            ModuleTastyPath::both_fixture(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .unwrap();
+        let prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let object_name = Name::new(store.names.intern("Both"), Namespace::Term);
+        let object = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix,
+                    name: object_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let module_class = resolver
+            .module_class_of_object(&store, object)
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+
+        assert_eq!(
+            resolver.complete_module_class(&mut store, module_class),
+            Ok(true)
+        );
+        let SymbolInfo::Complete(info) = store.symbols.get(module_class).info else {
+            panic!("module class should complete in place")
+        };
+        let Type::ClassInfo(info) = store.types.get(info) else {
+            panic!("completed module class should have ClassInfo")
+        };
+        assert_eq!(
+            store.scopes.get(info.declarations).owner,
+            Some(module_class)
+        );
+        assert!(matches!(
+            store.symbols.get(object).info,
+            SymbolInfo::Complete(ty)
+                if matches!(store.types.get(ty), Type::TypeRef { target: TypeRefTarget::Symbol(target), .. } if *target == module_class)
+        ));
+        let checkpoint = store.checkpoint();
+        assert_eq!(
+            resolver.complete_module_class(&mut store, module_class),
+            Ok(true)
+        );
+        assert_eq!(store.checkpoint(), checkpoint);
     }
 
     #[test]

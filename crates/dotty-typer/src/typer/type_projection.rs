@@ -746,7 +746,15 @@ impl SourceTyper<'_> {
                 position,
             });
         }
-        let prefix = self.type_prefix_for_qualifier(qualifier);
+        let prefix = self.type_prefix_for_qualifier(qualifier)?;
+        if prefix == self.definitions.no_prefix {
+            return Err(TyperError::TypeNameNotFound {
+                source: self.source,
+                tree_index,
+                name,
+                position,
+            });
+        }
         let request = MemberRequest {
             prefix,
             name,
@@ -796,13 +804,19 @@ impl SourceTyper<'_> {
         })
     }
 
-    pub(in crate::typer) fn type_prefix_for_qualifier(&mut self, symbol: SymbolId) -> TypeId {
-        match self.store.symbols.get(symbol).kind {
+    pub(in crate::typer) fn type_prefix_for_qualifier(
+        &mut self,
+        symbol: SymbolId,
+    ) -> Result<TypeId, TyperError> {
+        Ok(match self.store.symbols.get(symbol).kind {
             SymbolKind::Package => self.package_type_prefix(symbol),
             SymbolKind::Object => {
-                let owner = self.store.symbols.get(symbol).owner;
-                let module_class = owner
-                    .and_then(|owner| self.index.definition_of(symbol).map(|_| owner))
+                let source_module_class = self
+                    .store
+                    .symbols
+                    .get(symbol)
+                    .owner
+                    .filter(|_| self.index.definition_of(symbol).is_some())
                     .and_then(|owner| {
                         self.index
                             .definition_of(symbol)
@@ -816,12 +830,19 @@ impl SourceTyper<'_> {
                                 _ => None,
                             })
                     });
-                if let Some(module_class) = module_class {
+                if let Some(module_class) = source_module_class {
                     self.store.types.alloc(Type::ThisType {
                         class: module_class,
                     })
-                } else {
+                } else if self.index.definition_of(symbol).is_some() {
                     self.definitions.no_prefix
+                } else {
+                    let module_class = self.module_class_of_object(symbol)?;
+                    let prefix = self.type_symbol_prefix(module_class);
+                    self.store.types.alloc(Type::TypeRef {
+                        prefix,
+                        target: TypeRefTarget::Symbol(module_class),
+                    })
                 }
             }
             SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass => {
@@ -832,7 +853,7 @@ impl SourceTyper<'_> {
                 })
             }
             _ => self.definitions.no_prefix,
-        }
+        })
     }
 }
 

@@ -353,6 +353,17 @@ by a successful retry. A companion case hands a package registry produced by
 the TASTy unpickler to the classpath resolver and checks that an already
 entered class keeps its `SymbolId`.
 
+For Scala 3.9 library objects, the classpath resolver exposes a `ModuleClass`
+only when its cached package/object identity validates the object/module pair.
+The typer uses that canonical identity for `Source.stdin` and for explicit,
+renamed, wildcard, and local imports from `scala.io.Source`; the selected
+member remains owned by the module class, distinct from the `Source` companion
+class. Source-owned objects keep their namer-provided module scope. Missing or
+unvalidated external module identities remain explicit and are never inferred
+from a matching `Foo$` spelling. A failing external selection rolls back its
+loaded package and object state, and a later valid selection can resolve the
+object again.
+
 The session lifecycle is:
 
 1. Create one `SemanticStore` and call `Definitions::bootstrap` once.

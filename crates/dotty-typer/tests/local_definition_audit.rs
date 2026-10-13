@@ -70,6 +70,7 @@ struct ResolverMetrics {
     package_term_companion_targets: BTreeSet<String>,
     package_term_object_looking_targets: BTreeSet<String>,
     package_term_request_rows: Vec<PackageTermRequestObservation>,
+    module_package_term_observations: Vec<ModulePackageTermObservation>,
     package_type_class_resource: usize,
     package_type_class_targets: BTreeSet<String>,
     dependency_profiles: Vec<DependencyObservation>,
@@ -124,6 +125,16 @@ struct PackageTermRequestObservation {
     outcome: String,
     type_resource: String,
     companion_resource: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ModulePackageTermObservation {
+    request_key: String,
+    source_file: String,
+    enclosing_attempt: String,
+    resolution: &'static str,
+    object_identity: String,
+    module_class_identity: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -534,6 +545,54 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let current_file = metrics.current_file.clone();
         let current_method = metrics.current_method.clone();
         merge_module_resolution_profile(&mut metrics.module_resolution, module_profile);
+        if prefix.target_kind == "Package"
+            && request.name.is_term()
+            && matches!(&request.space, MemberSpace::Prefix)
+            && matches!(&request.selector, dotty_core::MemberSelector::Unique)
+        {
+            let (resolution, object_identity, module_class_identity) = match &result {
+                Ok(Some(symbol)) if store.symbols.contains(*symbol) => {
+                    if store.symbols.get(*symbol).kind == dotty_core::SymbolKind::Object {
+                        match self.inner.module_class_of_object(store, *symbol) {
+                            Ok(Some(module_class)) if store.symbols.contains(module_class) => (
+                                "validated_module_identity",
+                                audit_symbol_path(store, *symbol),
+                                audit_symbol_path(store, module_class),
+                            ),
+                            Ok(_) => (
+                                "object_without_validated_module_identity",
+                                audit_symbol_path(store, *symbol),
+                                String::new(),
+                            ),
+                            Err(_) => (
+                                "module_identity_validation_error",
+                                audit_symbol_path(store, *symbol),
+                                String::new(),
+                            ),
+                        }
+                    } else {
+                        (
+                            "resolved_non_object_term",
+                            audit_symbol_path(store, *symbol),
+                            String::new(),
+                        )
+                    }
+                }
+                Ok(Some(_)) => ("resolved_unknown_symbol", String::new(), String::new()),
+                Ok(None) => ("unresolved", String::new(), String::new()),
+                Err(_) => ("resolver_error", String::new(), String::new()),
+            };
+            metrics
+                .module_package_term_observations
+                .push(ModulePackageTermObservation {
+                    request_key: target_key.clone(),
+                    source_file: current_file.clone(),
+                    enclosing_attempt: current_method.clone(),
+                    resolution,
+                    object_identity,
+                    module_class_identity,
+                });
+        }
         if prefix.target_kind == "Package"
             && request.name.is_term()
             && outcome == "package term member unsupported"
@@ -3641,23 +3700,29 @@ fn pinned_scala39_local_definition_audit() {
     ];
     for (path, tree_index) in baseline_signature_methods {
         let key = format!("{path}#tree={tree_index}");
-        assert_eq!(
-            audit
-                .local_method_first_blockers
-                .get(&key)
-                .map(String::as_str),
-            Some("ImportQualifierNotFound"),
+        let current = audit
+            .local_method_first_blockers
+            .get(&key)
+            .map(String::as_str);
+        // #1050 can identify a package term as an Object before correctly
+        // rejecting it when the resolver has no authoritative ModuleClass.
+        assert!(
+            matches!(
+                current,
+                Some("ImportQualifierNotFound" | "ObjectModuleClassUnavailable")
+            ),
             "the #899 baseline method should retain its measured current first blocker: {key}"
         );
     }
     assert_eq!(audit.by_name_method_outcomes.len(), 2);
-    assert_eq!(
-        audit
-            .by_name_method_outcomes
-            .get("compiler/src/dotty/tools/dotc/core/SymUtils.scala::instantiateCFT")
-            .map(String::as_str),
-        Some("ImportQualifierNotFound")
-    );
+    let instantiate_cft = audit
+        .by_name_method_outcomes
+        .get("compiler/src/dotty/tools/dotc/core/SymUtils.scala::instantiateCFT")
+        .map(String::as_str);
+    assert!(matches!(
+        instantiate_cft,
+        Some("ImportQualifierNotFound" | "ObjectModuleClassUnavailable")
+    ));
     assert_eq!(
         audit
             .by_name_method_outcomes
@@ -3911,14 +3976,19 @@ fn pinned_scala39_local_definition_audit() {
     print_match_profile(&audit.match_profile);
     {
         let metrics = resolver_metrics.borrow();
+        println!(
+            "#1050 current external member metrics: requests={}, errors={}",
+            metrics.external_member_requests(),
+            metrics.member_errors
+        );
         assert_eq!(
             metrics.external_member_requests(),
-            8_070,
-            "the #974 shared TASTy parent fix makes additional Scala library classes reachable"
+            7_270,
+            "the #1050 external-object support changes the #974 audit request baseline"
         );
         assert_eq!(
             metrics.member_errors, 217,
-            "the shared-parent TASTy fix reduces the post-#973 member error count from 347 to 217"
+            "the #1050 external-object support changes the #974 member-error baseline"
         );
         assert_eq!(
             metrics.member_request_shapes.values().sum::<usize>(),
@@ -3941,6 +4011,10 @@ fn pinned_scala39_local_definition_audit() {
         );
     }
     print_resolver_metrics(&resolver_metrics.borrow());
+    print_module_import_cohort_current_outcomes(
+        &resolver_metrics.borrow(),
+        &audit.local_method_first_blockers,
+    );
     print_package_term_module_evidence(&resolver_metrics.borrow(), classpath.clone());
     print_resolution_blocker_profile(&audit.resolution_blocker_profile);
     print_pinned_immutable_field_completion_outcomes(&root, classpath.clone());
@@ -4297,9 +4371,12 @@ fn print_pinned_immutable_field_method_outcomes(outcomes: &BTreeMap<String, Stri
         let outcome = outcomes
             .get(&key)
             .unwrap_or_else(|| panic!("baseline local method attempt is missing: {key}"));
-        assert_eq!(
-            outcome, "ImportQualifierNotFound",
-            "the pinned baseline method should now reach its classpath blocker: {key}"
+        assert!(
+            matches!(
+                outcome.as_str(),
+                "ImportQualifierNotFound" | "ObjectModuleClassUnavailable"
+            ),
+            "the pinned baseline method should retain its explicit classpath blocker: {key}"
         );
         println!("  {key} outcome={outcome}");
     }
@@ -8066,6 +8143,24 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     for target in &module_profile.member_targets {
         println!("  member_target={target}");
     }
+    let mut module_observations = metrics.module_package_term_observations.clone();
+    module_observations.sort();
+    println!("module_package_term_observations:");
+    println!("  observations={}", module_observations.len());
+    println!(
+        "  request_key\tsource_file\tenclosing_attempt\tresolution\tobject_identity\tmodule_class_identity"
+    );
+    for observation in module_observations {
+        println!(
+            "  {}\t{}\t{}\t{}\t{}\t{}",
+            observation.request_key,
+            observation.source_file,
+            observation.enclosing_attempt,
+            observation.resolution,
+            observation.object_identity,
+            observation.module_class_identity
+        );
+    }
     let mut package_term_rows = metrics.package_term_request_rows.clone();
     package_term_rows.sort();
     println!("package_term_request_rows:");
@@ -8395,6 +8490,99 @@ fn print_package_term_module_evidence(metrics: &ResolverMetrics, classpath: Shar
 
 fn tsv_or_dash(value: &str) -> &str {
     if value.is_empty() { "-" } else { value }
+}
+
+fn print_module_import_cohort_current_outcomes(
+    metrics: &ResolverMetrics,
+    current_first_blockers: &BTreeMap<String, String>,
+) {
+    const FROZEN: &str = include_str!(
+        "../../../docs/typer-classpath-corpus-audit-3.9.0-package-term-first-blockers.tsv"
+    );
+    let validated_targets = metrics
+        .module_package_term_observations
+        .iter()
+        .filter(|observation| observation.resolution == "validated_module_identity")
+        .map(|observation| observation.request_key.as_str())
+        .collect::<BTreeSet<_>>();
+    let rows = FROZEN.lines().skip(1).filter(|line| !line.is_empty());
+    let mut outcomes = Vec::new();
+    for row in rows {
+        let columns = row.split('\t').collect::<Vec<_>>();
+        assert_eq!(columns.len(), 7, "frozen #1046 first-blocker row shape");
+        let blocker = columns[0];
+        let file = columns[1];
+        let method = columns[2];
+        let qualifier = columns[5];
+        let Some((package, name)) = qualifier.rsplit_once('.') else {
+            continue;
+        };
+        let request_key = format!("prefix={package}::namespace=term::name={name}::space=Prefix");
+        let current = current_first_blockers
+            .get(method)
+            .map(String::as_str)
+            .unwrap_or("method_not_observed");
+        let identity_validated = validated_targets.contains(request_key.as_str());
+        let progressed_past_baseline = current != blocker;
+        let fully_typed = current == "typed";
+        let deeper_failure = progressed_past_baseline && !fully_typed;
+        outcomes.push((
+            blocker,
+            file,
+            method,
+            qualifier,
+            request_key,
+            identity_validated,
+            progressed_past_baseline,
+            deeper_failure,
+            fully_typed,
+            current,
+        ));
+    }
+    let validated = outcomes.iter().filter(|row| row.5).count();
+    let progressed = outcomes.iter().filter(|row| row.6).count();
+    let deeper = outcomes.iter().filter(|row| row.7).count();
+    let typed = outcomes.iter().filter(|row| row.8).count();
+    let current_blockers = outcomes.iter().fold(BTreeMap::new(), |mut counts, row| {
+        *counts.entry(row.9).or_insert(0usize) += 1;
+        counts
+    });
+    assert_eq!(
+        outcomes.len(),
+        369,
+        "the frozen #1046 cohort must stay intact"
+    );
+    assert_eq!(validated, 358);
+    assert_eq!(progressed, 358);
+    assert_eq!(deeper, 358);
+    assert_eq!(
+        typed, 0,
+        "a changed first blocker is not full method typing"
+    );
+    assert_eq!(
+        current_blockers.get("ObjectModuleClassUnavailable"),
+        Some(&350)
+    );
+    assert_eq!(
+        current_blockers.get("ObjectTermReferenceDeferred"),
+        Some(&8)
+    );
+    assert_eq!(current_blockers.get("ImportQualifierNotFound"), Some(&11));
+    println!("frozen_module_import_cohort_current_outcomes:");
+    println!("  baseline_rows={}", outcomes.len());
+    println!("  rows_with_validated_module_identity={validated}");
+    println!("  rows_past_their_baseline_first_blocker={progressed}");
+    println!("  rows_with_a_new_first_blocker_but_not_fully_typed={deeper}");
+    println!("  rows_fully_typed={typed}");
+    println!(
+        "  baseline_first_blocker\tfile\tmethod\tfailed_qualifier\trequest_key\tmodule_identity_validated\tpast_baseline_blocker\tnew_blocker_not_typed\tfully_typed\tcurrent_first_blocker"
+    );
+    for row in outcomes {
+        println!(
+            "  {}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9
+        );
+    }
 }
 
 fn print_resolution_blocker_profile(profile: &ResolutionBlockerProfile) {
@@ -11802,6 +11990,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::OverloadedReferenceDeferred { .. } => "OverloadedReferenceDeferred",
         TyperError::ObjectTermReferenceDeferred { .. } => "ObjectTermReferenceDeferred",
         TyperError::ObjectModuleClassUnavailable { .. } => "ObjectModuleClassUnavailable",
+        TyperError::ObjectModuleClassResolution { .. } => "ObjectModuleClassResolution",
         TyperError::UnsupportedTermReference { .. } => "UnsupportedTermReference",
         TyperError::MemberNotFound { .. } => "MemberNotFound",
         TyperError::OverloadedSelectionDeferred { .. } => "OverloadedSelectionDeferred",

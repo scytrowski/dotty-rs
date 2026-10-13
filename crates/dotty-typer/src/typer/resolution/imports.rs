@@ -107,7 +107,7 @@ impl SourceTyper<'_> {
                         return Ok(Some(package));
                     }
                 }
-                let prefix = self.type_prefix_for_qualifier(qualifier);
+                let prefix = self.type_prefix_for_qualifier(qualifier)?;
                 let request = MemberRequest {
                     prefix,
                     name: select.name,
@@ -350,8 +350,9 @@ impl SourceTyper<'_> {
                 }
             }
             if !found_locally {
+                let prefix = self.type_prefix_for_qualifier(qualifier)?;
                 let request = MemberRequest {
-                    prefix: self.type_prefix_for_qualifier(qualifier),
+                    prefix,
                     name,
                     selector: MemberSelector::Unique,
                     space: MemberSpace::Prefix,
@@ -974,6 +975,22 @@ impl SourceTyper<'_> {
         let Some(owner) = semantic.owner else {
             return scopes;
         };
+        if self.index.definition_of(symbol).is_none() {
+            if let Some(module_class) = self
+                .resolver
+                .module_class_of_object(self.store, symbol)
+                .ok()
+                .flatten()
+                && let SymbolInfo::Complete(info) = self.store.symbols.get(module_class).info
+                && let Some(Type::ClassInfo(info)) = self.store.types.try_get(info)
+                && info.class == module_class
+                && self.store.scopes.contains(info.declarations)
+                && self.store.scopes.get(info.declarations).owner == Some(module_class)
+            {
+                insert_scope(&mut scopes, info.declarations);
+            }
+            return scopes;
+        }
         let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(symbol)
         else {
             return scopes;

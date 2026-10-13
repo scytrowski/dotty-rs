@@ -106,6 +106,26 @@ fn class_path(stubs: &TemporaryDirectory) -> CompositeClassPath {
     ])
 }
 
+fn scala_library_classpath(stubs: &TemporaryDirectory) -> CompositeClassPath {
+    let scala_library = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/dotty-tasty/tests/fixtures/scala3-library");
+    CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(scala_library)),
+        Box::new(DirectoryClassPath::new(PathBuf::from(TASTY_SAMPLE))),
+        Box::new(DirectoryClassPath::new(stubs.path().to_path_buf())),
+    ])
+}
+
+fn write_scala_source_jdk_stubs(stubs: &TemporaryDirectory) {
+    write_required_jdk_stubs(stubs.path());
+    write_stub_class(
+        stubs.path(),
+        "java/io/Closeable",
+        Some("java/lang/Object"),
+        0x0601,
+    );
+}
+
 struct DemandClassPath {
     root: PathBuf,
     reads: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -630,6 +650,29 @@ impl<E: ClassPathEntry> RecordingResolver<E> {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for RecordingResolver<E> {
+    fn module_class_of_object(
+        &self,
+        store: &SemanticStore,
+        object: SymbolId,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner
+            .as_ref()
+            .unwrap()
+            .module_class_of_object(store, object)
+    }
+
+    fn complete_module_class(
+        &mut self,
+        store: &mut SemanticStore,
+        module_class: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        let result = self.inner().complete_module_class(store, module_class)?;
+        if result {
+            self.log.borrow_mut().completions.push(module_class);
+        }
+        Ok(result)
+    }
+
     fn complete_class(
         &mut self,
         store: &mut SemanticStore,
@@ -930,6 +973,362 @@ fn source_typer_resolves_a_member_inherited_from_a_real_scala_library_class() {
         typer.store().symbols.get(inherited_method).owner,
         Some(source),
         "the inherited method remains owned by its declaring parent"
+    );
+}
+
+#[test]
+fn source_typer_selects_a_method_through_a_validated_external_object() {
+    let stubs = TemporaryDirectory::new("scala-source-object-jdk-stubs");
+    write_scala_source_jdk_stubs(&stubs);
+    let classpath = scala_library_classpath(&stubs);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "def first: scala.io.BufferedSource = scala.io.Source.stdin; def again: scala.io.BufferedSource = scala.io.Source.stdin",
+        SourceId::from_index(12),
+        &mut store,
+        &mut packages,
+    );
+    let resolver = ClasspathSymbolResolver::new(
+        classpath,
+        definitions,
+        LoadingSession::with_packages(packages),
+    );
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        unit.source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    )
+    .with_resolver(Box::new(resolver));
+
+    let mut selected_field = None;
+    let mut repeated = None;
+    for method_name in ["first", "again"] {
+        let (method, rhs) = method_rhs(&unit, typer.store(), method_name);
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer
+            .type_expression(rhs, context)
+            .expect("a validated external Object should provide its ModuleClass members");
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(field),
+            ..
+        } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("external object field selection should retain a term reference")
+        };
+        let field = *field;
+        assert_eq!(
+            typer.store().symbols.get(field).kind,
+            dotty_core::SymbolKind::Method
+        );
+        let module_class = typer.store().symbols.get(field).owner.unwrap();
+        assert_eq!(
+            typer.store().symbols.get(module_class).kind,
+            dotty_core::SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            selected_field.get_or_insert(field),
+            &field,
+            "repeated source references must reuse the canonical field symbol"
+        );
+        if method_name == "again" {
+            repeated = Some((method, rhs, typed));
+        }
+    }
+    let (method, rhs, typed) = repeated.unwrap();
+    let context = typer.expression_context_for(method).unwrap();
+    assert_eq!(
+        typer.type_expression(rhs, context).unwrap(),
+        typed,
+        "successful repeated typing should preserve the published typed tree"
+    );
+}
+
+#[test]
+fn external_object_import_forms_resolve_the_same_module_member() {
+    let cases = [
+        (
+            "import scala.io.Source\ndef use: scala.io.BufferedSource = Source.stdin",
+            "Source",
+        ),
+        (
+            "import scala.io.Source.stdin\ndef use: scala.io.BufferedSource = stdin",
+            "stdin",
+        ),
+        (
+            "import scala.io.Source.{stdin => input}\ndef use: scala.io.BufferedSource = input",
+            "input",
+        ),
+        (
+            "import scala.io.Source.*\ndef use: scala.io.BufferedSource = stdin",
+            "stdin",
+        ),
+        (
+            "def use: scala.io.BufferedSource = { import scala.io.Source; Source.stdin }",
+            "Source",
+        ),
+    ];
+
+    for (index, (source_text, _reference_name)) in cases.into_iter().enumerate() {
+        let stubs = TemporaryDirectory::new(&format!("scala-source-object-import-{index}"));
+        write_scala_source_jdk_stubs(&stubs);
+        let classpath = scala_library_classpath(&stubs);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let unit = parse_and_name(
+            source_text,
+            SourceId::from_index(30 + index as u32),
+            &mut store,
+            &mut packages,
+        );
+        let object_name = Name::new(store.names.intern("Source"), Namespace::Term);
+        let class_name = Name::new(store.names.intern("Source"), Namespace::Type);
+        let resolver = ClasspathSymbolResolver::new(
+            classpath,
+            definitions,
+            LoadingSession::with_packages(packages),
+        );
+        let log = Rc::new(RefCell::new(ResolutionLog::default()));
+        let resolver = RecordingResolver::new(resolver, Rc::clone(&log));
+        let typer_packages = Packages::new();
+        let mut typer = SourceTyper::new(
+            &unit.parsed.ast,
+            unit.source,
+            &unit.index,
+            &mut store,
+            definitions,
+            &typer_packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let (method, rhs) = method_rhs(&unit, typer.store(), "use");
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer
+            .type_expression(rhs, context)
+            .unwrap_or_else(|error| panic!("import case {index} failed: {error:?}"));
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(member),
+            ..
+        } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("import case {index} should preserve the selected member reference")
+        };
+        let member = *member;
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(member).name.text()),
+            "stdin",
+            "all import forms should identify the same Scala library member"
+        );
+        assert_eq!(
+            typer.store().symbols.get(member).kind,
+            dotty_core::SymbolKind::Method
+        );
+        let module_class = typer.store().symbols.get(member).owner.unwrap();
+        assert_eq!(
+            typer.store().symbols.get(module_class).kind,
+            dotty_core::SymbolKind::ModuleClass
+        );
+        let package = typer.store().symbols.get(module_class).owner.unwrap();
+        drop(typer);
+        let session = log
+            .borrow_mut()
+            .session
+            .take()
+            .expect("resolver session should survive typing");
+        let package_scope = store
+            .scopes
+            .get(session.into_packages().scope_of(package).unwrap());
+        let object = package_scope
+            .lookup(&object_name)
+            .expect("the package should retain the Scala Source object identity");
+        let companion_class = package_scope
+            .lookup(&class_name)
+            .expect("the package should retain the distinct Scala Source class identity");
+        assert_ne!(object, companion_class);
+        assert_eq!(
+            store.symbols.get(object).kind,
+            dotty_core::SymbolKind::Object
+        );
+        assert_eq!(
+            store.symbols.get(companion_class).kind,
+            dotty_core::SymbolKind::Class
+        );
+    }
+}
+
+#[test]
+fn local_declaration_keeps_precedence_over_an_external_object_wildcard_import() {
+    let stubs = TemporaryDirectory::new("scala-source-local-shadowing");
+    write_scala_source_jdk_stubs(&stubs);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "def use: Int = { import scala.io.Source.*; val stdin: Int = 1; stdin }",
+        SourceId::from_index(45),
+        &mut store,
+        &mut packages,
+    );
+    let resolver = ClasspathSymbolResolver::new(
+        scala_library_classpath(&stubs),
+        definitions,
+        LoadingSession::with_packages(packages),
+    );
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        unit.source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let (method, rhs) = method_rhs(&unit, typer.store(), "use");
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer
+        .type_expression(rhs, context)
+        .expect("a local declaration should shadow the imported Object member");
+    assert_eq!(
+        typer
+            .widen_expression_type(typer.typed_ast().get(typed).ty)
+            .unwrap(),
+        definitions.int
+    );
+    let use_tree = unit
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::Ident(identifier)
+                if typer.store().names.resolve(identifier.name.text()) == "stdin" =>
+            {
+                Some(tree)
+            }
+            _ => None,
+        })
+        .expect("source should reference the local stdin declaration");
+    let typed_use = typer
+        .source_typed_index()
+        .get(unit.source, use_tree)
+        .expect("the local reference should have a typed mapping");
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(local),
+        ..
+    } = typer.store().types.get(typer.typed_ast().get(typed_use).ty)
+    else {
+        panic!("the local reference should remain a term reference")
+    };
+    let local = *local;
+    assert_eq!(
+        typer.store().symbols.get(local).kind,
+        dotty_core::SymbolKind::Local
+    );
+    assert_eq!(typer.store().symbols.get(local).owner, Some(method));
+}
+
+#[test]
+fn failed_external_object_selection_rolls_back_and_can_be_retried() {
+    let stubs = TemporaryDirectory::new("scala-source-object-rollback");
+    write_scala_source_jdk_stubs(&stubs);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "def broken: scala.io.BufferedSource = scala.io.Source.missing\ndef valid: scala.io.BufferedSource = scala.io.Source.stdin",
+        SourceId::from_index(46),
+        &mut store,
+        &mut packages,
+    );
+    let root_package = packages.symbol::<&str>(&[]).unwrap();
+    let root_scope = packages.scope_of(root_package).unwrap();
+    let scala_package_name = Name::new(store.names.intern("scala"), Namespace::Term);
+    let log = Rc::new(RefCell::new(ResolutionLog::default()));
+    let resolver = RecordingResolver::new(
+        ClasspathSymbolResolver::new(
+            scala_library_classpath(&stubs),
+            definitions,
+            LoadingSession::with_packages(packages),
+        ),
+        Rc::clone(&log),
+    );
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        unit.source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    )
+    .with_resolver(Box::new(resolver));
+
+    let (broken_method, broken_rhs) = method_rhs(&unit, typer.store(), "broken");
+    let broken_context = typer.expression_context_for(broken_method).unwrap();
+    let checkpoint = typer.store().checkpoint();
+    let error = typer
+        .type_expression(broken_rhs, broken_context)
+        .expect_err("an absent external module member should fail typing");
+    assert!(matches!(error, TyperError::MemberNotFound { .. }));
+    assert_eq!(typer.store().checkpoint(), checkpoint);
+    assert!(
+        typer
+            .store()
+            .scopes
+            .get(root_scope)
+            .lookup_all(&scala_package_name)
+            .is_empty(),
+        "failed external module resolution must remove its package link"
+    );
+    let stale_module_ids = log
+        .borrow()
+        .members
+        .iter()
+        .filter_map(|(name, symbol)| (name == "Source").then_some(*symbol))
+        .collect::<Vec<_>>();
+    assert!(
+        !stale_module_ids.is_empty(),
+        "the failed attempt should load Source"
+    );
+    assert!(
+        stale_module_ids
+            .iter()
+            .all(|symbol| !typer.store().symbols.contains(*symbol)),
+        "failed attempt left live Source ids: {:?}",
+        stale_module_ids
+            .iter()
+            .map(|symbol| (symbol, typer.store().symbols.get(*symbol).clone()))
+            .collect::<Vec<_>>()
+    );
+
+    let (valid_method, valid_rhs) = method_rhs(&unit, typer.store(), "valid");
+    let valid_context = typer.expression_context_for(valid_method).unwrap();
+    let typed = typer.type_expression(valid_rhs, valid_context).unwrap();
+    assert_eq!(
+        typer.source_typed_index().get(unit.source, valid_rhs),
+        Some(typed),
+        "a successful retry should publish the typed source mapping"
+    );
+    let live_source = log
+        .borrow()
+        .members
+        .iter()
+        .rev()
+        .find_map(|(name, symbol)| {
+            (name == "Source" && typer.store().symbols.contains(*symbol)).then_some(*symbol)
+        })
+        .expect("retry should leave a live Scala Source object");
+    assert_eq!(
+        typer.store().symbols.get(live_source).kind,
+        dotty_core::SymbolKind::Object
     );
 }
 
