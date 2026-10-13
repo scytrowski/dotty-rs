@@ -2,9 +2,9 @@
 
 This profile freezes the request and binary evidence from the
 [Scala 3.9.0 classpath audit](typer-classpath-corpus-audit-3.9.0.md) for
-[#1046](https://github.com/scytrowski/dotty-rs/issues/1046). It is a research
-increment. It changes audit instrumentation and documentation only; resolver,
-loader, and Typer behavior are unchanged.
+[#1046](https://github.com/scytrowski/dotty-rs/issues/1046), captured before
+resolver implementation in #1049. The counts and TSVs below remain the frozen
+baseline; #1049 adds a separate runtime profile for current resolver outcomes.
 
 The oracle is pinned to Scala revision
 `777528f19a58e794c9954a42f433373472ec57f8`, Scala artifacts 3.9.0, and Temurin
@@ -126,7 +126,22 @@ and the exact `Foo$` type name. `SymbolLinks::companion` remains for a proven
 ordinary class/trait and object pair; the module class is not that link's
 endpoint.
 
-The bounded next implementation contract is therefore:
+## Resolver implementation in #1049
+
+The resolver now enters a package-term Object only when the exact type-side
+TASTy proves a top-level module. It preserves a companion Class in the type
+namespace and the Object in the term namespace, navigates stable `TermRef`
+prefixes to the canonical ModuleClass, and completes that class on demand.
+Field, method, and supported type declarations are returned from its
+`ClassInfo` scope. Missing and ambiguous member requests roll back completion
+performed by that request. `ModuleResolutionProfile` reports package-term
+success/unresolved/error counts, new versus reused Object identities,
+completed ModuleClass identities, non-class member successes, and stable
+package/module/member target keys. Collection is opt-in and disabled for ordinary
+resolver users. The typer audit enables it explicitly and prints these observations
+separately from the frozen baseline rows.
+
+The identity contract remains:
 
 - Enter `Foo` as a package-owned term `Object` only when TASTy identifies the
   exact top-level object definition.
@@ -150,25 +165,20 @@ from the `scala` package and the required `scala.package` object. Future
 resolution must keep those identities separate; this first object slice does
 not alias `_root_`, `scala`, or `scala.package`.
 
-## Loader boundary and next implementation slice
+## Remaining loader boundary
 
-`tasty_symbol::decode_identity` currently finds a `TYPEDEF` with the requested
-simple name, validates its template, and returns class flags and visibility.
-It does not expose whether that TASTy definition is an ordinary class or an
-object's module class. A lookup for `Foo$` usually finds only the module
-classfile, while the authoritative TASTy object and module-class definitions
-are in `Foo.tasty`. A bounded module-identity decoder must inspect those exact
-TASTy definition tags and owner relationships before creating either
-canonical symbol. A Java class whose binary name contains `$` remains a class
-unless its Scala TASTy proves the module identity.
+`tasty_symbol::decode_module_identity` inspects the exact TASTy definition
+tags and owner relationships in `Foo.tasty` before creating either canonical
+symbol. A lookup for `Foo$` or an ordinary Java class whose binary name
+contains `$` is not module evidence. Module completion also requires the
+corresponding TASTy resource; a classfile alone cannot populate ModuleClass
+members.
 
-The next issue can reuse #1019's canonical identity shell and transaction
-behavior, then #1021's in-place completion for the module-class symbol. It
-should keep the module value and module class as separate identities and
-complete only when an object member is actually requested. It does not need a
-new global completer engine. Keep nested objects, package objects, ambiguous
-TASTy ownership, malformed metadata, and general Java static members deferred
-until each has an explicit identity contract.
+The behavior above reuses #1019's canonical identity shell and transaction
+behavior together with #1021's in-place completion for ModuleClass. Nested
+objects, package-object member projection, ambiguous TASTy ownership,
+malformed metadata, and general Java static members remain deferred until each
+has an explicit identity contract.
 
 The raw module profile and both TSV artifacts are sorted by package, requested
 name, source path, and attempt text. They contain no `SymbolId`, arena

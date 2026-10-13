@@ -286,13 +286,13 @@ therefore remain canonical across classpath roots and frontend phases.
 Package paths are reused when already present in the shared `Packages`
 registry. A new path is entered only when its classpath reports a direct
 `.class` or `.tasty` resource in that package. Member lookup understands
-package and class `TypeRef`s, `Applied` class types, and class/package
-`ThisType`s. `MemberSpace::Explicit` chooses its declaring type as the
-lookup scope; names retain their type or term namespace, and a `Unique`
-request with multiple declarations returns `ResolutionError::Ambiguous`.
-The resolver returns declaration symbols only; inherited lookup, receiver
-adaptation, and overload ranking stay with the caller. Unsupported prefix
-forms return `None`.
+package and class `TypeRef`s, stable `TermRef`s to validated external Scala
+objects, `Applied` references, and class/package `ThisType`s. `MemberSpace::Explicit`
+chooses its declaring type as the lookup scope; names retain their type or
+term namespace, and a `Unique` request with multiple declarations returns
+`ResolutionError::Ambiguous`. The resolver returns declaration symbols only;
+inherited lookup, receiver adaptation, and overload ranking stay with the
+caller. Unsupported prefix forms return `None`.
 
 A unique type-name request whose prefix is a package `TypeRef` derives the
 binary class name from the canonical package owner chain and asks the loader
@@ -301,10 +301,24 @@ after it has `Complete(Type::ClassInfo)` and a valid declaration scope. The
 same `LoadingSession` shares its canonical package registry and positive
 class cache across package lookup, class dependencies, and later member
 lookup, so repeated requests return the same `SymbolId`. Package term
-requests are not rewritten to `Foo$`; a classpath
-resource for `Foo` alone does not establish a Scala module identity. A
-pre-existing incomplete source class also remains unresolved because this
-adapter has no safe in-place completion contract for it.
+requests materialize a canonical Object/ModuleClass pair only when the exact
+type-side TASTy proves a top-level object. A `.class` file for `Foo` or a
+resource named `Foo$` alone does not establish module identity. An object
+prefix completes its ModuleClass on demand and looks up declarations in that
+class's `ClassInfo`; a missing or ambiguous member rolls back completion
+performed by that request. Package term and member observations are available
+by opting in with `with_module_resolution_profile_collection()` and draining
+`take_module_resolution_profile()`. Collection is disabled by default to avoid
+adding audit work to ordinary member resolution. Sorted target keys use binary
+names and namespaces rather than allocated symbol IDs. The counters
+distinguish unresolved requests, malformed evidence, newly materialized and
+reused objects, module completion, and non-class member successes.
+
+The profile preserves a separate channel from the frozen #1046 source audit:
+the baseline remains 2,749 package-term observations across 80 request keys,
+including 2,196 observations across 46 keys with companion resource evidence.
+The resolver profile reports actual outcomes for later focused or corpus runs;
+it does not rewrite those frozen observations.
 
 The checked-in resolver regressions exercise a real JDK 26
 `java.time.DayOfWeek` classfile and a real Scala 3.9 `scala.io.Source` TASTy
@@ -484,7 +498,8 @@ Pre-existing complete prefixes remain complete on absent/ambiguous requests;
 repeated successful calls reuse member IDs without rereading class bytes.
 Package type requests also complete an existing owned external shell before
 returning its canonical class symbol (#1023). Unowned/source Missing classes,
-builtin aliases, and the package-term unresolved boundary retain their contracts.
+builtin aliases, and unresolved package terms without positive TASTy module
+evidence retain their contracts.
 
 `ClassLoader::load_class(name)` follows that shape:
 
