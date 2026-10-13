@@ -277,4 +277,40 @@ impl SourceTyper<'_> {
         }
         Ok(module_class)
     }
+
+    /// Returns the source-owned or resolver-validated ModuleClass for an
+    /// Object. External identities are accepted only through the resolver's
+    /// authoritative module cache; matching a `Foo$` name is validation of
+    /// that returned identity, never a way to discover one.
+    pub(in crate::typer) fn module_class_of_object(
+        &self,
+        object: SymbolId,
+    ) -> Result<SymbolId, TyperError> {
+        if let Ok(module_class) = self.source_module_class_of_object(object) {
+            return Ok(module_class);
+        }
+        let module_class = self
+            .resolver
+            .module_class_of_object(self.store, object)
+            .map_err(|error| TyperError::ObjectModuleClassResolution { object, error })?
+            .ok_or(TyperError::ObjectModuleClassUnavailable { object })?;
+        if !self.store.symbols.contains(object) || !self.store.symbols.contains(module_class) {
+            return Err(TyperError::ObjectModuleClassUnavailable { object });
+        }
+        let object_symbol = self.store.symbols.get(object);
+        let module_symbol = self.store.symbols.get(module_class);
+        let expected_module_name =
+            format!("{}$", self.store.names.resolve(object_symbol.name.text()));
+        if object_symbol.kind != SymbolKind::Object
+            || object_symbol.name.namespace() != dotty_core::Namespace::Term
+            || module_symbol.kind != SymbolKind::ModuleClass
+            || module_symbol.name.namespace() != dotty_core::Namespace::Type
+            || module_symbol.owner != object_symbol.owner
+            || object_symbol.owner.is_none()
+            || self.store.names.resolve(module_symbol.name.text()) != expected_module_name
+        {
+            return Err(TyperError::ObjectModuleClassUnavailable { object });
+        }
+        Ok(module_class)
+    }
 }

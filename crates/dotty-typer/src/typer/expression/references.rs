@@ -131,7 +131,7 @@ impl SourceTyper<'_> {
                     SymbolInfo::Complete(info)
                         if matches!(self.store.types.try_get(info), Some(Type::ByName { .. }))
                 );
-                matches!(
+                let stable_term = matches!(
                     declaration.kind,
                     SymbolKind::Parameter
                         | SymbolKind::Field
@@ -140,10 +140,13 @@ impl SourceTyper<'_> {
                         | SymbolKind::Package
                         | SymbolKind::Object
                 ) && !declaration.flags.contains(SymbolFlags::MUTABLE)
-                    && !by_name
-                    && (declaration.kind == SymbolKind::Package
-                        || declaration.kind != SymbolKind::Object
-                        || self.source_module_class_of_object(*symbol).is_ok())
+                    && !by_name;
+                if declaration.kind == SymbolKind::Object && stable_term {
+                    self.module_class_of_object(*symbol)?;
+                    true
+                } else {
+                    stable_term
+                }
             }
             _ => false,
         };
@@ -177,13 +180,17 @@ impl SourceTyper<'_> {
             | SymbolKind::Local
             | SymbolKind::Method => {}
             SymbolKind::Object => {
-                if self.source_module_class_of_object(symbol).is_err() {
-                    return Err(TyperError::ObjectTermReferenceDeferred {
-                        source: self.source,
-                        tree_index,
-                        symbol,
-                    });
-                }
+                self.module_class_of_object(symbol)
+                    .map_err(|error| match error {
+                        TyperError::ObjectModuleClassUnavailable { .. } => {
+                            TyperError::ObjectTermReferenceDeferred {
+                                source: self.source,
+                                tree_index,
+                                symbol,
+                            }
+                        }
+                        error => error,
+                    })?;
             }
             _ => {
                 return Err(TyperError::UnsupportedTermReference {

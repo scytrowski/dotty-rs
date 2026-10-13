@@ -911,6 +911,12 @@ pub enum TyperError {
     ObjectModuleClassUnavailable {
         object: SymbolId,
     },
+    /// The configured resolver rejected or could not validate an external
+    /// Object's module identity.
+    ObjectModuleClassResolution {
+        object: SymbolId,
+        error: ResolutionError,
+    },
     /// The resolved term symbol kind is outside the supported value subset.
     UnsupportedTermReference {
         source: SourceId,

@@ -630,6 +630,29 @@ impl<E: ClassPathEntry> RecordingResolver<E> {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for RecordingResolver<E> {
+    fn module_class_of_object(
+        &self,
+        store: &SemanticStore,
+        object: SymbolId,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner
+            .as_ref()
+            .unwrap()
+            .module_class_of_object(store, object)
+    }
+
+    fn complete_module_class(
+        &mut self,
+        store: &mut SemanticStore,
+        module_class: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        let result = self.inner().complete_module_class(store, module_class)?;
+        if result {
+            self.log.borrow_mut().completions.push(module_class);
+        }
+        Ok(result)
+    }
+
     fn complete_class(
         &mut self,
         store: &mut SemanticStore,
@@ -930,6 +953,91 @@ fn source_typer_resolves_a_member_inherited_from_a_real_scala_library_class() {
         typer.store().symbols.get(inherited_method).owner,
         Some(source),
         "the inherited method remains owned by its declaring parent"
+    );
+}
+
+#[test]
+fn source_typer_selects_a_method_through_a_validated_external_object() {
+    let stubs = TemporaryDirectory::new("scala-source-object-jdk-stubs");
+    write_required_jdk_stubs(stubs.path());
+    write_stub_class(
+        stubs.path(),
+        "java/io/Closeable",
+        Some("java/lang/Object"),
+        0x0601,
+    );
+    let scala_library = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/dotty-tasty/tests/fixtures/scala3-library");
+    let classpath = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(scala_library)),
+        Box::new(DirectoryClassPath::new(PathBuf::from(TASTY_SAMPLE))),
+        Box::new(DirectoryClassPath::new(stubs.path().to_path_buf())),
+    ]);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "def first: scala.io.BufferedSource = scala.io.Source.stdin; def again: scala.io.BufferedSource = scala.io.Source.stdin",
+        SourceId::from_index(12),
+        &mut store,
+        &mut packages,
+    );
+    let resolver = ClasspathSymbolResolver::new(
+        classpath,
+        definitions,
+        LoadingSession::with_packages(packages),
+    );
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        unit.source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    )
+    .with_resolver(Box::new(resolver));
+
+    let mut selected_field = None;
+    let mut repeated = None;
+    for method_name in ["first", "again"] {
+        let (method, rhs) = method_rhs(&unit, typer.store(), method_name);
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer
+            .type_expression(rhs, context)
+            .expect("a validated external Object should provide its ModuleClass members");
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(field),
+            ..
+        } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("external object field selection should retain a term reference")
+        };
+        let field = *field;
+        assert_eq!(
+            typer.store().symbols.get(field).kind,
+            dotty_core::SymbolKind::Method
+        );
+        let module_class = typer.store().symbols.get(field).owner.unwrap();
+        assert_eq!(
+            typer.store().symbols.get(module_class).kind,
+            dotty_core::SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            selected_field.get_or_insert(field),
+            &field,
+            "repeated source references must reuse the canonical field symbol"
+        );
+        if method_name == "again" {
+            repeated = Some((method, rhs, typed));
+        }
+    }
+    let (method, rhs, typed) = repeated.unwrap();
+    let context = typer.expression_context_for(method).unwrap();
+    assert_eq!(
+        typer.type_expression(rhs, context).unwrap(),
+        typed,
+        "successful repeated typing should preserve the published typed tree"
     );
 }
 

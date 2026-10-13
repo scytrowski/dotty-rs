@@ -321,7 +321,7 @@ impl SourceTyper<'_> {
                 }
                 let kind = self.store.symbols.get(symbol).kind;
                 if kind == SymbolKind::Object {
-                    let module_class = self.source_module_class_of_object(symbol)?;
+                    let module_class = self.module_class_of_object(symbol)?;
                     let module_prefix = if prefix == self.definitions.no_prefix {
                         self.type_symbol_prefix(module_class)
                     } else {

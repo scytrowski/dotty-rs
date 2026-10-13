@@ -974,6 +974,23 @@ impl SourceTyper<'_> {
         let Some(owner) = semantic.owner else {
             return scopes;
         };
+        let module_class = self.source_module_class_of_object(symbol).ok().or_else(|| {
+            self.resolver
+                .module_class_of_object(self.store, symbol)
+                .ok()
+                .flatten()
+        });
+        if let Some(module_class) = module_class {
+            if let SymbolInfo::Complete(info) = self.store.symbols.get(module_class).info
+                && let Some(Type::ClassInfo(info)) = self.store.types.try_get(info)
+                && info.class == module_class
+                && self.store.scopes.contains(info.declarations)
+                && self.store.scopes.get(info.declarations).owner == Some(module_class)
+            {
+                insert_scope(&mut scopes, info.declarations);
+            }
+            return scopes;
+        }
         let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(symbol)
         else {
             return scopes;

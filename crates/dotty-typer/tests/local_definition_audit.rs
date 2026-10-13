@@ -11802,6 +11802,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::OverloadedReferenceDeferred { .. } => "OverloadedReferenceDeferred",
         TyperError::ObjectTermReferenceDeferred { .. } => "ObjectTermReferenceDeferred",
         TyperError::ObjectModuleClassUnavailable { .. } => "ObjectModuleClassUnavailable",
+        TyperError::ObjectModuleClassResolution { .. } => "ObjectModuleClassResolution",
         TyperError::UnsupportedTermReference { .. } => "UnsupportedTermReference",
         TyperError::MemberNotFound { .. } => "MemberNotFound",
         TyperError::OverloadedSelectionDeferred { .. } => "OverloadedSelectionDeferred",
