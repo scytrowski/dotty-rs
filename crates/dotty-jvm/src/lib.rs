@@ -18,6 +18,7 @@ use dotty_core::symbols::{SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
 
 mod descriptor;
+mod identity;
 
 /// JVMS limit for a method's parameter slots, including `this` for instance
 /// methods.
@@ -55,6 +56,68 @@ pub struct JvmMethodDescriptor {
     parameters: Vec<JvmType>,
     /// Primitive result, or JVM `void` for Scala `Unit`.
     result: JvmReturnType,
+}
+
+/// A JVM class identity derived from the class symbol and its package owners.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmClassIdentity {
+    symbol: SymbolId,
+    internal_name: String,
+    access_flags: dotty_classfile::access_flags::ClassAccessFlags,
+}
+
+/// Why a class symbol is outside the supported top-level class subset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsupportedJvmClassKind {
+    Abstract,
+    Generic,
+    Enum,
+    Synthetic,
+    Case,
+    Sealed,
+}
+
+/// A symbol flag with no conservative mapping in this JVM metadata subset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsupportedJvmSymbolFlag {
+    Abstract,
+    Sealed,
+    Case,
+    Implicit,
+    Given,
+    Lazy,
+    Mutable,
+    Inline,
+    Transparent,
+    Opaque,
+    Extension,
+    Static,
+    Synthetic,
+    JavaDefined,
+    Erased,
+    Override,
+    Enum,
+    Exported,
+}
+
+/// The name component that failed the bounded Scala/JVM identifier check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmNameKind {
+    PackageSegment,
+    Class,
+    Method,
+}
+
+/// Why a class's semantic class information cannot establish a simple class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidJvmClassInfoKind {
+    MissingOrUnfilled,
+    Error,
+    NotClassInfo,
+    WrongClassSymbol,
+    MissingDeclarationScope,
+    WrongDeclarationScopeOwner,
+    InvalidDeclaration,
 }
 
 /// Borrowed input for validating one or more class plans.
@@ -197,6 +260,45 @@ pub enum JvmCodegenError {
         builtin: PrimitiveBuiltin,
         ty: TypeId,
     },
+    /// The symbol owner is not part of the supported package-only class path.
+    UnsupportedOwnerKind {
+        class: SymbolId,
+        owner: SymbolId,
+        found: SymbolKind,
+    },
+    /// A declared owner identity is not in the supplied semantic store.
+    UnknownOwner { class: SymbolId, owner: SymbolId },
+    /// The package owner chain is cyclic or has no valid unnamed root.
+    InvalidPackageOwnerChain { class: SymbolId, owner: SymbolId },
+    /// A class name or package segment is not a supported simple identifier.
+    InvalidJvmName {
+        symbol: SymbolId,
+        kind: JvmNameKind,
+        text: String,
+    },
+    /// The class form is outside the ordinary, concrete, non-generic subset.
+    UnsupportedJvmClass {
+        class: SymbolId,
+        kind: UnsupportedJvmClassKind,
+    },
+    /// A class or method has visibility other than public.
+    UnsupportedJvmVisibility {
+        symbol: SymbolId,
+        visibility: dotty_core::symbols::Visibility,
+    },
+    /// A symbol flag has no mapping in the bounded JVM metadata subset.
+    UnsupportedJvmSymbolFlag {
+        symbol: SymbolId,
+        flag: UnsupportedJvmSymbolFlag,
+    },
+    /// Completed class info is malformed or cannot establish a simple class.
+    InvalidJvmClassInfo {
+        class: SymbolId,
+        ty: Option<TypeId>,
+        kind: InvalidJvmClassInfoKind,
+    },
+    /// A class declaration scope contains a symbol ID outside the symbol table.
+    InvalidClassDeclaration { class: SymbolId, symbol: SymbolId },
 }
 
 /// Semantic role required by a compilation plan.
@@ -270,6 +372,31 @@ impl fmt::Display for JvmCodegenError {
 }
 
 impl Error for JvmCodegenError {}
+
+impl JvmClassIdentity {
+    /// Canonical class symbol retained by this projected identity.
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+
+    /// JVM internal class name, such as `Answer` or `example/Answer`.
+    pub fn internal_name(&self) -> &str {
+        &self.internal_name
+    }
+
+    /// Conservative class-file access flags for a public ordinary class.
+    pub const fn access_flags(&self) -> dotty_classfile::access_flags::ClassAccessFlags {
+        self.access_flags
+    }
+}
+
+impl JvmClassPlan {
+    /// Derives this class's JVM internal name from its canonical package-owner
+    /// chain and validates its public, concrete, non-generic class shape.
+    pub fn identity(&self, store: &SemanticStore) -> Result<JvmClassIdentity, JvmCodegenError> {
+        identity::class_identity(store, self.class)
+    }
+}
 
 impl JvmMethodPlan {
     /// Extracts this method's primitive-only JVM signature from canonical

@@ -5,14 +5,14 @@ use dotty_core::ids::{SymbolId, TreeId};
 use dotty_core::names::{Name, Namespace, TermName};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{
-    Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
+    Scope, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
 };
-use dotty_core::types::{Constant, MethodKind, MethodParam, MethodType, PolyType, Type};
+use dotty_core::types::{ClassInfo, Constant, MethodKind, MethodParam, MethodType, PolyType, Type};
 
 use crate::{
-    InvalidTypeReason, JvmClassPlan, JvmCodegenError, JvmCompilationUnit, JvmMethodPlan,
-    JvmReturnType, JvmType, JvmValueCategory, SymbolRole, UnsupportedJvmTypeKind,
-    UnsupportedMethodShapeKind,
+    InvalidJvmClassInfoKind, InvalidTypeReason, JvmClassPlan, JvmCodegenError, JvmCompilationUnit,
+    JvmMethodPlan, JvmNameKind, JvmReturnType, JvmType, JvmValueCategory, SymbolRole,
+    UnsupportedJvmClassKind, UnsupportedJvmTypeKind, UnsupportedMethodShapeKind,
 };
 
 struct Fixture {
@@ -483,6 +483,298 @@ impl SignatureFixture {
         self.plan
             .descriptor(&self.store, self.class, &self.definitions)
     }
+}
+
+struct ClassIdentityFixture {
+    store: SemanticStore,
+    class: SymbolId,
+    declarations: dotty_core::ScopeId,
+}
+
+impl ClassIdentityFixture {
+    fn new(package_segments: &[&str], class_name: &str) -> Self {
+        let mut store = SemanticStore::new();
+        let no_prefix = store.types.alloc(Type::NoPrefix);
+        let root_name = store.names.intern("");
+        let mut owner = store.symbols.alloc(Symbol {
+            name: Name::new(root_name, Namespace::Term),
+            owner: None,
+            kind: SymbolKind::Package,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        for segment in package_segments {
+            let name = store.names.intern(segment);
+            owner = store.symbols.alloc(Symbol {
+                name: Name::new(name, Namespace::Term),
+                owner: Some(owner),
+                kind: SymbolKind::Package,
+                flags: SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Missing,
+                origin: SymbolOrigin::Synthetic,
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            });
+        }
+
+        let name = store.names.intern(class_name);
+        let class = store.symbols.alloc(Symbol {
+            name: Name::new(name, Namespace::Type),
+            owner: Some(owner),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let declarations = store.scopes.alloc(Scope::new(Some(class)));
+        let class_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+            prefix: no_prefix,
+            class,
+            parents: Vec::new(),
+            declarations,
+            self_type: None,
+        }));
+        store
+            .symbols
+            .set_info(class, SymbolInfo::Complete(class_info));
+        Self {
+            store,
+            class,
+            declarations,
+        }
+    }
+
+    fn identity(&self) -> Result<crate::JvmClassIdentity, JvmCodegenError> {
+        JvmClassPlan {
+            class: self.class,
+            methods: Vec::new(),
+        }
+        .identity(&self.store)
+    }
+}
+
+fn alloc_symbol_named(
+    store: &mut SemanticStore,
+    name: &str,
+    namespace: Namespace,
+    owner: Option<SymbolId>,
+    kind: SymbolKind,
+    flags: SymbolFlags,
+) -> SymbolId {
+    let name = store.names.intern(name);
+    store.symbols.alloc(Symbol {
+        name: Name::new(name, namespace),
+        owner,
+        kind,
+        flags,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    })
+}
+
+#[test]
+fn derives_default_and_package_owned_class_internal_names() {
+    let default_package = ClassIdentityFixture::new(&[], "Answer");
+    let default_identity = default_package.identity().unwrap();
+    assert_eq!(default_identity.symbol(), default_package.class);
+    assert_eq!(default_identity.internal_name(), "Answer");
+    assert_eq!(default_identity.access_flags().0, 0x0021);
+
+    let packaged = ClassIdentityFixture::new(&["example", "api"], "Answer");
+    let package_identity = packaged.identity().unwrap();
+    assert_eq!(package_identity.internal_name(), "example/api/Answer");
+
+    let mut finalized = ClassIdentityFixture::new(&[], "FinalAnswer");
+    finalized.store.symbols.get_mut(finalized.class).flags = SymbolFlags::FINAL;
+    assert_eq!(finalized.identity().unwrap().access_flags().0, 0x0031);
+}
+
+#[test]
+fn class_identity_is_deterministic_after_unrelated_symbol_allocations() {
+    let mut ordinary = ClassIdentityFixture::new(&["example"], "Answer");
+    let expected = ordinary.identity().unwrap();
+    for index in 0..10 {
+        let name = format!("unused{index}");
+        alloc_symbol_named(
+            &mut ordinary.store,
+            &name,
+            Namespace::Term,
+            None,
+            SymbolKind::Value,
+            SymbolFlags::EMPTY,
+        );
+    }
+    assert_eq!(ordinary.identity().unwrap(), expected);
+}
+
+#[test]
+fn rejects_nested_and_invalid_package_owner_chains() {
+    let mut nested = ClassIdentityFixture::new(&[], "Outer");
+    let inner = alloc_symbol_named(
+        &mut nested.store,
+        "Inner",
+        Namespace::Type,
+        Some(nested.class),
+        SymbolKind::Class,
+        SymbolFlags::EMPTY,
+    );
+    let declarations = nested.store.scopes.alloc(Scope::new(Some(inner)));
+    let prefix = nested.store.types.alloc(Type::NoPrefix);
+    let class_info = nested.store.types.alloc(Type::ClassInfo(ClassInfo {
+        prefix,
+        class: inner,
+        parents: Vec::new(),
+        declarations,
+        self_type: None,
+    }));
+    nested
+        .store
+        .symbols
+        .set_info(inner, SymbolInfo::Complete(class_info));
+    assert_eq!(
+        JvmClassPlan {
+            class: inner,
+            methods: Vec::new(),
+        }
+        .identity(&nested.store),
+        Err(JvmCodegenError::UnsupportedOwnerKind {
+            class: inner,
+            owner: nested.class,
+            found: SymbolKind::Class,
+        })
+    );
+
+    let mut ownerless = ClassIdentityFixture::new(&[], "Ownerless");
+    ownerless.store.symbols.get_mut(ownerless.class).owner = None;
+    assert_eq!(
+        ownerless.identity(),
+        Err(JvmCodegenError::InvalidPackageOwnerChain {
+            class: ownerless.class,
+            owner: ownerless.class,
+        })
+    );
+}
+
+#[test]
+fn rejects_unsupported_class_shapes_and_generic_declarations() {
+    for (flags, expected) in [
+        (SymbolFlags::ABSTRACT, UnsupportedJvmClassKind::Abstract),
+        (SymbolFlags::ENUM, UnsupportedJvmClassKind::Enum),
+        (SymbolFlags::SYNTHETIC, UnsupportedJvmClassKind::Synthetic),
+        (SymbolFlags::CASE, UnsupportedJvmClassKind::Case),
+        (SymbolFlags::SEALED, UnsupportedJvmClassKind::Sealed),
+    ] {
+        let mut fixture = ClassIdentityFixture::new(&[], "Unsupported");
+        fixture.store.symbols.get_mut(fixture.class).flags = flags;
+        assert_eq!(
+            fixture.identity(),
+            Err(JvmCodegenError::UnsupportedJvmClass {
+                class: fixture.class,
+                kind: expected,
+            })
+        );
+    }
+
+    let mut generic = ClassIdentityFixture::new(&[], "Generic");
+    let parameter = alloc_symbol_named(
+        &mut generic.store,
+        "A",
+        Namespace::Type,
+        Some(generic.class),
+        SymbolKind::TypeParameter,
+        SymbolFlags::EMPTY,
+    );
+    let name = generic.store.symbols.get(parameter).name;
+    generic
+        .store
+        .scopes
+        .get_mut(generic.declarations)
+        .enter(name, parameter);
+    assert_eq!(
+        generic.identity(),
+        Err(JvmCodegenError::UnsupportedJvmClass {
+            class: generic.class,
+            kind: UnsupportedJvmClassKind::Generic,
+        })
+    );
+
+    let mut nonpublic = ClassIdentityFixture::new(&[], "Hidden");
+    nonpublic.store.symbols.get_mut(nonpublic.class).visibility = Visibility::Private;
+    assert_eq!(
+        nonpublic.identity(),
+        Err(JvmCodegenError::UnsupportedJvmVisibility {
+            symbol: nonpublic.class,
+            visibility: Visibility::Private,
+        })
+    );
+}
+
+#[test]
+fn rejects_invalid_class_and_package_segment_names() {
+    for invalid in ["", "bad/name", "bad.name", "bad;name", "+"] {
+        let mut fixture = ClassIdentityFixture::new(&[], "Valid");
+        let name = fixture.store.names.intern(invalid);
+        fixture.store.symbols.get_mut(fixture.class).name = Name::new(name, Namespace::Type);
+        assert_eq!(
+            fixture.identity(),
+            Err(JvmCodegenError::InvalidJvmName {
+                symbol: fixture.class,
+                kind: JvmNameKind::Class,
+                text: invalid.to_owned(),
+            })
+        );
+    }
+
+    let mut fixture = ClassIdentityFixture::new(&["bad.segment"], "Valid");
+    let invalid_package = fixture
+        .store
+        .symbols
+        .get(fixture.class)
+        .owner
+        .expect("class has package owner");
+    let bad_name = fixture.store.names.intern("bad.segment");
+    fixture.store.symbols.get_mut(invalid_package).name = Name::new(bad_name, Namespace::Term);
+    assert_eq!(
+        fixture.identity(),
+        Err(JvmCodegenError::InvalidJvmName {
+            symbol: invalid_package,
+            kind: JvmNameKind::PackageSegment,
+            text: "bad.segment".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn rejects_malformed_class_info_instead_of_guessing_class_shape() {
+    let mut fixture = ClassIdentityFixture::new(&[], "Broken");
+    let not_class_info = fixture.store.types.alloc(Type::NoPrefix);
+    fixture
+        .store
+        .symbols
+        .set_info(fixture.class, SymbolInfo::Complete(not_class_info));
+    assert_eq!(
+        fixture.identity(),
+        Err(JvmCodegenError::InvalidJvmClassInfo {
+            class: fixture.class,
+            ty: Some(not_class_info),
+            kind: InvalidJvmClassInfoKind::NotClassInfo,
+        })
+    );
 }
 
 #[test]
