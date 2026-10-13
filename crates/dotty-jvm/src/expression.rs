@@ -83,6 +83,15 @@ pub(super) fn lower_value_expression(
                     symbol: Some(parameter.symbol()),
                 });
             }
+            let parameter_symbol = store.symbols.get(parameter.symbol());
+            if parameter_symbol.kind != dotty_core::symbols::SymbolKind::Parameter
+                || parameter_symbol.owner != Some(method.symbol())
+            {
+                return Err(JvmCodegenError::InvalidParameterReference {
+                    tree: tree_id,
+                    symbol: Some(parameter.symbol()),
+                });
+            }
             let symbol_type = match store.symbols.info(parameter.symbol()) {
                 SymbolInfo::Complete(ty) => Some(*ty),
                 SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => None,
@@ -486,6 +495,43 @@ mod tests {
                 (JvmValueCategory::IntLike, expected)
             );
         }
+    }
+
+    #[test]
+    fn rejects_parameter_metadata_that_no_longer_matches_store_ownership() {
+        let mut fixture = Fixture::new(&[JvmType::Int]);
+        let parameter = fixture.parameters[0];
+        let reference_type = fixture.store.types.alloc(Type::TermRef {
+            prefix: fixture.definitions.no_prefix,
+            target: TermRefTarget::Symbol(parameter),
+        });
+        let tree = fixture.ident(reference_type);
+        let other_method = symbol(
+            &mut fixture.store,
+            SymbolKind::Method,
+            None,
+            fixture.definitions.int,
+        );
+        fixture.store.symbols.get_mut(parameter).owner = Some(other_method);
+
+        let mut code = CodeBuilder::new();
+        code.iconst(0).unwrap();
+        let before = code_bytes(&fixture, &code);
+        assert_eq!(
+            lower_value_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                tree,
+                &mut code,
+            ),
+            Err(JvmCodegenError::InvalidParameterReference {
+                tree,
+                symbol: Some(parameter),
+            })
+        );
+        assert_eq!(code_bytes(&fixture, &code), before);
     }
 
     #[test]
