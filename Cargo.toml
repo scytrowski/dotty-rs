@@ -15,6 +15,7 @@ members = [
     "crates/dotty-parser",
     "crates/dotty-namer",
     "crates/dotty-typer",
+    "crates/dotty-jvm",
     "tools/parser-smoke-dump",
     "tools/parser-corpus-report",
 ]
