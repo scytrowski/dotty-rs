@@ -8,6 +8,9 @@
 //! verification or optimization. The linear assembler and analyzer continue
 //! to represent one ordered straight-line block. [`code_sequence`] models
 //! labels and a small branch family and validates targets before assembly.
+//! [`control_flow`] builds a source-ordered graph from those symbolic
+//! sequences, retaining and marking unreachable blocks without assigning byte
+//! offsets.
 //! The low-level [`Instruction`] constant-pool operands below contain assigned
 //! [`ConstantPoolIndex`] values. [`CodeBuilder`] offers the owned class builder
 //! a symbolic alternative that interns names before assembling those typed
@@ -68,6 +71,7 @@ pub mod analysis;
 pub mod assembler;
 pub(crate) mod code_builder;
 pub mod code_sequence;
+pub mod control_flow;
 
 pub(crate) use analysis::analyze_validated;
 pub use analysis::{AnalysisError, CodeAnalysis, LinearCodeAnalyzer, ValueKind, analyze};
@@ -80,6 +84,7 @@ pub use code_sequence::{
     BranchCondition, BranchInstruction, CodeElement, CodeSequence, CodeSequenceError,
     CodeSequenceErrorKind, LabelId, ValidatedCodeSequence,
 };
+pub use control_flow::{BasicBlock, BasicBlockId, ControlFlowGraph, ControlFlowGraphError};
 
 use crate::constant_pool::ConstantPoolIndex;
 use std::fmt;
