@@ -259,6 +259,19 @@ pub fn assemble_labeled(
     assemble_labeled_validated(&validated, constant_pool)
 }
 
+/// Assembles a symbolic sequence against a constant pool whose complete
+/// layout was already validated. Sequence structure and instruction operands
+/// are still checked.
+pub(crate) fn assemble_labeled_pool_validated(
+    sequence: &CodeSequence,
+    constant_pool: &ConstantPool,
+) -> Result<AssembledCode, AssembleError> {
+    let validated = sequence
+        .validate()
+        .map_err(|error| AssembleError::InvalidCodeSequence(error.kind()))?;
+    assemble_labeled_validated(&validated, constant_pool)
+}
+
 fn assemble_labeled_validated(
     sequence: &ValidatedCodeSequence,
     constant_pool: &ConstantPool,

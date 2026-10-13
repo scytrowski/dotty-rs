@@ -34,12 +34,16 @@ use crate::access_flags::{
     ACC_SYNCHRONIZED, ACC_SYNTHETIC, ACC_TRANSIENT, ACC_VARARGS, ACC_VOLATILE, ClassAccessFlags,
     FieldAccessFlags, MethodAccessFlags,
 };
-use crate::attribute::{Attribute, CodeAttribute};
+use crate::attribute::{Attribute, CodeAttribute, RawAttribute};
 use crate::bytecode::code_builder::{
     self as code_builder, CodeBuilder, CodeBuilderError, FieldOperation, MethodOperation,
-    SymbolicInstruction,
+    SymbolicBranch, SymbolicCodeElement, SymbolicInstruction,
 };
-use crate::bytecode::{AnalysisError, AssembleError, Instruction};
+use crate::bytecode::{
+    AnalysisError, AssembleError, BranchInstruction, CfgCodeAnalyzer, CodeSequence,
+    ControlFlowGraph, Instruction, StackMapFrameGenerationError, StackMapTable,
+    generate_stack_map_frames,
+};
 use crate::class_file::{ClassFile, ClassFileVersion};
 use crate::constant_pool::ConstantPoolIndex;
 use crate::constant_pool_builder::{ConstantPoolBuildError, ConstantPoolBuilder};
@@ -97,6 +101,8 @@ pub enum ClassFileBuildError {
     InvalidDescriptor(DescriptorError),
     /// A method descriptor exceeds the JVMS 255 parameter-slot limit.
     TooManyParameterSlots,
+    /// Automatic branched-code generation requires class-file major version 65 or newer.
+    BranchingRequiresVersion { major: u16 },
     /// A generic signature failed the existing signature parser.
     InvalidSignature(SignatureError),
     /// Class, field, or method flags contain a combination forbidden by the
@@ -134,6 +140,10 @@ pub enum ClassFileBuildError {
     Assemble(AssembleError),
     /// Bytecode analysis rejected a generated instruction sequence.
     Analysis(AnalysisError),
+    /// Control-flow graph construction rejected a generated branched method.
+    ControlFlow(crate::bytecode::ControlFlowGraphError),
+    /// Stack-map frame generation rejected a generated branched method.
+    StackMapFrames(StackMapFrameGenerationError),
     /// Internal generated-code staging did not match its method declaration.
     InvalidCodePlan,
     /// Constant-pool construction failed.
@@ -159,6 +169,10 @@ impl fmt::Display for ClassFileBuildError {
             Self::TooManyParameterSlots => {
                 formatter.write_str("method descriptor exceeds 255 parameter slots")
             }
+            Self::BranchingRequiresVersion { major } => write!(
+                formatter,
+                "automatic branched code generation requires class-file major version 65 or newer (found {major})"
+            ),
             Self::InvalidSignature(error) => write!(formatter, "invalid JVM signature: {error}"),
             Self::InvalidAccessFlags => {
                 formatter.write_str("invalid combination of JVM access flags")
@@ -185,6 +199,8 @@ impl fmt::Display for ClassFileBuildError {
             Self::CodeBuilder(error) => error.fmt(formatter),
             Self::Assemble(error) => error.fmt(formatter),
             Self::Analysis(error) => error.fmt(formatter),
+            Self::ControlFlow(error) => error.fmt(formatter),
+            Self::StackMapFrames(error) => error.fmt(formatter),
             Self::InvalidCodePlan => formatter.write_str("invalid generated method code plan"),
             Self::ConstantPool(error) => error.fmt(formatter),
             Self::Encode(error) => error.fmt(formatter),
@@ -229,11 +245,23 @@ enum OwnedMethodCode {
     Built(CodeBuilder),
 }
 
+enum ResolvedMethodCode {
+    Linear(Vec<Instruction>),
+    Branched(CodeSequence),
+}
+
 #[derive(Debug, Clone)]
 struct OwnedCode {
     max_stack: u16,
     max_locals: u16,
     bytes: Vec<u8>,
+    attributes: Vec<OwnedCodeAttribute>,
+}
+
+#[derive(Debug, Clone)]
+struct OwnedCodeAttribute {
+    name_index: ConstantPoolIndex,
+    payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -255,10 +283,13 @@ enum OwnedClassAttribute {
 /// limits and also supports typed methods through [`CodeBuilder`]. Typed code
 /// resolves symbolic references, assembles instructions, and computes stack
 /// and local bounds before the constant pool is frozen. The analysis checks
-/// supported instruction categories and straight-line bounds; it is not full
-/// JVM verification and does not generate stack-map frames. A typed-code
-/// closure commits its method only after the closure succeeds; failures during
-/// final encoding return an error and produce no class bytes.
+/// supported instruction categories and straight-line bounds. Branched code
+/// uses the integer-only CFG analyzer and emits `StackMapTable` frames for the
+/// supported class-file version 65+ subset and rejects unreachable blocks
+/// whose verifier state cannot be inferred; neither path is full JVM
+/// verification. A typed-code closure commits its method only after the
+/// closure and label validation succeed; failures during final encoding return
+/// an error and produce no class bytes.
 pub struct ClassFileBuilder {
     class_name: String,
     version: ClassFileVersion,
@@ -519,6 +550,14 @@ impl ClassFileBuilder {
 
         let mut code_builder = CodeBuilder::new();
         code(&mut code_builder).map_err(ClassFileBuildError::CodeBuilder)?;
+        code_builder
+            .validate()
+            .map_err(ClassFileBuildError::CodeBuilder)?;
+        if code_builder.has_branches() && self.version.major < 65 {
+            return Err(ClassFileBuildError::BranchingRequiresVersion {
+                major: self.version.major,
+            });
+        }
         self.methods.push(OwnedMethod {
             access_flags,
             name,
@@ -627,6 +666,17 @@ impl ClassFileBuilder {
         if self.methods.iter().any(|method| method.code.is_some()) {
             pool_builder.utf8("Code")?;
         }
+        let stack_map_table_name = self
+            .methods
+            .iter()
+            .any(|method| {
+                matches!(
+                    &method.code,
+                    Some(OwnedMethodCode::Built(code)) if code.has_branches()
+                )
+            })
+            .then(|| pool_builder.utf8("StackMapTable"))
+            .transpose()?;
         if self
             .attributes
             .iter()
@@ -664,7 +714,10 @@ impl ClassFileBuilder {
             .zip(resolved_code)
             .map(|(method, resolved)| match (&method.code, resolved) {
                 (Some(OwnedMethodCode::Raw(code)), None) => Ok(Some(code.clone())),
-                (Some(OwnedMethodCode::Built(_)), Some(instructions)) => {
+                (
+                    Some(OwnedMethodCode::Built(_)),
+                    Some(ResolvedMethodCode::Linear(instructions)),
+                ) => {
                     let bytes = crate::bytecode::assemble_validated(&instructions, &constant_pool)
                         .map_err(ClassFileBuildError::Assemble)?;
                     let analysis = crate::bytecode::analyze_validated(
@@ -678,6 +731,50 @@ impl ClassFileBuilder {
                         max_stack: analysis.max_stack,
                         max_locals: analysis.max_locals,
                         bytes,
+                        attributes: Vec::new(),
+                    }))
+                }
+                (Some(OwnedMethodCode::Built(_)), Some(ResolvedMethodCode::Branched(sequence))) => {
+                    let name_index =
+                        stack_map_table_name.ok_or(ClassFileBuildError::InvalidCodePlan)?;
+                    let graph = ControlFlowGraph::build(&sequence)
+                        .map_err(ClassFileBuildError::ControlFlow)?;
+                    CfgCodeAnalyzer::validate_all_instructions(&graph)
+                        .map_err(ClassFileBuildError::Analysis)?;
+                    let flow = CfgCodeAnalyzer::analyze_validated(
+                        &graph,
+                        &method.descriptor,
+                        method.access_flags.is_static(),
+                        &constant_pool,
+                    )
+                    .map_err(ClassFileBuildError::Analysis)?;
+                    for (block, entry) in graph.blocks().iter().zip(flow.block_entries()) {
+                        if entry.is_none() {
+                            return Err(ClassFileBuildError::Analysis(
+                                AnalysisError::UnreachableBlock { block: block.id },
+                            ));
+                        }
+                    }
+                    let assembled = crate::bytecode::assembler::assemble_labeled_pool_validated(
+                        &sequence,
+                        &constant_pool,
+                    )
+                    .map_err(ClassFileBuildError::Assemble)?;
+                    let generated = generate_stack_map_frames(&flow, &graph, &assembled)
+                        .map_err(ClassFileBuildError::StackMapFrames)?;
+                    let payload = StackMapTable {
+                        frames: generated.frames,
+                    }
+                    .encode_payload_with_layout(&constant_pool, &assembled.bytes, &assembled.layout)
+                    .map_err(ClassFileBuildError::Encode)?;
+                    Ok(Some(OwnedCode {
+                        max_stack: generated.code_analysis.max_stack,
+                        max_locals: generated.code_analysis.max_locals,
+                        bytes: assembled.bytes,
+                        attributes: vec![OwnedCodeAttribute {
+                            name_index,
+                            payload,
+                        }],
                     }))
                 }
                 (None, None) => Ok(None),
@@ -706,7 +803,10 @@ impl ClassFileBuilder {
             .zip(methods)
             .zip(finalized_code.iter())
             .map(|((method, indices), code)| {
-                let mut attributes = Vec::with_capacity(usize::from(code.is_some()) + 1);
+                let mut attributes = Vec::with_capacity(
+                    code.as_ref().map_or(1, |code| code.attributes.len() + 1)
+                        + usize::from(code.is_some()),
+                );
                 if let Some(signature) = indices.signature {
                     attributes.push(Attribute::Signature(signature));
                 }
@@ -716,7 +816,16 @@ impl ClassFileBuilder {
                         max_locals: code.max_locals,
                         code: &code.bytes,
                         exception_table: vec![],
-                        attributes: vec![],
+                        attributes: code
+                            .attributes
+                            .iter()
+                            .map(|attribute| {
+                                Attribute::Other(RawAttribute {
+                                    name_index: attribute.name_index,
+                                    bytes: &attribute.payload,
+                                })
+                            })
+                            .collect(),
                     }));
                 }
                 MethodInfo {
@@ -746,82 +855,148 @@ fn resolve_code(
     code: &CodeBuilder,
     pool: &mut ConstantPoolBuilder,
     major_version: u16,
-) -> Result<Vec<Instruction>, ClassFileBuildError> {
-    code.instructions
-        .iter()
-        .map(|instruction| match instruction {
-            SymbolicInstruction::Typed(instruction) => Ok(*instruction),
-            SymbolicInstruction::Integer(value) => {
-                let index = pool.integer(*value)?;
-                code_builder::integer_load(index).map_err(ClassFileBuildError::CodeBuilder)
-            }
-            SymbolicInstruction::Long(value) => {
-                let index = pool.long(*value)?;
-                code_builder::long_load(index).map_err(ClassFileBuildError::CodeBuilder)
-            }
-            SymbolicInstruction::New(owner) => {
-                validate_internal_name(owner)?;
-                let index = pool.class(owner)?;
-                let reference = code_builder::typed_class_reference(index)
-                    .map_err(ClassFileBuildError::CodeBuilder)?;
-                Ok(Instruction::New(reference))
-            }
-            SymbolicInstruction::Field {
-                operation,
-                owner,
-                name,
-                descriptor,
-            } => {
-                validate_internal_name(owner)?;
-                validate_member_name(name, false)?;
-                validate_field_descriptor(descriptor)?;
-                let index = pool.field_ref(owner, name, descriptor)?;
-                let reference = code_builder::typed_field_reference(index)
-                    .map_err(ClassFileBuildError::CodeBuilder)?;
-                Ok(match operation {
-                    FieldOperation::Get => Instruction::GetField(reference),
-                    FieldOperation::Put => Instruction::PutField(reference),
-                    FieldOperation::GetStatic => Instruction::GetStatic(reference),
-                    FieldOperation::PutStatic => Instruction::PutStatic(reference),
-                })
-            }
-            SymbolicInstruction::Method {
-                operation,
-                owner,
-                name,
-                descriptor,
-            } => {
-                validate_internal_name(owner)?;
-                validate_member_name(name, true)?;
-                let has_receiver = !matches!(
-                    operation,
-                    MethodOperation::Static | MethodOperation::StaticInterface
-                );
-                validate_method_descriptor(descriptor, has_receiver)?;
-                if matches!(
-                    operation,
-                    MethodOperation::StaticInterface | MethodOperation::SpecialInterface
-                ) && major_version < 52
-                {
-                    return Err(
-                        ClassFileBuildError::InterfaceMethodReferenceRequiresVersion {
-                            major: major_version,
-                        },
-                    );
+) -> Result<ResolvedMethodCode, ClassFileBuildError> {
+    if code.has_branches() {
+        let mut sequence = CodeSequence::new();
+        let mut labels = Vec::with_capacity(code.label_count());
+        for _ in 0..code.label_count() {
+            labels.push(
+                sequence
+                    .new_label()
+                    .map_err(|_| ClassFileBuildError::InvalidCodePlan)?,
+            );
+        }
+        for element in &code.elements {
+            match element {
+                SymbolicCodeElement::Instruction(instruction) => {
+                    sequence.instruction(resolve_instruction(instruction, pool, major_version)?);
                 }
-                let index = match operation {
-                    MethodOperation::StaticInterface | MethodOperation::SpecialInterface => {
-                        pool.interface_method_ref(owner, name, descriptor)?
-                    }
-                    MethodOperation::Static
-                    | MethodOperation::Virtual
-                    | MethodOperation::Special => pool.method_ref(owner, name, descriptor)?,
-                };
-                code_builder::typed_method_reference(*operation, index)
-                    .map_err(ClassFileBuildError::CodeBuilder)
+                SymbolicCodeElement::Label(label) => {
+                    let index = code_builder::CodeBuilder::label_index(label);
+                    let label = labels
+                        .get(index)
+                        .cloned()
+                        .ok_or(ClassFileBuildError::InvalidCodePlan)?;
+                    sequence
+                        .bind(label)
+                        .map_err(|_| ClassFileBuildError::InvalidCodePlan)?;
+                }
+                SymbolicCodeElement::Branch { operation, target } => {
+                    let index = code_builder::CodeBuilder::label_index(target);
+                    let target = labels
+                        .get(index)
+                        .cloned()
+                        .ok_or(ClassFileBuildError::InvalidCodePlan)?;
+                    sequence.branch(match operation {
+                        SymbolicBranch::Goto => BranchInstruction::Goto(target),
+                        SymbolicBranch::GotoWide => BranchInstruction::GotoWide(target),
+                        SymbolicBranch::IfEq => BranchInstruction::IfEq(target),
+                        SymbolicBranch::IfNe => BranchInstruction::IfNe(target),
+                        SymbolicBranch::IfICmpEq => BranchInstruction::IfICmpEq(target),
+                        SymbolicBranch::IfICmpNe => BranchInstruction::IfICmpNe(target),
+                        SymbolicBranch::IfICmpLt => BranchInstruction::IfICmpLt(target),
+                        SymbolicBranch::IfICmpGe => BranchInstruction::IfICmpGe(target),
+                        SymbolicBranch::IfICmpGt => BranchInstruction::IfICmpGt(target),
+                        SymbolicBranch::IfICmpLe => BranchInstruction::IfICmpLe(target),
+                    });
+                }
             }
-        })
-        .collect()
+        }
+        return Ok(ResolvedMethodCode::Branched(sequence));
+    }
+
+    let mut instructions = Vec::new();
+    for element in &code.elements {
+        match element {
+            SymbolicCodeElement::Instruction(instruction) => {
+                instructions.push(resolve_instruction(instruction, pool, major_version)?);
+            }
+            SymbolicCodeElement::Label(_) => {}
+            SymbolicCodeElement::Branch { .. } => {
+                return Err(ClassFileBuildError::InvalidCodePlan);
+            }
+        }
+    }
+    Ok(ResolvedMethodCode::Linear(instructions))
+}
+
+fn resolve_instruction(
+    instruction: &SymbolicInstruction,
+    pool: &mut ConstantPoolBuilder,
+    major_version: u16,
+) -> Result<Instruction, ClassFileBuildError> {
+    match instruction {
+        SymbolicInstruction::Typed(instruction) => Ok(*instruction),
+        SymbolicInstruction::Integer(value) => {
+            let index = pool.integer(*value)?;
+            code_builder::integer_load(index).map_err(ClassFileBuildError::CodeBuilder)
+        }
+        SymbolicInstruction::Long(value) => {
+            let index = pool.long(*value)?;
+            code_builder::long_load(index).map_err(ClassFileBuildError::CodeBuilder)
+        }
+        SymbolicInstruction::New(owner) => {
+            validate_internal_name(owner)?;
+            let index = pool.class(owner)?;
+            let reference = code_builder::typed_class_reference(index)
+                .map_err(ClassFileBuildError::CodeBuilder)?;
+            Ok(Instruction::New(reference))
+        }
+        SymbolicInstruction::Field {
+            operation,
+            owner,
+            name,
+            descriptor,
+        } => {
+            validate_internal_name(owner)?;
+            validate_member_name(name, false)?;
+            validate_field_descriptor(descriptor)?;
+            let index = pool.field_ref(owner, name, descriptor)?;
+            let reference = code_builder::typed_field_reference(index)
+                .map_err(ClassFileBuildError::CodeBuilder)?;
+            Ok(match operation {
+                FieldOperation::Get => Instruction::GetField(reference),
+                FieldOperation::Put => Instruction::PutField(reference),
+                FieldOperation::GetStatic => Instruction::GetStatic(reference),
+                FieldOperation::PutStatic => Instruction::PutStatic(reference),
+            })
+        }
+        SymbolicInstruction::Method {
+            operation,
+            owner,
+            name,
+            descriptor,
+        } => {
+            validate_internal_name(owner)?;
+            validate_member_name(name, true)?;
+            let has_receiver = !matches!(
+                operation,
+                MethodOperation::Static | MethodOperation::StaticInterface
+            );
+            validate_method_descriptor(descriptor, has_receiver)?;
+            if matches!(
+                operation,
+                MethodOperation::StaticInterface | MethodOperation::SpecialInterface
+            ) && major_version < 52
+            {
+                return Err(
+                    ClassFileBuildError::InterfaceMethodReferenceRequiresVersion {
+                        major: major_version,
+                    },
+                );
+            }
+            let index = match operation {
+                MethodOperation::StaticInterface | MethodOperation::SpecialInterface => {
+                    pool.interface_method_ref(owner, name, descriptor)?
+                }
+                MethodOperation::Static | MethodOperation::Virtual | MethodOperation::Special => {
+                    pool.method_ref(owner, name, descriptor)?
+                }
+            };
+            code_builder::typed_method_reference(*operation, index)
+                .map_err(ClassFileBuildError::CodeBuilder)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -907,6 +1082,7 @@ impl MethodBuilder<'_> {
             max_stack,
             max_locals,
             bytes,
+            attributes: Vec::new(),
         }));
         Ok(self)
     }

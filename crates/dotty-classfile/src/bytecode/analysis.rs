@@ -224,6 +224,12 @@ pub enum AnalysisError {
         /// Stack value count from the incoming predecessor.
         incoming_values: usize,
     },
+    /// Automatic frame generation cannot emit a frame for an unreachable
+    /// block because its verifier state is unknown.
+    UnreachableBlock {
+        /// Block without an inferred entry state.
+        block: BasicBlockId,
+    },
     /// A defensive fixed-point work limit was exceeded.
     FlowAnalysisLimitExceeded {
         /// Number of blocks processed before the limit was reached.
@@ -388,6 +394,11 @@ impl fmt::Display for AnalysisError {
             } => write!(
                 formatter,
                 "block {} merges operand stacks with {expected_values} and {incoming_values} values",
+                block.index()
+            ),
+            Self::UnreachableBlock { block } => write!(
+                formatter,
+                "automatic stack-map generation does not support unreachable block {}",
                 block.index()
             ),
             Self::FlowAnalysisLimitExceeded { steps, limit } => write!(
@@ -1222,6 +1233,27 @@ impl FlowAnalysis {
 pub struct CfgCodeAnalyzer;
 
 impl CfgCodeAnalyzer {
+    pub(crate) fn validate_all_instructions(graph: &ControlFlowGraph) -> Result<(), AnalysisError> {
+        for block in graph.blocks() {
+            for (offset, element) in block.instructions.iter().enumerate() {
+                let instruction_index = block.instruction_range.start + offset;
+                match element {
+                    CodeElement::Instruction(instruction) => {
+                        validate_flow_instruction(instruction_index, *instruction)?;
+                    }
+                    CodeElement::Branch(_) => {}
+                    CodeElement::Label(_) => {
+                        return Err(AnalysisError::UnsupportedFlowInstruction {
+                            instruction: instruction_index,
+                            kind: UnsupportedFlowInstructionKind::Operation,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Analyzes reachable instructions in a control-flow graph.
     ///
     /// Int-like parameters initialize integer locals. A receiver in an
@@ -1247,6 +1279,18 @@ impl CfgCodeAnalyzer {
         constant_pool
             .validate_for_encoding()
             .map_err(AnalysisError::InvalidConstantPool)?;
+        Self::analyze_validated(graph, method_descriptor, is_static, constant_pool)
+    }
+
+    /// Analyzes against a constant pool whose complete layout was already
+    /// validated. Method descriptors and instruction operands are still
+    /// checked.
+    pub(crate) fn analyze_validated(
+        graph: &ControlFlowGraph,
+        method_descriptor: &str,
+        is_static: bool,
+        constant_pool: &ConstantPool,
+    ) -> Result<FlowAnalysis, AnalysisError> {
         let descriptor = MethodDescriptor::parse(method_descriptor)
             .map_err(AnalysisError::InvalidMethodDescriptor)?;
         check_parameter_slots(&descriptor, !is_static, None)?;

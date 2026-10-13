@@ -21,6 +21,29 @@ fn utf8<'a>(
     class_file.constant_pool.utf8(index).unwrap()
 }
 
+fn code_attribute<'a, 'b>(
+    method: &'a dotty_classfile::classfile::MethodInfo<'b>,
+) -> &'a dotty_classfile::classfile::CodeAttribute<'b> {
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!(
+            "expected exactly one Code attribute, got {:?}",
+            method.attributes
+        );
+    };
+    code
+}
+
+fn method_named<'a, 'b>(
+    class_file: &'a ClassFile<'b>,
+    name: &str,
+) -> &'a dotty_classfile::classfile::MethodInfo<'b> {
+    class_file
+        .methods
+        .iter()
+        .find(|method| utf8(class_file, method.name_index) == name)
+        .unwrap_or_else(|| panic!("missing method {name}"))
+}
+
 #[test]
 fn builds_and_roundtrips_owned_class_metadata_and_raw_code() {
     let mut builder = ClassFileBuilder::new(
@@ -263,6 +286,440 @@ fn builds_static_arithmetic_method_from_typed_instructions() {
                 && code.max_locals == 2
                 && code.code == [0x1a, 0x1b, 0x60, 0xac]
     ));
+}
+
+#[test]
+fn builds_branched_integer_methods_with_one_stack_map_table_each() {
+    let mut builder = ClassFileBuilder::new(
+        "example/Branched",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_static_method("max", "(II)I", |code| {
+            let left = code.new_label()?;
+            code.iload(0)?;
+            code.iload(1)?;
+            code.if_icmpge(left.clone())?;
+            code.iload(1)?;
+            code.ireturn()?;
+            code.mark(left)?;
+            code.iload(0)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("sumTo", "(I)I", |code| {
+            let loop_head = code.new_label()?;
+            let done = code.new_label()?;
+            code.iconst(0)?;
+            code.istore(1)?;
+            code.iconst(1)?;
+            code.istore(2)?;
+            code.mark(loop_head.clone())?;
+            code.iload(2)?;
+            code.iload(0)?;
+            code.if_icmpgt(done.clone())?;
+            code.iload(1)?;
+            code.iload(2)?;
+            code.iadd()?;
+            code.istore(1)?;
+            code.iload(2)?;
+            code.iconst(1)?;
+            code.iadd()?;
+            code.istore(2)?;
+            code.goto(loop_head)?;
+            code.mark(done)?;
+            code.iload(1)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    assert_eq!(class_file.methods.len(), 2);
+    let max = code_attribute(method_named(&class_file, "max"));
+    assert_eq!((max.max_stack, max.max_locals), (2, 2));
+    assert_eq!(
+        max.code,
+        [0x1a, 0x1b, 0xa2, 0x00, 0x05, 0x1b, 0xac, 0x1a, 0xac]
+    );
+    let [Attribute::Other(max_stack_map)] = max.attributes.as_slice() else {
+        panic!("branched method should contain exactly one StackMapTable");
+    };
+    assert_eq!(utf8(&class_file, max_stack_map.name_index), "StackMapTable");
+    assert_eq!(
+        max_stack_map.bytes,
+        [
+            0x00, 0x01, 0xff, 0x00, 0x07, 0x00, 0x02, 0x01, 0x01, 0x00, 0x00
+        ]
+    );
+
+    let sum_to = code_attribute(method_named(&class_file, "sumTo"));
+    assert_eq!((sum_to.max_stack, sum_to.max_locals), (2, 3));
+    assert_eq!(sum_to.code.len(), 22);
+    assert_eq!(
+        &sum_to.code[..9],
+        &[0x03, 0x3c, 0x04, 0x3d, 0x1c, 0x1a, 0xa3, 0x00, 0x0e]
+    );
+    assert_eq!(&sum_to.code[17..], &[0xa7, 0xff, 0xf3, 0x1b, 0xac]);
+    let [Attribute::Other(sum_to_stack_map)] = sum_to.attributes.as_slice() else {
+        panic!("branched loop should contain exactly one StackMapTable");
+    };
+    assert_eq!(
+        utf8(&class_file, sum_to_stack_map.name_index),
+        "StackMapTable"
+    );
+    assert_eq!(
+        sum_to_stack_map.bytes,
+        [
+            0x00, 0x02, 0xff, 0x00, 0x04, 0x00, 0x03, 0x01, 0x01, 0x01, 0x00, 0x00, 0xff, 0x00,
+            0x0f, 0x00, 0x03, 0x01, 0x01, 0x01, 0x00, 0x00,
+        ]
+    );
+}
+
+#[test]
+fn rejects_unreachable_blocks_before_automatic_stack_map_emission() {
+    let mut builder = ClassFileBuilder::new(
+        "example/UnreachableIntegerBlock",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_static_method("branch", "()I", |code| {
+            let target = code.new_label()?;
+            code.goto(target.clone())?;
+            code.iconst(0)?;
+            code.ireturn()?;
+            code.mark(target)?;
+            code.iconst(1)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(matches!(
+        builder.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::UnreachableBlock { block }
+        )) if block.index() == 1
+    ));
+}
+
+#[test]
+fn rejects_foreign_unbound_duplicate_and_old_version_branch_labels() {
+    let mut foreign_builder = dotty_classfile::classfile::CodeBuilder::new();
+    let foreign = foreign_builder.new_label().unwrap();
+    let mut cloned_source = dotty_classfile::classfile::CodeBuilder::new();
+    let cloned_source_label = cloned_source.new_label().unwrap();
+    let mut cloned_builder = cloned_source.clone();
+    assert_eq!(
+        cloned_builder.goto(cloned_source_label).err(),
+        Some(CodeBuilderError::ForeignLabel { label: 0 })
+    );
+    let mut builder = ClassFileBuilder::new(
+        "example/BranchErrors",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        builder
+            .add_static_method("foreign", "()V", |code| {
+                code.goto(foreign.clone())?;
+                Ok(())
+            })
+            .err(),
+        Some(ClassFileBuildError::CodeBuilder(
+            CodeBuilderError::ForeignLabel { label: 0 }
+        ))
+    );
+    assert_eq!(
+        builder
+            .add_static_method("unbound", "()V", |code| {
+                let label = code.new_label()?;
+                code.goto(label)?;
+                Ok(())
+            })
+            .err(),
+        Some(ClassFileBuildError::CodeBuilder(
+            CodeBuilderError::UnboundLabel { label: 0 }
+        ))
+    );
+    assert_eq!(
+        builder
+            .add_static_method("duplicate", "()V", |code| {
+                let label = code.new_label()?;
+                code.mark(label.clone())?;
+                code.mark(label)?;
+                Ok(())
+            })
+            .err(),
+        Some(ClassFileBuildError::CodeBuilder(
+            CodeBuilderError::DuplicateLabel { label: 0 }
+        ))
+    );
+    // Failed closures do not publish method declarations.
+    builder
+        .add_static_method("unbound", "()V", |code| {
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let mut old_version = ClassFileBuilder::new(
+        "example/OldBranchVersion",
+        ClassFileVersion {
+            major: 61,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        old_version
+            .add_static_method("branch", "()V", |code| {
+                let label = code.new_label()?;
+                code.goto(label.clone())?;
+                code.mark(label)?;
+                code.return_void()?;
+                Ok(())
+            })
+            .err(),
+        Some(ClassFileBuildError::BranchingRequiresVersion { major: 61 })
+    );
+}
+
+#[test]
+fn branched_layout_uses_wide_locals_and_ldc_w_before_frame_targets() {
+    let mut wide_builder = ClassFileBuilder::new(
+        "example/WideBranch",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    wide_builder
+        .add_static_method("wide", "()V", |code| {
+            let target = code.new_label()?;
+            code.iconst(1)?;
+            code.istore(256)?;
+            code.iconst(0)?;
+            code.ifeq(target.clone())?;
+            code.return_void()?;
+            code.mark(target)?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    let wide_bytes = wide_builder.encode().unwrap();
+    let wide_class = decode(&wide_bytes);
+    let wide = code_attribute(method_named(&wide_class, "wide"));
+    assert_eq!(wide.max_locals, 257);
+    assert_eq!(&wide.code[..6], &[0x04, 0xc4, 0x36, 0x01, 0x00, 0x03]);
+    assert_eq!(&wide.code[6..], &[0x99, 0x00, 0x04, 0xb1, 0xb1]);
+    let [Attribute::Other(wide_stack_map)] = wide.attributes.as_slice() else {
+        panic!("wide branched code should contain one StackMapTable");
+    };
+    assert_eq!(wide_stack_map.bytes.len(), 266);
+    assert_eq!(
+        &wide_stack_map.bytes[..7],
+        &[0x00, 0x01, 0xff, 0x00, 0x0a, 0x01, 0x01]
+    );
+    assert!(wide_stack_map.bytes[7..263].iter().all(|entry| *entry == 0));
+    assert_eq!(&wide_stack_map.bytes[263..], &[0x01, 0x00, 0x00]);
+
+    let mut ldc_builder = ClassFileBuilder::new(
+        "example/LdcWideBranch",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    for index in 0..260 {
+        ldc_builder
+            .add_field(format!("field{index}"), "I", FieldAccessFlags(ACC_PRIVATE))
+            .unwrap();
+    }
+    ldc_builder
+        .add_static_method("ldcWide", "()V", |code| {
+            let target = code.new_label()?;
+            code.iconst(123_456)?;
+            code.ifeq(target.clone())?;
+            code.return_void()?;
+            code.mark(target)?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    let ldc_bytes = ldc_builder.encode().unwrap();
+    let ldc_class = decode(&ldc_bytes);
+    let ldc = code_attribute(method_named(&ldc_class, "ldcWide"));
+    assert_eq!(ldc.code.len(), 8);
+    assert_eq!(ldc.code[0], 0x13);
+    let integer_index = dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+        ldc.code[1],
+        ldc.code[2],
+    ]));
+    assert!(matches!(
+        ldc_class.constant_pool.get(integer_index),
+        Some(ConstantPoolEntry::Integer(123_456))
+    ));
+    assert_eq!(&ldc.code[3..], &[0x99, 0x00, 0x04, 0xb1, 0xb1]);
+    let [Attribute::Other(ldc_stack_map)] = ldc.attributes.as_slice() else {
+        panic!("ldc_w branch should contain one StackMapTable");
+    };
+    assert_eq!(
+        ldc_stack_map.bytes,
+        [0x00, 0x01, 0xff, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00]
+    );
+}
+
+#[test]
+fn rejects_unsupported_branch_frames_stack_merges_uninitialized_locals_and_terminal_labels() {
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let mut references = ClassFileBuilder::new("example/ReferenceBranch", version).unwrap();
+    references
+        .add_static_method("unsupported", "()V", |code| {
+            let target = code.new_label()?;
+            code.aconst_null()?;
+            code.ifeq(target.clone())?;
+            code.return_void()?;
+            code.mark(target)?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        references.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::UnsupportedFlowInstruction {
+                kind: dotty_classfile::bytecode::UnsupportedFlowInstructionKind::Reference,
+                ..
+            }
+        ))
+    ));
+
+    let mut unreachable_reference =
+        ClassFileBuilder::new("example/UnreachableReferenceBranch", version).unwrap();
+    unreachable_reference
+        .add_static_method("unsupported", "()V", |code| {
+            let target = code.new_label()?;
+            code.iconst(0)?;
+            code.ifeq(target.clone())?;
+            code.return_void()?;
+            code.aconst_null()?;
+            code.return_void()?;
+            code.mark(target)?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        unreachable_reference.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::UnsupportedFlowInstruction {
+                kind: dotty_classfile::bytecode::UnsupportedFlowInstructionKind::Reference,
+                ..
+            }
+        ))
+    ));
+
+    let mut category_two = ClassFileBuilder::new("example/CategoryTwoBranch", version).unwrap();
+    category_two
+        .add_static_method("unsupported", "()V", |code| {
+            let target = code.new_label()?;
+            code.lconst(1)?;
+            code.ifeq(target.clone())?;
+            code.return_void()?;
+            code.mark(target)?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        category_two.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::UnsupportedFlowInstruction {
+                kind: dotty_classfile::bytecode::UnsupportedFlowInstructionKind::CategoryTwo,
+                ..
+            }
+        ))
+    ));
+
+    let mut stack_mismatch = ClassFileBuilder::new("example/StackMismatchBranch", version).unwrap();
+    stack_mismatch
+        .add_static_method("invalid", "()V", |code| {
+            let other = code.new_label()?;
+            let join = code.new_label()?;
+            code.iconst(0)?;
+            code.ifeq(other.clone())?;
+            code.iconst(1)?;
+            code.goto(join.clone())?;
+            code.mark(other)?;
+            code.mark(join)?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        stack_mismatch.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::IncompatibleStackMerge { .. }
+        ))
+    ));
+
+    let mut uninitialized = ClassFileBuilder::new("example/UninitializedBranch", version).unwrap();
+    uninitialized
+        .add_static_method("invalid", "()I", |code| {
+            let target = code.new_label()?;
+            code.iconst(0)?;
+            code.ifeq(target.clone())?;
+            code.iload(0)?;
+            code.ireturn()?;
+            code.mark(target)?;
+            code.iconst(0)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        uninitialized.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::UninitializedLocal { index: 0, .. }
+        ))
+    ));
+
+    let mut terminal_label = ClassFileBuilder::new("example/TerminalLabelBranch", version).unwrap();
+    assert_eq!(
+        terminal_label
+            .add_static_method("invalid", "()V", |code| {
+                let end = code.new_label()?;
+                code.goto(end.clone())?;
+                code.mark(end)?;
+                Ok(())
+            })
+            .err(),
+        Some(ClassFileBuildError::CodeBuilder(
+            CodeBuilderError::BranchToTerminalEnd { label: 0 }
+        ))
+    );
 }
 
 #[test]

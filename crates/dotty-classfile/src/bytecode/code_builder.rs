@@ -1,4 +1,4 @@
-//! Symbolic builder for the supported straight-line JVM instruction subset.
+//! Symbolic builder for typed JVM instructions and integer-only branches.
 
 use super::{
     ClassReference, ConstantPoolIndexOperand, FieldReference, Instruction, Ldc2Constant,
@@ -7,7 +7,22 @@ use super::{
 };
 use crate::constant_pool::ConstantPoolIndex;
 use crate::descriptor::{DescriptorError, FieldType, MethodDescriptor};
+use std::collections::HashSet;
 use std::fmt;
+use std::sync::Arc;
+
+/// An opaque label owned by one [`CodeBuilder`].
+#[derive(Clone)]
+pub struct CodeLabel {
+    scope: Arc<()>,
+    index: usize,
+}
+
+impl fmt::Debug for CodeLabel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "CodeLabel({})", self.index)
+    }
+}
 
 /// A typed failure while adding an instruction to a [`CodeBuilder`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +37,16 @@ pub enum CodeBuilderError {
     InvalidDescriptor(DescriptorError),
     /// An invoked method descriptor exceeds the JVM's 255 parameter-slot limit.
     TooManyParameterSlots,
+    /// A branch or label operation used a label owned by another builder.
+    ForeignLabel { label: usize },
+    /// A branch targets a label that was allocated but never marked.
+    UnboundLabel { label: usize },
+    /// A label was marked more than once.
+    DuplicateLabel { label: usize },
+    /// A branch targets the position after the final executable instruction.
+    BranchToTerminalEnd { label: usize },
+    /// The builder exhausted its label identifiers.
+    LabelIdExhausted,
 }
 
 impl fmt::Display for CodeBuilderError {
@@ -43,6 +68,19 @@ impl fmt::Display for CodeBuilderError {
             Self::TooManyParameterSlots => {
                 formatter.write_str("method descriptor exceeds 255 parameter slots")
             }
+            Self::ForeignLabel { label } => {
+                write!(formatter, "label {label} belongs to another code builder")
+            }
+            Self::UnboundLabel { label } => {
+                write!(formatter, "branch target label {label} is unbound")
+            }
+            Self::DuplicateLabel { label } => {
+                write!(formatter, "label {label} was marked more than once")
+            }
+            Self::BranchToTerminalEnd { label } => {
+                write!(formatter, "branch target label {label} is at code end")
+            }
+            Self::LabelIdExhausted => formatter.write_str("code builder exhausted label IDs"),
         }
     }
 }
@@ -86,20 +124,225 @@ pub(crate) enum SymbolicInstruction {
     },
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SymbolicBranch {
+    Goto,
+    GotoWide,
+    IfEq,
+    IfNe,
+    IfICmpEq,
+    IfICmpNe,
+    IfICmpLt,
+    IfICmpGe,
+    IfICmpGt,
+    IfICmpLe,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum SymbolicCodeElement {
+    Instruction(SymbolicInstruction),
+    Label(CodeLabel),
+    Branch {
+        operation: SymbolicBranch,
+        target: CodeLabel,
+    },
+}
+
 /// A source of typed instructions and symbolic JVM references for one method.
 ///
 /// Constant-pool indices are assigned by [`crate::class_file_builder::ClassFileBuilder`]
 /// when the class is encoded. The builder intentionally exposes no raw opcode
 /// or constant-pool-index operation.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
 pub struct CodeBuilder {
-    pub(crate) instructions: Vec<SymbolicInstruction>,
+    pub(crate) elements: Vec<SymbolicCodeElement>,
+    scope: Arc<()>,
+    next_label: usize,
+    defined_labels: HashSet<usize>,
+}
+
+impl Clone for CodeBuilder {
+    fn clone(&self) -> Self {
+        let scope = Arc::new(());
+        let elements = self
+            .elements
+            .iter()
+            .map(|element| match element {
+                SymbolicCodeElement::Instruction(instruction) => {
+                    SymbolicCodeElement::Instruction(instruction.clone())
+                }
+                SymbolicCodeElement::Label(label) => SymbolicCodeElement::Label(CodeLabel {
+                    scope: Arc::clone(&scope),
+                    index: label.index,
+                }),
+                SymbolicCodeElement::Branch { operation, target } => SymbolicCodeElement::Branch {
+                    operation: *operation,
+                    target: CodeLabel {
+                        scope: Arc::clone(&scope),
+                        index: target.index,
+                    },
+                },
+            })
+            .collect();
+        Self {
+            elements,
+            scope,
+            next_label: self.next_label,
+            defined_labels: self.defined_labels.clone(),
+        }
+    }
+}
+
+impl Default for CodeBuilder {
+    fn default() -> Self {
+        Self {
+            elements: Vec::new(),
+            scope: Arc::new(()),
+            next_label: 0,
+            defined_labels: HashSet::new(),
+        }
+    }
 }
 
 impl CodeBuilder {
     /// Creates an empty instruction builder.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Allocates a label for a branch target in this method.
+    pub fn new_label(&mut self) -> Result<CodeLabel, CodeBuilderError> {
+        let index = self.next_label;
+        self.next_label = index
+            .checked_add(1)
+            .ok_or(CodeBuilderError::LabelIdExhausted)?;
+        Ok(CodeLabel {
+            scope: Arc::clone(&self.scope),
+            index,
+        })
+    }
+
+    /// Marks a label at the current bytecode position.
+    pub fn mark(&mut self, label: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.check_label(&label)?;
+        if !self.defined_labels.insert(label.index) {
+            return Err(CodeBuilderError::DuplicateLabel { label: label.index });
+        }
+        self.elements.push(SymbolicCodeElement::Label(label));
+        Ok(self)
+    }
+
+    /// Adds an unconditional short branch (`goto`).
+    pub fn goto(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.branch(SymbolicBranch::Goto, target)
+    }
+
+    /// Adds an unconditional wide branch (`goto_w`).
+    pub fn goto_w(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.branch(SymbolicBranch::GotoWide, target)
+    }
+
+    /// Branches when the top integer is zero (`ifeq`).
+    pub fn ifeq(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.branch(SymbolicBranch::IfEq, target)
+    }
+
+    /// Branches when the top integer is nonzero (`ifne`).
+    pub fn ifne(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.branch(SymbolicBranch::IfNe, target)
+    }
+
+    /// Branches when the first of two integers equals the second.
+    pub fn if_icmpeq(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.branch(SymbolicBranch::IfICmpEq, target)
+    }
+
+    /// Branches when the first of two integers differs from the second.
+    pub fn if_icmpne(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.branch(SymbolicBranch::IfICmpNe, target)
+    }
+
+    /// Branches when the first integer is less than the second.
+    pub fn if_icmplt(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.branch(SymbolicBranch::IfICmpLt, target)
+    }
+
+    /// Branches when the first integer is greater than or equal to the second.
+    pub fn if_icmpge(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.branch(SymbolicBranch::IfICmpGe, target)
+    }
+
+    /// Branches when the first integer is greater than the second.
+    pub fn if_icmpgt(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.branch(SymbolicBranch::IfICmpGt, target)
+    }
+
+    /// Branches when the first integer is less than or equal to the second.
+    pub fn if_icmple(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.branch(SymbolicBranch::IfICmpLe, target)
+    }
+
+    pub(crate) fn has_branches(&self) -> bool {
+        self.elements
+            .iter()
+            .any(|element| matches!(element, SymbolicCodeElement::Branch { .. }))
+    }
+
+    pub(crate) fn label_count(&self) -> usize {
+        self.next_label
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), CodeBuilderError> {
+        let mut label_positions = std::collections::HashMap::new();
+        let mut instruction_count = 0usize;
+        for element in &self.elements {
+            match element {
+                SymbolicCodeElement::Label(label) => {
+                    label_positions.insert(label.index, instruction_count);
+                }
+                SymbolicCodeElement::Instruction(_) | SymbolicCodeElement::Branch { .. } => {
+                    instruction_count += 1;
+                }
+            }
+        }
+        for element in &self.elements {
+            if let SymbolicCodeElement::Branch { target, .. } = element {
+                self.check_label(target)?;
+                let Some(&target_position) = label_positions.get(&target.index) else {
+                    return Err(CodeBuilderError::UnboundLabel {
+                        label: target.index,
+                    });
+                };
+                if target_position == instruction_count {
+                    return Err(CodeBuilderError::BranchToTerminalEnd {
+                        label: target.index,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_label(&self, label: &CodeLabel) -> Result<(), CodeBuilderError> {
+        if !Arc::ptr_eq(&self.scope, &label.scope) {
+            return Err(CodeBuilderError::ForeignLabel { label: label.index });
+        }
+        Ok(())
+    }
+
+    pub(crate) const fn label_index(label: &CodeLabel) -> usize {
+        label.index
+    }
+
+    fn branch(
+        &mut self,
+        operation: SymbolicBranch,
+        target: CodeLabel,
+    ) -> Result<&mut Self, CodeBuilderError> {
+        self.check_label(&target)?;
+        self.elements
+            .push(SymbolicCodeElement::Branch { operation, target });
+        Ok(self)
     }
 
     /// Pushes an integer, selecting `iconst`, `bipush`, `sipush`, or `ldc`.
@@ -121,7 +364,9 @@ impl CodeBuilder {
         } else if let Ok(value) = i16::try_from(value) {
             self.push(Instruction::Sipush(value));
         } else {
-            self.instructions.push(SymbolicInstruction::Integer(value));
+            self.elements.push(SymbolicCodeElement::Instruction(
+                SymbolicInstruction::Integer(value),
+            ));
         }
         Ok(self)
     }
@@ -131,7 +376,11 @@ impl CodeBuilder {
         match value {
             0 => self.push(Instruction::LConst(SmallLongConstant::Zero)),
             1 => self.push(Instruction::LConst(SmallLongConstant::One)),
-            _ => self.instructions.push(SymbolicInstruction::Long(value)),
+            _ => self
+                .elements
+                .push(SymbolicCodeElement::Instruction(SymbolicInstruction::Long(
+                    value,
+                ))),
         }
         Ok(self)
     }
@@ -278,7 +527,10 @@ impl CodeBuilder {
     pub fn new_object(&mut self, owner: impl Into<String>) -> Result<&mut Self, CodeBuilderError> {
         let owner = owner.into();
         validate_internal_name(&owner)?;
-        self.instructions.push(SymbolicInstruction::New(owner));
+        self.elements
+            .push(SymbolicCodeElement::Instruction(SymbolicInstruction::New(
+                owner,
+            )));
         Ok(self)
     }
 
@@ -307,8 +559,9 @@ impl CodeBuilder {
     }
 
     fn push(&mut self, instruction: Instruction) {
-        self.instructions
-            .push(SymbolicInstruction::Typed(instruction));
+        self.elements.push(SymbolicCodeElement::Instruction(
+            SymbolicInstruction::Typed(instruction),
+        ));
     }
 
     fn local(
@@ -337,12 +590,14 @@ impl CodeBuilder {
         validate_unqualified_name(&name, false)?;
         let ty = FieldType::parse(&descriptor).map_err(CodeBuilderError::InvalidDescriptor)?;
         validate_field_type_names(&ty)?;
-        self.instructions.push(SymbolicInstruction::Field {
-            operation,
-            owner,
-            name,
-            descriptor,
-        });
+        self.elements.push(SymbolicCodeElement::Instruction(
+            SymbolicInstruction::Field {
+                operation,
+                owner,
+                name,
+                descriptor,
+            },
+        ));
         Ok(self)
     }
 
@@ -390,12 +645,14 @@ impl CodeBuilder {
         {
             return Err(CodeBuilderError::InvalidName);
         }
-        self.instructions.push(SymbolicInstruction::Method {
-            operation,
-            owner,
-            name,
-            descriptor,
-        });
+        self.elements.push(SymbolicCodeElement::Instruction(
+            SymbolicInstruction::Method {
+                operation,
+                owner,
+                name,
+                descriptor,
+            },
+        ));
         Ok(self)
     }
 }

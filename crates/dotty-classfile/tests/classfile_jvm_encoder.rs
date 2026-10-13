@@ -166,6 +166,47 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
             Ok(())
         })
         .expect("typed method construction succeeds");
+    calculator
+        .add_static_method("max", "(II)I", |code| {
+            let left = code.new_label()?;
+            code.iload(0)?;
+            code.iload(1)?;
+            code.if_icmpge(left.clone())?;
+            code.iload(1)?;
+            code.ireturn()?;
+            code.mark(left)?;
+            code.iload(0)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .expect("branched max method construction succeeds");
+    calculator
+        .add_static_method("sumTo", "(I)I", |code| {
+            let loop_head = code.new_label()?;
+            let done = code.new_label()?;
+            code.iconst(0)?;
+            code.istore(1)?;
+            code.iconst(1)?;
+            code.istore(2)?;
+            code.mark(loop_head.clone())?;
+            code.iload(2)?;
+            code.iload(0)?;
+            code.if_icmpgt(done.clone())?;
+            code.iload(1)?;
+            code.iload(2)?;
+            code.iadd()?;
+            code.istore(1)?;
+            code.iload(2)?;
+            code.iconst(1)?;
+            code.iadd()?;
+            code.istore(2)?;
+            code.goto(loop_head)?;
+            code.mark(done)?;
+            code.iload(1)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .expect("branched sumTo method construction succeeds");
     let calculator_bytes = calculator
         .encode()
         .expect("Calculator is generated through the typed builder");
@@ -241,7 +282,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     let calculator = decode_and_validate(&calculator_bytes);
     assert_eq!(calculator.version, version);
     assert_eq!(calculator.access_flags.0, ACC_PUBLIC | ACC_SUPER);
-    assert_eq!(calculator.methods.len(), 1);
+    assert_eq!(calculator.methods.len(), 3);
     let add = &calculator.methods[0];
     assert_eq!(calculator.constant_pool.utf8(add.name_index), Ok("add"));
     assert_eq!(
@@ -257,6 +298,26 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     assert_eq!(add_code.code, [0x1a, 0x1b, 0x60, 0xac]);
     assert!(add_code.exception_table.is_empty());
     assert!(add_code.attributes.is_empty());
+
+    let max = code(&calculator.methods[1]);
+    assert_eq!((max.max_stack, max.max_locals), (2, 2));
+    assert_eq!(
+        max.code,
+        [0x1a, 0x1b, 0xa2, 0x00, 0x05, 0x1b, 0xac, 0x1a, 0xac]
+    );
+    assert!(
+        matches!(max.attributes.as_slice(), [Attribute::Other(attribute)]
+        if calculator.constant_pool.utf8(attribute.name_index) == Ok("StackMapTable"))
+    );
+
+    let sum_to = code(&calculator.methods[2]);
+    assert_eq!((sum_to.max_stack, sum_to.max_locals), (2, 3));
+    assert_eq!(sum_to.code.len(), 22);
+    assert_eq!(sum_to.attributes.len(), 1);
+    assert!(
+        matches!(sum_to.attributes.as_slice(), [Attribute::Other(attribute)]
+        if calculator.constant_pool.utf8(attribute.name_index) == Ok("StackMapTable"))
+    );
 
     let box_file = decode_and_validate(&box_bytes);
     assert_eq!(box_file.version, version);
@@ -374,7 +435,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     let harness_path = directory.path().join("GeneratedClassesHarness.java");
     fs::write(
         &harness_path,
-        "public final class GeneratedClassesHarness {\n    public static void main(String[] args) {\n        int calculator = Calculator.add(20, 22);\n        if (calculator != 42) throw new AssertionError(\"Calculator.add: \" + calculator);\n        int boxed = new Box(42).get();\n        if (boxed != 42) throw new AssertionError(\"Box.get: \" + boxed);\n        int caller = Caller.answer();\n        if (caller != 42) throw new AssertionError(\"Caller.answer: \" + caller);\n        int generated = Caller.makeBox(42).get();\n        if (generated != 42) throw new AssertionError(\"Caller.makeBox: \" + generated);\n        System.out.println(\"Calculator.add=\" + calculator);\n        System.out.println(\"Box.get=\" + boxed);\n        System.out.println(\"Caller.answer=\" + caller);\n        System.out.println(\"Caller.makeBox=\" + generated);\n    }\n}\n",
+        "public final class GeneratedClassesHarness {\n    public static void main(String[] args) {\n        int calculator = Calculator.add(20, 22);\n        if (calculator != 42) throw new AssertionError(\"Calculator.add: \" + calculator);\n        int maximum = Calculator.max(12, 42);\n        if (maximum != 42) throw new AssertionError(\"Calculator.max: \" + maximum);\n        int sum = Calculator.sumTo(10);\n        if (sum != 55) throw new AssertionError(\"Calculator.sumTo: \" + sum);\n        int boxed = new Box(42).get();\n        if (boxed != 42) throw new AssertionError(\"Box.get: \" + boxed);\n        int caller = Caller.answer();\n        if (caller != 42) throw new AssertionError(\"Caller.answer: \" + caller);\n        int generated = Caller.makeBox(42).get();\n        if (generated != 42) throw new AssertionError(\"Caller.makeBox: \" + generated);\n        System.out.println(\"Calculator.add=\" + calculator);\n        System.out.println(\"Calculator.max=\" + maximum);\n        System.out.println(\"Calculator.sumTo=\" + sum);\n        System.out.println(\"Box.get=\" + boxed);\n        System.out.println(\"Caller.answer=\" + caller);\n        System.out.println(\"Caller.makeBox=\" + generated);\n    }\n}\n",
     )
     .unwrap_or_else(|error| panic!("write {}: {error}", harness_path.display()));
 
@@ -384,6 +445,9 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
             "Calculator",
             &[
                 "public static int add(int, int);",
+                "public static int max(int, int);",
+                "public static int sumTo(int);",
+                "StackMapTable: number_of_entries =",
                 "stack=2, locals=2",
                 "iload_0",
                 "iload_1",
@@ -466,6 +530,6 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     );
     assert_eq!(
         String::from_utf8_lossy(&java.stdout).trim(),
-        "Calculator.add=42\nBox.get=42\nCaller.answer=42\nCaller.makeBox=42"
+        "Calculator.add=42\nCalculator.max=42\nCalculator.sumTo=55\nBox.get=42\nCaller.answer=42\nCaller.makeBox=42"
     );
 }
