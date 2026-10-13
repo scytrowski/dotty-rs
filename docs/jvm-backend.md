@@ -4,8 +4,9 @@
 future JVM lowering. It depends on `dotty-core` for canonical symbols, types,
 and typed trees, and on `dotty-classfile` for class-file descriptor and output
 APIs. The crate validates a borrowed `JvmCompilationUnit` contract and
-projects one bounded method subset to JVM descriptors; it does not lower trees
-or emit class files.
+projects one bounded method subset to JVM descriptors and lowers a first
+subset of typed expression leaves to the class-file crate's symbolic code
+builder. It does not assemble a source frontend or emit complete class files.
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,
@@ -88,3 +89,22 @@ This metadata layer does not encode Scala operator names, nested-class `$`
 names, companion/module classes, trait forwarders, bridges, private-access
 semantics, constructors, classfile hierarchy, or bytecode. Unsupported ABI
 forms must be handled by a separate contract before they can be emitted.
+
+## Typed expression leaves
+
+`lower_value_expression` accepts only typed `Literal` nodes containing
+`Constant::Int` or `Constant::Boolean`, and `Ident` nodes whose typed
+`TermRefTarget::Symbol` matches one of the method metadata's canonical
+parameter symbols. Int and Boolean literals lower through `CodeBuilder::iconst`
+and parameter references through `CodeBuilder::iload` at the metadata-assigned
+instance local slot. The result category is `IntLike` for both, while Boolean
+method descriptors remain `Z`. Literal constant types may be the matching
+singleton constant type or the canonical `Definitions.int` / `.boolean` type.
+
+The caller owns the `CodeBuilder` and is responsible for appending returns or
+other method epilogues. A rejected tree or failed instruction append leaves the
+builder unchanged. `Select`, `Apply`, `TypeApply`, `Block`, `If`, `While`,
+`Match`, `New`, closures, nested `DefDef`s, String/Long and other non-Int/
+Boolean literals, and all other typed nodes return a structured
+unsupported-expression error. No source name lookup, implicit boxing, boolean
+conversion, branch generation, or frontend dependency is performed.

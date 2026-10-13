@@ -19,6 +19,7 @@ use dotty_core::symbols::{SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
 
 mod descriptor;
+mod expression;
 mod identity;
 
 /// JVMS limit for a method's parameter slots, including `this` for instance
@@ -241,6 +242,40 @@ pub enum JvmCodegenError {
     UnsupportedSemanticNode {
         tree: TreeId<Typed>,
         node: &'static str,
+    },
+    /// A typed expression uses a missing, sentinel, or error type.
+    InvalidExpressionType {
+        tree: TreeId<Typed>,
+        ty: TypeId,
+        reason: InvalidTypeReason,
+    },
+    /// The typed node is not yet part of the expression-lowering subset.
+    UnsupportedTypedExpression {
+        tree: TreeId<Typed>,
+        node: &'static str,
+    },
+    /// A supported integer/boolean literal disagrees with its typed type.
+    LiteralTypeMismatch {
+        tree: TreeId<Typed>,
+        value: JvmType,
+        typed: Option<JvmType>,
+    },
+    /// A typed identifier is not a symbol reference to one of this method's parameters.
+    InvalidParameterReference {
+        tree: TreeId<Typed>,
+        symbol: Option<SymbolId>,
+    },
+    /// A typed parameter reference has a different primitive type from its local metadata.
+    ParameterReferenceTypeMismatch {
+        tree: TreeId<Typed>,
+        parameter: SymbolId,
+        expected: JvmType,
+        found: Option<JvmType>,
+    },
+    /// An instruction could not be appended to the method's code builder.
+    CodeBuilder {
+        tree: TreeId<Typed>,
+        error: dotty_classfile::bytecode::CodeBuilderError,
     },
     /// A method has an unsupported single-clause or monomorphism shape.
     UnsupportedMethodShape {
@@ -485,6 +520,26 @@ impl JvmMethodMetadata {
     pub fn parameters(&self) -> &[JvmParameterLocal] {
         &self.parameters
     }
+}
+
+/// Lowers the supported value-producing leaves from the supplied typed AST.
+///
+/// Integer and Boolean literals become an integer constant instruction.
+/// Parameter identifiers are resolved only through their canonical
+/// `TermRefTarget::Symbol` and this method's parameter metadata. Both produce
+/// [`JvmValueCategory::IntLike`]. The method does not add a return instruction
+/// or any other method epilogue. Unsupported expressions return a typed error.
+/// The builder is only updated after successful validation and instruction
+/// construction.
+pub fn lower_value_expression(
+    store: &SemanticStore,
+    typed_ast: &TypedAst,
+    definitions: &Definitions,
+    method: &JvmMethodMetadata,
+    tree: TreeId<Typed>,
+    code: &mut dotty_classfile::bytecode::CodeBuilder,
+) -> Result<JvmValueCategory, JvmCodegenError> {
+    expression::lower_value_expression(store, typed_ast, definitions, method, tree, code)
 }
 
 impl JvmParameterLocal {
