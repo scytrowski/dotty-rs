@@ -110,6 +110,49 @@ fn merge_module_resolution_profile(
         .extend(source.completed_module_classes);
 }
 
+#[test]
+fn merged_module_resolution_profiles_union_only_resolved_object_and_member_targets() {
+    let mut aggregate = ModuleResolutionProfile::default();
+    aggregate.package_term_successes = 1;
+    aggregate
+        .resolved_object_targets
+        .insert("fixture::First".to_owned());
+    aggregate.resolved_member_targets.insert(
+        "fixture/First::namespace=term::name=value::space=Prefix::selector=Unique".to_owned(),
+    );
+
+    let mut next = ModuleResolutionProfile::default();
+    next.package_term_successes = 2;
+    next.resolved_object_targets
+        .insert("fixture::First".to_owned());
+    next.resolved_object_targets
+        .insert("fixture::Second".to_owned());
+    next.resolved_member_targets.insert(
+        "fixture/Second::namespace=term::name=value::space=Prefix::selector=Unique".to_owned(),
+    );
+    next.member_targets
+        .insert("fixture/Failed::name=missing".to_owned());
+
+    merge_module_resolution_profile(&mut aggregate, next);
+
+    assert_eq!(aggregate.package_term_successes, 3);
+    assert_eq!(
+        aggregate.resolved_object_targets,
+        BTreeSet::from(["fixture::First".to_owned(), "fixture::Second".to_owned()])
+    );
+    assert_eq!(aggregate.resolved_member_targets.len(), 2);
+    assert_eq!(aggregate.member_targets.len(), 1);
+}
+
+#[test]
+fn audit_tsv_rows_render_missing_cells_without_trailing_tabs() {
+    assert_eq!(tsv_or_dash(""), "-");
+    assert_eq!(
+        tsv_or_dash("scala.collection.mutable"),
+        "scala.collection.mutable"
+    );
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ResolverRequestObservation {
     target: String,
@@ -8176,8 +8219,8 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
             observation.source_file,
             observation.enclosing_attempt,
             observation.resolution,
-            observation.object_identity,
-            observation.module_class_identity
+            tsv_or_dash(&observation.object_identity),
+            tsv_or_dash(&observation.module_class_identity)
         );
     }
     let mut package_term_rows = metrics.package_term_request_rows.clone();
@@ -8207,8 +8250,8 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
             row.source_file,
             row.enclosing_attempt,
             row.outcome,
-            row.type_resource,
-            row.companion_resource
+            tsv_or_dash(&row.type_resource),
+            tsv_or_dash(&row.companion_resource)
         );
     }
     println!("  distinct_packages={}", metrics.packages.len());
