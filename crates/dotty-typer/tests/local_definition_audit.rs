@@ -1410,27 +1410,50 @@ fn audit_resolver_forwards_authoritative_module_identity_lookup() {
         .unwrap()
         .unwrap();
 
-    let direct = resolver.inner.module_class_of_object(&store, object);
+    // Keep these calls behind the port: concrete-method calls would not catch
+    // a future AuditResolver implementation that silently inherits defaults.
+    let direct = {
+        let direct: &mut dyn SymbolResolver = &mut resolver.inner;
+        direct.module_class_of_object(&store, object)
+    };
     assert!(direct.as_ref().unwrap().is_some());
     assert_eq!(
-        resolver.module_class_of_object(&store, object),
+        module_class_of_object_through_port(&mut resolver, &store, object),
         direct,
         "the audit adapter must return the authoritative identity unchanged"
     );
 
     let unowned = definitions.object_class;
     assert_eq!(
-        resolver.module_class_of_object(&store, unowned),
-        resolver.inner.module_class_of_object(&store, unowned)
+        module_class_of_object_through_port(&mut resolver, &store, unowned),
+        module_class_of_object_through_port(&mut resolver.inner, &store, unowned)
     );
     resolver.rollback_to(&mut store, resolver_checkpoint);
     store.rollback_to(store_checkpoint);
     let unknown = object;
     assert!(!store.symbols.contains(unknown));
     assert_eq!(
-        resolver.module_class_of_object(&store, unknown),
-        resolver.inner.module_class_of_object(&store, unknown)
+        module_class_of_object_through_port(&mut resolver, &store, unknown),
+        module_class_of_object_through_port(&mut resolver.inner, &store, unknown)
     );
+}
+
+fn module_class_of_object_through_port(
+    resolver: &mut impl SymbolResolver,
+    store: &SemanticStore,
+    object: SymbolId,
+) -> Result<Option<SymbolId>, ResolutionError> {
+    let resolver: &mut dyn SymbolResolver = resolver;
+    resolver.module_class_of_object(store, object)
+}
+
+fn complete_module_class_through_port(
+    resolver: &mut impl SymbolResolver,
+    store: &mut SemanticStore,
+    module_class: SymbolId,
+) -> Result<bool, ResolutionError> {
+    let resolver: &mut dyn SymbolResolver = resolver;
+    resolver.complete_module_class(store, module_class)
 }
 
 #[test]
@@ -1451,9 +1474,7 @@ fn audit_resolver_forwards_module_completion_and_preserves_caller_rollback() {
     let store_checkpoint = store.checkpoint();
     let resolver_checkpoint = resolver.checkpoint();
     assert_eq!(
-        resolver
-            .inner
-            .complete_module_class(&mut store, module_class),
+        complete_module_class_through_port(&mut resolver.inner, &mut store, module_class),
         Ok(true),
         "the direct resolver establishes the expected completion result"
     );
@@ -1466,13 +1487,13 @@ fn audit_resolver_forwards_module_completion_and_preserves_caller_rollback() {
     );
 
     assert_eq!(
-        resolver.complete_module_class(&mut store, module_class),
+        complete_module_class_through_port(&mut resolver, &mut store, module_class),
         Ok(true)
     );
     assert!(valid_module_class_info(&store, module_class));
     let completed_checkpoint = store.checkpoint();
     assert_eq!(
-        resolver.complete_module_class(&mut store, module_class),
+        complete_module_class_through_port(&mut resolver, &mut store, module_class),
         Ok(true)
     );
     assert_eq!(store.checkpoint(), completed_checkpoint);
