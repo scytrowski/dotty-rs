@@ -689,3 +689,21 @@ All done unless noted otherwise.
 - `.tasty` generics and annotations.
 - Explicit field/method/interface-method overload resolution (JVMS
   §5.4.3.2-5.4.3.4) as an API distinct from class loading.
+
+## 10. Top-level Scala module identities
+
+`ClassLoader::ensure_module_identity` establishes the term `Object` and its
+backing type `ModuleClass` as separate `SymbolInfo::Missing` shells. It only
+accepts a Scala 3.9 `.tasty` file whose AST proves both exact definitions as
+direct members of the requested package. A JVM class name ending in `$` and a
+classfile alone do not prove module identity. The API records the pair in the
+shared `LoadingSession`, so sequential loaders over the same semantic store
+reuse the same `SymbolId`s.
+
+An ordinary class or trait companion is linked to the object only when that
+definition is present in the same TASTy file. The module class is not put in
+`SymbolLinks::companion`; its relationship to the object follows their common
+package owner and source name. This operation enters identity shells only and
+does not complete object members or semantic value types. It currently covers
+top-level package members; nested objects and identities proved only by JVM
+classfiles remain unsupported.

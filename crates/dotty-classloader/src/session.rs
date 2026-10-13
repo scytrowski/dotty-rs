@@ -31,8 +31,9 @@ use std::collections::HashMap;
 /// unlike `resolved` itself, these are keyed by the already-resolved
 /// `SymbolId`, not by a classpath-dependent `BinaryName`, so sharing them
 /// carries none of the negative-caching risk `ClassRepository` has (see
-/// below): a `SymbolId`'s own metadata/origin, once true, stays true
-/// regardless of which loader recorded it.
+/// below). When a previously identified external class shell is proven to
+/// be a Scala module class by authoritative TASTy, its symbol origin is
+/// upgraded and this sidecar origin follows transactionally.
 ///
 /// Deliberately holds only *positive* results, not a full
 /// `ClassRepository` (that stays a
@@ -63,19 +64,22 @@ use std::collections::HashMap;
 pub struct LoadingSession {
     pub(crate) identified: HashMap<BinaryName, SymbolId>,
     identified_order: Vec<BinaryName>,
+    pub(crate) modules: HashMap<BinaryName, crate::loader::ModuleIdentity>,
+    module_order: Vec<BinaryName>,
     pub(crate) resolved: HashMap<BinaryName, SymbolId>,
     resolved_order: Vec<BinaryName>,
     pub(crate) packages: PackageRegistry,
     pub(crate) metadata: HashMap<SymbolId, ClassfileMetadata>,
     metadata_order: Vec<SymbolId>,
     pub(crate) origins: HashMap<SymbolId, ClassOrigin>,
-    origin_order: Vec<SymbolId>,
+    origin_undo: Vec<(SymbolId, Option<ClassOrigin>)>,
     symbol_undo: Vec<(SymbolId, Symbol)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SessionCheckpoint {
     identified: usize,
+    modules: usize,
     resolved: usize,
     metadata: usize,
     origins: usize,
@@ -107,13 +111,15 @@ impl LoadingSession {
         Self {
             identified: HashMap::new(),
             identified_order: Vec::new(),
+            modules: HashMap::new(),
+            module_order: Vec::new(),
             resolved: HashMap::new(),
             resolved_order: Vec::new(),
             packages: PackageRegistry::new(),
             metadata: HashMap::new(),
             metadata_order: Vec::new(),
             origins: HashMap::new(),
-            origin_order: Vec::new(),
+            origin_undo: Vec::new(),
             symbol_undo: Vec::new(),
         }
     }
@@ -121,9 +127,10 @@ impl LoadingSession {
     pub(crate) fn checkpoint(&self) -> SessionCheckpoint {
         SessionCheckpoint {
             identified: self.identified_order.len(),
+            modules: self.module_order.len(),
             resolved: self.resolved_order.len(),
             metadata: self.metadata_order.len(),
-            origins: self.origin_order.len(),
+            origins: self.origin_undo.len(),
             symbols: self.symbol_undo.len(),
             packages: self.packages.checkpoint(),
         }
@@ -146,12 +153,22 @@ impl LoadingSession {
         }
     }
 
+    pub(crate) fn cache_module(
+        &mut self,
+        name: BinaryName,
+        identity: crate::loader::ModuleIdentity,
+    ) {
+        if self.modules.insert(name.clone(), identity).is_none() {
+            self.module_order.push(name);
+        }
+    }
+
     pub(crate) fn record_origin(&mut self, symbol: SymbolId, origin: ClassOrigin) {
-        if self.origins.contains_key(&symbol) {
+        if self.origins.get(&symbol) == Some(&origin) {
             return;
         }
-        self.origin_order.push(symbol);
-        self.origins.insert(symbol, origin);
+        let previous = self.origins.insert(symbol, origin);
+        self.origin_undo.push((symbol, previous));
     }
 
     pub(crate) fn record_metadata(&mut self, symbol: SymbolId, metadata: ClassfileMetadata) {
@@ -176,6 +193,10 @@ impl LoadingSession {
             let name = self.identified_order.pop().expect("length checked");
             self.identified.remove(&name);
         }
+        while self.module_order.len() > checkpoint.modules {
+            let name = self.module_order.pop().expect("length checked");
+            self.modules.remove(&name);
+        }
         while self.resolved_order.len() > checkpoint.resolved {
             let name = self.resolved_order.pop().expect("length checked");
             self.resolved.remove(&name);
@@ -184,9 +205,13 @@ impl LoadingSession {
             let symbol = self.metadata_order.pop().expect("length checked");
             self.metadata.remove(&symbol);
         }
-        while self.origin_order.len() > checkpoint.origins {
-            let symbol = self.origin_order.pop().expect("length checked");
-            self.origins.remove(&symbol);
+        while self.origin_undo.len() > checkpoint.origins {
+            let (symbol, previous) = self.origin_undo.pop().expect("length checked");
+            if let Some(previous) = previous {
+                self.origins.insert(symbol, previous);
+            } else {
+                self.origins.remove(&symbol);
+            }
         }
         self.packages.rollback_to(store, checkpoint.packages);
     }
@@ -267,6 +292,7 @@ mod tests {
         let origin = ClassOrigin::Directory("<memory>".into());
         session.record_origin(identity, origin.clone());
         let checkpoint = session.checkpoint();
+        session.record_origin(identity, ClassOrigin::Jar("<upgraded>".into()));
         session.record_metadata(
             identity,
             ClassfileMetadata {
