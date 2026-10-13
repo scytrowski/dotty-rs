@@ -1,20 +1,24 @@
-//! Descriptor-aware analysis for the typed straight-line instruction subset.
+//! Descriptor-aware analysis for straight-line code and integer-only CFGs.
 //!
-//! This computes operand-stack and local-slot bounds and checks the value
-//! categories needed by the supported instructions. It is not a JVM verifier:
-//! it does not track initialized objects, reference subtyping, or control-flow
-//! joins, and it does not produce stack-map frames.
+//! [`LinearCodeAnalyzer`] retains the typed straight-line analysis API.
+//! [`CfgCodeAnalyzer`] propagates integer stack and local states across
+//! symbolic branches. Neither is a full JVM verifier: reference identity,
+//! object initialization, and reference joins are not modeled, and neither
+//! analyzer produces stack-map frames.
 
 use super::{
-    ClassReference, ConstantPoolOperandKind, FieldReference, Instruction, Ldc2Constant,
-    LdcConstant, LocalIndex, SpecialMethodReference, StaticMethodReference, VirtualMethodReference,
+    BasicBlockId, BranchInstruction, ClassReference, CodeElement, ConstantPoolOperandKind,
+    ControlFlowGraph, FieldReference, Instruction, Ldc2Constant, LdcConstant, LocalIndex,
+    SpecialMethodReference, StaticMethodReference, VirtualMethodReference,
 };
 use crate::constant_pool::{ConstantPool, ConstantPoolEntry, ConstantPoolIndex, PoolRefError};
 use crate::descriptor::{DescriptorError, FieldType, MethodDescriptor};
 use crate::encode_error::EncodeError;
 use std::fmt;
 
-/// The value categories tracked by the linear analyzer.
+const MAX_FLOW_STATE_SLOTS: usize = 8 * 1024 * 1024;
+
+/// JVM value categories used by the bytecode analyzers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueKind {
     /// An int-like JVM value (`boolean`, `byte`, `char`, `short`, or `int`).
@@ -59,7 +63,7 @@ pub struct CodeAnalysis {
     pub max_locals: u16,
 }
 
-/// A typed failure while analyzing a straight-line method body.
+/// A typed failure while analyzing a method body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalysisError {
     /// The method descriptor is malformed.
@@ -196,6 +200,59 @@ pub enum AnalysisError {
     },
     /// The instruction sequence has no terminal return.
     MissingReturn,
+    /// The CFG analyzer encountered an instruction outside its integer-only subset.
+    UnsupportedFlowInstruction {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Unsupported value family or operation.
+        kind: UnsupportedFlowInstructionKind,
+    },
+    /// The CFG analyzer encountered a non-int-like parameter.
+    UnsupportedFlowParameter {
+        /// Zero-based method parameter position.
+        parameter: usize,
+        /// Parameter's JVM category.
+        actual: ValueKind,
+    },
+    /// Incoming operand stacks disagree at a block entry.
+    IncompatibleStackMerge {
+        /// Block receiving incompatible states.
+        block: BasicBlockId,
+        /// Stack value count already established for this block.
+        expected_values: usize,
+        /// Stack value count from the incoming predecessor.
+        incoming_values: usize,
+    },
+    /// A defensive fixed-point work limit was exceeded.
+    FlowAnalysisLimitExceeded {
+        /// Number of blocks processed before the limit was reached.
+        steps: usize,
+        /// Maximum block processing steps for this graph and local lattice.
+        limit: usize,
+    },
+    /// Retained block-entry states would exceed the analyzer's memory budget.
+    FlowStateSizeLimitExceeded {
+        /// Total local and stack values across retained block-entry states.
+        slots: usize,
+        /// Maximum retained state values.
+        limit: usize,
+    },
+    /// An internally inconsistent graph does not provide a block entry state.
+    InvalidControlFlowGraph {
+        /// Block whose graph state or identity is invalid.
+        block: BasicBlockId,
+    },
+}
+
+/// Why an instruction is outside the integer-only CFG analysis subset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsupportedFlowInstructionKind {
+    /// The instruction reads, writes, or creates a reference value.
+    Reference,
+    /// The instruction reads or creates a category-two value.
+    CategoryTwo,
+    /// The instruction's transfer behavior is not implemented for CFG analysis.
+    Operation,
 }
 
 impl fmt::Display for AnalysisError {
@@ -314,6 +371,38 @@ impl fmt::Display for AnalysisError {
             ),
             Self::MissingReturn => {
                 formatter.write_str("instruction sequence has no terminal return")
+            }
+            Self::UnsupportedFlowInstruction { instruction, kind } => write!(
+                formatter,
+                "instruction {instruction} uses unsupported CFG analysis category {kind:?}"
+            ),
+            Self::UnsupportedFlowParameter { parameter, actual } => write!(
+                formatter,
+                "method parameter {parameter} has unsupported CFG analysis category {actual}"
+            ),
+            Self::IncompatibleStackMerge {
+                block,
+                expected_values,
+                incoming_values,
+            } => write!(
+                formatter,
+                "block {} merges operand stacks with {expected_values} and {incoming_values} values",
+                block.index()
+            ),
+            Self::FlowAnalysisLimitExceeded { steps, limit } => write!(
+                formatter,
+                "CFG analysis processed {steps} blocks, exceeding its fixed-point limit of {limit}"
+            ),
+            Self::FlowStateSizeLimitExceeded { slots, limit } => write!(
+                formatter,
+                "CFG analysis requires {slots} retained state values, exceeding its limit of {limit}"
+            ),
+            Self::InvalidControlFlowGraph { block } => {
+                write!(
+                    formatter,
+                    "CFG block {} has inconsistent analysis state",
+                    block.index()
+                )
             }
         }
     }
@@ -1064,6 +1153,376 @@ fn is_return(instruction: Instruction) -> bool {
         instruction,
         Instruction::Return | Instruction::IReturn | Instruction::AReturn | Instruction::LReturn
     )
+}
+
+/// The local-variable lattice used by integer-only CFG analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowLocalState {
+    /// The slot is uninitialized or has incompatible predecessor values.
+    Top,
+    /// The slot contains an int-like JVM value.
+    Integer,
+}
+
+/// The incoming verifier state for one reachable basic block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockEntryState {
+    /// Local slots, including receiver/argument slots and slots grown by stores.
+    pub locals: Vec<FlowLocalState>,
+    /// Operand stack values in bottom-to-top order. Every value is `Int`.
+    pub operand_stack: Vec<ValueKind>,
+}
+
+/// Maxima and incoming states produced by fixed-point CFG analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowAnalysis {
+    /// Maximum operand-stack depth in JVM slots over reachable instructions.
+    pub max_stack: u16,
+    /// Required local-variable array size in JVM slots.
+    pub max_locals: u16,
+    block_entries: Vec<Option<BlockEntryState>>,
+}
+
+impl FlowAnalysis {
+    /// Returns an incoming state for a reachable block, or `None` for an
+    /// unreachable block or an ID outside this result.
+    pub fn entry_state(&self, block: BasicBlockId) -> Option<&BlockEntryState> {
+        self.block_entries.get(block.index())?.as_ref()
+    }
+
+    /// Returns states indexed by source-ordered block ID. Unreachable blocks
+    /// have no state.
+    pub fn block_entries(&self) -> &[Option<BlockEntryState>] {
+        &self.block_entries
+    }
+}
+
+/// Fixed-point stack and local analysis for integer-only CFGs.
+pub struct CfgCodeAnalyzer;
+
+impl CfgCodeAnalyzer {
+    /// Analyzes reachable instructions in a control-flow graph.
+    ///
+    /// Int-like parameters initialize integer locals. A receiver in an
+    /// instance method is retained as `Top`, because reference operations are
+    /// outside this analyzer's scope. `if*` branches consume their comparison
+    /// operands, `goto` preserves the stack, and predecessor states are merged
+    /// until stable. Locals merge to `Top`; operand-stack heights must agree.
+    /// Unreachable blocks are retained by the CFG but have no entry state.
+    /// Each local can only move from `Integer` to `Top`, so the worklist has a
+    /// finite bound based on the graph size and local-state width. An
+    /// incompatible stack state fails explicitly instead of growing a cycle.
+    ///
+    /// The analyzer supports integer constants, integer local loads/stores,
+    /// `iadd`, `dup`, integer comparisons, gotos, and `return`/`ireturn`.
+    /// Reference, category-two, floating-point, exception, and switch flows
+    /// are not supported. No byte offsets or stack-map frames are produced.
+    pub fn analyze(
+        graph: &ControlFlowGraph,
+        method_descriptor: &str,
+        is_static: bool,
+        constant_pool: &ConstantPool,
+    ) -> Result<FlowAnalysis, AnalysisError> {
+        constant_pool
+            .validate_for_encoding()
+            .map_err(AnalysisError::InvalidConstantPool)?;
+        let descriptor = MethodDescriptor::parse(method_descriptor)
+            .map_err(AnalysisError::InvalidMethodDescriptor)?;
+        check_parameter_slots(&descriptor, !is_static, None)?;
+        for (parameter, ty) in descriptor.parameters.iter().enumerate() {
+            if value_kind(ty) != ValueKind::Int {
+                return Err(AnalysisError::UnsupportedFlowParameter {
+                    parameter,
+                    actual: value_kind(ty),
+                });
+            }
+        }
+
+        let mut initial = Frame::new(&descriptor, is_static)?;
+        let mut local_count = initial.locals.len();
+        for block in graph.blocks() {
+            for (offset, element) in block.instructions.iter().enumerate() {
+                let instruction_index = block.instruction_range.start + offset;
+                match element {
+                    CodeElement::Instruction(instruction) => {
+                        if block.reachable {
+                            validate_flow_instruction(instruction_index, *instruction)?;
+                        }
+                        if let Some((index, width)) = local_access(*instruction) {
+                            let end = usize::from(index.get()) + usize::from(width);
+                            if end > usize::from(u16::MAX) {
+                                return Err(AnalysisError::LocalLimitExceeded {
+                                    instruction: instruction_index,
+                                    index: index.get(),
+                                    width,
+                                });
+                            }
+                            local_count = local_count.max(end);
+                        }
+                    }
+                    CodeElement::Branch(_) => {}
+                    CodeElement::Label(_) => {
+                        return Err(AnalysisError::UnsupportedFlowInstruction {
+                            instruction: instruction_index,
+                            kind: UnsupportedFlowInstructionKind::Operation,
+                        });
+                    }
+                }
+            }
+        }
+        initial.locals.resize(local_count, None);
+        let initial_state = state_from_frame(&initial);
+
+        let block_count = graph.blocks().len();
+        let initial_state_slots = initial_state
+            .locals
+            .len()
+            .saturating_add(initial_state.operand_stack.len());
+        if block_count > MAX_FLOW_STATE_SLOTS || initial_state_slots > MAX_FLOW_STATE_SLOTS {
+            return Err(AnalysisError::FlowStateSizeLimitExceeded {
+                slots: initial_state_slots.max(block_count),
+                limit: MAX_FLOW_STATE_SLOTS,
+            });
+        }
+        let max_steps = block_count
+            .saturating_mul(local_count.saturating_add(1))
+            .max(1);
+        let mut block_entries = vec![None; block_count];
+        let entry = graph.entry_block();
+        let Some(entry_state) = block_entries.get_mut(entry.index()) else {
+            return Err(AnalysisError::InvalidControlFlowGraph { block: entry });
+        };
+        *entry_state = Some(initial_state);
+        let mut retained_state_slots = initial_state_slots;
+
+        let mut pending = std::collections::VecDeque::from([entry]);
+        let mut queued = vec![false; block_count];
+        queued[entry.index()] = true;
+        let mut steps = 0usize;
+        let mut max_stack = 0usize;
+
+        while let Some(block_id) = pending.pop_front() {
+            queued[block_id.index()] = false;
+            steps = steps.saturating_add(1);
+            if steps > max_steps {
+                return Err(AnalysisError::FlowAnalysisLimitExceeded {
+                    steps,
+                    limit: max_steps,
+                });
+            }
+            let block = graph
+                .block(block_id)
+                .ok_or(AnalysisError::InvalidControlFlowGraph { block: block_id })?;
+            let state = block_entries
+                .get(block_id.index())
+                .and_then(Option::as_ref)
+                .ok_or(AnalysisError::InvalidControlFlowGraph { block: block_id })?
+                .clone();
+            let mut frame = frame_from_state(&state);
+
+            for (offset, element) in block.instructions.iter().enumerate() {
+                let instruction_index = block.instruction_range.start + offset;
+                match element {
+                    CodeElement::Instruction(instruction) => {
+                        frame.apply(instruction_index, *instruction, &descriptor, constant_pool)?
+                    }
+                    CodeElement::Branch(branch) => {
+                        apply_branch(&mut frame, instruction_index, branch)?;
+                    }
+                    CodeElement::Label(_) => {
+                        return Err(AnalysisError::UnsupportedFlowInstruction {
+                            instruction: instruction_index,
+                            kind: UnsupportedFlowInstructionKind::Operation,
+                        });
+                    }
+                }
+            }
+            max_stack = max_stack.max(frame.max_stack);
+            let outgoing = state_from_frame(&frame);
+
+            for successor in &block.successors {
+                let Some(slot) = block_entries.get_mut(successor.index()) else {
+                    return Err(AnalysisError::InvalidControlFlowGraph { block: *successor });
+                };
+                let changed = match slot {
+                    Some(existing) => merge_flow_states(existing, &outgoing, *successor)?,
+                    None => {
+                        let additional_slots = outgoing
+                            .locals
+                            .len()
+                            .saturating_add(outgoing.operand_stack.len());
+                        let required_slots = retained_state_slots.saturating_add(additional_slots);
+                        if required_slots > MAX_FLOW_STATE_SLOTS {
+                            return Err(AnalysisError::FlowStateSizeLimitExceeded {
+                                slots: required_slots,
+                                limit: MAX_FLOW_STATE_SLOTS,
+                            });
+                        }
+                        retained_state_slots = required_slots;
+                        *slot = Some(outgoing.clone());
+                        true
+                    }
+                };
+                if changed && !queued[successor.index()] {
+                    pending.push_back(*successor);
+                    queued[successor.index()] = true;
+                }
+            }
+        }
+
+        let max_stack =
+            u16::try_from(max_stack).map_err(|_| AnalysisError::StackLimitExceeded {
+                instruction: 0,
+                slots: max_stack,
+            })?;
+        let max_locals =
+            u16::try_from(local_count).map_err(|_| AnalysisError::LocalLimitExceeded {
+                instruction: 0,
+                index: u16::MAX,
+                width: 1,
+            })?;
+        Ok(FlowAnalysis {
+            max_stack,
+            max_locals,
+            block_entries,
+        })
+    }
+}
+
+fn validate_flow_instruction(
+    instruction_index: usize,
+    instruction: Instruction,
+) -> Result<(), AnalysisError> {
+    let supported = matches!(
+        instruction,
+        Instruction::IConst(_)
+            | Instruction::Bipush(_)
+            | Instruction::Sipush(_)
+            | Instruction::ILoad(_)
+            | Instruction::IStore(_)
+            | Instruction::IAdd
+            | Instruction::Dup
+            | Instruction::Return
+            | Instruction::IReturn
+            | Instruction::Ldc(LdcConstant::Integer(_))
+    );
+    if supported {
+        return Ok(());
+    }
+    let kind = match instruction {
+        Instruction::AConstNull
+        | Instruction::ALoad(_)
+        | Instruction::AStore(_)
+        | Instruction::GetField(_)
+        | Instruction::PutField(_)
+        | Instruction::GetStatic(_)
+        | Instruction::PutStatic(_)
+        | Instruction::InvokeStatic(_)
+        | Instruction::InvokeVirtual(_)
+        | Instruction::InvokeSpecial(_)
+        | Instruction::New(_)
+        | Instruction::Ldc(LdcConstant::Reference(_))
+        | Instruction::AReturn => UnsupportedFlowInstructionKind::Reference,
+        Instruction::LConst(_)
+        | Instruction::Ldc2(_)
+        | Instruction::LLoad(_)
+        | Instruction::LStore(_)
+        | Instruction::LReturn => UnsupportedFlowInstructionKind::CategoryTwo,
+        _ => UnsupportedFlowInstructionKind::Operation,
+    };
+    Err(AnalysisError::UnsupportedFlowInstruction {
+        instruction: instruction_index,
+        kind,
+    })
+}
+
+fn local_access(instruction: Instruction) -> Option<(LocalIndex, u8)> {
+    match instruction {
+        Instruction::ILoad(index)
+        | Instruction::IStore(index)
+        | Instruction::ALoad(index)
+        | Instruction::AStore(index) => Some((index, 1)),
+        Instruction::LLoad(index) | Instruction::LStore(index) => Some((index, 2)),
+        _ => None,
+    }
+}
+
+fn apply_branch(
+    frame: &mut Frame,
+    instruction: usize,
+    branch: &BranchInstruction,
+) -> Result<(), AnalysisError> {
+    match branch {
+        BranchInstruction::Goto(_) | BranchInstruction::GotoWide(_) => Ok(()),
+        BranchInstruction::IfEq(_) | BranchInstruction::IfNe(_) => {
+            frame.pop_expected(instruction, ValueKind::Int).map(|_| ())
+        }
+        BranchInstruction::IfICmpEq(_)
+        | BranchInstruction::IfICmpNe(_)
+        | BranchInstruction::IfICmpLt(_)
+        | BranchInstruction::IfICmpGe(_)
+        | BranchInstruction::IfICmpGt(_)
+        | BranchInstruction::IfICmpLe(_) => {
+            frame.pop_expected(instruction, ValueKind::Int)?;
+            frame.pop_expected(instruction, ValueKind::Int)?;
+            Ok(())
+        }
+    }
+}
+
+fn state_from_frame(frame: &Frame) -> BlockEntryState {
+    let locals = frame
+        .locals
+        .iter()
+        .map(|slot| match slot {
+            Some(LocalSlot::Value(ValueKind::Int)) => FlowLocalState::Integer,
+            _ => FlowLocalState::Top,
+        })
+        .collect();
+    BlockEntryState {
+        locals,
+        operand_stack: frame.stack.clone(),
+    }
+}
+
+fn frame_from_state(state: &BlockEntryState) -> Frame {
+    let locals = state
+        .locals
+        .iter()
+        .map(|local| match local {
+            FlowLocalState::Top => None,
+            FlowLocalState::Integer => Some(LocalSlot::Value(ValueKind::Int)),
+        })
+        .collect();
+    let stack_slots = state.operand_stack.len();
+    Frame {
+        stack: state.operand_stack.clone(),
+        stack_slots,
+        locals,
+        max_stack: stack_slots,
+    }
+}
+
+fn merge_flow_states(
+    existing: &mut BlockEntryState,
+    incoming: &BlockEntryState,
+    block: BasicBlockId,
+) -> Result<bool, AnalysisError> {
+    if existing.operand_stack != incoming.operand_stack {
+        return Err(AnalysisError::IncompatibleStackMerge {
+            block,
+            expected_values: existing.operand_stack.len(),
+            incoming_values: incoming.operand_stack.len(),
+        });
+    }
+    let mut changed = false;
+    for (existing, incoming) in existing.locals.iter_mut().zip(&incoming.locals) {
+        if *existing != *incoming && *existing != FlowLocalState::Top {
+            *existing = FlowLocalState::Top;
+            changed = true;
+        }
+    }
+    Ok(changed)
 }
 
 #[cfg(test)]
