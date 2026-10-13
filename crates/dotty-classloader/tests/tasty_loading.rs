@@ -254,6 +254,43 @@ fn loads_published_scala39_with_filter_and_its_map_member() {
 }
 
 #[test]
+fn completes_a_real_scala39_module_class_with_its_overloads() {
+    let mut store = SemanticStore::new();
+    let synthetic_jdk = TemporaryDirectory::new("published-scala39-module");
+    write_synthetic_object_class(synthetic_jdk.path());
+    let class_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(published_scala39_library_dir())),
+        Box::new(DirectoryClassPath::new(synthetic_jdk.path().clone())),
+    ]);
+    let mut loader = ClassLoader::new(class_path, &mut store);
+    let identity = loader
+        .complete_module(&BinaryName::from_internal("scala/math/BigInt"))
+        .expect("BigInt should complete from its Scala 3.9 TASTy");
+    drop(loader);
+
+    assert_eq!(
+        store.symbols.get(identity.module_class).kind,
+        SymbolKind::ModuleClass
+    );
+    let declarations = class_info(&store, identity.module_class).declarations;
+    let apply = Name::new(store.names.intern("apply"), Namespace::Term);
+    assert!(
+        store.scopes.get(declarations).lookup_all(&apply).len() > 1,
+        "BigInt should preserve its overloaded apply declarations"
+    );
+    assert_eq!(
+        store
+            .types
+            .get(match store.symbols.get(identity.object).info {
+                SymbolInfo::Complete(ty) => ty,
+                other => panic!("expected a completed module term, found {other:?}"),
+            })
+            .reference_symbol(),
+        Some(identity.module_class)
+    );
+}
+
+#[test]
 fn loads_scala39_function1_with_a_shared_anyref_parent() {
     let mut store = SemanticStore::new();
     let synthetic_jdk = TemporaryDirectory::new("published-scala39-function1");
