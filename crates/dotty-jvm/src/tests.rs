@@ -1,5 +1,8 @@
+use dotty_classfile::attribute::Attribute;
+use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
-use dotty_core::ast::{Tree, TreeKind, TypedAst};
+use dotty_classfile::reader::Reader;
+use dotty_core::ast::{Ident, If, Literal, Tree, TreeKind, TypedAst};
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TreeId};
 use dotty_core::names::{Name, Namespace, TermName};
@@ -7,12 +10,17 @@ use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{
     Scope, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
 };
-use dotty_core::types::{ClassInfo, Constant, MethodKind, MethodParam, MethodType, PolyType, Type};
+use dotty_core::types::{
+    ClassInfo, Constant, MethodKind, MethodParam, MethodType, PolyType, TermRefTarget, Type,
+};
+use std::fs;
+use std::process::Command;
 
 use crate::{
-    InvalidJvmClassInfoKind, InvalidTypeReason, JvmClassPlan, JvmCodegenError, JvmCompilationUnit,
-    JvmMethodPlan, JvmNameKind, JvmReturnType, JvmType, JvmValueCategory, SymbolRole,
-    UnsupportedJvmClassKind, UnsupportedJvmTypeKind, UnsupportedMethodShapeKind,
+    InvalidJvmClassInfoKind, InvalidTypeReason, JvmClassInitializationPlan, JvmClassPlan,
+    JvmCodegenError, JvmCompilationUnit, JvmMethodPlan, JvmNameKind, JvmReturnType, JvmType,
+    JvmValueCategory, SymbolRole, UnsupportedJvmClassKind, UnsupportedJvmTypeKind,
+    UnsupportedMethodShapeKind, emit_class,
 };
 
 struct Fixture {
@@ -62,6 +70,7 @@ impl Fixture {
                     parameters: vec![self.parameter],
                     body: Some(self.body),
                 }],
+                initialization: JvmClassInitializationPlan::Unsupported,
             }],
         }
     }
@@ -559,6 +568,7 @@ impl ClassIdentityFixture {
         JvmClassPlan {
             class: self.class,
             methods: Vec::new(),
+            initialization: JvmClassInitializationPlan::Unsupported,
         }
         .identity(&self.store)
     }
@@ -680,6 +690,7 @@ fn rejects_nested_and_invalid_package_owner_chains() {
         JvmClassPlan {
             class: inner,
             methods: Vec::new(),
+            initialization: JvmClassInitializationPlan::Unsupported,
         }
         .identity(&nested.store),
         Err(JvmCodegenError::UnsupportedOwnerKind {
@@ -895,6 +906,7 @@ fn method_metadata_preserves_parameter_identity_order_and_instance_slots() {
     let class_plan = JvmClassPlan {
         class: fixture.class,
         methods: vec![fixture.plan.clone()],
+        initialization: JvmClassInitializationPlan::Unsupported,
     };
     let metadata = class_plan
         .metadata(&fixture.store, &fixture.definitions)
@@ -956,6 +968,7 @@ fn rejects_non_simple_method_names_and_unsupported_instance_method_flags() {
         JvmClassPlan {
             class: invalid_name.class,
             methods: vec![invalid_name.plan.clone()],
+            initialization: JvmClassInitializationPlan::Unsupported,
         }
         .metadata(&invalid_name.store, &invalid_name.definitions),
         Err(JvmCodegenError::InvalidJvmName {
@@ -983,6 +996,7 @@ fn rejects_non_simple_method_names_and_unsupported_instance_method_flags() {
             JvmClassPlan {
                 class: fixture.class,
                 methods: vec![fixture.plan.clone()],
+                initialization: JvmClassInitializationPlan::Unsupported,
             }
             .metadata(&fixture.store, &fixture.definitions),
             Err(JvmCodegenError::UnsupportedJvmSymbolFlag {
@@ -999,6 +1013,7 @@ fn rejects_non_simple_method_names_and_unsupported_instance_method_flags() {
         JvmClassPlan {
             class: nonpublic.class,
             methods: vec![nonpublic.plan.clone()],
+            initialization: JvmClassInitializationPlan::Unsupported,
         }
         .metadata(&nonpublic.store, &nonpublic.definitions),
         Err(JvmCodegenError::UnsupportedJvmVisibility {
@@ -1017,6 +1032,7 @@ fn rejects_non_simple_method_names_and_unsupported_instance_method_flags() {
     let final_metadata = JvmClassPlan {
         class: final_method.class,
         methods: vec![final_method.plan.clone()],
+        initialization: JvmClassInitializationPlan::Unsupported,
     }
     .metadata(&final_method.store, &final_method.definitions)
     .unwrap();
@@ -1060,6 +1076,7 @@ fn same_named_method_from_a_different_owner_cannot_replace_the_planned_symbol() 
         JvmClassPlan {
             class: fixture.class,
             methods: vec![other_plan],
+            initialization: JvmClassInitializationPlan::Unsupported,
         }
         .metadata(&fixture.store, &fixture.definitions),
         Err(JvmCodegenError::WrongOwner {
@@ -1088,6 +1105,7 @@ fn rejects_duplicate_emitted_method_names_and_descriptors() {
         JvmClassPlan {
             class: fixture.class,
             methods: vec![fixture.plan.clone(), duplicate_plan],
+            initialization: JvmClassInitializationPlan::Unsupported,
         }
         .metadata(&fixture.store, &fixture.definitions),
         Err(JvmCodegenError::DuplicateJvmMethodIdentity {
@@ -1128,10 +1146,12 @@ fn compilation_unit_rejects_distinct_symbols_with_the_same_jvm_class_name() {
             JvmClassPlan {
                 class: fixture.class,
                 methods: Vec::new(),
+                initialization: JvmClassInitializationPlan::Unsupported,
             },
             JvmClassPlan {
                 class: duplicate,
                 methods: Vec::new(),
+                initialization: JvmClassInitializationPlan::Unsupported,
             },
         ],
     };
@@ -1534,5 +1554,475 @@ fn enforces_the_jvms_method_parameter_slot_limit_including_instance_receiver() {
     assert_eq!(
         maximum_instance.descriptor().unwrap().parameters().len(),
         254
+    );
+}
+
+struct EmissionFixture {
+    store: SemanticStore,
+    ast: TypedAst,
+    definitions: Definitions,
+    class: SymbolId,
+    methods: Vec<SymbolId>,
+    parameters: Vec<Vec<SymbolId>>,
+    bodies: Vec<TreeId<dotty_core::ast::Typed>>,
+}
+
+impl EmissionFixture {
+    fn new(allocation_noise: bool) -> Self {
+        let mut identity = ClassIdentityFixture::new(&["example"], "Answer");
+        if allocation_noise {
+            for value in 0..7 {
+                identity
+                    .store
+                    .types
+                    .alloc(Type::Constant(Constant::Int(value)));
+            }
+        }
+        let definitions = Definitions::bootstrap(&mut identity.store);
+        let original = match identity.store.symbols.info(identity.class) {
+            SymbolInfo::Complete(ty) => match identity.store.types.get(*ty) {
+                Type::ClassInfo(info) => info.clone(),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        let class_type = identity.store.types.alloc(Type::ClassInfo(ClassInfo {
+            parents: vec![definitions.object_type],
+            ..original
+        }));
+        identity
+            .store
+            .symbols
+            .set_info(identity.class, SymbolInfo::Complete(class_type));
+
+        let mut ast = TypedAst::new();
+        let value_body = ast.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: Constant::Int(42),
+            }),
+            position: None,
+            ty: definitions.int,
+        });
+        let (value, value_params) = add_emission_method(
+            &mut identity.store,
+            identity.class,
+            identity.declarations,
+            "value",
+            &[],
+            definitions.int,
+        );
+
+        let (select, select_params) = add_emission_method(
+            &mut identity.store,
+            identity.class,
+            identity.declarations,
+            "select",
+            &[
+                ("flag", definitions.boolean),
+                ("left", definitions.int),
+                ("right", definitions.int),
+            ],
+            definitions.int,
+        );
+        let mut ident = |store: &mut SemanticStore, parameter: SymbolId, _value_type| {
+            let name = store.symbols.get(parameter).name;
+            let reference_type = store.types.alloc(Type::TermRef {
+                prefix: definitions.no_prefix,
+                target: TermRefTarget::Symbol(parameter),
+            });
+            ast.alloc(Tree {
+                kind: TreeKind::Ident(Ident {
+                    name,
+                    backquoted: false,
+                }),
+                position: None,
+                ty: reference_type,
+            })
+        };
+        let condition = ident(&mut identity.store, select_params[0], definitions.boolean);
+        let left = ident(&mut identity.store, select_params[1], definitions.int);
+        let right = ident(&mut identity.store, select_params[2], definitions.int);
+        let select_body = ast.alloc(Tree {
+            kind: TreeKind::If(If {
+                cond: condition,
+                then_branch: left,
+                else_branch: right,
+            }),
+            position: None,
+            ty: definitions.int,
+        });
+
+        Self {
+            store: identity.store,
+            ast,
+            definitions,
+            class: identity.class,
+            methods: vec![value, select],
+            parameters: vec![value_params, select_params],
+            bodies: Vec::new(),
+        }
+        .with_bodies(vec![value_body, select_body])
+    }
+
+    fn with_bodies(mut self, bodies: Vec<TreeId<dotty_core::ast::Typed>>) -> Self {
+        self.bodies = bodies;
+        self
+    }
+
+    fn unit(&self) -> JvmCompilationUnit<'_> {
+        let methods = self
+            .methods
+            .iter()
+            .copied()
+            .zip(self.parameters.iter())
+            .zip(self.bodies.iter().copied())
+            .map(|((method, parameters), body)| JvmMethodPlan {
+                method,
+                parameters: parameters.clone(),
+                body: Some(body),
+            })
+            .collect();
+        JvmCompilationUnit {
+            store: &self.store,
+            typed_ast: &self.ast,
+            classes: vec![JvmClassPlan {
+                class: self.class,
+                methods,
+                initialization: JvmClassInitializationPlan::ImplicitNoArg,
+            }],
+        }
+    }
+
+    fn emit(&self) -> Result<crate::GeneratedClass, JvmCodegenError> {
+        emit_class(&self.unit(), self.class, &self.definitions)
+    }
+}
+
+fn add_emission_parameter(
+    store: &mut SemanticStore,
+    method: SymbolId,
+    text: &str,
+    ty: dotty_core::TypeId,
+) -> SymbolId {
+    let name = store.names.intern(text);
+    store.symbols.alloc(Symbol {
+        name: Name::new(name, Namespace::Term),
+        owner: Some(method),
+        kind: SymbolKind::Parameter,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Complete(ty),
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    })
+}
+
+fn add_emission_method(
+    store: &mut SemanticStore,
+    class: SymbolId,
+    declarations: dotty_core::ScopeId,
+    text: &str,
+    parameters: &[(&str, dotty_core::TypeId)],
+    result: dotty_core::TypeId,
+) -> (SymbolId, Vec<SymbolId>) {
+    let name_id = store.names.intern(text);
+    let method = store.symbols.alloc(Symbol {
+        name: Name::new(name_id, Namespace::Term),
+        owner: Some(class),
+        kind: SymbolKind::Method,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let mut parameter_ids = Vec::with_capacity(parameters.len());
+    let method_params = parameters
+        .iter()
+        .map(|(name, ty)| {
+            let id = store.names.intern(name);
+            parameter_ids.push(add_emission_parameter(store, method, name, *ty));
+            MethodParam {
+                name: TermName::new(id),
+                ty: *ty,
+                erased: false,
+                varargs: false,
+            }
+        })
+        .collect();
+    let method_type = store.types.alloc(Type::Method(MethodType {
+        params: method_params,
+        result,
+        kind: MethodKind::Plain,
+    }));
+    store
+        .symbols
+        .set_info(method, SymbolInfo::Complete(method_type));
+    let symbol_name = store.symbols.get(method).name;
+    store
+        .scopes
+        .get_mut(declarations)
+        .enter(symbol_name, method);
+    (method, parameter_ids)
+}
+
+#[test]
+fn emits_a_deterministic_complete_class_with_constructor_methods_and_branch_frames() {
+    let ordinary = EmissionFixture::new(false).emit().unwrap();
+    let shifted = EmissionFixture::new(true).emit().unwrap();
+    assert_eq!(ordinary.internal_name(), "example/Answer");
+    assert_eq!(ordinary.bytes(), shifted.bytes());
+
+    let mut reader = Reader::new(ordinary.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    assert!(reader.is_at_end());
+    class.validate_references().unwrap();
+    assert_eq!(class.version.major, 65);
+    assert_eq!(
+        class.constant_pool.class_name(class.this_class),
+        Ok("example/Answer")
+    );
+    assert_eq!(class.fields.len(), 0);
+    assert_eq!(class.methods.len(), 3);
+    let names = class
+        .methods
+        .iter()
+        .map(|method| class.constant_pool.utf8(method.name_index).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["<init>", "value", "select"]);
+    assert_eq!(
+        class.constant_pool.utf8(class.methods[0].descriptor_index),
+        Ok("()V")
+    );
+    assert_eq!(
+        class.constant_pool.utf8(class.methods[1].descriptor_index),
+        Ok("()I")
+    );
+    assert_eq!(
+        class.constant_pool.utf8(class.methods[2].descriptor_index),
+        Ok("(ZII)I")
+    );
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .filter(|method| class.constant_pool.utf8(method.name_index) == Ok("<init>"))
+            .count(),
+        1
+    );
+    let Attribute::Code(constructor) = &class.methods[0].attributes[0] else {
+        panic!("constructor code missing")
+    };
+    assert_eq!(constructor.code.len(), 5);
+    assert_eq!(&constructor.code[..2], &[0x2a, 0xb7]);
+    assert_eq!(constructor.code[4], 0xb1);
+    let Attribute::Code(select) = &class.methods[2].attributes[0] else {
+        panic!("select code missing")
+    };
+    assert!(select.code.contains(&0x99));
+    assert!(select.attributes.iter().any(|attribute| matches!(attribute, Attribute::Other(raw) if class.constant_pool.utf8(raw.name_index) == Ok("StackMapTable"))));
+
+    if require_jdk_or_skip() {
+        verify_emitted_class_with_jdk(ordinary.bytes());
+    }
+}
+
+fn require_jdk_or_skip() -> bool {
+    let unavailable = ["java", "javac", "javap"]
+        .into_iter()
+        .filter_map(|tool| match jdk_tool_major_version(tool) {
+            Some(major) if major >= 21 => None,
+            Some(major) => Some(format!("{tool} {major} (requires JDK 21+)")),
+            None => Some(format!("{tool} (missing or version unavailable)")),
+        })
+        .collect::<Vec<_>>();
+    if unavailable.is_empty() {
+        return true;
+    }
+
+    let message = format!(
+        "dotty-jvm emission gate requires java, javac, and javap from JDK 21+ on PATH; unavailable: {}",
+        unavailable.join(", ")
+    );
+    if std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1") {
+        panic!("{message}");
+    }
+    eprintln!("skipping dotty-jvm emitted class verifier gate: {message}");
+    false
+}
+
+fn jdk_tool_major_version(tool: &str) -> Option<u32> {
+    let output = Command::new(tool).arg("-version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    text.split(|character: char| !character.is_ascii_digit())
+        .find_map(|part| part.parse::<u32>().ok())
+}
+
+fn verify_emitted_class_with_jdk(bytes: &[u8]) {
+    let directory = std::env::temp_dir().join(format!("dotty-jvm-emission-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&directory);
+    let class_directory = directory.join("example");
+    fs::create_dir_all(&class_directory).unwrap();
+    fs::write(class_directory.join("Answer.class"), bytes).unwrap();
+    let classpath = directory.to_str().unwrap();
+
+    let javap = Command::new("javap")
+        .args(["-v", "-classpath", classpath, "example.Answer"])
+        .output()
+        .unwrap();
+    assert!(
+        javap.status.success(),
+        "javap rejected emitted Answer.class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    for expected in [
+        "major version: 65",
+        "example/Answer",
+        "descriptor: ()V",
+        "value()",
+        "select(boolean, int, int)",
+    ] {
+        assert!(
+            javap_output.contains(expected),
+            "javap output omitted {expected:?}:\n{javap_output}"
+        );
+    }
+
+    let harness = directory.join("EmissionHarness.java");
+    fs::write(
+        &harness,
+        "public final class EmissionHarness { public static void main(String[] args) { example.Answer answer = new example.Answer(); System.out.println(answer.value() + \":\" + answer.select(true, 7, 9) + \":\" + answer.select(false, 7, 9)); } }\n",
+    )
+    .unwrap();
+    let javac = Command::new("javac")
+        .args(["-classpath", classpath, "-d", classpath])
+        .arg(&harness)
+        .output()
+        .unwrap();
+    assert!(
+        javac.status.success(),
+        "javac rejected emitted Answer.class harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+
+    let java = Command::new("java")
+        .args(["-Xverify:all", "-classpath", classpath, "EmissionHarness"])
+        .output()
+        .unwrap();
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected emitted Answer.class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "42:7:9");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn class_emission_fails_closed_for_unknown_constructor_fields_and_superclasses() {
+    let mut fixture = EmissionFixture::new(false);
+    let mut unit = fixture.unit();
+    unit.classes[0].initialization = JvmClassInitializationPlan::Unsupported;
+    assert_eq!(
+        emit_class(&unit, fixture.class, &fixture.definitions),
+        Err(JvmCodegenError::UnsupportedConstructor {
+            class: fixture.class
+        })
+    );
+
+    let mut parameterized = EmissionFixture::new(false);
+    let declarations = match parameterized.store.symbols.info(parameterized.class) {
+        SymbolInfo::Complete(ty) => match parameterized.store.types.get(*ty) {
+            Type::ClassInfo(info) => info.declarations,
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    };
+    let int_type = parameterized.definitions.int;
+    let unit_type = parameterized.definitions.unit;
+    let (constructor, _) = add_emission_method(
+        &mut parameterized.store,
+        parameterized.class,
+        declarations,
+        "<init>",
+        &[("seed", int_type)],
+        unit_type,
+    );
+    parameterized.store.symbols.get_mut(constructor).kind = SymbolKind::Constructor;
+    assert_eq!(
+        parameterized.emit(),
+        Err(JvmCodegenError::UnsupportedConstructor {
+            class: parameterized.class
+        })
+    );
+
+    let field_name = fixture.store.names.intern("field");
+    let field = fixture.store.symbols.alloc(Symbol {
+        name: Name::new(field_name, Namespace::Term),
+        owner: Some(fixture.class),
+        kind: SymbolKind::Field,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Complete(fixture.definitions.int),
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let class_info_type = match fixture.store.symbols.info(fixture.class) {
+        SymbolInfo::Complete(ty) => *ty,
+        _ => unreachable!(),
+    };
+    let Type::ClassInfo(info) = fixture.store.types.get(class_info_type).clone() else {
+        unreachable!()
+    };
+    fixture
+        .store
+        .scopes
+        .get_mut(info.declarations)
+        .enter(Name::new(field_name, Namespace::Term), field);
+    assert_eq!(
+        fixture.emit(),
+        Err(JvmCodegenError::UnsupportedJvmClassMember {
+            class: fixture.class,
+            member: field,
+            kind: SymbolKind::Field
+        })
+    );
+
+    let mut superclass = EmissionFixture::new(false);
+    let Type::ClassInfo(mut info) = (match superclass.store.symbols.info(superclass.class) {
+        SymbolInfo::Complete(ty) => superclass.store.types.get(*ty).clone(),
+        _ => unreachable!(),
+    }) else {
+        unreachable!()
+    };
+    info.parents[0] = superclass.definitions.int;
+    let changed = superclass.store.types.alloc(Type::ClassInfo(info));
+    superclass
+        .store
+        .symbols
+        .set_info(superclass.class, SymbolInfo::Complete(changed));
+    assert_eq!(
+        superclass.emit(),
+        Err(JvmCodegenError::UnsupportedJvmSuperclass {
+            class: superclass.class,
+            parent: Some(superclass.definitions.int)
+        })
     );
 }

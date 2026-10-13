@@ -1,11 +1,12 @@
 //! A JVM backend adapter boundary for already-typed compiler semantics.
 //!
 //! This crate defines and validates a borrowed compilation plan, projects
-//! bounded class/method metadata, and lowers a small typed expression subset
-//! into `dotty-classfile`'s symbolic code builder. It does not assemble a
-//! source frontend, infer identities from names, mutate the caller's stores,
-//! or emit complete class files. See `docs/jvm-backend.md` for its supported
-//! subset and boundary assumptions.
+//! bounded class/method metadata, lowers a small typed expression subset into
+//! `dotty-classfile`'s symbolic code builder, and can compose those results
+//! into a complete class file when the frontend proves the supported
+//! initialization shape. It does not assemble a source frontend, infer
+//! identities from names, or mutate the caller's stores. See
+//! `docs/jvm-backend.md` for its supported subset and boundary assumptions.
 
 use std::collections::HashSet;
 use std::error::Error;
@@ -19,6 +20,7 @@ use dotty_core::symbols::{SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
 
 mod descriptor;
+mod emission;
 mod expression;
 mod identity;
 
@@ -30,6 +32,9 @@ pub const JVM_EXPRESSION_DEPTH_LIMIT: usize = 64;
 /// Repeated references to a shared subtree count separately because lowering
 /// expands each occurrence into bytecode.
 pub const JVM_EXPRESSION_NODE_BUDGET: usize = 4_096;
+
+/// Class-file major version emitted by the current whole-class backend.
+pub const JVM_CLASSFILE_MAJOR_VERSION: u16 = 65;
 
 /// JVMS limit for a method's parameter slots, including `this` for instance
 /// methods.
@@ -141,6 +146,42 @@ pub struct JvmClassMetadata {
     methods: Vec<JvmMethodMetadata>,
 }
 
+/// Frontend evidence about class initialization for whole-class emission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmClassInitializationPlan {
+    /// The frontend proved that an empty `Object.<init>()V` constructor is
+    /// equivalent to the source class: no constructor parameters or body,
+    /// superclass arguments, fields, or template initializers are present.
+    ImplicitNoArg,
+    /// Constructor or class initialization is explicit or cannot be proven
+    /// safe by the supplied compilation plan.
+    Unsupported,
+}
+
+/// An owned generated class-file artifact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratedClass {
+    internal_name: String,
+    bytes: Vec<u8>,
+}
+
+impl GeneratedClass {
+    /// JVM internal name encoded by this artifact.
+    pub fn internal_name(&self) -> &str {
+        &self.internal_name
+    }
+
+    /// Encoded class-file bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Takes ownership of the encoded class-file bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
 /// Why a class symbol is outside the supported top-level class subset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedJvmClassKind {
@@ -215,6 +256,9 @@ pub struct JvmClassPlan {
     pub class: SymbolId,
     /// Methods in deterministic frontend order.
     pub methods: Vec<JvmMethodPlan>,
+    /// Evidence that the synthesized minimal constructor preserves source
+    /// initialization behavior.
+    pub initialization: JvmClassInitializationPlan,
 }
 
 /// A method, its explicitly ordered parameter identities, and typed body root.
@@ -468,6 +512,38 @@ pub enum JvmCodegenError {
         previous: SymbolId,
         internal_name: String,
     },
+    /// The selected class symbol has no corresponding class plan in the unit.
+    MissingClassPlan { class: SymbolId },
+    /// The class plan cannot prove that synthesizing the minimal constructor is safe.
+    UnsupportedConstructor { class: SymbolId },
+    /// The class's parent list is not exactly its canonical `Object` type.
+    UnsupportedJvmSuperclass {
+        class: SymbolId,
+        parent: Option<TypeId>,
+    },
+    /// The class declares a self type outside this emission subset.
+    UnsupportedJvmSelfType { class: SymbolId, self_type: TypeId },
+    /// A declared field, initializer, nested type, or other member is outside
+    /// the single-class emission subset.
+    UnsupportedJvmClassMember {
+        class: SymbolId,
+        member: SymbolId,
+        kind: SymbolKind,
+    },
+    /// A selected method is owned by the class but absent from its declaration scope.
+    MethodNotInClassDeclarations { class: SymbolId, method: SymbolId },
+    /// ClassFileBuilder rejected staged output; `method` is present when the
+    /// failing operation was associated with a selected semantic method.
+    ClassFileBuild {
+        class: SymbolId,
+        method: Option<SymbolId>,
+        error: dotty_classfile::class_file_builder::ClassFileBuildError,
+    },
+    /// The fixed synthesized constructor could not be built symbolically.
+    ConstructorCodeBuilder {
+        class: SymbolId,
+        error: dotty_classfile::bytecode::CodeBuilderError,
+    },
 }
 
 /// Semantic role required by a compilation plan.
@@ -665,6 +741,21 @@ pub fn lower_method_body(
     body: TreeId<Typed>,
 ) -> Result<dotty_classfile::bytecode::CodeBuilder, JvmCodegenError> {
     expression::lower_method_body(store, typed_ast, definitions, method, body)
+}
+
+/// Emits one selected ordinary class as a complete JVM class-file artifact.
+///
+/// The class must have an explicit [`JvmClassPlan`] in `unit`. Its
+/// initialization plan must prove an implicit no-argument constructor is
+/// equivalent to the source class. The output is pinned to class-file version
+/// 65 and contains only the planned public instance methods, a minimal public
+/// constructor, and no TASTy or other Scala ABI metadata.
+pub fn emit_class(
+    unit: &JvmCompilationUnit<'_>,
+    class_symbol: SymbolId,
+    definitions: &Definitions,
+) -> Result<GeneratedClass, JvmCodegenError> {
+    emission::emit_class(unit, class_symbol, definitions)
 }
 
 impl JvmParameterLocal {
