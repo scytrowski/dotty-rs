@@ -25,6 +25,12 @@ mod identity;
 /// Maximum number of nested typed expression nodes visited by JVM lowering.
 pub const JVM_EXPRESSION_DEPTH_LIMIT: usize = 64;
 
+/// Maximum expanded typed-tree node visits in one JVM lowering call.
+///
+/// Repeated references to a shared subtree count separately because lowering
+/// expands each occurrence into bytecode.
+pub const JVM_EXPRESSION_NODE_BUDGET: usize = 4_096;
+
 /// JVMS limit for a method's parameter slots, including `this` for instance
 /// methods.
 pub const JVM_MAX_PARAMETER_SLOTS: usize = 255;
@@ -362,6 +368,8 @@ pub enum JvmCodegenError {
         position: Option<dotty_core::source::SourceSpan>,
         limit: usize,
     },
+    /// Lowering expanded too many typed-tree occurrences in one call.
+    ExpressionNodeBudgetExceeded { tree: TreeId<Typed>, limit: usize },
     /// A method has an unsupported single-clause or monomorphism shape.
     UnsupportedMethodShape {
         method: SymbolId,

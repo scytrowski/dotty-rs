@@ -107,7 +107,9 @@ type and reach a stack-compatible join. A branch that terminates with an
 explicit local return contributes no placeholder value; a `Nothing` branch
 without supported return flow is rejected. Every emitted tree must be within
 the fixed depth budget `JVM_EXPRESSION_DEPTH_LIMIT` (64 nodes), and depth errors
-carry the offending `TreeId` and optional source span.
+carry the offending `TreeId` and optional source span. Each lowering call also
+caps expanded node visits at `JVM_EXPRESSION_NODE_BUDGET` (4,096); repeated
+references to a shared subtree count each time they are expanded.
 
 `lower_method_body` checks the final flow against the method descriptor and
 adds `ireturn` for an `Int`/Boolean fallthrough. A body whose reachable paths

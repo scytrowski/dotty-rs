@@ -9,8 +9,9 @@ use dotty_core::symbols::SymbolInfo;
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 
 use crate::{
-    InvalidTypeReason, JVM_EXPRESSION_DEPTH_LIMIT, JvmCodegenError, JvmExpressionFlow,
-    JvmLoweredExpression, JvmMethodMetadata, JvmReturnType, JvmType, JvmValueCategory,
+    InvalidTypeReason, JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmCodegenError,
+    JvmExpressionFlow, JvmLoweredExpression, JvmMethodMetadata, JvmReturnType, JvmType,
+    JvmValueCategory,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,7 +48,17 @@ pub(super) fn lower_expression(
     tree: TreeId<Typed>,
 ) -> Result<JvmLoweredExpression, JvmCodegenError> {
     let mut code = CodeBuilder::new();
-    let flow = emit_expression(store, typed_ast, definitions, method, tree, &mut code, 0)?;
+    let mut node_visits = 0;
+    let flow = emit_expression(
+        store,
+        typed_ast,
+        definitions,
+        method,
+        tree,
+        &mut code,
+        0,
+        &mut node_visits,
+    )?;
     Ok(JvmLoweredExpression {
         code,
         flow: public_flow(flow),
@@ -62,7 +73,17 @@ pub(super) fn lower_method_body(
     body: TreeId<Typed>,
 ) -> Result<CodeBuilder, JvmCodegenError> {
     let mut code = CodeBuilder::new();
-    let flow = emit_expression(store, typed_ast, definitions, method, body, &mut code, 0)?;
+    let mut node_visits = 0;
+    let flow = emit_expression(
+        store,
+        typed_ast,
+        definitions,
+        method,
+        body,
+        &mut code,
+        0,
+        &mut node_visits,
+    )?;
     match (method.descriptor().result(), flow) {
         (JvmReturnType::Value(expected), Flow::Value(found)) if expected == found => {
             code.ireturn()
@@ -192,6 +213,7 @@ fn lower_leaf(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_expression(
     store: &SemanticStore,
     typed_ast: &TypedAst,
@@ -200,6 +222,7 @@ fn emit_expression(
     tree_id: TreeId<Typed>,
     code: &mut CodeBuilder,
     depth: usize,
+    node_visits: &mut usize,
 ) -> Result<Flow, JvmCodegenError> {
     let tree = typed_ast
         .try_get(tree_id)
@@ -214,6 +237,13 @@ fn emit_expression(
             limit: JVM_EXPRESSION_DEPTH_LIMIT,
         });
     }
+    if *node_visits >= JVM_EXPRESSION_NODE_BUDGET {
+        return Err(JvmCodegenError::ExpressionNodeBudgetExceeded {
+            tree: tree_id,
+            limit: JVM_EXPRESSION_NODE_BUDGET,
+        });
+    }
+    *node_visits += 1;
     validate_tree_type(store, tree_id, tree.ty)?;
     match &tree.kind {
         TreeKind::Literal(_) | TreeKind::Ident(_) => Ok(Flow::Value(lower_leaf(
@@ -236,6 +266,7 @@ fn emit_expression(
             if_tree.else_branch,
             code,
             depth,
+            node_visits,
         ),
         TreeKind::Return(return_tree) => emit_return(
             store,
@@ -248,6 +279,7 @@ fn emit_expression(
             return_tree.from,
             code,
             depth,
+            node_visits,
         ),
         kind => Err(JvmCodegenError::UnsupportedTypedExpression {
             tree: tree_id,
@@ -269,6 +301,7 @@ fn emit_if(
     else_branch: TreeId<Typed>,
     code: &mut CodeBuilder,
     depth: usize,
+    node_visits: &mut usize,
 ) -> Result<Flow, JvmCodegenError> {
     let condition_flow = emit_expression(
         store,
@@ -278,6 +311,7 @@ fn emit_if(
         condition,
         code,
         depth + 1,
+        node_visits,
     )?;
     if condition_flow != Flow::Value(JvmType::Boolean) {
         return Err(JvmCodegenError::InvalidIfCondition {
@@ -308,6 +342,7 @@ fn emit_if(
         then_branch,
         code,
         depth + 1,
+        node_visits,
     )?;
     let join_label = if matches!(then_flow, Flow::Value(_)) {
         let join_label = code
@@ -339,6 +374,7 @@ fn emit_if(
         else_branch,
         code,
         depth + 1,
+        node_visits,
     )?;
     let flow = merge_if_flows(
         store,
@@ -437,6 +473,7 @@ fn emit_return(
     from: Option<TreeId<Typed>>,
     code: &mut CodeBuilder,
     depth: usize,
+    node_visits: &mut usize,
 ) -> Result<Flow, JvmCodegenError> {
     if let Some(from) = from {
         return Err(JvmCodegenError::UnsupportedReturnTarget {
@@ -457,6 +494,7 @@ fn emit_return(
                 value,
                 code,
                 depth + 1,
+                node_visits,
             )? {
                 Flow::Value(found) if found == expected => {
                     code.ireturn()
@@ -1308,6 +1346,31 @@ mod tests {
                 limit: JVM_EXPRESSION_DEPTH_LIMIT,
             }
         );
+    }
+
+    #[test]
+    fn shared_typed_tree_dag_obeys_the_total_node_visit_budget() {
+        let mut fixture = Fixture::new(&[]);
+        let condition = fixture.literal(Constant::Boolean(true), fixture.definitions.boolean);
+        let value = fixture.literal(Constant::Int(1), fixture.definitions.int);
+        let mut shared = value;
+        for _ in 0..12 {
+            shared = fixture.if_expr(condition, shared, shared, fixture.definitions.int);
+        }
+
+        assert!(matches!(
+            lower_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                shared,
+            ),
+            Err(JvmCodegenError::ExpressionNodeBudgetExceeded {
+                limit: JVM_EXPRESSION_NODE_BUDGET,
+                ..
+            })
+        ));
     }
 
     #[test]
