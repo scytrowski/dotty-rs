@@ -112,26 +112,27 @@ fn merge_module_resolution_profile(
 
 #[test]
 fn merged_module_resolution_profiles_union_only_resolved_object_and_member_targets() {
-    let mut aggregate = ModuleResolutionProfile::default();
-    aggregate.package_term_successes = 1;
-    aggregate
-        .resolved_object_targets
-        .insert("fixture::First".to_owned());
-    aggregate.resolved_member_targets.insert(
-        "fixture/First::namespace=term::name=value::space=Prefix::selector=Unique".to_owned(),
-    );
+    let mut aggregate = ModuleResolutionProfile {
+        package_term_successes: 1,
+        resolved_object_targets: BTreeSet::from(["fixture::First".to_owned()]),
+        resolved_member_targets: BTreeSet::from([
+            "fixture/First::namespace=term::name=value::space=Prefix::selector=Unique".to_owned(),
+        ]),
+        ..ModuleResolutionProfile::default()
+    };
 
-    let mut next = ModuleResolutionProfile::default();
-    next.package_term_successes = 2;
-    next.resolved_object_targets
-        .insert("fixture::First".to_owned());
-    next.resolved_object_targets
-        .insert("fixture::Second".to_owned());
-    next.resolved_member_targets.insert(
-        "fixture/Second::namespace=term::name=value::space=Prefix::selector=Unique".to_owned(),
-    );
-    next.member_targets
-        .insert("fixture/Failed::name=missing".to_owned());
+    let next = ModuleResolutionProfile {
+        package_term_successes: 2,
+        resolved_object_targets: BTreeSet::from([
+            "fixture::First".to_owned(),
+            "fixture::Second".to_owned(),
+        ]),
+        resolved_member_targets: BTreeSet::from([
+            "fixture/Second::namespace=term::name=value::space=Prefix::selector=Unique".to_owned(),
+        ]),
+        member_targets: BTreeSet::from(["fixture/Failed::name=missing".to_owned()]),
+        ..ModuleResolutionProfile::default()
+    };
 
     merge_module_resolution_profile(&mut aggregate, next);
 

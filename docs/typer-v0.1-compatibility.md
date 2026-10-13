@@ -1612,3 +1612,17 @@ The runner compares two normalized outputs byte-for-byte and emits the report
 plus `*-deferred-cohorts.tsv`. The comparison tool rejects missing frozen rows, lost successful class target
 keys, a reduced class-success count, a changed typed-method denominator, p95
 depth above 70, and full-completion fanout above 524. Shell identities touched are reported separately.
+
+### #1051 package-term and Scala module audit
+
+The pinned Scala 3.9.0 audit retains the immutable 2,749-request / 80-key
+package-term profile and 369-row #1046 first-blocker cohort. The resolver now
+reports canonical Object successes and distinct verified object identities
+separately from attempted target keys, and distinguishes successful module
+members from member requests that miss or fail. Across two deterministic runs,
+1,791 requests resolved to canonical Objects across 46 verified identities;
+zero corpus requests reached module-member lookup. The focused real-artifact
+source fixture nevertheless verifies `scala.io.Source.stdin` end to end.
+See the [#1051 checkpoint](typer-classpath-corpus-audit-3.9.0.md#1051-package-term-hardening-checkpoint)
+for frozen-row movement, blocker reasons, performance limits, and the single
+next-sprint recommendation. No default-import behavior is implied.
