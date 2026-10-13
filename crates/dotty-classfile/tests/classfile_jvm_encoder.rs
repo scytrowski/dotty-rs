@@ -208,7 +208,7 @@ fn assert_stack_map_targets(
     );
     assert!(frame_pcs.windows(2).all(|pair| pair[0] < pair[1]));
 
-    let (instruction_pcs, branch_targets) = branch_targets(&code.code);
+    let (instruction_pcs, branch_targets) = branch_targets(code.code);
     for (target, _) in &branch_targets {
         assert!(
             instruction_pcs.contains(target),
@@ -682,7 +682,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
                 &calculator.methods[2],
                 &calculator.methods[3],
             ] {
-                for (target, mnemonic) in branch_targets(&code(method).code).1 {
+                for (target, mnemonic) in branch_targets(code(method).code).1 {
                     let branch = format!("{mnemonic} {target}");
                     assert!(
                         javap_output.contains(&branch),
