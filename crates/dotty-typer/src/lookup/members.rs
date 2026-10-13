@@ -273,13 +273,12 @@ impl SourceTyper<'_> {
                 self.complete_symbol_inner(symbol, journal)
                     .map_err(|error| MemberLookupError::SourceClassCompletion { symbol, error })?;
             } else {
-                let completed =
-                    self.resolver
-                        .complete_class(self.store, symbol)
-                        .map_err(|error| MemberLookupError::ExternalClassCompletion {
-                            symbol,
-                            error,
-                        })?;
+                let completed = if self.store.symbols.get(symbol).kind == SymbolKind::ModuleClass {
+                    self.resolver.complete_module_class(self.store, symbol)
+                } else {
+                    self.resolver.complete_class(self.store, symbol)
+                }
+                .map_err(|error| MemberLookupError::ExternalClassCompletion { symbol, error })?;
                 if !self.store.symbols.contains(symbol) {
                     return Err(MemberLookupError::UnknownClassSymbol { symbol });
                 }
