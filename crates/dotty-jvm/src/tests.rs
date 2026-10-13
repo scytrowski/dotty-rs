@@ -587,6 +587,36 @@ fn alloc_symbol_named(
     })
 }
 
+fn prepare_signature_class(fixture: &mut SignatureFixture, class_name: &str) -> SymbolId {
+    let root = alloc_symbol_named(
+        &mut fixture.store,
+        "",
+        Namespace::Term,
+        None,
+        SymbolKind::Package,
+        SymbolFlags::EMPTY,
+    );
+    let class_name = fixture.store.names.intern(class_name);
+    {
+        let class = fixture.store.symbols.get_mut(fixture.class);
+        class.name = Name::new(class_name, Namespace::Type);
+        class.owner = Some(root);
+    }
+    let declarations = fixture.store.scopes.alloc(Scope::new(Some(fixture.class)));
+    let class_info = fixture.store.types.alloc(Type::ClassInfo(ClassInfo {
+        prefix: fixture.definitions.no_prefix,
+        class: fixture.class,
+        parents: Vec::new(),
+        declarations,
+        self_type: None,
+    }));
+    fixture
+        .store
+        .symbols
+        .set_info(fixture.class, SymbolInfo::Complete(class_info));
+    root
+}
+
 #[test]
 fn derives_default_and_package_owned_class_internal_names() {
     let default_package = ClassIdentityFixture::new(&[], "Answer");
@@ -671,6 +701,26 @@ fn rejects_nested_and_invalid_package_owner_chains() {
 }
 
 #[test]
+fn rejects_traits_objects_and_module_classes_as_emittable_classes() {
+    for kind in [
+        SymbolKind::Trait,
+        SymbolKind::Object,
+        SymbolKind::ModuleClass,
+    ] {
+        let mut fixture = ClassIdentityFixture::new(&[], "NotAClass");
+        fixture.store.symbols.get_mut(fixture.class).kind = kind;
+        assert_eq!(
+            fixture.identity(),
+            Err(JvmCodegenError::UnsupportedSymbolKind {
+                symbol: fixture.class,
+                expected: SymbolRole::Class,
+                found: kind,
+            })
+        );
+    }
+}
+
+#[test]
 fn rejects_unsupported_class_shapes_and_generic_declarations() {
     for (flags, expected) in [
         (SymbolFlags::ABSTRACT, UnsupportedJvmClassKind::Abstract),
@@ -726,7 +776,15 @@ fn rejects_unsupported_class_shapes_and_generic_declarations() {
 
 #[test]
 fn rejects_invalid_class_and_package_segment_names() {
-    for invalid in ["", "bad/name", "bad.name", "bad;name", "+"] {
+    for invalid in [
+        "",
+        "_",
+        "bad/name",
+        "bad.name",
+        "bad;name",
+        "Outer$Inner",
+        "+",
+    ] {
         let mut fixture = ClassIdentityFixture::new(&[], "Valid");
         let name = fixture.store.names.intern(invalid);
         fixture.store.symbols.get_mut(fixture.class).name = Name::new(name, Namespace::Type);
@@ -761,6 +819,18 @@ fn rejects_invalid_class_and_package_segment_names() {
 
 #[test]
 fn rejects_malformed_class_info_instead_of_guessing_class_shape() {
+    let mut missing = ClassIdentityFixture::new(&[], "MissingInfo");
+    missing
+        .store
+        .symbols
+        .set_info(missing.class, SymbolInfo::Missing);
+    assert_eq!(
+        missing.identity(),
+        Err(JvmCodegenError::MissingSemanticInfo {
+            symbol: missing.class,
+        })
+    );
+
     let mut fixture = ClassIdentityFixture::new(&[], "Broken");
     let not_class_info = fixture.store.types.alloc(Type::NoPrefix);
     fixture
@@ -773,6 +843,305 @@ fn rejects_malformed_class_info_instead_of_guessing_class_shape() {
             class: fixture.class,
             ty: Some(not_class_info),
             kind: InvalidJvmClassInfoKind::NotClassInfo,
+        })
+    );
+}
+
+#[test]
+fn method_metadata_preserves_parameter_identity_order_and_instance_slots() {
+    let mut fixture = SignatureFixture::new(3);
+    prepare_signature_class(&mut fixture, "Answer");
+    let method_name = fixture.store.names.intern("select");
+    fixture.store.symbols.get_mut(fixture.method).name = Name::new(method_name, Namespace::Term);
+    let method_type = fixture.store.types.alloc(Type::Method(MethodType {
+        params: vec![
+            MethodParam {
+                name: TermName::new(fixture.store.names.intern("first")),
+                ty: fixture.definitions.boolean,
+                erased: false,
+                varargs: false,
+            },
+            MethodParam {
+                name: TermName::new(fixture.store.names.intern("second")),
+                ty: fixture.definitions.int,
+                erased: false,
+                varargs: false,
+            },
+            MethodParam {
+                name: TermName::new(fixture.store.names.intern("third")),
+                ty: fixture.definitions.int,
+                erased: false,
+                varargs: false,
+            },
+        ],
+        result: fixture.definitions.int,
+        kind: MethodKind::Plain,
+    }));
+    fixture
+        .store
+        .symbols
+        .set_info(fixture.method, SymbolInfo::Complete(method_type));
+    for (parameter, ty) in fixture.parameters.iter().copied().zip([
+        fixture.definitions.boolean,
+        fixture.definitions.int,
+        fixture.definitions.int,
+    ]) {
+        fixture
+            .store
+            .symbols
+            .set_info(parameter, SymbolInfo::Complete(ty));
+    }
+
+    let class_plan = JvmClassPlan {
+        class: fixture.class,
+        methods: vec![fixture.plan.clone()],
+    };
+    let metadata = class_plan
+        .metadata(&fixture.store, &fixture.definitions)
+        .unwrap();
+    assert_eq!(metadata.identity().internal_name(), "Answer");
+    assert_eq!(metadata.methods().len(), 1);
+    let method = &metadata.methods()[0];
+    assert_eq!(method.symbol(), fixture.method);
+    assert_eq!(method.name(), "select");
+    assert_eq!(method.descriptor().as_str(), "(ZII)I");
+    assert_eq!(method.access_flags().0, 0x0001);
+    assert_eq!(
+        method
+            .parameters()
+            .iter()
+            .map(|parameter| (parameter.symbol(), parameter.slot(), parameter.width()))
+            .collect::<Vec<_>>(),
+        vec![
+            (fixture.parameters[0], 1, 1),
+            (fixture.parameters[1], 2, 1),
+            (fixture.parameters[2], 3, 1),
+        ]
+    );
+    assert_eq!(
+        method
+            .parameters()
+            .iter()
+            .map(|parameter| parameter.ty())
+            .collect::<Vec<_>>(),
+        vec![JvmType::Boolean, JvmType::Int, JvmType::Int]
+    );
+    for index in 0..7 {
+        let name = format!("unrelated{index}");
+        alloc_symbol_named(
+            &mut fixture.store,
+            &name,
+            Namespace::Term,
+            None,
+            SymbolKind::Value,
+            SymbolFlags::EMPTY,
+        );
+    }
+    assert_eq!(
+        class_plan
+            .metadata(&fixture.store, &fixture.definitions)
+            .unwrap(),
+        metadata
+    );
+}
+
+#[test]
+fn rejects_non_simple_method_names_and_unsupported_instance_method_flags() {
+    let mut invalid_name = SignatureFixture::new(0);
+    prepare_signature_class(&mut invalid_name, "Answer");
+    let operator = invalid_name.store.names.intern("$plus");
+    invalid_name.store.symbols.get_mut(invalid_name.method).name =
+        Name::new(operator, Namespace::Term);
+    assert_eq!(
+        JvmClassPlan {
+            class: invalid_name.class,
+            methods: vec![invalid_name.plan.clone()],
+        }
+        .metadata(&invalid_name.store, &invalid_name.definitions),
+        Err(JvmCodegenError::InvalidJvmName {
+            symbol: invalid_name.method,
+            kind: JvmNameKind::Method,
+            text: "$plus".to_owned(),
+        })
+    );
+
+    for (flags, unsupported) in [
+        (SymbolFlags::STATIC, crate::UnsupportedJvmSymbolFlag::Static),
+        (
+            SymbolFlags::SYNTHETIC,
+            crate::UnsupportedJvmSymbolFlag::Synthetic,
+        ),
+        (
+            SymbolFlags::ABSTRACT,
+            crate::UnsupportedJvmSymbolFlag::Abstract,
+        ),
+    ] {
+        let mut fixture = SignatureFixture::new(0);
+        prepare_signature_class(&mut fixture, "Answer");
+        fixture.store.symbols.get_mut(fixture.method).flags = flags;
+        assert_eq!(
+            JvmClassPlan {
+                class: fixture.class,
+                methods: vec![fixture.plan.clone()],
+            }
+            .metadata(&fixture.store, &fixture.definitions),
+            Err(JvmCodegenError::UnsupportedJvmSymbolFlag {
+                symbol: fixture.method,
+                flag: unsupported,
+            })
+        );
+    }
+
+    let mut nonpublic = SignatureFixture::new(0);
+    prepare_signature_class(&mut nonpublic, "Answer");
+    nonpublic.store.symbols.get_mut(nonpublic.method).visibility = Visibility::Private;
+    assert_eq!(
+        JvmClassPlan {
+            class: nonpublic.class,
+            methods: vec![nonpublic.plan.clone()],
+        }
+        .metadata(&nonpublic.store, &nonpublic.definitions),
+        Err(JvmCodegenError::UnsupportedJvmVisibility {
+            symbol: nonpublic.method,
+            visibility: Visibility::Private,
+        })
+    );
+
+    let mut final_method = SignatureFixture::new(0);
+    prepare_signature_class(&mut final_method, "Answer");
+    final_method
+        .store
+        .symbols
+        .get_mut(final_method.method)
+        .flags = SymbolFlags::FINAL;
+    let final_metadata = JvmClassPlan {
+        class: final_method.class,
+        methods: vec![final_method.plan.clone()],
+    }
+    .metadata(&final_method.store, &final_method.definitions)
+    .unwrap();
+    assert_eq!(final_metadata.methods()[0].access_flags().0, 0x0011);
+}
+
+#[test]
+fn same_named_method_from_a_different_owner_cannot_replace_the_planned_symbol() {
+    let mut fixture = SignatureFixture::new(0);
+    let root = prepare_signature_class(&mut fixture, "Answer");
+    let other_class = alloc_symbol_named(
+        &mut fixture.store,
+        "Other",
+        Namespace::Type,
+        Some(root),
+        SymbolKind::Class,
+        SymbolFlags::EMPTY,
+    );
+    let class_scope = fixture.store.scopes.alloc(Scope::new(Some(other_class)));
+    let class_info = fixture.store.types.alloc(Type::ClassInfo(ClassInfo {
+        prefix: fixture.definitions.no_prefix,
+        class: other_class,
+        parents: Vec::new(),
+        declarations: class_scope,
+        self_type: None,
+    }));
+    fixture
+        .store
+        .symbols
+        .set_info(other_class, SymbolInfo::Complete(class_info));
+    let mut other_method_symbol = fixture.store.symbols.get(fixture.method).clone();
+    other_method_symbol.owner = Some(other_class);
+    let other_method = fixture.store.symbols.alloc(other_method_symbol);
+    let other_plan = JvmMethodPlan {
+        method: other_method,
+        parameters: Vec::new(),
+        body: None,
+    };
+
+    assert_eq!(
+        JvmClassPlan {
+            class: fixture.class,
+            methods: vec![other_plan],
+        }
+        .metadata(&fixture.store, &fixture.definitions),
+        Err(JvmCodegenError::WrongOwner {
+            symbol: other_method,
+            expected: fixture.class,
+            actual: Some(other_class),
+        })
+    );
+}
+
+#[test]
+fn rejects_duplicate_emitted_method_names_and_descriptors() {
+    let mut fixture = SignatureFixture::new(0);
+    prepare_signature_class(&mut fixture, "Answer");
+    let duplicate = fixture
+        .store
+        .symbols
+        .alloc(fixture.store.symbols.get(fixture.method).clone());
+    let duplicate_plan = JvmMethodPlan {
+        method: duplicate,
+        parameters: Vec::new(),
+        body: None,
+    };
+
+    assert_eq!(
+        JvmClassPlan {
+            class: fixture.class,
+            methods: vec![fixture.plan.clone(), duplicate_plan],
+        }
+        .metadata(&fixture.store, &fixture.definitions),
+        Err(JvmCodegenError::DuplicateJvmMethodIdentity {
+            class: fixture.class,
+            method: duplicate,
+            previous: fixture.method,
+            name: "sharedName".to_owned(),
+            descriptor: "()I".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn compilation_unit_rejects_distinct_symbols_with_the_same_jvm_class_name() {
+    let mut fixture = SignatureFixture::new(0);
+    prepare_signature_class(&mut fixture, "Answer");
+    let duplicate = fixture
+        .store
+        .symbols
+        .alloc(fixture.store.symbols.get(fixture.class).clone());
+    let duplicate_scope = fixture.store.scopes.alloc(Scope::new(Some(duplicate)));
+    let duplicate_info = fixture.store.types.alloc(Type::ClassInfo(ClassInfo {
+        prefix: fixture.definitions.no_prefix,
+        class: duplicate,
+        parents: Vec::new(),
+        declarations: duplicate_scope,
+        self_type: None,
+    }));
+    fixture
+        .store
+        .symbols
+        .set_info(duplicate, SymbolInfo::Complete(duplicate_info));
+    let ast = TypedAst::new();
+    let unit = JvmCompilationUnit {
+        store: &fixture.store,
+        typed_ast: &ast,
+        classes: vec![
+            JvmClassPlan {
+                class: fixture.class,
+                methods: Vec::new(),
+            },
+            JvmClassPlan {
+                class: duplicate,
+                methods: Vec::new(),
+            },
+        ],
+    };
+
+    assert_eq!(
+        unit.metadata(&fixture.definitions),
+        Err(JvmCodegenError::DuplicateJvmClassIdentity {
+            class: duplicate,
+            previous: fixture.class,
+            internal_name: "Answer".to_owned(),
         })
     );
 }

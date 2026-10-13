@@ -409,6 +409,11 @@ impl JvmType {
         JvmValueCategory::IntLike
     }
 
+    /// Number of JVM local-variable slots occupied by this value.
+    pub const fn slot_width(self) -> u8 {
+        1
+    }
+
     const fn field_type(self) -> FieldType {
         match self {
             Self::Int => FieldType::Int,
