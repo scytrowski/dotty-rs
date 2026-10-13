@@ -279,6 +279,51 @@ circular-completion orchestration requirement was observed. Package modules
 may expose a reusable lazy-completion requirement in the next sprint; measure
 that need before generalizing to arbitrary symbols or deferring hierarchy.
 
+## #1051 package-term and module identity audit
+
+The [current classpath audit](typer-classpath-corpus-audit-3.9.0.md) was run
+twice against Scala revision `777528f19a58e794c9954a42f433373472ec57f8` and
+Temurin 21.0.8; the normalized reports matched byte-for-byte. The frozen #1046
+baseline still contains 2,749 observations / 80 package-term keys and 369
+first-blocker rows (361 imports, eight term names). The current resolver made
+2,297 package-term requests and returned 1,791 canonical Objects across 46
+verified object identities; one request returned the package
+`scala.collection.mutable`, 505 were unresolved, and none errored. It completed
+zero external ModuleClasses and resolved zero external module members in the
+corpus (`distinct_module_targets`
+and `distinct_member_targets` are both zero).
+
+The 369 frozen rows retain exact first-blocker attribution: 358 validate an
+Object/ModuleClass identity and advance past the baseline blocker, with zero
+fully typed methods; the current blockers are 350 `ObjectModuleClassUnavailable`,
+eight `ObjectTermReferenceDeferred`, and 11 `ImportQualifierNotFound`. No
+corpus request reached an external module-member lookup after those earlier
+blockers. This explains the zero member successes without treating a type
+symbol, resource probe, or blocker movement as a successful member resolution.
+The required positive end-to-end gate is covered separately by
+`source_typer_selects_a_method_through_a_validated_external_object` and
+`external_object_import_forms_resolve_the_same_module_member`, which resolve
+`scala.io.Source.stdin` through the checked-in Scala 3.9.0 artifact.
+
+All 29 successful external class target keys from the previous gate remain;
+the automatic gate reports 29/75 current target keys. Deferred loading remains
+within the hard limits: p95/max completion depth 3/4 and maximum completed
+fanout 8. The typed-local-method denominator remains 3,297 with zero typed.
+The exact 120-row cohort sidecar and frozen module request profiles remain
+available in the audit report.
+
+The next recommendation from this checkpoint is one bounded sprint for
+verified object ModuleClass availability and completion. `ObjectModuleClassUnavailable`
+leads the current semantic blocker ranking at 576 observations in 77 files;
+the resolver has 46 authoritative object identities to reuse. Explicit
+first-segment failures have greater raw volume (2,292 in 197 files) but span
+26 unresolved targets and cross package/import boundaries. Scala TASTy
+supertype errors account for 212 observations across 26 requested roots and
+51 files; anonymous class instantiation accounts for 32 / 15 files. Generic
+member adaptation has no corpus requests that reach it. The recommended module
+slice must keep all these other gaps observable and retain the pinned member
+fixture gate.
+
 ## Validation
 
 - Two full pinned Temurin 21.0.8 audit runs: byte-identical normalized output,

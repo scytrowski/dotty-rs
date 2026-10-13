@@ -26,14 +26,20 @@ pub struct ModuleResolutionProfile {
     pub package_term_successes: u64,
     /// Package-term requests with no supported module evidence.
     pub package_term_unresolved: u64,
+    /// Package-term requests that returned a non-Object term symbol.
+    pub package_term_non_object_results: u64,
     /// Package-term requests rejected because module evidence or identity was malformed.
     pub package_term_errors: u64,
     /// Object identities newly materialized by successful package-term requests.
     pub new_object_identities: u64,
     /// Existing Object identities reused by successful package-term requests.
     pub reused_object_identities: u64,
+    /// Sorted package/name keys that resolved to a canonical Object symbol.
+    pub resolved_object_targets: std::collections::BTreeSet<String>,
     /// Field, method, and type-member successes through module prefixes.
     pub module_member_successes: u64,
+    /// Sorted module/member/namespace/space keys that resolved successfully.
+    pub resolved_member_targets: std::collections::BTreeSet<String>,
     /// Sorted package/name keys observed by package-term requests.
     pub package_term_targets: std::collections::BTreeSet<String>,
     /// Sorted binary names of canonical objects targeted by module-prefix requests.
@@ -1115,16 +1121,20 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
 
         if package_target.is_some() {
             match &result {
-                Ok(Some(symbol)) => {
+                Ok(Some(symbol)) if store.symbols.get(*symbol).kind == SymbolKind::Object => {
                     self.module_profile.package_term_successes += 1;
-                    if store.symbols.get(*symbol).kind == SymbolKind::Object {
-                        if package_target_preexisting {
-                            self.module_profile.reused_object_identities += 1;
-                        } else {
-                            self.module_profile.new_object_identities += 1;
-                        }
+                    if let Some(target) = &package_target {
+                        self.module_profile
+                            .resolved_object_targets
+                            .insert(target.clone());
+                    }
+                    if package_target_preexisting {
+                        self.module_profile.reused_object_identities += 1;
+                    } else {
+                        self.module_profile.new_object_identities += 1;
                     }
                 }
+                Ok(Some(_)) => self.module_profile.package_term_non_object_results += 1,
                 Ok(None) => self.module_profile.package_term_unresolved += 1,
                 Err(_) => self.module_profile.package_term_errors += 1,
             }
@@ -1140,6 +1150,11 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
                 )
             {
                 self.module_profile.module_member_successes += 1;
+                if let Some(target) = &member_target {
+                    self.module_profile
+                        .resolved_member_targets
+                        .insert(target.clone());
+                }
             }
             if matches!(
                 module_info_before,
@@ -1663,6 +1678,12 @@ mod tests {
         assert_eq!(profile.new_object_identities, 1);
         assert_eq!(profile.reused_object_identities, 1);
         assert_eq!(profile.package_term_targets.len(), 1);
+        assert_eq!(
+            profile.resolved_object_targets,
+            std::collections::BTreeSet::from([
+                "me.cytrowski.tastyfixtures.semantic::Both".to_owned()
+            ])
+        );
     }
 
     #[test]
@@ -2035,6 +2056,8 @@ mod tests {
         assert_eq!(profile.package_term_requests, 1);
         assert_eq!(profile.package_term_successes, 1);
         assert_eq!(profile.module_member_successes, 2);
+        assert_eq!(profile.resolved_object_targets.len(), 1);
+        assert_eq!(profile.resolved_member_targets.len(), 2);
         assert_eq!(profile.package_term_targets.len(), 1);
         assert_eq!(profile.module_targets.len(), 1);
         assert_eq!(profile.member_targets.len(), 2);
