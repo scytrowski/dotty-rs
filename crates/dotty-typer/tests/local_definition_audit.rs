@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use dotty_classloader::classloader::{
     BinaryName, ClassFormat, ClassLoadProfile, ClassLoader, ClassOrigin, ClassPathEntry,
     ClassPathError, ClassResource, ClasspathSymbolResolver, CompositeClassPath, JarClassPath,
-    JdkClassPath, LoadingSession,
+    JdkClassPath, LoadingSession, ModuleResolutionProfile,
 };
 use dotty_core::ast::{Match, Modifier, Tree, TreeKind, Untyped, UntypedNode, VisibilitySyntax};
 use dotty_core::ids::TreeId;
@@ -78,6 +78,28 @@ struct ResolverMetrics {
     class_member_completed_prefix_reuse: usize,
     class_member_prefixes: BTreeSet<String>,
     class_member_keys: BTreeSet<String>,
+    module_resolution: ModuleResolutionProfile,
+}
+
+fn merge_module_resolution_profile(
+    target: &mut ModuleResolutionProfile,
+    source: ModuleResolutionProfile,
+) {
+    target.package_term_requests += source.package_term_requests;
+    target.package_term_successes += source.package_term_successes;
+    target.package_term_unresolved += source.package_term_unresolved;
+    target.package_term_errors += source.package_term_errors;
+    target.new_object_identities += source.new_object_identities;
+    target.reused_object_identities += source.reused_object_identities;
+    target.module_member_successes += source.module_member_successes;
+    target
+        .package_term_targets
+        .extend(source.package_term_targets);
+    target.module_targets.extend(source.module_targets);
+    target.member_targets.extend(source.member_targets);
+    target
+        .completed_module_classes
+        .extend(source.completed_module_classes);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -488,6 +510,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             .flatten();
         let result = self.inner.resolve_member(store, request);
         let load_profiles = self.inner.take_load_profiles();
+        let module_profile = self.inner.take_module_resolution_profile();
         // Profiles describe work performed even when Ok(None) rolls it back.
         // Only the actual lookup owner can establish that its scope was available.
         let target_completed = target_binary.as_ref().is_some_and(|name| {
@@ -510,6 +533,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let outcome = member_outcome(store, &result, request, &actual_target, target_completed);
         let current_file = metrics.current_file.clone();
         let current_method = metrics.current_method.clone();
+        merge_module_resolution_profile(&mut metrics.module_resolution, module_profile);
         if prefix.target_kind == "Package"
             && request.name.is_term()
             && outcome == "package term member unsupported"
@@ -6671,7 +6695,8 @@ fn audit_source_inner(
             definitions,
             LoadingSession::with_packages(packages),
         )
-        .with_load_profile_collection();
+        .with_load_profile_collection()
+        .with_module_resolution_profile_collection();
         typer = typer.with_resolver(Box::new(AuditResolver {
             inner: resolver,
             metrics,
@@ -8008,6 +8033,39 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         "  package_object_or_dollar_looking_distinct_targets={}",
         metrics.package_term_object_looking_targets.len()
     );
+    let module_profile = &metrics.module_resolution;
+    println!("module_resolution_profile:");
+    println!(
+        "  package_term_requests={} successes={} unresolved={} errors={}",
+        module_profile.package_term_requests,
+        module_profile.package_term_successes,
+        module_profile.package_term_unresolved,
+        module_profile.package_term_errors
+    );
+    println!(
+        "  new_object_identities={} reused_object_identities={}",
+        module_profile.new_object_identities, module_profile.reused_object_identities
+    );
+    println!(
+        "  completed_module_classes={} module_member_successes={}",
+        module_profile.completed_module_classes.len(),
+        module_profile.module_member_successes
+    );
+    println!(
+        "  distinct_package_term_targets={} distinct_module_targets={} distinct_member_targets={}",
+        module_profile.package_term_targets.len(),
+        module_profile.module_targets.len(),
+        module_profile.member_targets.len()
+    );
+    for target in &module_profile.package_term_targets {
+        println!("  package_term_target={target}");
+    }
+    for target in &module_profile.module_targets {
+        println!("  module_target={target}");
+    }
+    for target in &module_profile.member_targets {
+        println!("  member_target={target}");
+    }
     let mut package_term_rows = metrics.package_term_request_rows.clone();
     package_term_rows.sort();
     println!("package_term_request_rows:");
