@@ -147,6 +147,25 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         result
     }
 
+    fn complete_module(
+        &mut self,
+        store: &mut SemanticStore,
+        name: &BinaryName,
+    ) -> Result<crate::loader::ModuleIdentity, ClassLoadError> {
+        let class_path = self
+            .class_path
+            .take()
+            .expect("resolver operation is exclusive");
+        let session = std::mem::replace(&mut self.session, LoadingSession::new());
+        let mut loader =
+            ClassLoader::with_definitions(class_path, store, self.definitions, session);
+        let result = loader.complete_module(name);
+        let (class_path, session) = loader.into_parts();
+        self.class_path = Some(class_path);
+        self.session = session;
+        result
+    }
+
     fn try_ensure_module_identity(
         &mut self,
         store: &mut SemanticStore,
@@ -384,7 +403,40 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             }
             PrefixTarget::Class(class) => {
                 let mut scope = self.declaration_scope(store, class);
-                if scope.is_none() {
+                if store.symbols.get(class).kind == SymbolKind::ModuleClass {
+                    let identity = self
+                        .session
+                        .modules
+                        .values()
+                        .find(|identity| identity.module_class == class)
+                        .cloned()
+                        .ok_or_else(|| ResolutionError::Malformed {
+                            reason: format!(
+                                "module class {class:?} has no canonical object identity"
+                            ),
+                        })?;
+                    let package = store.symbols.get(identity.object).owner.ok_or_else(|| {
+                        ResolutionError::Malformed {
+                            reason: format!(
+                                "module class {class:?} has an ownerless object identity"
+                            ),
+                        }
+                    })?;
+                    self.validate_module_object(store, package, identity.object)?;
+                    let completed =
+                        self.complete_module(store, &identity.object_name)
+                            .map_err(|error| ResolutionError::Malformed {
+                                reason: format!("module completion failed: {error}"),
+                            })?;
+                    if completed.object != identity.object || completed.module_class != class {
+                        return Err(ResolutionError::Malformed {
+                            reason: format!(
+                                "module completion changed canonical identity for {class:?}"
+                            ),
+                        });
+                    }
+                    scope = self.declaration_scope(store, class);
+                } else if scope.is_none() {
                     // Stay inside resolve_member's transaction: None/ambiguity
                     // must undo even a successful prefix completion.
                     self.complete_class_inner(store, class)?;
@@ -467,6 +519,26 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             return Ok(None);
         }
         match store.types.get(ty) {
+            Type::TermRef {
+                target: dotty_core::TermRefTarget::Symbol(object),
+                ..
+            } if store.symbols.contains(*object)
+                && store.symbols.get(*object).kind == SymbolKind::Object =>
+            {
+                let Some(package) = store.symbols.get(*object).owner else {
+                    return Err(ResolutionError::Malformed {
+                        reason: format!("object prefix {object:?} has no package owner"),
+                    });
+                };
+                self.validate_module_object(store, package, *object)?;
+                let identity = self
+                    .session
+                    .modules
+                    .values()
+                    .find(|identity| identity.object == *object)
+                    .expect("validated object has a module identity");
+                Ok(Some(PrefixTarget::Class(identity.module_class)))
+            }
             Type::TypeRef {
                 target: TypeRefTarget::Symbol(symbol),
                 ..
@@ -893,6 +965,13 @@ mod tests {
 
     impl ClassPathEntry for ModuleTastyPath {
         fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            if name.as_internal() == "java/lang/Object" {
+                return Ok(Some(ClassResource::new(
+                    test_class_stub("java/lang/Object", 0x0021),
+                    ClassFormat::Class,
+                    ClassOrigin::Directory(PathBuf::from("<module-dependency>")),
+                )));
+            }
             Ok(self.entries.lock().unwrap().get(name).map(|bytes| {
                 ClassResource::new(
                     bytes.clone(),
@@ -1250,6 +1329,157 @@ mod tests {
         assert_eq!(resolver.resolve_member(&mut store, &request), Ok(None));
         assert_eq!(store.checkpoint(), store_mark);
         assert_eq!(resolver.session.checkpoint(), session_mark);
+    }
+
+    #[test]
+    fn stable_object_term_prefix_completes_and_resolves_module_members() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            ModuleTastyPath::both_fixture(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let both_name = Name::new(store.names.intern("Both"), Namespace::Term);
+        let object = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: both_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let object_ref = store.types.alloc(Type::TermRef {
+            prefix: package_prefix,
+            target: dotty_core::TermRefTarget::Symbol(object),
+        });
+        let make_name = Name::new(store.names.intern("make"), Namespace::Term);
+        let make = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: object_ref,
+                    name: make_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let module_class = resolver.session.modules
+            [&BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both")]
+            .module_class;
+        assert_eq!(store.symbols.get(make).kind, SymbolKind::Method);
+        assert_eq!(store.symbols.get(make).owner, Some(module_class));
+        assert!(matches!(
+            store.symbols.get(module_class).info,
+            SymbolInfo::Complete(info)
+                if matches!(store.types.get(info), Type::ClassInfo(class_info)
+                    if class_info.class == module_class
+                        && store.scopes.get(class_info.declarations).owner == Some(module_class))
+        ));
+
+        let module_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, module_class));
+        assert_eq!(
+            resolver.resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: make_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Explicit(module_prefix),
+                },
+            ),
+            Ok(Some(make))
+        );
+        assert_eq!(
+            resolver.resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: object_ref,
+                    name: make_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Explicit(package_prefix),
+                },
+            ),
+            Ok(None),
+            "Explicit owner must not fall back to the Object prefix"
+        );
+    }
+
+    #[test]
+    fn missing_module_member_rolls_back_on_demand_completion() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            ModuleTastyPath::both_fixture(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let both_name = Name::new(store.names.intern("Both"), Namespace::Term);
+        let object = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: both_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let object_ref = store.types.alloc(Type::TermRef {
+            prefix: package_prefix,
+            target: dotty_core::TermRefTarget::Symbol(object),
+        });
+        let module_class = resolver.session.modules
+            [&BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both")]
+            .module_class;
+        let absent_name = Name::new(store.names.intern("absent"), Namespace::Term);
+        let store_mark = store.checkpoint();
+        let session_mark = resolver.session.checkpoint();
+        let result = resolver.resolve_member(
+            &mut store,
+            &MemberRequest {
+                prefix: object_ref,
+                name: absent_name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            },
+        );
+
+        assert_eq!(result, Ok(None));
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+        assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+        assert_eq!(store.symbols.get(object).info, SymbolInfo::Missing);
     }
 
     #[test]
