@@ -4,9 +4,9 @@
 future JVM lowering. It depends on `dotty-core` for canonical symbols, types,
 and typed trees, and on `dotty-classfile` for class-file descriptor and output
 APIs. The crate validates a borrowed `JvmCompilationUnit` contract and
-projects one bounded method subset to JVM descriptors and lowers a first
-subset of typed expression leaves to the class-file crate's symbolic code
-builder. It does not assemble a source frontend or emit complete class files.
+projects one bounded method subset to JVM descriptors and lowers selected
+typed expressions to the class-file crate's symbolic code builder. It does not
+assemble a source frontend or emit complete class files.
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,
@@ -92,19 +92,33 @@ forms must be handled by a separate contract before they can be emitted.
 
 ## Typed expression leaves
 
-`lower_value_expression` accepts only typed `Literal` nodes containing
-`Constant::Int` or `Constant::Boolean`, and `Ident` nodes whose typed
-`TermRefTarget::Symbol` matches one of the method metadata's canonical
-parameter symbols. Int and Boolean literals lower through `CodeBuilder::iconst`
-and parameter references through `CodeBuilder::iload` at the metadata-assigned
-instance local slot. The result category is `IntLike` for both, while Boolean
-method descriptors remain `Z`. Literal constant types may be the matching
-singleton constant type or the canonical `Definitions.int` / `.boolean` type.
+`lower_value_expression` accepts typed `Literal` nodes containing `Constant::Int`
+or `Constant::Boolean`, and `Ident` nodes whose typed `TermRefTarget::Symbol`
+matches one of the method metadata's canonical parameter symbols. Literals
+lower through `CodeBuilder::iconst`; parameter references use `CodeBuilder::iload`
+at the metadata-assigned instance local slot. Both produce the `IntLike`
+category while Boolean descriptors remain `Z`. Literal types may be the
+matching singleton constant type or canonical `Definitions.int` / `.boolean`.
 
-The caller owns the `CodeBuilder` and is responsible for appending returns or
-other method epilogues. A rejected tree or failed instruction append leaves the
-builder unchanged. `Select`, `Apply`, `TypeApply`, `Block`, `If`, `While`,
-`Match`, `New`, closures, nested `DefDef`s, String/Long and other non-Int/
-Boolean literals, and all other typed nodes return a structured
-unsupported-expression error. No source name lookup, implicit boxing, boolean
-conversion, branch generation, or frontend dependency is performed.
+`lower_expression` adds nested typed `If` expressions and local explicit
+`Return` nodes. A Boolean condition is evaluated once and followed by symbolic
+`ifeq`/`goto` labels. Value-producing branches agree on their `Int` or Boolean
+type and reach a stack-compatible join. A branch that terminates with an
+explicit local return contributes no placeholder value; a `Nothing` branch
+without supported return flow is rejected. Every emitted tree must be within
+the fixed depth budget `JVM_EXPRESSION_DEPTH_LIMIT` (64 nodes), and depth errors
+carry the offending `TreeId` and optional source span.
+
+`lower_method_body` checks the final flow against the method descriptor and
+adds `ireturn` for an `Int`/Boolean fallthrough. A body whose reachable paths
+all return gets no extra epilogue. Unit is accepted only when the body has
+supported explicit `return` flow; it emits JVM `return`. All APIs build into a
+fresh method-local `CodeBuilder`, so an error discards partial instructions.
+The classfile builder then validates reachable blocks, analyzes stack states,
+assembles labels, and writes `StackMapTable` frames.
+
+`Return.from = Some(...)` is rejected. `Select`, `Apply`, `TypeApply`, `Block`,
+`While`, `Match`, `Try`, `New`, closures, nested `DefDef`s, String/Long and
+other non-Int/Boolean literals, object/reference joins, and all other typed
+nodes remain unsupported. No source name lookup, implicit boxing, boolean
+conversion, constant folding, or frontend dependency is introduced.
