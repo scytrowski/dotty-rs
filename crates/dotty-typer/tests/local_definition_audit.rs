@@ -1292,6 +1292,8 @@ struct ModuleAuditPath {
     include_object_class: bool,
 }
 
+struct ScalaSourceAuditPath;
+
 impl ClassPathEntry for ModuleAuditPath {
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
         let (bytes, format) = match name.as_internal() {
@@ -1326,6 +1328,50 @@ impl ClassPathEntry for ModuleAuditPath {
     }
 }
 
+impl ClassPathEntry for ScalaSourceAuditPath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        let (bytes, format) = match name.as_internal() {
+            "scala/io/Source" => (
+                include_bytes!(
+                    "../../dotty-tasty/tests/fixtures/scala3-library/scala/io/Source.tasty"
+                )
+                .to_vec(),
+                ClassFormat::Tasty,
+            ),
+            "scala/package" => (
+                include_bytes!(
+                    "../../dotty-tasty/tests/fixtures/scala3-library/scala/package.tasty"
+                )
+                .to_vec(),
+                ClassFormat::Tasty,
+            ),
+            "java/lang/Object" | "java/io/Closeable" | "scala/collection/Iterator" => {
+                (audit_class_stub(name.as_internal()), ClassFormat::Class)
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(ClassResource::new(
+            bytes,
+            format,
+            ClassOrigin::Directory("<scala-3.9.0-library-fixture>".into()),
+        )))
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        Ok(package == ["scala"] || package == ["scala", "io"])
+    }
+}
+
+fn audit_class_stub(internal_name: &str) -> Vec<u8> {
+    let name = internal_name.as_bytes();
+    let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 61, 0, 3, 1];
+    bytes.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    bytes.extend_from_slice(name);
+    bytes.extend_from_slice(&[7, 0, 1, 0, 0x21, 0, 2, 0, 0]);
+    bytes.extend_from_slice(&[0; 8]);
+    bytes
+}
+
 fn module_audit_resolver(
     store: &mut SemanticStore,
     include_object_class: bool,
@@ -1353,6 +1399,310 @@ fn module_audit_resolver(
             class_path_probe: None,
         },
     )
+}
+
+fn source_audit_resolver(
+    store: &mut SemanticStore,
+    file: &str,
+    method: &str,
+) -> (Definitions, AuditResolver<ScalaSourceAuditPath>) {
+    let definitions = Definitions::bootstrap(store);
+    (
+        definitions,
+        AuditResolver {
+            inner: ClasspathSymbolResolver::new(
+                ScalaSourceAuditPath,
+                definitions,
+                LoadingSession::new(),
+            )
+            .with_load_profile_collection()
+            .with_module_resolution_profile_collection(),
+            metrics: Rc::new(RefCell::new(ResolverMetrics {
+                current_file: file.to_owned(),
+                current_method: method.to_owned(),
+                ..ResolverMetrics::default()
+            })),
+            class_path_probe: None,
+        },
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ScalaSourceModuleSnapshot {
+    object: String,
+    class: String,
+    module_class: String,
+    module_parent_count: usize,
+    module_member_count: usize,
+    stdin: String,
+}
+
+fn semantic_type_shape(store: &SemanticStore, ty: dotty_core::TypeId, depth: u8) -> String {
+    if depth >= 32 || !store.types.contains(ty) {
+        return "<invalid-or-too-deep>".to_owned();
+    }
+    let nested = |ty| semantic_type_shape(store, ty, depth + 1);
+    match store.types.get(ty) {
+        Type::NoType => "NoType".to_owned(),
+        Type::NoPrefix => "NoPrefix".to_owned(),
+        Type::Error(_) => "Error".to_owned(),
+        Type::TermRef { target, .. } => match target {
+            dotty_core::TermRefTarget::Symbol(symbol) => {
+                format!("TermRef({})", audit_symbol_path(store, *symbol))
+            }
+            dotty_core::TermRefTarget::Name(name) => {
+                format!("TermRef({})", store.names.resolve(name.as_name().text()))
+            }
+        },
+        Type::TypeRef { target, .. } => match target {
+            TypeRefTarget::Symbol(symbol) => {
+                format!("TypeRef({})", audit_symbol_path(store, *symbol))
+            }
+            TypeRefTarget::Name(name) => {
+                format!("TypeRef({})", store.names.resolve(name.as_name().text()))
+            }
+        },
+        Type::ThisType { class } => format!("This({})", audit_symbol_path(store, *class)),
+        Type::Constant(constant) => format!("Constant({constant:?})"),
+        Type::Applied { tycon, args } => format!(
+            "{}[{}]",
+            nested(*tycon),
+            args.iter()
+                .map(|arg| nested(*arg))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Type::ByName { result } => format!("ByName({})", nested(*result)),
+        Type::Flexible { underlying } => format!("Flexible({})", nested(*underlying)),
+        Type::JavaArray { element } => format!("Array({})", nested(*element)),
+        Type::Repeated { element } => format!("Repeated({})", nested(*element)),
+        Type::Method(method) => format!(
+            "Method({:?};[{}])->{}",
+            method.kind,
+            method
+                .params
+                .iter()
+                .map(|param| nested(param.ty))
+                .collect::<Vec<_>>()
+                .join(","),
+            nested(method.result)
+        ),
+        Type::Poly(poly) => format!("Poly({})->{}", poly.params.len(), nested(poly.result)),
+        Type::TypeLambda(lambda) => {
+            format!(
+                "TypeLambda({})->{}",
+                lambda.params.len(),
+                nested(lambda.result)
+            )
+        }
+        Type::Bounds { low, high } => format!("Bounds({}..{})", nested(*low), nested(*high)),
+        Type::AliasingBounds { alias } => format!("Alias({})", nested(*alias)),
+        Type::ClassInfo(info) => format!(
+            "ClassInfo({};parents={})",
+            audit_symbol_path(store, info.class),
+            info.parents.len()
+        ),
+        Type::SuperType { .. } => "SuperType".to_owned(),
+        Type::And { .. } => "And".to_owned(),
+        Type::Or { .. } => "Or".to_owned(),
+        Type::Refined { .. } => "Refined".to_owned(),
+        Type::Recursive { .. } => "Recursive".to_owned(),
+        Type::RecThis { .. } => "RecThis".to_owned(),
+        Type::ParamRef { index, .. } => format!("ParamRef({index})"),
+        Type::Match(_) => "Match".to_owned(),
+        Type::MatchCase { .. } => "MatchCase".to_owned(),
+        Type::Annotated { underlying, .. } => format!("Annotated({})", nested(*underlying)),
+        Type::Wildcard { bounds } => format!("Wildcard({})", nested(*bounds)),
+    }
+}
+
+fn scala_source_module_snapshot(
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    resolver: &mut impl SymbolResolver,
+) -> ScalaSourceModuleSnapshot {
+    let resolver: &mut dyn SymbolResolver = resolver;
+    let package = resolver
+        .resolve_package(store, &["scala", "io"])
+        .unwrap()
+        .expect("the checked-in Scala 3.9 fixture contains scala.io");
+    let prefix = store
+        .types
+        .alloc(Type::type_ref(definitions.no_prefix, package));
+    let source_term_name = dotty_core::Name::new(store.names.intern("Source"), Namespace::Term);
+    let source_term = resolver
+        .resolve_member(
+            store,
+            &MemberRequest {
+                prefix,
+                name: source_term_name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            },
+        )
+        .unwrap()
+        .expect("scala.io.Source term should resolve");
+    let source_type_name = dotty_core::Name::new(store.names.intern("Source"), Namespace::Type);
+    let source_type = resolver
+        .resolve_member(
+            store,
+            &MemberRequest {
+                prefix,
+                name: source_type_name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            },
+        )
+        .unwrap()
+        .expect("scala.io.Source type should resolve");
+    assert_eq!(
+        store.symbols.get(source_term).kind,
+        dotty_core::SymbolKind::Object
+    );
+    assert!(matches!(
+        store.symbols.get(source_type).kind,
+        dotty_core::SymbolKind::Class | dotty_core::SymbolKind::Trait
+    ));
+    assert_ne!(
+        source_term, source_type,
+        "term and type namespaces stay distinct"
+    );
+
+    let module_class = resolver
+        .module_class_of_object(store, source_term)
+        .unwrap()
+        .expect("Source object has a canonical module class");
+    assert_eq!(
+        store.symbols.get(source_term).links.companion,
+        Some(source_type),
+        "the package term must retain the canonical companion class"
+    );
+    assert_eq!(
+        store.symbols.get(module_class).kind,
+        dotty_core::SymbolKind::ModuleClass
+    );
+    assert!(resolver.complete_module_class(store, module_class).unwrap());
+    assert!(valid_module_class_info(store, module_class));
+    let source_value_type = match store.symbols.get(source_term).info {
+        dotty_core::SymbolInfo::Complete(ty) => store.types.get(ty),
+        _ => panic!("the Source object must carry its canonical value type"),
+    };
+    assert!(matches!(
+        source_value_type,
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(target),
+            ..
+        } | Type::TermRef {
+            target: dotty_core::TermRefTarget::Symbol(target),
+            ..
+        } if *target == module_class
+    ));
+    let completed_checkpoint = store.checkpoint();
+    assert!(resolver.complete_module_class(store, module_class).unwrap());
+    assert_eq!(
+        store.checkpoint(),
+        completed_checkpoint,
+        "repeated completion must not allocate duplicate module state"
+    );
+    let dotty_core::SymbolInfo::Complete(info) = store.symbols.get(module_class).info else {
+        unreachable!("completion check above establishes complete module information");
+    };
+    let Type::ClassInfo(info) = store.types.get(info) else {
+        unreachable!("valid module class info is a ClassInfo");
+    };
+    let module_parent_count = info.parents.len();
+    let module_member_count = store
+        .scopes
+        .get(info.declarations)
+        .entered_symbols()
+        .count();
+
+    let module_prefix = store
+        .types
+        .alloc(Type::type_ref(definitions.no_prefix, module_class));
+    let stdin_name = dotty_core::Name::new(store.names.intern("stdin"), Namespace::Term);
+    let stdin = resolver
+        .resolve_member(
+            store,
+            &MemberRequest {
+                prefix: module_prefix,
+                name: stdin_name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            },
+        )
+        .unwrap()
+        .expect("the real Source module declares stdin");
+
+    let describe = |symbol: SymbolId| {
+        let entry = store.symbols.get(symbol);
+        let semantic_type = match entry.info {
+            dotty_core::SymbolInfo::Complete(ty) => semantic_type_shape(store, ty, 0),
+            dotty_core::SymbolInfo::Missing => "Missing".to_owned(),
+            dotty_core::SymbolInfo::Deferred(_) => "Deferred".to_owned(),
+            dotty_core::SymbolInfo::Error => "Error".to_owned(),
+        };
+        format!(
+            "{}|{:?}|{:?}|{}|{:?}|{}",
+            audit_symbol_path(store, symbol),
+            entry.kind,
+            entry.name.namespace(),
+            symbol_info_label(entry.info),
+            entry.origin,
+            semantic_type
+        )
+    };
+    ScalaSourceModuleSnapshot {
+        object: describe(source_term),
+        class: describe(source_type),
+        module_class: describe(module_class),
+        module_parent_count,
+        module_member_count,
+        stdin: describe(stdin),
+    }
+}
+
+#[test]
+fn audit_and_classpath_resolvers_match_for_real_scala_source_module() {
+    let mut direct_store = SemanticStore::new();
+    let direct_definitions = Definitions::bootstrap(&mut direct_store);
+    let mut direct = ClasspathSymbolResolver::new(
+        ScalaSourceAuditPath,
+        direct_definitions,
+        LoadingSession::new(),
+    );
+    let expected = scala_source_module_snapshot(&mut direct_store, direct_definitions, &mut direct);
+
+    let mut audit_store = SemanticStore::new();
+    let (audit_definitions, mut audit) =
+        source_audit_resolver(&mut audit_store, "scala.io.Source.scala", "Source.stdin");
+    let actual = scala_source_module_snapshot(&mut audit_store, audit_definitions, &mut audit);
+
+    assert_eq!(
+        actual, expected,
+        "the audit wrapper must preserve production semantics"
+    );
+    let observations = &audit.metrics.borrow().module_operation_observations;
+    for (operation, outcome) in [("module_class_of_object", "resolved")] {
+        let matches = observations
+            .iter()
+            .filter(|observation| observation.operation == operation)
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "{operation} must be recorded once");
+        assert_eq!(matches[0].result, outcome);
+        assert_eq!(matches[0].source_file, "scala.io.Source.scala");
+        assert_eq!(matches[0].enclosing_attempt, "Source.stdin");
+    }
+    let completions = observations
+        .iter()
+        .filter(|observation| observation.operation == "complete_module_class")
+        .collect::<Vec<_>>();
+    assert_eq!(completions.len(), 2, "one observation is recorded per call");
+    assert!(completions.iter().all(|observation| {
+        observation.result == "completed"
+            && observation.source_file == "scala.io.Source.scala"
+            && observation.enclosing_attempt == "Source.stdin"
+    }));
 }
 
 fn module_audit_object(
