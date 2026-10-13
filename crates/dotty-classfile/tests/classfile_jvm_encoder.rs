@@ -144,14 +144,152 @@ fn operand_index(
     ]))
 }
 
-#[test]
-fn public_builders_emit_executable_calculator_box_and_caller_classes() {
-    let directory = TempDir::new();
-    let version = ClassFileVersion {
-        major: 65,
-        minor: 0,
-    };
+fn read_u2(bytes: &[u8], cursor: &mut usize) -> usize {
+    let value = u16::from_be_bytes([bytes[*cursor], bytes[*cursor + 1]]);
+    *cursor += 2;
+    usize::from(value)
+}
 
+fn skip_verification_type(bytes: &[u8], cursor: &mut usize) {
+    let tag = bytes[*cursor];
+    *cursor += 1;
+    match tag {
+        0..=6 => {}
+        7 | 8 => *cursor += 2,
+        _ => panic!("invalid verification_type_info tag {tag}"),
+    }
+    assert!(*cursor <= bytes.len(), "truncated verification_type_info");
+}
+
+fn assert_stack_map_targets(
+    class_file: &ClassFile<'_>,
+    method: &dotty_classfile::classfile::MethodInfo<'_>,
+    expected_frames: usize,
+) -> Vec<usize> {
+    let code = code(method);
+    let [Attribute::Other(attribute)] = code.attributes.as_slice() else {
+        panic!(
+            "expected exactly one nested StackMapTable, got {:?}",
+            code.attributes
+        );
+    };
+    assert_eq!(
+        class_file.constant_pool.utf8(attribute.name_index),
+        Ok("StackMapTable")
+    );
+
+    let bytes = attribute.bytes;
+    let mut cursor = 0;
+    let frame_count = read_u2(bytes, &mut cursor);
+    assert_eq!(frame_count, expected_frames);
+    let mut frame_pcs = Vec::with_capacity(frame_count);
+    for _ in 0..frame_count {
+        assert_eq!(bytes[cursor], 255, "expected full_frame encoding");
+        cursor += 1;
+        let offset_delta = read_u2(bytes, &mut cursor);
+        let pc = frame_pcs
+            .last()
+            .map_or(offset_delta, |previous| previous + offset_delta + 1);
+        frame_pcs.push(pc);
+
+        let locals = read_u2(bytes, &mut cursor);
+        for _ in 0..locals {
+            skip_verification_type(bytes, &mut cursor);
+        }
+        let stack = read_u2(bytes, &mut cursor);
+        for _ in 0..stack {
+            skip_verification_type(bytes, &mut cursor);
+        }
+    }
+    assert_eq!(
+        cursor,
+        bytes.len(),
+        "StackMapTable payload has trailing bytes"
+    );
+    assert!(frame_pcs.windows(2).all(|pair| pair[0] < pair[1]));
+
+    let (instruction_pcs, branch_targets) = branch_targets(code.code);
+    for (target, _) in &branch_targets {
+        assert!(
+            instruction_pcs.contains(target),
+            "branch target {target} is not an instruction boundary"
+        );
+    }
+    let mut expected_targets = branch_targets
+        .iter()
+        .map(|(target, _)| *target)
+        .filter(|target| *target != 0)
+        .collect::<Vec<_>>();
+    expected_targets.sort_unstable();
+    expected_targets.dedup();
+    assert_eq!(frame_pcs, expected_targets);
+    frame_pcs
+}
+
+fn branch_targets(code: &[u8]) -> (Vec<usize>, Vec<(usize, &'static str)>) {
+    let mut instruction_pcs = Vec::new();
+    let mut targets = Vec::new();
+    let mut pc = 0;
+    while pc < code.len() {
+        instruction_pcs.push(pc);
+        let opcode = code[pc];
+        let (length, mnemonic) = match opcode {
+            0x99 => (3, Some("ifeq")),
+            0x9a => (3, Some("ifne")),
+            0x9f => (3, Some("if_icmpeq")),
+            0xa0 => (3, Some("if_icmpne")),
+            0xa1 => (3, Some("if_icmplt")),
+            0xa2 => (3, Some("if_icmpge")),
+            0xa3 => (3, Some("if_icmpgt")),
+            0xa4 => (3, Some("if_icmple")),
+            0xa7 => (3, Some("goto")),
+            0xc8 => (5, Some("goto_w")),
+            0x10 | 0x12 | 0x15 | 0x36 => (2, None),
+            0x11 | 0x13 | 0xb4 | 0xb5 | 0xb6 | 0xb7 | 0xb8 | 0xbb => (3, None),
+            0x00..=0x0f | 0x1a..=0x2d | 0x3b..=0x4e | 0x57 | 0x59 | 0x60 | 0xac | 0xb0 | 0xb1 => {
+                (1, None)
+            }
+            _ => panic!("unexpected opcode 0x{opcode:02x} at PC {pc}"),
+        };
+        assert!(pc + length <= code.len(), "truncated opcode at PC {pc}");
+        if let Some(mnemonic) = mnemonic {
+            let displacement = if opcode == 0xc8 {
+                i32::from_be_bytes(code[pc + 1..pc + 5].try_into().unwrap()) as i64
+            } else {
+                i64::from(i16::from_be_bytes([code[pc + 1], code[pc + 2]]))
+            };
+            let target = usize::try_from((pc as i64) + displacement)
+                .expect("branch target is a nonnegative PC");
+            targets.push((target, mnemonic));
+        }
+        pc += length;
+    }
+    (instruction_pcs, targets)
+}
+
+fn javap_contains_branch(output: &str, mnemonic: &str, target: usize) -> bool {
+    let target = target.to_string();
+    output.lines().any(|line| {
+        let mut tokens = line.split_whitespace();
+        let is_instruction = tokens
+            .next()
+            .and_then(|token| token.strip_suffix(':'))
+            .and_then(|pc| pc.parse::<usize>().ok())
+            .is_some();
+        is_instruction && tokens.next() == Some(mnemonic) && tokens.next() == Some(target.as_str())
+    })
+}
+
+#[test]
+fn matches_javap_branch_columns_independent_of_whitespace() {
+    let javap_output = "  2: if_icmpge     7\n\t22: goto\t4\n 30: if_icmpge 17\n";
+    assert!(javap_contains_branch(javap_output, "if_icmpge", 7));
+    assert!(javap_contains_branch(javap_output, "goto", 4));
+    assert!(!javap_contains_branch(javap_output, "if_icmpge", 1));
+    assert!(!javap_contains_branch(javap_output, "iconst_0", 7));
+}
+
+fn build_calculator(version: ClassFileVersion) -> Vec<u8> {
     let mut calculator =
         ClassFileBuilder::new("Calculator", version).expect("Java 21 class builder is supported");
     calculator
@@ -207,9 +345,59 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
             Ok(())
         })
         .expect("branched sumTo method construction succeeds");
-    let calculator_bytes = calculator
+    calculator
+        .add_static_method("nested", "(II)I", |code| {
+            let not_less = code.new_label()?;
+            let nonzero = code.new_label()?;
+            let equal = code.new_label()?;
+            let joined = code.new_label()?;
+            code.iload(0)?;
+            code.iload(1)?;
+            code.if_icmpge(not_less.clone())?;
+            code.iload(0)?;
+            code.ifne(nonzero.clone())?;
+            code.iconst(100)?;
+            code.istore(2)?;
+            code.goto(joined.clone())?;
+            code.mark(nonzero)?;
+            code.iconst(10)?;
+            code.istore(2)?;
+            code.goto(joined.clone())?;
+            code.mark(not_less)?;
+            code.iload(0)?;
+            code.iload(1)?;
+            code.if_icmpeq(equal.clone())?;
+            code.iconst(0)?;
+            code.istore(2)?;
+            code.goto(joined.clone())?;
+            code.mark(equal)?;
+            code.iconst(1)?;
+            code.istore(2)?;
+            code.mark(joined)?;
+            code.iload(2)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .expect("branched nested method construction succeeds");
+    calculator
         .encode()
-        .expect("Calculator is generated through the typed builder");
+        .expect("Calculator is generated through the typed builder")
+}
+
+#[test]
+fn public_builders_emit_executable_calculator_box_and_caller_classes() {
+    let directory = TempDir::new();
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+
+    let calculator_bytes = build_calculator(version);
+    assert_eq!(
+        build_calculator(version),
+        calculator_bytes,
+        "repeated builds must produce identical class, code, and frame bytes"
+    );
     let calculator_path = directory.path().join("Calculator.class");
     fs::write(&calculator_path, &calculator_bytes)
         .unwrap_or_else(|error| panic!("write {}: {error}", calculator_path.display()));
@@ -282,7 +470,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     let calculator = decode_and_validate(&calculator_bytes);
     assert_eq!(calculator.version, version);
     assert_eq!(calculator.access_flags.0, ACC_PUBLIC | ACC_SUPER);
-    assert_eq!(calculator.methods.len(), 3);
+    assert_eq!(calculator.methods.len(), 4);
     let add = &calculator.methods[0];
     assert_eq!(calculator.constant_pool.utf8(add.name_index), Ok("add"));
     assert_eq!(
@@ -309,6 +497,10 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
         matches!(max.attributes.as_slice(), [Attribute::Other(attribute)]
         if calculator.constant_pool.utf8(attribute.name_index) == Ok("StackMapTable"))
     );
+    assert_eq!(
+        assert_stack_map_targets(&calculator, &calculator.methods[1], 1),
+        [7]
+    );
 
     let sum_to = code(&calculator.methods[2]);
     assert_eq!((sum_to.max_stack, sum_to.max_locals), (2, 3));
@@ -318,6 +510,14 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
         matches!(sum_to.attributes.as_slice(), [Attribute::Other(attribute)]
         if calculator.constant_pool.utf8(attribute.name_index) == Ok("StackMapTable"))
     );
+
+    let sum_to_frames = assert_stack_map_targets(&calculator, &calculator.methods[2], 2);
+    assert_eq!(sum_to_frames.len(), 2);
+    let nested = code(&calculator.methods[3]);
+    assert_eq!((nested.max_stack, nested.max_locals), (2, 3));
+    assert!(nested.exception_table.is_empty());
+    let nested_frames = assert_stack_map_targets(&calculator, &calculator.methods[3], 4);
+    assert_eq!(nested_frames.len(), 4);
 
     let box_file = decode_and_validate(&box_bytes);
     assert_eq!(box_file.version, version);
@@ -435,7 +635,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     let harness_path = directory.path().join("GeneratedClassesHarness.java");
     fs::write(
         &harness_path,
-        "public final class GeneratedClassesHarness {\n    public static void main(String[] args) {\n        int calculator = Calculator.add(20, 22);\n        if (calculator != 42) throw new AssertionError(\"Calculator.add: \" + calculator);\n        int maximum = Calculator.max(12, 42);\n        if (maximum != 42) throw new AssertionError(\"Calculator.max: \" + maximum);\n        int sum = Calculator.sumTo(10);\n        if (sum != 55) throw new AssertionError(\"Calculator.sumTo: \" + sum);\n        int boxed = new Box(42).get();\n        if (boxed != 42) throw new AssertionError(\"Box.get: \" + boxed);\n        int caller = Caller.answer();\n        if (caller != 42) throw new AssertionError(\"Caller.answer: \" + caller);\n        int generated = Caller.makeBox(42).get();\n        if (generated != 42) throw new AssertionError(\"Caller.makeBox: \" + generated);\n        System.out.println(\"Calculator.add=\" + calculator);\n        System.out.println(\"Calculator.max=\" + maximum);\n        System.out.println(\"Calculator.sumTo=\" + sum);\n        System.out.println(\"Box.get=\" + boxed);\n        System.out.println(\"Caller.answer=\" + caller);\n        System.out.println(\"Caller.makeBox=\" + generated);\n    }\n}\n",
+        "public final class GeneratedClassesHarness {\n    public static void main(String[] args) {\n        int calculator = Calculator.add(20, 22);\n        if (calculator != 42) throw new AssertionError(\"Calculator.add: \" + calculator);\n        int maxForward = Calculator.max(20, 22);\n        int maxReverse = Calculator.max(22, 20);\n        int maxEqual = Calculator.max(22, 22);\n        if (maxForward != 22 || maxReverse != 22 || maxEqual != 22) throw new AssertionError(\"Calculator.max: \" + maxForward + \", \" + maxReverse + \", \" + maxEqual);\n        int sumTen = Calculator.sumTo(10);\n        int sumZero = Calculator.sumTo(0);\n        int sumOne = Calculator.sumTo(1);\n        if (sumTen != 55 || sumZero != 0 || sumOne != 1) throw new AssertionError(\"Calculator.sumTo: \" + sumTen + \", \" + sumZero + \", \" + sumOne);\n        int nestedZero = Calculator.nested(0, 1);\n        int nestedLess = Calculator.nested(1, 2);\n        int nestedEqual = Calculator.nested(2, 2);\n        int nestedGreater = Calculator.nested(3, 2);\n        if (nestedZero != 100 || nestedLess != 10 || nestedEqual != 1 || nestedGreater != 0) throw new AssertionError(\"Calculator.nested: \" + nestedZero + \", \" + nestedLess + \", \" + nestedEqual + \", \" + nestedGreater);\n        int boxed = new Box(42).get();\n        if (boxed != 42) throw new AssertionError(\"Box.get: \" + boxed);\n        int caller = Caller.answer();\n        if (caller != 42) throw new AssertionError(\"Caller.answer: \" + caller);\n        int generated = Caller.makeBox(42).get();\n        if (generated != 42) throw new AssertionError(\"Caller.makeBox: \" + generated);\n        System.out.println(\"Calculator.add=\" + calculator);\n        System.out.println(\"Calculator.max=\" + maxForward + \",\" + maxReverse + \",\" + maxEqual);\n        System.out.println(\"Calculator.sumTo=\" + sumTen + \",\" + sumZero + \",\" + sumOne);\n        System.out.println(\"Calculator.nested=\" + nestedZero + \",\" + nestedLess + \",\" + nestedEqual + \",\" + nestedGreater);\n        System.out.println(\"Box.get=\" + boxed);\n        System.out.println(\"Caller.answer=\" + caller);\n        System.out.println(\"Caller.makeBox=\" + generated);\n    }\n}\n",
     )
     .unwrap_or_else(|error| panic!("write {}: {error}", harness_path.display()));
 
@@ -447,8 +647,12 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
                 "public static int add(int, int);",
                 "public static int max(int, int);",
                 "public static int sumTo(int);",
-                "StackMapTable: number_of_entries =",
+                "public static int nested(int, int);",
+                "StackMapTable: number_of_entries = 1",
+                "StackMapTable: number_of_entries = 2",
+                "StackMapTable: number_of_entries = 4",
                 "stack=2, locals=2",
+                "stack=2, locals=3",
                 "iload_0",
                 "iload_1",
                 "iadd",
@@ -494,6 +698,20 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
                 "javap output for {class_name} did not contain {item:?}:\n{javap_output}"
             );
         }
+        if class_name == "Calculator" {
+            for method in [
+                &calculator.methods[1],
+                &calculator.methods[2],
+                &calculator.methods[3],
+            ] {
+                for (target, mnemonic) in branch_targets(code(method).code).1 {
+                    assert!(
+                        javap_contains_branch(&javap_output, mnemonic, target),
+                        "javap output is missing branch {mnemonic} to {target}:\n{javap_output}"
+                    );
+                }
+            }
+        }
     }
 
     let javac = run(
@@ -530,6 +748,6 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     );
     assert_eq!(
         String::from_utf8_lossy(&java.stdout).trim(),
-        "Calculator.add=42\nCalculator.max=42\nCalculator.sumTo=55\nBox.get=42\nCaller.answer=42\nCaller.makeBox=42"
+        "Calculator.add=42\nCalculator.max=22,22,22\nCalculator.sumTo=55,0,1\nCalculator.nested=100,10,1,0\nBox.get=42\nCaller.answer=42\nCaller.makeBox=42"
     );
 }

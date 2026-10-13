@@ -120,8 +120,9 @@ subsets:
 | Generated class | Typed operations exercised |
 | --- | --- |
 | `Calculator` | `iload`, `iadd`, `ireturn` |
-| `Calculator.max` | `if_icmpge`, conditional target, and two returns |
-| `Calculator.sumTo` | loop back-edge, `goto`, integer locals, and merge frames |
+| `Calculator.max` | `if_icmpge`, both branches, and equality; executed for `(20,22)`, `(22,20)`, and `(22,22)` |
+| `Calculator.sumTo` | loop back-edge, `goto`, integer locals, and merge frames; executed for `0`, `1`, and `10` |
+| `Calculator.nested` | nested integer conditionals, four branch targets, and a shared join of initialized integer locals |
 | `Box` | `aload`, `iload`, `invokespecial`, `putfield`, `getfield`, `return`, `ireturn` |
 | `Caller` | integer constants, `invokestatic`, `new`, `dup`, `iload`, `invokespecial`, `areturn`, `ireturn` |
 
@@ -141,11 +142,15 @@ uses `invokestatic` to invoke the generated `Calculator.add` method. Its
 
 `tests/classfile_jvm_encoder.rs` asks `javap -v` to parse all three generated
 classes, compiles a small Java caller, and executes it with
-`java -Xverify:all`. The Java assertions check that `Calculator.add(20, 22)`,
-`Calculator.max(12, 42)`, `Calculator.sumTo(10)`, `new Box(42).get()`,
-`Caller.answer()`, and `Caller.makeBox(42).get()` each return the expected
-value. The branch and loop methods exercise builder-generated stack maps; the
-factory executes the generated allocation and constructor-call sequence.
+`java -Xverify:all`. The Java assertions check `Calculator.add(20, 22)`, all
+three `Calculator.max` branch outcomes, `Calculator.sumTo` for zero, one, and
+multiple iterations, four paths through `Calculator.nested`,
+`new Box(42).get()`, `Caller.answer()`, and `Caller.makeBox(42).get()`. The test
+decodes each `StackMapTable` payload, checks full-frame counts and increasing
+PCs, and verifies that frame and branch targets are instruction boundaries.
+It also checks that `javap -v` reports the branch targets and frame counts.
+Rebuilding the same calculator twice must produce identical class bytes,
+including its code and frames.
 
 Run the structural and ordinary crate tests with:
 
@@ -163,9 +168,9 @@ DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test -p dotty-classfile --test classfile_jvm
 When a JDK tool is missing or is older than 21, the gate prints the missing or
 unsupported tool and skips its JVM execution portion locally, after running
 the generated-class structure and reference checks. CI's dedicated job
-provisions Temurin JDK 21 and sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, making all
-three runtime scenarios mandatory. The JDK corpus itself is checked in, so
-the structural round-trip suite does not depend on an installed JDK.
+provisions Temurin JDK 21 and sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`; missing
+tools or verifier failures fail that job. The JDK corpus itself is checked in,
+so the structural round-trip suite does not depend on an installed JDK.
 
 The existing `assemble(&[Instruction], ...)` and linear analyzer remain
 straight-line APIs. The separate symbolic `CodeSequence` API supports labels
@@ -174,6 +179,8 @@ and `goto`, `goto_w`, `ifeq`, `ifne`, and `if_icmp{eq,ne,lt,ge,gt,le}` branches.
 label byte offsets. It uses checked branch displacement and code-length
 arithmetic, and never widens a short branch automatically. The public typed
 `CodeBuilder` now connects these pieces for the integer-only branched subset
-and emits `StackMapTable`; exception edges, reference-state merges,
-uninitialized objects, compression, and general JVM verification remain out
-of scope. This does not add Scala compilation or a JVM backend.
+and emits `StackMapTable`; it rejects unreachable blocks and unsupported
+verifier states. Follow-up work can add switch instructions, exception edges,
+reference merges, and object initialization states. Frame compression and
+general JVM verification remain out of scope. This does not add Scala
+compilation or a JVM backend.
