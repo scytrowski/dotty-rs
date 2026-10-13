@@ -385,6 +385,37 @@ fn builds_branched_integer_methods_with_one_stack_map_table_each() {
 }
 
 #[test]
+fn rejects_unreachable_blocks_before_automatic_stack_map_emission() {
+    let mut builder = ClassFileBuilder::new(
+        "example/UnreachableIntegerBlock",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_static_method("branch", "()I", |code| {
+            let target = code.new_label()?;
+            code.goto(target.clone())?;
+            code.iconst(0)?;
+            code.ireturn()?;
+            code.mark(target)?;
+            code.iconst(1)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(matches!(
+        builder.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::UnreachableBlock { block }
+        )) if block.index() == 1
+    ));
+}
+
+#[test]
 fn rejects_foreign_unbound_duplicate_and_old_version_branch_labels() {
     let mut foreign_builder = dotty_classfile::classfile::CodeBuilder::new();
     let foreign = foreign_builder.new_label().unwrap();

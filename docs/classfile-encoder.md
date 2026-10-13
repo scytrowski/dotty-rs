@@ -68,7 +68,9 @@ Straight-line methods use the linear analyzer and do not receive an automatic
 assembled byte offsets, and `full_frame` entries. Automatic branched emission
 requires class-file major version 65 or newer. It accepts only the analyzer's
 integer-like state subset; it is not a JVM verifier and rejects reference,
-category-two, incompatible-stack, and uninitialized-local flows.
+category-two, incompatible-stack, uninitialized-local, and unreachable-block
+flows. Unreachable bytecode is rejected because automatic frame generation
+does not infer verifier states for dead code.
 
 ```rust
 use dotty_classfile::classfile::{ClassFileBuilder, ClassFileVersion};

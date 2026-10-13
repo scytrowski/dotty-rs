@@ -41,7 +41,7 @@ use crate::bytecode::code_builder::{
 };
 use crate::bytecode::{
     AnalysisError, AssembleError, BranchInstruction, CfgCodeAnalyzer, CodeSequence,
-    ControlFlowGraph, Instruction, StackMapFrameGenerationError, StackMapTable, assemble_labeled,
+    ControlFlowGraph, Instruction, StackMapFrameGenerationError, StackMapTable,
     generate_stack_map_frames,
 };
 use crate::class_file::{ClassFile, ClassFileVersion};
@@ -285,7 +285,8 @@ enum OwnedClassAttribute {
 /// and local bounds before the constant pool is frozen. The analysis checks
 /// supported instruction categories and straight-line bounds. Branched code
 /// uses the integer-only CFG analyzer and emits `StackMapTable` frames for the
-/// supported class-file version 65+ subset; neither path is full JVM
+/// supported class-file version 65+ subset and rejects unreachable blocks
+/// whose verifier state cannot be inferred; neither path is full JVM
 /// verification. A typed-code closure commits its method only after the
 /// closure and label validation succeed; failures during final encoding return
 /// an error and produce no class bytes.
@@ -740,15 +741,25 @@ impl ClassFileBuilder {
                         .map_err(ClassFileBuildError::ControlFlow)?;
                     CfgCodeAnalyzer::validate_all_instructions(&graph)
                         .map_err(ClassFileBuildError::Analysis)?;
-                    let flow = CfgCodeAnalyzer::analyze(
+                    let flow = CfgCodeAnalyzer::analyze_validated(
                         &graph,
                         &method.descriptor,
                         method.access_flags.is_static(),
                         &constant_pool,
                     )
                     .map_err(ClassFileBuildError::Analysis)?;
-                    let assembled = assemble_labeled(&sequence, &constant_pool)
-                        .map_err(ClassFileBuildError::Assemble)?;
+                    for (block, entry) in graph.blocks().iter().zip(flow.block_entries()) {
+                        if entry.is_none() {
+                            return Err(ClassFileBuildError::Analysis(
+                                AnalysisError::UnreachableBlock { block: block.id },
+                            ));
+                        }
+                    }
+                    let assembled = crate::bytecode::assembler::assemble_labeled_pool_validated(
+                        &sequence,
+                        &constant_pool,
+                    )
+                    .map_err(ClassFileBuildError::Assemble)?;
                     let generated = generate_stack_map_frames(&flow, &graph, &assembled)
                         .map_err(ClassFileBuildError::StackMapFrames)?;
                     let payload = StackMapTable {
