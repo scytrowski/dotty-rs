@@ -313,6 +313,11 @@ adding audit work to ordinary member resolution. Sorted target keys use binary
 names and namespaces rather than allocated symbol IDs. The counters
 distinguish unresolved requests, malformed evidence, newly materialized and
 reused objects, module completion, and non-class member successes.
+`resolved_object_targets` and `resolved_member_targets` contain only keys that
+resolved to canonical Object and declared member symbols, respectively;
+`package_term_targets` and `member_targets` also include misses. Corpus reports
+can therefore report distinct successful objects and members without counting
+attempts as successes.
 
 The profile preserves a separate channel from the frozen #1046 source audit:
 the baseline remains 2,749 package-term observations across 80 request keys,

@@ -89,10 +89,17 @@ fn merge_module_resolution_profile(
     target.package_term_requests += source.package_term_requests;
     target.package_term_successes += source.package_term_successes;
     target.package_term_unresolved += source.package_term_unresolved;
+    target.package_term_non_object_results += source.package_term_non_object_results;
     target.package_term_errors += source.package_term_errors;
     target.new_object_identities += source.new_object_identities;
     target.reused_object_identities += source.reused_object_identities;
     target.module_member_successes += source.module_member_successes;
+    target
+        .resolved_object_targets
+        .extend(source.resolved_object_targets);
+    target
+        .resolved_member_targets
+        .extend(source.resolved_member_targets);
     target
         .package_term_targets
         .extend(source.package_term_targets);
@@ -8113,9 +8120,10 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     let module_profile = &metrics.module_resolution;
     println!("module_resolution_profile:");
     println!(
-        "  package_term_requests={} successes={} unresolved={} errors={}",
+        "  package_term_requests={} object_successes={} non_object_results={} unresolved={} errors={}",
         module_profile.package_term_requests,
         module_profile.package_term_successes,
+        module_profile.package_term_non_object_results,
         module_profile.package_term_unresolved,
         module_profile.package_term_errors
     );
@@ -8127,6 +8135,17 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         "  completed_module_classes={} module_member_successes={}",
         module_profile.completed_module_classes.len(),
         module_profile.module_member_successes
+    );
+    println!(
+        "  external_package_term_successes={} distinct_external_objects={}",
+        module_profile.package_term_successes,
+        module_profile.resolved_object_targets.len()
+    );
+    println!(
+        "  external_module_class_completions={} external_module_member_successes={} distinct_external_module_members={}",
+        module_profile.completed_module_classes.len(),
+        module_profile.module_member_successes,
+        module_profile.resolved_member_targets.len()
     );
     println!(
         "  distinct_package_term_targets={} distinct_module_targets={} distinct_member_targets={}",
