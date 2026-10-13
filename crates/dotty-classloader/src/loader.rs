@@ -584,6 +584,67 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         &mut self,
         name: &BinaryName,
     ) -> Result<ModuleIdentity, ClassLoadError> {
+        let identity = self.ensure_module_identity_inner(name)?;
+        match self.store.symbols.get(identity.module_class).info {
+            SymbolInfo::Complete(info) => {
+                let object_info = self.store.symbols.get(identity.object).info;
+                let valid_object_type = matches!(
+                    object_info,
+                    SymbolInfo::Complete(object_type)
+                        if matches!(self.store.types.get(object_type), Type::TypeRef { .. })
+                            && self.store.types.get(object_type).reference_symbol()
+                                == Some(identity.module_class)
+                );
+                let valid_class_info = matches!(
+                    self.store.types.get(info),
+                    Type::ClassInfo(class_info)
+                        if class_info.class == identity.module_class
+                            && self.store.scopes.contains(class_info.declarations)
+                            && self.store.scopes.get(class_info.declarations).owner
+                                == Some(identity.module_class)
+                            && self.store.scopes.get(class_info.declarations)
+                                .entered_symbols()
+                                .all(|member| {
+                                    self.store.symbols.contains(member)
+                                        && self.store.symbols.get(member).owner
+                                            == Some(identity.module_class)
+                                })
+                );
+                if valid_object_type && valid_class_info {
+                    self.session
+                        .cache_resolved(identity.module_class_name.clone(), identity.module_class);
+                    return Ok(identity);
+                }
+                return Err(ClassLoadError::IdentityConflict {
+                    name: identity.module_class_name,
+                    reason: "the completed module class, declarations scope, or object type is inconsistent"
+                        .to_owned(),
+                });
+            }
+            SymbolInfo::Missing
+                if self.store.symbols.get(identity.object).info != SymbolInfo::Missing =>
+            {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: identity.module_class_name,
+                    reason: "the object term is complete while its module class is missing"
+                        .to_owned(),
+                });
+            }
+            SymbolInfo::Error => {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: identity.module_class_name,
+                    reason: "the module class is marked as failed".to_owned(),
+                });
+            }
+            SymbolInfo::Deferred(_) => {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: identity.module_class_name,
+                    reason: "the module class has an unrelated pending completion".to_owned(),
+                });
+            }
+            SymbolInfo::Missing => {}
+        }
+
         let resource = self
             .class_path
             .find_class(name)
@@ -593,19 +654,6 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             return Err(ClassLoadError::IdentityConflict {
                 name: name.clone(),
                 reason: "a classfile cannot complete a Scala module class".to_owned(),
-            });
-        }
-        let identity = self.ensure_module_identity_inner(name)?;
-        if let SymbolInfo::Complete(info) = self.store.symbols.get(identity.module_class).info {
-            if matches!(self.store.types.get(info), Type::ClassInfo(class_info) if class_info.class == identity.module_class)
-            {
-                self.session
-                    .cache_resolved(identity.module_class_name.clone(), identity.module_class);
-                return Ok(identity);
-            }
-            return Err(ClassLoadError::IdentityConflict {
-                name: identity.module_class_name,
-                reason: "the module class has an incompatible completed type".to_owned(),
             });
         }
 
@@ -6366,11 +6414,28 @@ mod tests {
             loader.store.types.get(object_info).reference_symbol(),
             Some(identity.module_class)
         );
+        let companion_class = loader.load_class(&name).unwrap();
+        assert_eq!(
+            loader.store.symbols.get(companion_class).kind,
+            SymbolKind::Class
+        );
+        assert_ne!(
+            class_info(loader.store, companion_class).declarations,
+            declarations
+        );
 
-        let repeated = loader.complete_module(&name).unwrap();
+        let definitions = loader.definitions();
+        let session = loader.into_session();
+        let mut repeated_loader = ClassLoader::with_definitions(
+            InMemoryClassPath(HashMap::new()),
+            &mut store,
+            definitions,
+            session,
+        );
+        let repeated = repeated_loader.complete_module(&name).unwrap();
         assert_eq!(repeated, identity);
         assert_eq!(
-            class_info(loader.store, identity.module_class).declarations,
+            class_info(repeated_loader.store, identity.module_class).declarations,
             declarations
         );
     }
@@ -6421,6 +6486,34 @@ mod tests {
         assert_eq!(
             class_info(retry_loader.store, identity.module_class).class,
             identity.module_class
+        );
+    }
+
+    #[test]
+    fn complete_module_rejects_an_inconsistent_preexisting_class_info() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryTastyClassPath(HashMap::from([(
+                name.clone(),
+                semantic_unpickler_fixture_bytes("Both.tasty"),
+            )])),
+            &mut store,
+        );
+        let identity = loader.ensure_module_identity(&name).unwrap();
+        let invalid_info = loader.store.types.alloc(Type::NoType);
+        loader
+            .store
+            .symbols
+            .set_info(identity.module_class, SymbolInfo::Complete(invalid_info));
+
+        assert!(matches!(
+            loader.complete_module(&name),
+            Err(ClassLoadError::IdentityConflict { .. })
+        ));
+        assert_eq!(
+            loader.store.symbols.get(identity.module_class).info,
+            SymbolInfo::Complete(invalid_info)
         );
     }
 

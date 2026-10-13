@@ -193,6 +193,10 @@ pub enum TastyDecodeError {
     /// from (there is always one for a class/trait/object; seeing this
     /// means the file's shape isn't one this decoder recognizes).
     NoTemplateBody,
+    /// A selected module class has no declared superclass in its `Template`.
+    /// Unlike the legacy class projection, module completion never invents
+    /// `java/lang/Object` when the hierarchy is absent.
+    MissingModuleSuperclass,
     /// A declared `Template` parent (superclass or mixin interface) has no
     /// name this decoder can resolve — see `resolve_parent_name_with_bare`'s
     /// doc comment for exactly which shapes are and are not resolved.
@@ -211,6 +215,12 @@ impl fmt::Display for TastyDecodeError {
                 write!(formatter, "no matching TypeDef found in .tasty file")
             }
             Self::NoTemplateBody => write!(formatter, "TypeDef has no Template body"),
+            Self::MissingModuleSuperclass => {
+                write!(
+                    formatter,
+                    "module-class Template has no declared superclass"
+                )
+            }
             Self::AmbiguousModuleIdentity => {
                 write!(formatter, "TASTy has ambiguous top-level module identities")
             }
@@ -235,6 +245,7 @@ impl std::error::Error for TastyDecodeError {
             Self::Ast(source) => Some(source),
             Self::MissingTypeDef
             | Self::NoTemplateBody
+            | Self::MissingModuleSuperclass
             | Self::UnresolvedSupertype(_)
             | Self::AmbiguousModuleIdentity => None,
         }
@@ -249,6 +260,7 @@ impl TastyDecodeError {
             Self::Ast(_) => "tasty.ast_error",
             Self::MissingTypeDef => "tasty.missing_type_def",
             Self::NoTemplateBody => "tasty.no_template_body",
+            Self::MissingModuleSuperclass => "tasty.missing_module_superclass",
             Self::UnresolvedSupertype(_) => "tasty.unresolved_supertype",
             Self::AmbiguousModuleIdentity => "tasty.ambiguous_module_identity",
         }
@@ -288,6 +300,7 @@ impl TastyDecodeError {
             Self::Parse(_) => ClassLoadCategory::MalformedArtifact,
             Self::MissingTypeDef
             | Self::NoTemplateBody
+            | Self::MissingModuleSuperclass
             | Self::UnresolvedSupertype(_)
             | Self::AmbiguousModuleIdentity => ClassLoadCategory::Conditional,
         }
@@ -723,6 +736,7 @@ fn decode_impl(
                 }
             }
         }
+        None if module_class => return Err(TastyDecodeError::MissingModuleSuperclass),
         None => BinaryName::from_internal("java/lang/Object"),
     };
 
@@ -2389,6 +2403,37 @@ mod tests {
         .expect("Both.tasty contains an object");
 
         assert_eq!(identity.companion_class_kind, Some(SymbolKind::Class));
+    }
+
+    #[test]
+    fn decodes_overloaded_methods_from_the_module_class_template() {
+        let bytes = fixture_bytes("scala3-library/scala/math/BigInt.tasty");
+        let decoded = decode_module_class_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("scala/math/BigInt$"),
+            |_, _| None,
+            |package, simple_name| {
+                Some(BinaryName::from_internal(format!(
+                    "{package}/{simple_name}"
+                )))
+            },
+        )
+        .unwrap();
+
+        let apply_count = decoded
+            .methods
+            .iter()
+            .filter(|method| method.name == "apply")
+            .count();
+        assert!(
+            apply_count > 1,
+            "expected overloaded apply methods, found {:?}",
+            decoded
+                .methods
+                .iter()
+                .map(|method| &method.name)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -709,6 +709,8 @@ only identity shells; only parents and interfaces are eagerly loaded. A
 successful completion is cached in the shared session, so repeating it in
 this or a later loader keeps the same declaration scope. A failed completion
 rolls back the module pair, scope, symbols, and session updates as one unit.
+An absent or unresolved declared superclass is reported as malformed TASTy;
+module completion does not synthesize a parent.
 
 An ordinary class or trait companion is linked to the object only when that
 definition is present in the same TASTy file. The module class is not put in
