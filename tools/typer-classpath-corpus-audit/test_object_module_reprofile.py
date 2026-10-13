@@ -98,6 +98,21 @@ class ObjectModuleReprofileTests(unittest.TestCase):
             "module_lookup_error",
         )
 
+    def test_module_stage_evidence_survives_a_moved_first_blocker(self):
+        self.assertEqual(
+            classify(["resolved"], [], [], "ObjectTermReferenceDeferred"),
+            "module_shell_not_completed",
+        )
+        self.assertEqual(
+            classify(
+                ["resolved"],
+                ["completed|Complete(ClassInfo)"],
+                ["failure|observed"],
+                "ObjectTermReferenceDeferred",
+            ),
+            "module_member_lookup_failed",
+        )
+
     def test_direct_and_inherited_first_blockers_use_stable_tree_indexes(self):
         direct = "method=compiler/Foo.scala#tree=10::site=compiler/Foo.scala:2:run::attempt=compiler/Foo.scala#tree=10::blocker=ObjectModuleClassUnavailable::typed=false"
         inherited = "method=compiler/Foo.scala#tree=11::site=compiler/Foo.scala:3=child::attempt=compiler/Foo.scala#tree=10::blocker=ObjectModuleClassUnavailable::typed=false"

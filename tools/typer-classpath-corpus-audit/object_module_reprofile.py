@@ -181,7 +181,7 @@ def classify(module_lookups, completions, member_lookups, current_blocker, objec
         return "method_not_observed"
     if current_blocker == "typed":
         return "fully_typed"
-    if current_blocker != BASELINE_BLOCKER:
+    if current_blocker != BASELINE_BLOCKER and not (module_lookups or completions or member_lookups):
         if current_blocker.startswith("ImportQualifierNotFound"):
             return "earlier_import_package_blocker"
         return "blocker_moved"
