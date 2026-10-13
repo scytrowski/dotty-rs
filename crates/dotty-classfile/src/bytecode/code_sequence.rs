@@ -360,6 +360,10 @@ pub struct ValidatedCodeSequence {
 }
 
 impl ValidatedCodeSequence {
+    pub(crate) fn sequence_scope(&self) -> &Arc<()> {
+        &self.scope
+    }
+
     /// Returns the sequence in source order, including zero-width labels.
     pub fn elements(&self) -> &[CodeElement] {
         &self.elements

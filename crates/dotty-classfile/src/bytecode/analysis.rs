@@ -15,6 +15,7 @@ use crate::constant_pool::{ConstantPool, ConstantPoolEntry, ConstantPoolIndex, P
 use crate::descriptor::{DescriptorError, FieldType, MethodDescriptor};
 use crate::encode_error::EncodeError;
 use std::fmt;
+use std::sync::Arc;
 
 const MAX_FLOW_STATE_SLOTS: usize = 8 * 1024 * 1024;
 
@@ -1181,6 +1182,9 @@ pub struct FlowAnalysis {
     /// Required local-variable array size in JVM slots.
     pub max_locals: u16,
     block_entries: Vec<Option<BlockEntryState>>,
+    initial_state: BlockEntryState,
+    sequence_scope: Arc<()>,
+    is_static: bool,
 }
 
 impl FlowAnalysis {
@@ -1194,6 +1198,18 @@ impl FlowAnalysis {
     /// have no state.
     pub fn block_entries(&self) -> &[Option<BlockEntryState>] {
         &self.block_entries
+    }
+
+    pub(crate) fn initial_state(&self) -> &BlockEntryState {
+        &self.initial_state
+    }
+
+    pub(crate) fn shares_sequence_scope(&self, scope: &Arc<()>) -> bool {
+        Arc::ptr_eq(&self.sequence_scope, scope)
+    }
+
+    pub(crate) const fn is_static(&self) -> bool {
+        self.is_static
     }
 }
 
@@ -1292,7 +1308,7 @@ impl CfgCodeAnalyzer {
         let Some(entry_state) = block_entries.get_mut(entry.index()) else {
             return Err(AnalysisError::InvalidControlFlowGraph { block: entry });
         };
-        *entry_state = Some(initial_state);
+        *entry_state = Some(initial_state.clone());
         let mut retained_state_slots = initial_state_slots;
 
         let mut pending = std::collections::VecDeque::from([entry]);
@@ -1385,6 +1401,9 @@ impl CfgCodeAnalyzer {
             max_stack,
             max_locals,
             block_entries,
+            initial_state,
+            sequence_scope: Arc::clone(graph.sequence_scope()),
+            is_static,
         })
     }
 }

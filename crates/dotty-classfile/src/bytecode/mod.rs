@@ -75,6 +75,7 @@ pub(crate) mod code_builder;
 pub mod code_sequence;
 pub mod control_flow;
 pub mod stack_map;
+pub mod stack_map_frames;
 
 pub(crate) use analysis::analyze_validated;
 pub use analysis::{
@@ -92,6 +93,10 @@ pub use code_sequence::{
 };
 pub use control_flow::{BasicBlock, BasicBlockId, ControlFlowGraph, ControlFlowGraphError};
 pub use stack_map::{FullFrame, StackMapTable, VerificationTypeInfo};
+pub use stack_map_frames::{
+    GeneratedStackMapFrames, StackMapFrameGenerationError, UnsupportedStackMapState,
+    generate_stack_map_frames,
+};
 
 use crate::constant_pool::ConstantPoolIndex;
 use std::fmt;
