@@ -1,13 +1,13 @@
 //! Typed JVM instructions and symbolic branches for the deliberately small
 //! bytecode subset supported by this crate.
 //!
-//! This module describes instructions; [`assembler::assemble`] encodes the
-//! supported subset and [`analysis::analyze`] computes straight-line
-//! `max_stack`/`max_locals` bounds. Neither API decodes bytecode or performs
-//! general JVM verification or optimization. These existing APIs continue to
-//! represent one ordered straight-line block. [`code_sequence`] separately
-//! models labels and a small branch family symbolically, validating targets
-//! without laying out or encoding them.
+//! [`assembler::assemble`] encodes straight-line instructions, while
+//! [`assembler::assemble_labeled`] lays out and encodes symbolic branches.
+//! [`analysis::analyze`] computes straight-line `max_stack`/`max_locals`
+//! bounds. These APIs do not decode bytecode or perform general JVM
+//! verification or optimization. The linear assembler and analyzer continue
+//! to represent one ordered straight-line block. [`code_sequence`] models
+//! labels and a small branch family and validates targets before assembly.
 //! The low-level [`Instruction`] constant-pool operands below contain assigned
 //! [`ConstantPoolIndex`] values. [`CodeBuilder`] offers the owned class builder
 //! a symbolic alternative that interns names before assembling those typed
@@ -72,11 +72,13 @@ pub mod code_sequence;
 pub(crate) use analysis::analyze_validated;
 pub use analysis::{AnalysisError, CodeAnalysis, LinearCodeAnalyzer, ValueKind, analyze};
 pub(crate) use assembler::assemble_validated;
-pub use assembler::{AssembleError, ConstantPoolOperandKind, assemble};
+pub use assembler::{
+    AssembleError, AssembledCode, CodeLayout, ConstantPoolOperandKind, assemble, assemble_labeled,
+};
 pub use code_builder::{CodeBuilder, CodeBuilderError};
 pub use code_sequence::{
-    BranchCondition, BranchInstruction, CodeElement, CodeSequence, CodeSequenceError, LabelId,
-    ValidatedCodeSequence,
+    BranchCondition, BranchInstruction, CodeElement, CodeSequence, CodeSequenceError,
+    CodeSequenceErrorKind, LabelId, ValidatedCodeSequence,
 };
 
 use crate::constant_pool::ConstantPoolIndex;

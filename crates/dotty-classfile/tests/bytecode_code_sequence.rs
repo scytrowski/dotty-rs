@@ -105,6 +105,10 @@ fn exposes_semantics_for_every_supported_branch_condition() {
             BranchCondition::Always,
         ),
         (
+            BranchInstruction::GotoWide(target.clone()),
+            BranchCondition::Always,
+        ),
+        (
             BranchInstruction::IfEq(target.clone()),
             BranchCondition::EqualZero,
         ),
