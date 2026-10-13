@@ -561,6 +561,165 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         result
     }
 
+    /// Completes the canonical `ModuleClass` of a top-level Scala object,
+    /// publishing its parents and declared members into `ClassInfo` while
+    /// retaining the identity returned by [`Self::ensure_module_identity`].
+    /// Member signature references establish identities only; they do not
+    /// recursively complete the referenced classes. Repeated calls in a
+    /// shared loading session return the same module identity without adding
+    /// another declarations scope.
+    pub fn complete_module(&mut self, name: &BinaryName) -> Result<ModuleIdentity, ClassLoadError> {
+        let store_checkpoint = self.store.checkpoint();
+        let session_checkpoint = self.session.checkpoint();
+        let result = self.complete_module_inner(name);
+        if result.is_err() {
+            self.session.rollback_to(self.store, session_checkpoint);
+            self.store.rollback_to(store_checkpoint);
+            self.repository.discard_rolled_back_symbols(self.store);
+        }
+        result
+    }
+
+    fn complete_module_inner(
+        &mut self,
+        name: &BinaryName,
+    ) -> Result<ModuleIdentity, ClassLoadError> {
+        let resource = self
+            .class_path
+            .find_class(name)
+            .map_err(|error| ClassLoadError::Io(name.clone(), Rc::new(error)))?
+            .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
+        if resource.format() != ClassFormat::Tasty {
+            return Err(ClassLoadError::IdentityConflict {
+                name: name.clone(),
+                reason: "a classfile cannot complete a Scala module class".to_owned(),
+            });
+        }
+        let identity = self.ensure_module_identity_inner(name)?;
+        if let SymbolInfo::Complete(info) = self.store.symbols.get(identity.module_class).info {
+            if matches!(self.store.types.get(info), Type::ClassInfo(class_info) if class_info.class == identity.module_class)
+            {
+                self.session
+                    .cache_resolved(identity.module_class_name.clone(), identity.module_class);
+                return Ok(identity);
+            }
+            return Err(ClassLoadError::IdentityConflict {
+                name: identity.module_class_name,
+                reason: "the module class has an incompatible completed type".to_owned(),
+            });
+        }
+
+        let alias_error = RefCell::new(None);
+        let class_path = &self.class_path;
+        let decoded = tasty_symbol::decode_module_class_with_resolvers(
+            resource.bytes(),
+            &identity.module_class_name,
+            |owner, alias| match resolve_tasty_alias(class_path, owner, alias) {
+                Ok(target) => target,
+                Err(error) => {
+                    alias_error.borrow_mut().get_or_insert(error);
+                    None
+                }
+            },
+            |package, simple_name| match resolve_tasty_bare_reference(
+                class_path,
+                package,
+                simple_name,
+            ) {
+                Ok(target) => target,
+                Err(error) => {
+                    alias_error.borrow_mut().get_or_insert(error);
+                    None
+                }
+            },
+        );
+        if let Some(error) = alias_error.into_inner() {
+            return Err(error.into_class_load_error().0);
+        }
+        let decoded = decoded.map_err(|error| {
+            ClassLoadError::InvalidTastyFile(identity.module_class_name.clone(), error)
+        })?;
+
+        let module_class = self.store.symbols.get(identity.module_class);
+        if module_class.kind != SymbolKind::ModuleClass
+            || module_class.owner != self.store.symbols.get(identity.object).owner
+            || module_class.info != SymbolInfo::Missing
+        {
+            return Err(ClassLoadError::IdentityConflict {
+                name: identity.module_class_name,
+                reason: "the module class shell is inconsistent or already being completed"
+                    .to_owned(),
+            });
+        }
+
+        let declarations = self
+            .store
+            .scopes
+            .alloc(Scope::new(Some(identity.module_class)));
+        self.session
+            .record_symbol_update(self.store, identity.module_class);
+        if let Some(declared) = &decoded.visibility {
+            let visibility = self.tasty_visibility(&identity.module_class_name, declared);
+            self.store.symbols.get_mut(identity.module_class).visibility = visibility;
+        }
+
+        let mut ancestry = vec![identity.module_class_name.clone()];
+        let super_class = self.load_dependency(
+            &identity.module_class_name,
+            decoded.super_class,
+            &mut ancestry,
+        )?;
+        let mut interfaces = Vec::with_capacity(decoded.interfaces.len());
+        for dependency in decoded.interfaces {
+            interfaces.push(self.load_dependency(
+                &identity.module_class_name,
+                dependency,
+                &mut ancestry,
+            )?);
+        }
+
+        let origin = self.store.symbols.get(identity.module_class).origin;
+        for field in &decoded.fields {
+            let resolved_type = self
+                .lower_tasty_member_type(&identity.module_class_name, field.declared_type.as_ref());
+            self.enter_field(
+                identity.module_class,
+                declarations,
+                &field.name,
+                field.flags,
+                resolved_type,
+                origin,
+            );
+        }
+        for method in &decoded.methods {
+            let resolved_type = self.lower_tasty_method(&identity.module_class_name, method);
+            self.enter_method(
+                identity.module_class,
+                declarations,
+                &method.name,
+                method.flags,
+                resolved_type,
+                origin,
+            );
+        }
+
+        self.complete_class(
+            identity.module_class,
+            declarations,
+            Some(super_class),
+            interfaces,
+        );
+        let object_type = self.type_ref(identity.module_class);
+        self.session
+            .record_symbol_update(self.store, identity.object);
+        self.store
+            .symbols
+            .set_info(identity.object, SymbolInfo::Complete(object_type));
+        self.session
+            .cache_resolved(identity.module_class_name.clone(), identity.module_class);
+        Ok(identity)
+    }
+
     fn ensure_module_identity_inner(
         &mut self,
         name: &BinaryName,
@@ -6122,6 +6281,146 @@ mod tests {
         assert_eq!(
             store.symbols.get(identity.module_class).links.companion,
             None
+        );
+    }
+
+    #[test]
+    fn complete_module_publishes_module_members_and_stable_object_type_once() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let module_bytes = semantic_unpickler_fixture_bytes("Both.tasty");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(HashMap::from([(
+                name.clone(),
+                module_bytes,
+            )]))),
+            Box::new(InMemoryClassPath(HashMap::from([(
+                BinaryName::from_internal("java/lang/Object"),
+                synthetic_class("java/lang/Object", None),
+            )]))),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+
+        let identity = loader.complete_module(&name).unwrap();
+        let info = class_info(loader.store, identity.module_class);
+        let declarations = info.declarations;
+        let make_name = Name::new(loader.store.names.intern("make"), Namespace::Term);
+        let make = loader.store.scopes.get(declarations).lookup_all(&make_name);
+        assert_eq!(make.len(), 1);
+        assert_eq!(
+            loader.store.symbols.get(make[0]).owner,
+            Some(identity.module_class)
+        );
+        let class_identity = loader
+            .session
+            .identified
+            .get(&name)
+            .copied()
+            .expect("member signature should establish the referenced class identity");
+        assert_ne!(class_identity, identity.module_class);
+        assert_eq!(
+            loader.store.symbols.get(class_identity).kind,
+            SymbolKind::Class
+        );
+        assert_eq!(
+            loader.store.symbols.get(class_identity).info,
+            SymbolInfo::Missing
+        );
+        let SymbolInfo::Complete(make_info) = loader.store.symbols.get(make[0]).info else {
+            panic!("method declaration should carry its decoded signature");
+        };
+        let Type::Method(make_signature) = loader.store.types.get(make_info) else {
+            panic!("make should have a method type");
+        };
+        assert_eq!(
+            loader
+                .store
+                .types
+                .get(make_signature.result)
+                .reference_symbol(),
+            Some(class_identity)
+        );
+        assert!(
+            loader
+                .store
+                .scopes
+                .get(declarations)
+                .entered_symbols()
+                .all(|member| {
+                    loader
+                        .store
+                        .names
+                        .resolve(loader.store.symbols.get(member).name.text())
+                        != "MODULE$"
+                })
+        );
+        let SymbolInfo::Complete(object_info) = loader.store.symbols.get(identity.object).info
+        else {
+            panic!("the object term should have a stable module type");
+        };
+        assert!(matches!(
+            loader.store.types.get(object_info),
+            Type::TypeRef { .. }
+        ));
+        assert_eq!(
+            loader.store.types.get(object_info).reference_symbol(),
+            Some(identity.module_class)
+        );
+
+        let repeated = loader.complete_module(&name).unwrap();
+        assert_eq!(repeated, identity);
+        assert_eq!(
+            class_info(loader.store, identity.module_class).declarations,
+            declarations
+        );
+    }
+
+    #[test]
+    fn complete_module_rolls_back_shells_when_hierarchy_loading_fails() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryTastyClassPath(HashMap::from([(
+                name.clone(),
+                semantic_unpickler_fixture_bytes("Both.tasty"),
+            )])),
+            &mut store,
+        );
+        let identity = loader.ensure_module_identity(&name).unwrap();
+
+        assert!(matches!(
+            loader.complete_module(&name),
+            Err(ClassLoadError::DependencyFailure { .. })
+        ));
+        assert_eq!(loader.session.modules.get(&name), Some(&identity));
+        assert_eq!(
+            loader.store.symbols.get(identity.object).info,
+            SymbolInfo::Missing
+        );
+        assert_eq!(
+            loader.store.symbols.get(identity.module_class).info,
+            SymbolInfo::Missing
+        );
+        let definitions = loader.definitions();
+        let session = loader.into_session();
+
+        let retry_class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(HashMap::from([(
+                name.clone(),
+                semantic_unpickler_fixture_bytes("Both.tasty"),
+            )]))),
+            Box::new(InMemoryClassPath(HashMap::from([(
+                BinaryName::from_internal("java/lang/Object"),
+                synthetic_class("java/lang/Object", None),
+            )]))),
+        ]);
+        let mut retry_loader =
+            ClassLoader::with_definitions(retry_class_path, &mut store, definitions, session);
+        let retried = retry_loader.complete_module(&name).unwrap();
+        assert_eq!(retried, identity);
+        assert_eq!(
+            class_info(retry_loader.store, identity.module_class).class,
+            identity.module_class
         );
     }
 
