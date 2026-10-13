@@ -596,13 +596,17 @@ fn rejects_unsupported_branch_frames_stack_merges_uninitialized_locals_and_termi
     };
     let mut references = ClassFileBuilder::new("example/ReferenceBranch", version).unwrap();
     references
-        .add_static_method("unsupported", "()V", |code| {
-            let target = code.new_label()?;
+        .add_static_method("unsupported", "()Ljava/lang/Object;", |code| {
+            let other = code.new_label()?;
+            let join = code.new_label()?;
+            code.iconst(0)?;
+            code.ifeq(other.clone())?;
             code.aconst_null()?;
-            code.ifeq(target.clone())?;
-            code.return_void()?;
-            code.mark(target)?;
-            code.return_void()?;
+            code.goto(join.clone())?;
+            code.mark(other)?;
+            code.aconst_null()?;
+            code.mark(join)?;
+            code.areturn()?;
             Ok(())
         })
         .unwrap();
@@ -720,6 +724,56 @@ fn rejects_unsupported_branch_frames_stack_merges_uninitialized_locals_and_termi
             CodeBuilderError::BranchToTerminalEnd { label: 0 }
         ))
     );
+
+    let mut wrong_return = ClassFileBuilder::new("example/WrongBranchReturn", version).unwrap();
+    wrong_return
+        .add_static_method("invalid", "()V", |code| {
+            code.iconst(0)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        wrong_return.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::WrongReturnOpcode {
+                expected: None,
+                actual: Some(dotty_classfile::bytecode::ValueKind::Int),
+                ..
+            }
+        ))
+    ));
+}
+
+#[test]
+fn class_builder_rejects_overflowing_short_branch_displacement() {
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let mut builder = ClassFileBuilder::new("example/BranchOverflow", version).unwrap();
+    builder
+        .add_static_method("overflow", "()I", |code| {
+            let target = code.new_label()?;
+            code.iconst(0)?;
+            code.ifeq(target.clone())?;
+            for _ in 0..16_384 {
+                code.iconst(0)?;
+                code.istore(0)?;
+            }
+            code.mark(target)?;
+            code.iconst(1)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(matches!(
+        builder.encode(),
+        Err(ClassFileBuildError::Assemble(
+            dotty_classfile::bytecode::AssembleError::BranchOffsetOutOfRange { .. }
+        ))
+    ));
 }
 
 #[test]
