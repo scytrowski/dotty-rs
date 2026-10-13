@@ -2,9 +2,10 @@
 
 `dotty-jvm` is the adapter boundary between a completed typed frontend and
 future JVM lowering. It depends on `dotty-core` for canonical symbols, types,
-and typed trees, and on `dotty-classfile` for the owned class-file output API.
-The crate currently defines a borrowed `JvmCompilationUnit` contract and
-validates its identities; it does not lower trees or emit class files.
+and typed trees, and on `dotty-classfile` for class-file descriptor and output
+APIs. The crate validates a borrowed `JvmCompilationUnit` contract and
+projects one bounded method subset to JVM descriptors; it does not lower trees
+or emit class files.
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,
@@ -31,5 +32,28 @@ walk or validate references nested inside semantic types, since that is the
 responsibility of the canonical semantic model's producers. All operations
 are read-only; the lifetime-bound references keep the caller as the owner.
 
-No bytecode, JVM descriptors, type erasure, source pipeline orchestration,
-TASTy integration, or macro support is part of this contract.
+## Primitive descriptor subset
+
+`JvmMethodPlan::descriptor` reads the method's completed `Type::Method` and the
+ordered parameter symbols from that plan. It supports one ordinary
+monomorphic parameter clause, `Definitions.int` (`I`), `Definitions.boolean`
+(`Z`), and result-only `Definitions.unit` (`V`). Integer and Boolean singleton
+constants widen to their corresponding primitive descriptor without changing
+the source type arena. Int and Boolean both use the JVM int-like category-one
+operand representation, while their descriptors remain distinct.
+
+The descriptor path checks class/method/parameter kinds and ownership,
+completed semantic info, method/plan parameter counts, and agreement between
+each parameter symbol type and its method signature type. It counts the
+instance receiver toward the JVMS 255-slot limit; static methods do not add a
+receiver slot. The result is parsed by `dotty-classfile` before it is returned.
+
+Polymorphic or curried methods, non-plain parameter clauses, aliases, type
+parameters, match/refined/union/intersection types, Scala objects, reference
+classes, arrays, by-name and repeated types, non-primitive constants, Unit
+parameters, erased parameters, and varargs are rejected with structured
+errors. Unknown types never fall back to `java/lang/Object`.
+
+No general Scala type erasure, boxing, Unit-as-value, raw bytecode, source
+pipeline orchestration, TASTy integration, or macro support is part of this
+contract.

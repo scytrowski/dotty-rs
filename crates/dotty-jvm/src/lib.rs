@@ -3,17 +3,59 @@
 //! This crate currently defines and validates a borrowed compilation plan. It
 //! does not assemble a source frontend, infer identities from names, mutate
 //! the caller's stores, or emit bytecode. See `docs/jvm-backend.md` for the
-//! boundary and validation assumptions.
+//! boundary and validation assumptions. Its first descriptor projection is
+//! limited to primitive `Int`, `Boolean`, and result-only `Unit` methods.
 
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
 use dotty_core::ast::{Tree, Typed, TypedAst};
+use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TreeId, TypeId};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
+
+mod descriptor;
+
+/// JVMS limit for a method's parameter slots, including `this` for instance
+/// methods.
+pub const JVM_MAX_PARAMETER_SLOTS: usize = 255;
+
+/// A JVM value representation supported by the current projection slice.
+///
+/// `Int` and `Boolean` have distinct descriptor letters (`I` and `Z`) but
+/// both use the JVM's int-like category-one operand representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmType {
+    Int,
+    Boolean,
+}
+
+/// Operand category for the JVM values currently supported here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmValueCategory {
+    IntLike,
+}
+
+/// A JVM method result. `Void` is only valid as a result, never a parameter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmReturnType {
+    Value(JvmType),
+    Void,
+}
+
+/// Primitive JVM descriptor and value categories for one method signature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmMethodDescriptor {
+    descriptor: dotty_classfile::descriptor::MethodDescriptor,
+    descriptor_text: String,
+    /// Primitive parameters in declaration order.
+    parameters: Vec<JvmType>,
+    /// Primitive result, or JVM `void` for Scala `Unit`.
+    result: JvmReturnType,
+}
 
 /// Borrowed input for validating one or more class plans.
 ///
@@ -110,6 +152,51 @@ pub enum JvmCodegenError {
         tree: TreeId<Typed>,
         node: &'static str,
     },
+    /// A method has an unsupported single-clause or monomorphism shape.
+    UnsupportedMethodShape {
+        method: SymbolId,
+        ty: TypeId,
+        kind: UnsupportedMethodShapeKind,
+    },
+    /// A supported primitive parameter's symbol type disagrees with its
+    /// corresponding entry in the method's ordered `MethodType`.
+    ParameterTypeMismatch {
+        method: SymbolId,
+        parameter: SymbolId,
+        declared: TypeId,
+        symbol_info: TypeId,
+    },
+    /// Scala `Unit` cannot appear in a JVM parameter list.
+    UnitParameter {
+        method: SymbolId,
+        parameter: SymbolId,
+        ty: TypeId,
+    },
+    /// An unsupported semantic type was used for a method value or result.
+    UnsupportedJvmType {
+        symbol: SymbolId,
+        ty: TypeId,
+        kind: UnsupportedJvmTypeKind,
+    },
+    /// A method descriptor exceeds the JVMS 255 parameter-slot limit.
+    TooManyParameterSlots { method: SymbolId, slots: usize },
+    /// A parameter modifier is not represented by this primitive-only slice.
+    UnsupportedMethodParameter {
+        method: SymbolId,
+        index: usize,
+        kind: UnsupportedMethodParameterKind,
+    },
+    /// An internally generated descriptor unexpectedly failed the classfile
+    /// crate's parser.
+    InvalidGeneratedDescriptor {
+        method: SymbolId,
+        error: dotty_classfile::descriptor::DescriptorError,
+    },
+    /// A supplied builtin type identity is malformed for this semantic store.
+    InvalidBuiltinDefinition {
+        builtin: PrimitiveBuiltin,
+        ty: TypeId,
+    },
 }
 
 /// Semantic role required by a compilation plan.
@@ -129,6 +216,53 @@ pub enum InvalidTypeReason {
     NoPrefix,
 }
 
+/// Unsupported method-type shape for this descriptor projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsupportedMethodShapeKind {
+    Polymorphic,
+    NestedCurriedClause,
+    NonPlainClause,
+    ParameterCountMismatch,
+    NotMethodType,
+}
+
+/// Unsupported semantic type form in this descriptor projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsupportedJvmTypeKind {
+    Alias,
+    TypeParameter,
+    MatchType,
+    RefinedType,
+    Union,
+    Intersection,
+    ScalaObject,
+    ReferenceClass,
+    NamedReference,
+    TermReference,
+    NestedMethod,
+    Array,
+    ByName,
+    Repeated,
+    Bounds,
+    NonPrimitiveConstant,
+    Other,
+}
+
+/// Primitive definition identity being read from [`Definitions`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrimitiveBuiltin {
+    Int,
+    Boolean,
+    Unit,
+}
+
+/// An unsupported method parameter modifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsupportedMethodParameterKind {
+    Erased,
+    Varargs,
+}
+
 impl fmt::Display for JvmCodegenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "JVM compilation input is invalid: {self:?}")
@@ -136,6 +270,24 @@ impl fmt::Display for JvmCodegenError {
 }
 
 impl Error for JvmCodegenError {}
+
+impl JvmMethodPlan {
+    /// Extracts this method's primitive-only JVM signature from canonical
+    /// semantic types and this plan's explicitly ordered parameter symbols.
+    ///
+    /// The class, method, and parameter symbol kinds and ownership are checked
+    /// before reading completed type information. The signature accepts one
+    /// ordinary monomorphic parameter clause containing only `Int` and
+    /// `Boolean`, with `Int`, `Boolean`, or result-only `Unit` as its result.
+    pub fn descriptor(
+        &self,
+        store: &SemanticStore,
+        owner: SymbolId,
+        definitions: &Definitions,
+    ) -> Result<JvmMethodDescriptor, JvmCodegenError> {
+        descriptor::method_descriptor(self, store, owner, definitions)
+    }
+}
 
 impl JvmCompilationUnit<'_> {
     /// Validates the plan without mutating or copying semantic state.
