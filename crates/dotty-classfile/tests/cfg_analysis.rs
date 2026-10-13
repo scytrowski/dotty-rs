@@ -327,7 +327,7 @@ fn non_integer_parameters_are_rejected_without_changing_linear_analysis() {
 }
 
 #[test]
-fn instance_receiver_is_top_and_int_parameters_keep_jvm_local_indexes() {
+fn instance_receiver_is_preserved_and_int_parameters_keep_jvm_local_indexes() {
     let mut sequence = CodeSequence::new();
     sequence.instruction(Instruction::ILoad(local(1)));
     sequence.instruction(Instruction::IReturn);
@@ -335,7 +335,10 @@ fn instance_receiver_is_top_and_int_parameters_keep_jvm_local_indexes() {
     let analysis =
         CfgCodeAnalyzer::analyze(&graph, "(I)I", false, &ConstantPool::default()).unwrap();
     let entry = analysis.entry_state(graph.entry_block()).unwrap();
-    assert_eq!(entry.locals, [FlowLocalState::Top, FlowLocalState::Integer]);
+    assert_eq!(
+        entry.locals,
+        [FlowLocalState::Receiver, FlowLocalState::Integer]
+    );
     assert_eq!(analysis.max_locals, 2);
 }
 

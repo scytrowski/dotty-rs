@@ -525,6 +525,7 @@ pub(crate) fn analyze_validated(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalSlot {
     Value(ValueKind),
+    Receiver,
     CategoryTwoTail,
 }
 
@@ -539,7 +540,7 @@ impl Frame {
     fn new(descriptor: &MethodDescriptor, is_static: bool) -> Result<Self, AnalysisError> {
         let mut locals = Vec::new();
         if !is_static {
-            locals.push(Some(LocalSlot::Value(ValueKind::Reference)));
+            locals.push(Some(LocalSlot::Receiver));
         }
         for parameter in &descriptor.parameters {
             let kind = value_kind(parameter);
@@ -760,6 +761,15 @@ impl Frame {
                 })
             }
             Some(LocalSlot::Value(actual)) => self.push(instruction, actual),
+            Some(LocalSlot::Receiver) if expected == ValueKind::Reference => {
+                self.push(instruction, ValueKind::Reference)
+            }
+            Some(LocalSlot::Receiver) => Err(AnalysisError::LocalTypeMismatch {
+                instruction,
+                index: index.get(),
+                expected,
+                actual: ValueKind::Reference,
+            }),
         }
     }
 
@@ -1174,6 +1184,8 @@ pub enum FlowLocalState {
     Top,
     /// The slot contains an int-like JVM value.
     Integer,
+    /// The slot is the current instance receiver.
+    Receiver,
 }
 
 /// The incoming verifier state for one reachable basic block.
@@ -1545,6 +1557,7 @@ fn state_from_frame(frame: &Frame) -> BlockEntryState {
         .iter()
         .map(|slot| match slot {
             Some(LocalSlot::Value(ValueKind::Int)) => FlowLocalState::Integer,
+            Some(LocalSlot::Receiver) => FlowLocalState::Receiver,
             _ => FlowLocalState::Top,
         })
         .collect();
@@ -1561,6 +1574,7 @@ fn frame_from_state(state: &BlockEntryState) -> Frame {
         .map(|local| match local {
             FlowLocalState::Top => None,
             FlowLocalState::Integer => Some(LocalSlot::Value(ValueKind::Int)),
+            FlowLocalState::Receiver => Some(LocalSlot::Receiver),
         })
         .collect();
     let stack_slots = state.operand_stack.len();

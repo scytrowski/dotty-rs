@@ -842,6 +842,41 @@ fn builds_constructor_and_instance_field_access_from_symbolic_code() {
 }
 
 #[test]
+fn rejects_branched_constructors_without_uninitialized_this_flow() {
+    let mut builder = ClassFileBuilder::new(
+        "example/BranchedConstructor",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_instance_method("<init>", "()V", |code| {
+            let done = code.new_label()?;
+            code.aload(0)?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.iconst(0)?;
+            code.ifeq(done.clone())?;
+            code.return_void()?;
+            code.mark(done)?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(matches!(
+        builder.encode(),
+        Err(ClassFileBuildError::StackMapFrames(
+            dotty_classfile::bytecode::StackMapFrameGenerationError::UnsupportedFlow {
+                state: dotty_classfile::bytecode::UnsupportedStackMapState::InstanceReceiver,
+                ..
+            }
+        ))
+    ));
+}
+
+#[test]
 fn builds_new_dup_and_constructor_invocation_from_symbolic_code() {
     let mut builder = ClassFileBuilder::new(
         "example/Factory",

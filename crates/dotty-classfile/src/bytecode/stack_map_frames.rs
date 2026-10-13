@@ -1,4 +1,4 @@
-//! Derive typed `full_frame` records from integer-only CFG states and final
+//! Derive typed `full_frame` records from bounded CFG states and final
 //! assembled instruction offsets.
 //!
 //! [`generate_stack_map_frames`] only emits explicit frames for reachable
@@ -14,7 +14,7 @@ use super::{
     BasicBlockId, BlockEntryState, CodeAnalysis, CodeElement, ControlFlowGraph, FlowAnalysis,
     FlowLocalState, ValueKind,
 };
-use crate::constant_pool::ConstantPool;
+use crate::constant_pool::{ConstantPool, ConstantPoolIndex};
 use crate::encode_error::EncodeError;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -239,9 +239,9 @@ pub struct GeneratedStackMapFrames {
 /// must come from `assemble_labeled` on the same immutable sequence revision.
 /// A private snapshot identity enforces this relationship. The method emits no frame at PC 0;
 /// loops back to PC 0 must preserve the analyzer's implicit initial state.
-/// Only integer stack values and integer/Top locals are representable. An
-/// instance receiver still represented as `Top` is rejected because its class
-/// or uninitialized-this type is not available to this integer-only analyzer.
+/// Only integer stack values and integer/Top locals are representable through
+/// the public API. Class-file construction can additionally resolve a
+/// preserved instance receiver to its current-class type.
 /// No frame is synthesized for an unreachable target or for ordinary
 /// fallthrough blocks. The returned maxima are copied unchanged for a later
 /// explicit class-file integration.
@@ -249,6 +249,30 @@ pub fn generate_stack_map_frames(
     flow: &FlowAnalysis,
     graph: &ControlFlowGraph,
     assembled: &AssembledCode,
+) -> Result<GeneratedStackMapFrames, StackMapFrameGenerationError> {
+    generate_stack_map_frames_inner(flow, graph, assembled, &ConstantPool::default(), None)
+}
+
+/// Generates stack-map frames while resolving an initialized instance receiver
+/// to the current class. `receiver_class` must identify the class represented
+/// by local slot zero in the constant pool. Constructor flow is not supported
+/// because this analyzer does not track `uninitializedThis` initialization.
+pub(crate) fn generate_stack_map_frames_with_receiver(
+    flow: &FlowAnalysis,
+    graph: &ControlFlowGraph,
+    assembled: &AssembledCode,
+    constant_pool: &ConstantPool,
+    receiver_class: ConstantPoolIndex,
+) -> Result<GeneratedStackMapFrames, StackMapFrameGenerationError> {
+    generate_stack_map_frames_inner(flow, graph, assembled, constant_pool, Some(receiver_class))
+}
+
+fn generate_stack_map_frames_inner(
+    flow: &FlowAnalysis,
+    graph: &ControlFlowGraph,
+    assembled: &AssembledCode,
+    constant_pool: &ConstantPool,
+    receiver_class: Option<ConstantPoolIndex>,
 ) -> Result<GeneratedStackMapFrames, StackMapFrameGenerationError> {
     if !flow.shares_sequence_scope(graph.sequence_scope())
         || !assembled
@@ -363,7 +387,8 @@ pub fn generate_stack_map_frames(
                     has_state: false,
                 },
             )?;
-            let mut frame = frame_from_state(target_block_id, state, flow.is_static())?;
+            let mut frame =
+                frame_from_state(target_block_id, state, flow.is_static(), receiver_class)?;
             frame.pc = u32::try_from(label_offset).map_err(|_| {
                 StackMapFrameGenerationError::FrameOffsetOutOfRange {
                     offset: label_offset,
@@ -399,11 +424,7 @@ pub fn generate_stack_map_frames(
         frames: frames.clone(),
     };
     table
-        .encode_payload_with_layout(
-            &ConstantPool::default(),
-            &assembled.bytes,
-            &assembled.layout,
-        )
+        .encode_payload_with_layout(constant_pool, &assembled.bytes, &assembled.layout)
         .map_err(StackMapFrameGenerationError::InvalidStackMap)?;
 
     Ok(GeneratedStackMapFrames {
@@ -419,6 +440,7 @@ fn frame_from_state(
     block: BasicBlockId,
     state: &BlockEntryState,
     is_static: bool,
+    receiver_class: Option<ConstantPoolIndex>,
 ) -> Result<FullFrame, StackMapFrameGenerationError> {
     if !is_static && state.locals.first() == Some(&FlowLocalState::Top) {
         return Err(StackMapFrameGenerationError::UnsupportedFlow {
@@ -430,10 +452,19 @@ fn frame_from_state(
         .locals
         .iter()
         .map(|local| match local {
-            FlowLocalState::Top => VerificationTypeInfo::Top,
-            FlowLocalState::Integer => VerificationTypeInfo::Integer,
+            FlowLocalState::Top => Ok(VerificationTypeInfo::Top),
+            FlowLocalState::Integer => Ok(VerificationTypeInfo::Integer),
+            FlowLocalState::Receiver => match receiver_class {
+                Some(class) => Ok(VerificationTypeInfo::Object(class)),
+                None => {
+                    return Err(StackMapFrameGenerationError::UnsupportedFlow {
+                        block,
+                        state: UnsupportedStackMapState::InstanceReceiver,
+                    });
+                }
+            },
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     while locals.last() == Some(&VerificationTypeInfo::Top) {
         locals.pop();
     }
@@ -465,6 +496,7 @@ mod tests {
         SmallIntConstant, assemble_labeled,
     };
     use crate::constant_pool::ConstantPool;
+    use crate::constant_pool_builder::ConstantPoolBuilder;
 
     fn analyze_sequence(
         sequence: &CodeSequence,
@@ -831,5 +863,36 @@ mod tests {
         let (graph, flow, assembled) = analyze_sequence(&static_code, "(I)V");
         let generated = generate_stack_map_frames(&flow, &graph, &assembled).unwrap();
         assert_eq!(generated.frames[0].locals, [VerificationTypeInfo::Integer]);
+    }
+
+    #[test]
+    fn generates_instance_receiver_frame_with_current_class_type() {
+        let mut sequence = CodeSequence::new();
+        let target = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::IConst(SmallIntConstant::Zero))
+            .branch(BranchInstruction::IfEq(target.clone()))
+            .instruction(Instruction::Return)
+            .bind(target)
+            .unwrap()
+            .instruction(Instruction::Return);
+
+        let mut pool_builder = ConstantPoolBuilder::new();
+        let this_class = pool_builder.class("example/Receiver").unwrap();
+        let pool = pool_builder.finish().unwrap();
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let flow = CfgCodeAnalyzer::analyze(&graph, "()V", false, &pool).unwrap();
+        let assembled = assemble_labeled(&sequence, &pool).unwrap();
+        let generated =
+            generate_stack_map_frames_with_receiver(&flow, &graph, &assembled, &pool, this_class)
+                .unwrap();
+
+        assert_eq!(
+            generated.frames[0].locals,
+            [VerificationTypeInfo::Object(this_class)]
+        );
+        table(generated)
+            .encode_payload_with_layout(&pool, &assembled.bytes, &assembled.layout)
+            .unwrap();
     }
 }
