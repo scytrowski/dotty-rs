@@ -456,12 +456,10 @@ fn frame_from_state(
             FlowLocalState::Integer => Ok(VerificationTypeInfo::Integer),
             FlowLocalState::Receiver => match receiver_class {
                 Some(class) => Ok(VerificationTypeInfo::Object(class)),
-                None => {
-                    return Err(StackMapFrameGenerationError::UnsupportedFlow {
-                        block,
-                        state: UnsupportedStackMapState::InstanceReceiver,
-                    });
-                }
+                None => Err(StackMapFrameGenerationError::UnsupportedFlow {
+                    block,
+                    state: UnsupportedStackMapState::InstanceReceiver,
+                }),
             },
         })
         .collect::<Result<_, _>>()?;
