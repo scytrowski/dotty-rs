@@ -278,6 +278,20 @@ pub struct ClassLoader<'store, E> {
     definitions: Definitions,
 }
 
+/// Canonical term/type identities for a top-level Scala object.
+///
+/// The object term and its backing module class are distinct symbols. Their
+/// common owner and source name define the relationship; `companion_class`
+/// is populated only when the same TASTy proves a real class companion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleIdentity {
+    pub object: SymbolId,
+    pub module_class: SymbolId,
+    pub companion_class: Option<SymbolId>,
+    pub object_name: BinaryName,
+    pub module_class_name: BinaryName,
+}
+
 /// Dependency work observed during one top-level class load.
 ///
 /// `max_dependency_depth` is zero when the request only touches its root
@@ -527,6 +541,250 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             self.store.rollback_to(store_checkpoint);
         }
         result
+    }
+
+    /// Establishes the canonical term and module-class identities for a
+    /// top-level Scala object proven by its Scala 3.9 TASTy file. This only
+    /// enters `SymbolInfo::Missing` shells; it does not complete members.
+    /// Repeated calls in the shared loading session return the same pair.
+    pub fn ensure_module_identity(
+        &mut self,
+        name: &BinaryName,
+    ) -> Result<ModuleIdentity, ClassLoadError> {
+        let store_checkpoint = self.store.checkpoint();
+        let session_checkpoint = self.session.checkpoint();
+        let result = self.ensure_module_identity_inner(name);
+        if result.is_err() {
+            self.session.rollback_to(self.store, session_checkpoint);
+            self.store.rollback_to(store_checkpoint);
+        }
+        result
+    }
+
+    fn ensure_module_identity_inner(
+        &mut self,
+        name: &BinaryName,
+    ) -> Result<ModuleIdentity, ClassLoadError> {
+        if let Some(identity) = self.session.modules.get(name).cloned() {
+            if self.module_identity_is_valid(name, &identity) {
+                return Ok(identity);
+            }
+            return Err(ClassLoadError::IdentityConflict {
+                name: name.clone(),
+                reason: "the session refers to a module symbol removed from the semantic store"
+                    .to_owned(),
+            });
+        }
+        let resource = self
+            .class_path
+            .find_class(name)
+            .map_err(|error| ClassLoadError::Io(name.clone(), Rc::new(error)))?
+            .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
+        if resource.format() != ClassFormat::Tasty {
+            return Err(ClassLoadError::IdentityConflict {
+                name: name.clone(),
+                reason: "a classfile does not prove Scala module identity".to_owned(),
+            });
+        }
+        let decoded = tasty_symbol::decode_module_identity(resource.bytes(), name)
+            .map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?
+            .ok_or_else(|| ClassLoadError::IdentityConflict {
+                name: name.clone(),
+                reason: "the TASTy file does not prove a top-level object and module class"
+                    .to_owned(),
+            })?;
+        let package = self.session.packages.resolve(self.store, name);
+        let object_name = Name::new(self.store.names.intern(name.simple_name()), Namespace::Term);
+        let module_name = Name::new(
+            self.store.names.intern(&format!("{}$", name.simple_name())),
+            Namespace::Type,
+        );
+        let object = self.ensure_module_symbol(
+            name,
+            package,
+            object_name,
+            SymbolKind::Object,
+            decoded.object_flags,
+            decoded.object_visibility.as_ref(),
+        )?;
+        let module_class_name = BinaryName::from_internal(format!("{}$", name.as_internal()));
+        let module_class = self.ensure_module_symbol(
+            &module_class_name,
+            package,
+            module_name,
+            SymbolKind::ModuleClass,
+            decoded.module_class_flags,
+            decoded.module_class_visibility.as_ref(),
+        )?;
+        self.session
+            .record_origin(object, resource.origin().clone());
+        self.session
+            .record_origin(module_class, resource.origin().clone());
+        self.session
+            .cache_identified(module_class_name.clone(), module_class);
+        let companion_class = if decoded.companion_class_kind.is_some() {
+            Some(self.ensure_class_identity_inner(name, &mut Vec::new())?)
+        } else {
+            None
+        };
+        if let Some(class) = companion_class {
+            if Some(self.store.symbols.get(class).kind) != decoded.companion_class_kind {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: name.clone(),
+                    reason: "the class identity conflicts with its TASTy companion definition"
+                        .to_owned(),
+                });
+            }
+            self.link_class_object_companions(name, class, object)?;
+        }
+        let identity = ModuleIdentity {
+            object,
+            module_class,
+            companion_class,
+            object_name: name.clone(),
+            module_class_name,
+        };
+        self.session.cache_module(name.clone(), identity.clone());
+        Ok(identity)
+    }
+
+    fn module_identity_is_valid(&self, requested: &BinaryName, identity: &ModuleIdentity) -> bool {
+        if identity.object == identity.module_class
+            || identity.object_name != *requested
+            || identity.module_class_name.as_internal() != format!("{}$", requested.as_internal())
+            || !self.store.symbols.contains(identity.object)
+            || !self.store.symbols.contains(identity.module_class)
+        {
+            return false;
+        }
+        let object = self.store.symbols.get(identity.object);
+        let module_class = self.store.symbols.get(identity.module_class);
+        object.kind == SymbolKind::Object
+            && object.name.namespace() == Namespace::Term
+            && self.store.names.resolve(object.name.text()) == requested.simple_name()
+            && module_class.kind == SymbolKind::ModuleClass
+            && module_class.name.namespace() == Namespace::Type
+            && self.store.names.resolve(module_class.name.text())
+                == format!("{}$", requested.simple_name())
+            && object.owner.is_some()
+            && object.owner == module_class.owner
+    }
+
+    fn ensure_module_symbol(
+        &mut self,
+        binary_name: &BinaryName,
+        package: SymbolId,
+        name: Name,
+        kind: SymbolKind,
+        flags: SymbolFlags,
+        declared_visibility: Option<&tasty_symbol::DeclaredVisibility>,
+    ) -> Result<SymbolId, ClassLoadError> {
+        let scope = self
+            .session
+            .packages
+            .scope_of(package)
+            .expect("resolved package has a declaration scope");
+        let existing = self.store.scopes.get(scope).lookup_all(&name).to_vec();
+        if existing.len() > 1 {
+            return Err(ClassLoadError::IdentityConflict {
+                name: binary_name.clone(),
+                reason: "the canonical package scope contains multiple declarations".to_owned(),
+            });
+        }
+        if kind == SymbolKind::ModuleClass
+            && self
+                .session
+                .identified
+                .get(binary_name)
+                .is_some_and(|identified| Some(identified) != existing.first())
+        {
+            return Err(ClassLoadError::IdentityConflict {
+                name: binary_name.clone(),
+                reason: "the loading session maps the module class name to another symbol"
+                    .to_owned(),
+            });
+        }
+        let visibility = if let Some(declared) = declared_visibility {
+            self.tasty_visibility(binary_name, declared)
+        } else {
+            Visibility::Public
+        };
+        if let Some(&symbol) = existing.first() {
+            let candidate = self.store.symbols.get(symbol);
+            let can_upgrade = kind == SymbolKind::ModuleClass
+                && candidate.kind == SymbolKind::Class
+                && candidate.info == SymbolInfo::Missing
+                && matches!(
+                    candidate.origin,
+                    SymbolOrigin::Classfile(_) | SymbolOrigin::Tasty(_)
+                );
+            if candidate.owner != Some(package)
+                || (candidate.kind != kind && !can_upgrade)
+                || candidate.info != SymbolInfo::Missing
+                || !matches!(
+                    candidate.origin,
+                    SymbolOrigin::Classfile(_) | SymbolOrigin::Tasty(_)
+                )
+            {
+                return Err(ClassLoadError::IdentityConflict {
+                    name: binary_name.clone(),
+                    reason: "the canonical package name is occupied by an incompatible symbol"
+                        .to_owned(),
+                });
+            }
+            if can_upgrade || candidate.flags != flags || candidate.visibility != visibility {
+                self.session.record_symbol_update(self.store, symbol);
+                let candidate = self.store.symbols.get_mut(symbol);
+                candidate.kind = kind;
+                candidate.flags = flags;
+                candidate.visibility = visibility;
+                candidate.origin = SymbolOrigin::Tasty(self.store.origins.register_tasty());
+            }
+            return Ok(symbol);
+        }
+        let symbol = self.store.symbols.alloc(Symbol {
+            name,
+            owner: Some(package),
+            kind,
+            flags,
+            visibility,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Tasty(self.store.origins.register_tasty()),
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        self.session
+            .packages
+            .enter_class(self.store, package, name, symbol);
+        Ok(symbol)
+    }
+
+    fn link_class_object_companions(
+        &mut self,
+        name: &BinaryName,
+        class: SymbolId,
+        object: SymbolId,
+    ) -> Result<(), ClassLoadError> {
+        let class_links = self.store.symbols.get(class).links.companion;
+        let object_links = self.store.symbols.get(object).links.companion;
+        if class_links.is_some_and(|linked| linked != object)
+            || object_links.is_some_and(|linked| linked != class)
+        {
+            return Err(ClassLoadError::IdentityConflict {
+                name: name.clone(),
+                reason: "a class or object already has a different companion link".to_owned(),
+            });
+        }
+        if class_links.is_none() {
+            self.session.record_symbol_update(self.store, class);
+            self.store.symbols.get_mut(class).links.companion = Some(object);
+        }
+        if object_links.is_none() {
+            self.session.record_symbol_update(self.store, object);
+            self.store.symbols.get_mut(object).links.companion = Some(class);
+        }
+        Ok(())
     }
 
     fn ensure_class_identity_inner(
@@ -3422,6 +3680,15 @@ mod tests {
         .expect("fixture should exist")
     }
 
+    fn semantic_unpickler_fixture_bytes(relative_path: &str) -> Vec<u8> {
+        fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty-unpickler/tests/fixtures/semantic")
+                .join(relative_path),
+        )
+        .expect("semantic unpickler fixture should exist")
+    }
+
     /// A hand-built, minimal, synthetic class file: JVMS §4.1 header +
     /// empty constant pool + access flags + a `this_class` index that
     /// does not resolve to any constant pool entry. `javac` cannot
@@ -5732,6 +5999,253 @@ mod tests {
         let second = loader.load_class(&name).unwrap();
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn ensure_module_identity_enters_distinct_term_and_type_symbols_idempotently() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let bytes = semantic_unpickler_fixture_bytes("Both.tasty");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryTastyClassPath(HashMap::from([(name.clone(), bytes)])),
+            &mut store,
+        );
+
+        let first = loader.ensure_module_identity(&name).unwrap();
+        let second = loader.ensure_module_identity(&name).unwrap();
+
+        assert_eq!(first, second);
+        assert_ne!(first.object, first.module_class);
+        assert_eq!(symbol_name(loader.store, first.object), "Both");
+        assert_eq!(symbol_name(loader.store, first.module_class), "Both$");
+        assert_eq!(
+            loader.store.symbols.get(first.object).kind,
+            SymbolKind::Object
+        );
+        assert_eq!(
+            loader.store.symbols.get(first.module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            loader.store.symbols.get(first.object).info,
+            SymbolInfo::Missing
+        );
+        assert_eq!(
+            loader.store.symbols.get(first.module_class).info,
+            SymbolInfo::Missing
+        );
+        let class = first.companion_class.expect("Both has a class companion");
+        assert_eq!(loader.store.symbols.get(class).kind, SymbolKind::Class);
+        assert_eq!(
+            loader.store.symbols.get(class).links.companion,
+            Some(first.object)
+        );
+        assert_eq!(
+            loader.store.symbols.get(first.object).links.companion,
+            Some(class)
+        );
+        assert_eq!(
+            loader.store.symbols.get(first.module_class).links.companion,
+            None
+        );
+        let package = loader.store.symbols.get(first.object).owner.unwrap();
+        assert_eq!(
+            loader.store.symbols.get(first.module_class).owner,
+            Some(package)
+        );
+        assert_eq!(loader.store.symbols.get(class).owner, Some(package));
+        let package_scope = loader.session.packages.scope_of(package).unwrap();
+        let term_name = Name::new(loader.store.names.intern("Both"), Namespace::Term);
+        let class_type_name = Name::new(loader.store.names.intern("Both"), Namespace::Type);
+        let module_type_name = Name::new(loader.store.names.intern("Both$"), Namespace::Type);
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&term_name),
+            &[first.object]
+        );
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&class_type_name),
+            &[class]
+        );
+        assert_eq!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&module_type_name),
+            &[first.module_class]
+        );
+    }
+
+    #[test]
+    fn ensure_module_identity_accepts_a_standalone_object_without_inventing_a_companion() {
+        let name = BinaryName::from_internal("scala/jdk/CollectionConverters");
+        let bytes =
+            dotty_tasty_fixture_bytes("scala3-library/scala/jdk/CollectionConverters.tasty");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryTastyClassPath(HashMap::from([(name.clone(), bytes)])),
+            &mut store,
+        );
+
+        let identity = loader.ensure_module_identity(&name).unwrap();
+
+        assert_eq!(identity.companion_class, None);
+        assert_eq!(store.symbols.get(identity.object).kind, SymbolKind::Object);
+        assert_eq!(
+            store.symbols.get(identity.module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(store.symbols.get(identity.object).links.companion, None);
+    }
+
+    #[test]
+    fn ensure_module_identity_rejects_class_only_tasty_and_rolls_back() {
+        let name = BinaryName::from_internal("scala/annotation/StaticAnnotation");
+        let bytes =
+            dotty_tasty_fixture_bytes("scala3-library/scala/annotation/StaticAnnotation.tasty");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryTastyClassPath(HashMap::from([(name.clone(), bytes)])),
+            &mut store,
+        );
+
+        let error = loader.ensure_module_identity(&name).unwrap_err();
+
+        assert!(matches!(error, ClassLoadError::IdentityConflict { .. }));
+        assert_eq!(loader.session.packages.get(&["scala", "annotation"]), None);
+    }
+
+    #[test]
+    fn ensure_module_identity_reuses_a_preexisting_module_class_shell() {
+        let name = BinaryName::from_internal("scala/jdk/CollectionConverters");
+        let module_name = BinaryName::from_internal("scala/jdk/CollectionConverters$");
+        let bytes =
+            dotty_tasty_fixture_bytes("scala3-library/scala/jdk/CollectionConverters.tasty");
+        let module_bytes = synthetic_class("scala/jdk/CollectionConverters$", None);
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(HashMap::from([(
+                name.clone(),
+                bytes,
+            )]))),
+            Box::new(InMemoryClassPath(HashMap::from([(
+                module_name.clone(),
+                module_bytes,
+            )]))),
+        ]);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(class_path, &mut store);
+        let shell = loader.ensure_class_identity(&module_name).unwrap();
+        assert_eq!(loader.store.symbols.get(shell).kind, SymbolKind::Class);
+
+        let identity = loader.ensure_module_identity(&name).unwrap();
+
+        assert_eq!(identity.module_class, shell);
+        assert_eq!(
+            loader.store.symbols.get(shell).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(loader.store.symbols.get(shell).info, SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn ensure_module_identity_rolls_back_a_partial_pair_on_a_type_collision() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let bytes = semantic_unpickler_fixture_bytes("Both.tasty");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryTastyClassPath(HashMap::from([(name.clone(), bytes)])),
+            &mut store,
+        );
+        let package = loader.session.packages.resolve(loader.store, &name);
+        let occupied_name = Name::new(loader.store.names.intern("Both$"), Namespace::Type);
+        let occupied = loader.store.symbols.alloc(Symbol {
+            name: occupied_name,
+            owner: Some(package),
+            kind: SymbolKind::ModuleClass,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let package_scope = loader.session.packages.scope_of(package).unwrap();
+        loader
+            .store
+            .scopes
+            .get_mut(package_scope)
+            .enter(occupied_name, occupied);
+
+        let error = loader.ensure_module_identity(&name).unwrap_err();
+
+        assert!(matches!(error, ClassLoadError::IdentityConflict { .. }));
+        assert!(
+            loader
+                .store
+                .scopes
+                .get(package_scope)
+                .lookup_all(&Name::new(
+                    loader.store.names.intern("Both"),
+                    Namespace::Term
+                ))
+                .is_empty()
+        );
+        assert_eq!(
+            loader.store.symbols.get(occupied).kind,
+            SymbolKind::ModuleClass
+        );
+    }
+
+    #[test]
+    fn ensure_module_identity_does_not_infer_an_object_from_classfile_bytes() {
+        let name = BinaryName::from_internal("sample/Literal$Name");
+        let bytes = synthetic_class("sample/Literal$Name", None);
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryClassPath(HashMap::from([(name.clone(), bytes)])),
+            &mut store,
+        );
+
+        let error = loader.ensure_module_identity(&name).unwrap_err();
+
+        assert!(matches!(error, ClassLoadError::IdentityConflict { .. }));
+        assert_eq!(loader.session.packages.get(&["sample"]), None);
+    }
+
+    #[test]
+    fn module_identity_is_shared_by_sequential_loaders_in_one_session() {
+        let name = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let bytes = semantic_unpickler_fixture_bytes("Both.tasty");
+        let class_path = InMemoryTastyClassPath(HashMap::from([(name.clone(), bytes)]));
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let first = {
+            let mut loader = ClassLoader::with_definitions(
+                class_path,
+                &mut store,
+                definitions,
+                LoadingSession::new(),
+            );
+            let identity = loader.ensure_module_identity(&name).unwrap();
+            (identity, loader.into_session())
+        };
+        let mut loader = ClassLoader::with_definitions(
+            InMemoryTastyClassPath(HashMap::new()),
+            &mut store,
+            definitions,
+            first.1,
+        );
+
+        assert_eq!(loader.ensure_module_identity(&name).unwrap(), first.0);
     }
 
     #[test]
