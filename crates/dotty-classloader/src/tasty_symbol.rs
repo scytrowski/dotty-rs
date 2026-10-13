@@ -193,6 +193,10 @@ pub enum TastyDecodeError {
     /// from (there is always one for a class/trait/object; seeing this
     /// means the file's shape isn't one this decoder recognizes).
     NoTemplateBody,
+    /// A selected module class has no declared superclass in its `Template`.
+    /// Unlike the legacy class projection, module completion never invents
+    /// `java/lang/Object` when the hierarchy is absent.
+    MissingModuleSuperclass,
     /// A declared `Template` parent (superclass or mixin interface) has no
     /// name this decoder can resolve — see `resolve_parent_name_with_bare`'s
     /// doc comment for exactly which shapes are and are not resolved.
@@ -211,6 +215,12 @@ impl fmt::Display for TastyDecodeError {
                 write!(formatter, "no matching TypeDef found in .tasty file")
             }
             Self::NoTemplateBody => write!(formatter, "TypeDef has no Template body"),
+            Self::MissingModuleSuperclass => {
+                write!(
+                    formatter,
+                    "module-class Template has no declared superclass"
+                )
+            }
             Self::AmbiguousModuleIdentity => {
                 write!(formatter, "TASTy has ambiguous top-level module identities")
             }
@@ -235,6 +245,7 @@ impl std::error::Error for TastyDecodeError {
             Self::Ast(source) => Some(source),
             Self::MissingTypeDef
             | Self::NoTemplateBody
+            | Self::MissingModuleSuperclass
             | Self::UnresolvedSupertype(_)
             | Self::AmbiguousModuleIdentity => None,
         }
@@ -249,6 +260,7 @@ impl TastyDecodeError {
             Self::Ast(_) => "tasty.ast_error",
             Self::MissingTypeDef => "tasty.missing_type_def",
             Self::NoTemplateBody => "tasty.no_template_body",
+            Self::MissingModuleSuperclass => "tasty.missing_module_superclass",
             Self::UnresolvedSupertype(_) => "tasty.unresolved_supertype",
             Self::AmbiguousModuleIdentity => "tasty.ambiguous_module_identity",
         }
@@ -288,6 +300,7 @@ impl TastyDecodeError {
             Self::Parse(_) => ClassLoadCategory::MalformedArtifact,
             Self::MissingTypeDef
             | Self::NoTemplateBody
+            | Self::MissingModuleSuperclass
             | Self::UnresolvedSupertype(_)
             | Self::AmbiguousModuleIdentity => ClassLoadCategory::Conditional,
         }
@@ -370,6 +383,7 @@ pub(crate) fn decode(
             Some(BinaryName::from_internal(internal))
         },
         false,
+        false,
     )
 }
 
@@ -387,6 +401,28 @@ pub(crate) fn decode_with_resolvers(
         requested,
         &mut resolve_alias,
         &mut resolve_bare,
+        true,
+        false,
+    )
+}
+
+/// Decodes the exact top-level `ModuleClass` established by
+/// [`decode_module_identity`]. `requested` is the module-class binary name
+/// (`Foo$`), while the TASTy definition is encoded with an `ObjectClass`
+/// name. Requiring the `OBJECT` marker and package prevents an ordinary
+/// `Foo` class or a nested definition from being selected by name alone.
+pub(crate) fn decode_module_class_with_resolvers(
+    bytes: &[u8],
+    requested: &BinaryName,
+    mut resolve_alias: impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
+    mut resolve_bare: impl FnMut(&str, &str) -> Option<BinaryName>,
+) -> Result<DecodedTastyClass, TastyDecodeError> {
+    decode_impl(
+        bytes,
+        requested,
+        &mut resolve_alias,
+        &mut resolve_bare,
+        true,
         true,
     )
 }
@@ -612,6 +648,7 @@ fn decode_impl(
     mut resolve_alias: impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
     mut resolve_bare: impl FnMut(&str, &str) -> Option<BinaryName>,
     strict_superclass: bool,
+    module_class: bool,
 ) -> Result<DecodedTastyClass, TastyDecodeError> {
     let file = TastyFile::parse_scala_3_9(bytes)?;
     let index = file.ast_address_index()?;
@@ -625,18 +662,37 @@ fn decode_impl(
         None => "",
     };
 
-    let node = index
-        .iter()
-        .find(|node| {
+    let mut matching_nodes = index.iter().filter(|node| {
             if node.tag != TYPEDEF_TAG {
                 return false;
             }
-            let Ok(definition) = node.decode_definition() else {
+            let Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef {
+                name,
+                tail,
+                type_or_template,
+            })) = node.decode_structured() else {
                 return false;
             };
-            wire_name(&file, definition.name()).as_deref() == Some(simple_name)
-        })
+            if module_class {
+                module_class_wire_name(&file, name).as_deref() == Some(simple_name)
+                    && has_modifier(&tail, OBJECT_TAG)
+                    && is_in_requested_top_level_package(
+                        &file,
+                        &index,
+                        node.offset,
+                        package,
+                    )
+                    && matches!(type_or_template, RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG)
+            } else {
+                wire_name(&file, name).as_deref() == Some(simple_name)
+            }
+        });
+    let node = matching_nodes
+        .next()
         .ok_or(TastyDecodeError::MissingTypeDef)?;
+    if matching_nodes.next().is_some() {
+        return Err(TastyDecodeError::AmbiguousModuleIdentity);
+    }
 
     let StructuredNode::TypeDef(DefinitionBody::TypeDef {
         tail,
@@ -680,6 +736,7 @@ fn decode_impl(
                 }
             }
         }
+        None if module_class => return Err(TastyDecodeError::MissingModuleSuperclass),
         None => BinaryName::from_internal("java/lang/Object"),
     };
 
@@ -2320,6 +2377,24 @@ mod tests {
     #[test]
     fn decodes_a_proven_module_pair_and_its_real_companion_class() {
         let bytes = unpickler_fixture_bytes("Both.tasty");
+        let module_class = decode_module_class_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both$"),
+            |_, _| None,
+            |package, simple_name| {
+                Some(BinaryName::from_internal(format!(
+                    "{package}/{simple_name}"
+                )))
+            },
+        )
+        .unwrap();
+        assert!(
+            module_class
+                .methods
+                .iter()
+                .any(|method| method.name == "make")
+        );
+
         let identity = decode_module_identity(
             &bytes,
             &BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both"),
@@ -2328,6 +2403,37 @@ mod tests {
         .expect("Both.tasty contains an object");
 
         assert_eq!(identity.companion_class_kind, Some(SymbolKind::Class));
+    }
+
+    #[test]
+    fn decodes_overloaded_methods_from_the_module_class_template() {
+        let bytes = fixture_bytes("scala3-library/scala/math/BigInt.tasty");
+        let decoded = decode_module_class_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("scala/math/BigInt$"),
+            |_, _| None,
+            |package, simple_name| {
+                Some(BinaryName::from_internal(format!(
+                    "{package}/{simple_name}"
+                )))
+            },
+        )
+        .unwrap();
+
+        let apply_count = decoded
+            .methods
+            .iter()
+            .filter(|method| method.name == "apply")
+            .count();
+        assert!(
+            apply_count > 1,
+            "expected overloaded apply methods, found {:?}",
+            decoded
+                .methods
+                .iter()
+                .map(|method| &method.name)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

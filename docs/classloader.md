@@ -700,10 +700,23 @@ classfile alone do not prove module identity. The API records the pair in the
 shared `LoadingSession`, so sequential loaders over the same semantic store
 reuse the same `SymbolId`s.
 
+`ClassLoader::complete_module` completes that existing `ModuleClass` in
+place. It selects the `OBJECT`-marked `ObjectClass` `TypeDef` from the same
+TASTy package, publishes its real hierarchy and declared fields/methods in a
+`ClassInfo` whose `class` is the canonical module-class symbol, and gives the
+object term a `TypeRef` to that same symbol. Member type references establish
+only identity shells; only parents and interfaces are eagerly loaded. A
+successful completion is cached in the shared session, so repeating it in
+this or a later loader keeps the same declaration scope. A failed completion
+rolls back the module pair, scope, symbols, and session updates as one unit.
+An absent or unresolved declared superclass is reported as malformed TASTy;
+module completion does not synthesize a parent.
+
 An ordinary class or trait companion is linked to the object only when that
 definition is present in the same TASTy file. The module class is not put in
 `SymbolLinks::companion`; its relationship to the object follows their common
 package owner and source name. This operation enters identity shells only and
-does not complete object members or semantic value types. It currently covers
-top-level package members; nested objects and identities proved only by JVM
-classfiles remain unsupported.
+does not complete object members or semantic value types until
+`complete_module` is requested. The completion API currently covers top-level
+package members; nested objects and identities proved only by JVM classfiles
+remain unsupported.
