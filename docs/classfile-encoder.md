@@ -36,9 +36,10 @@ name index and payload.
 
 `ClassFileBuilder` creates new classes with owned names, descriptors, fields,
 and methods. Its raw `MethodBuilder::code` path remains available for callers
-that need to provide bytes and explicit `max_stack`/`max_locals`. For ordinary
-straight-line methods, `add_static_method`, `add_instance_method`, and
-`add_code_method` accept a closure over `CodeBuilder`:
+that need to provide bytes and explicit `max_stack`/`max_locals`. For
+straight-line methods and the supported integer-only branched subset,
+`add_static_method`, `add_instance_method`, and `add_code_method` accept a
+closure over `CodeBuilder`:
 
 ```rust
 use dotty_classfile::classfile::{ClassFileBuilder, ClassFileVersion};
@@ -62,9 +63,43 @@ Symbolic class, field, and method references are interned into the shared pool
 before it is finalized. The builder assembles the typed instructions and uses
 the method descriptor and static flag to compute `max_stack` and `max_locals`.
 The supported bytecode instruction matrix documents the available operations.
-This analysis checks straight-line value categories and resource bounds, but
-does not prove initialization states or reference assignability, handle
-control flow, or synthesize stack-map frames.
+Straight-line methods use the linear analyzer and do not receive an automatic
+`StackMapTable`. Branched methods use symbolic labels, CFG analysis, final
+assembled byte offsets, and `full_frame` entries. Automatic branched emission
+requires class-file major version 65 or newer. It accepts only the analyzer's
+integer-like state subset; it is not a JVM verifier and rejects reference,
+category-two, incompatible-stack, and uninitialized-local flows.
+
+```rust
+use dotty_classfile::classfile::{ClassFileBuilder, ClassFileVersion};
+
+let mut class = ClassFileBuilder::new(
+    "example/Maximum",
+    ClassFileVersion { major: 65, minor: 0 },
+)?;
+class.add_static_method("max", "(II)I", |code| {
+    let left = code.new_label()?;
+    code.iload(0)?;
+    code.iload(1)?;
+    code.if_icmpge(left.clone())?;
+    code.iload(1)?;
+    code.ireturn()?;
+    code.mark(left)?;
+    code.iload(0)?;
+    code.ireturn()?;
+    Ok(())
+})?;
+let bytes = class.encode()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`CodeBuilder` exposes `new_label`, `mark`, `goto`/`goto_w`, `ifeq`, `ifne`,
+and all `if_icmp*` branches. It validates label ownership and definitions
+before committing the method. `ClassFileBuilder` stages symbolic references,
+the `Code` and `StackMapTable` names, and frame payloads before finalizing the
+constant pool. A branched method gets exactly one nested `StackMapTable`
+attribute; its code bytes and payload are owned until a temporary borrowed
+class-file view is encoded. A failed closure or encode returns no class bytes.
 
 Structural equivalence does not promise byte-identical output for every
 arbitrary class file. A modeled attribute stores its semantic fields rather
@@ -77,11 +112,14 @@ bytecode or synthesize stack maps.
 
 ## Supported typed generation subset
 
-The executable fixture covers the current straight-line generation subset:
+The executable fixture covers the current straight-line and branched generation
+subsets:
 
 | Generated class | Typed operations exercised |
 | --- | --- |
 | `Calculator` | `iload`, `iadd`, `ireturn` |
+| `Calculator.max` | `if_icmpge`, conditional target, and two returns |
+| `Calculator.sumTo` | loop back-edge, `goto`, integer locals, and merge frames |
 | `Box` | `aload`, `iload`, `invokespecial`, `putfield`, `getfield`, `return`, `ireturn` |
 | `Caller` | integer constants, `invokestatic`, `new`, `dup`, `iload`, `invokespecial`, `areturn`, `ireturn` |
 
@@ -102,9 +140,10 @@ uses `invokestatic` to invoke the generated `Calculator.add` method. Its
 `tests/classfile_jvm_encoder.rs` asks `javap -v` to parse all three generated
 classes, compiles a small Java caller, and executes it with
 `java -Xverify:all`. The Java assertions check that `Calculator.add(20, 22)`,
-`new Box(42).get()`, `Caller.answer()`, and `Caller.makeBox(42).get()` each
-return `42`. The last scenario executes the generated allocation and
-constructor-call sequence rather than relying on javac to emit it.
+`Calculator.max(12, 42)`, `Calculator.sumTo(10)`, `new Box(42).get()`,
+`Caller.answer()`, and `Caller.makeBox(42).get()` each return the expected
+value. The branch and loop methods exercise builder-generated stack maps; the
+factory executes the generated allocation and constructor-call sequence.
 
 Run the structural and ordinary crate tests with:
 
@@ -126,12 +165,13 @@ provisions Temurin JDK 21 and sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, making all
 three runtime scenarios mandatory. The JDK corpus itself is checked in, so
 the structural round-trip suite does not depend on an installed JDK.
 
-The existing `assemble(&[Instruction], ...)`, analyzer, `CodeBuilder`, and
-class builder remain limited to straight-line methods. The separate symbolic
-`CodeSequence` API supports labels and `goto`, `goto_w`, `ifeq`, `ifne`, and
-`if_icmp{eq,ne,lt,ge,gt,le}` branches. `assemble_labeled` returns complete
-bytes plus deterministic instruction and label byte offsets. It uses checked
-branch displacement and code-length arithmetic, and never widens a short
-branch automatically. Control-flow analysis, `StackMapTable` generation,
-exception edges, and general verification of arbitrary input bytecode remain
-out of scope. This does not add Scala compilation or a JVM backend.
+The existing `assemble(&[Instruction], ...)` and linear analyzer remain
+straight-line APIs. The separate symbolic `CodeSequence` API supports labels
+and `goto`, `goto_w`, `ifeq`, `ifne`, and `if_icmp{eq,ne,lt,ge,gt,le}` branches.
+`assemble_labeled` returns complete bytes plus deterministic instruction and
+label byte offsets. It uses checked branch displacement and code-length
+arithmetic, and never widens a short branch automatically. The public typed
+`CodeBuilder` now connects these pieces for the integer-only branched subset
+and emits `StackMapTable`; exception edges, reference-state merges,
+uninitialized objects, compression, and general JVM verification remain out
+of scope. This does not add Scala compilation or a JVM backend.
