@@ -6,9 +6,9 @@ use crate::error::ClassLoadError;
 use crate::loader::{ClassLoadProfile, ClassLoader};
 use crate::session::{LoadingSession, SessionCheckpoint};
 use dotty_core::{
-    Definitions, MemberRequest, MemberSelector, MemberSpace, ResolutionError, ResolverCheckpoint,
-    SemanticStore, Symbol, SymbolId, SymbolInfo, SymbolKind, SymbolResolver, Type, TypeId,
-    TypeRefTarget,
+    Definitions, MemberRequest, MemberSelector, MemberSpace, Namespace, ResolutionError,
+    ResolverCheckpoint, SemanticStore, Symbol, SymbolId, SymbolInfo, SymbolKind, SymbolResolver,
+    Type, TypeId, TypeRefTarget,
 };
 
 struct ResolverUndo {
@@ -126,6 +126,124 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         self.class_path = Some(class_path);
         self.session = session;
         result
+    }
+
+    fn ensure_module_identity(
+        &mut self,
+        store: &mut SemanticStore,
+        name: &BinaryName,
+    ) -> Result<crate::loader::ModuleIdentity, ClassLoadError> {
+        let class_path = self
+            .class_path
+            .take()
+            .expect("resolver operation is exclusive");
+        let session = std::mem::replace(&mut self.session, LoadingSession::new());
+        let mut loader =
+            ClassLoader::with_definitions(class_path, store, self.definitions, session);
+        let result = loader.ensure_module_identity(name);
+        let (class_path, session) = loader.into_parts();
+        self.class_path = Some(class_path);
+        self.session = session;
+        result
+    }
+
+    fn try_ensure_module_identity(
+        &mut self,
+        store: &mut SemanticStore,
+        name: &BinaryName,
+    ) -> Result<Option<crate::loader::ModuleIdentity>, ResolutionError> {
+        let resource = self
+            .class_path
+            .as_ref()
+            .expect("resolver operation is exclusive")
+            .find_class(name)
+            .map_err(|error| ResolutionError::Malformed {
+                reason: format!("cannot inspect external module {name}: {error}"),
+            })?;
+        let Some(resource) = resource else {
+            return Ok(None);
+        };
+        if resource.format() != crate::class_path::ClassFormat::Tasty {
+            return Ok(None);
+        }
+        match self.ensure_module_identity(store, name) {
+            Ok(identity) => Ok(Some(identity)),
+            Err(ClassLoadError::IdentityConflict { reason, .. })
+                if reason
+                    == "the TASTy file does not prove a top-level object and module class" =>
+            {
+                Ok(None)
+            }
+            Err(ClassLoadError::NotFound(_)) => Ok(None),
+            Err(error) => Err(ResolutionError::Malformed {
+                reason: format!("external module identity failed for {name}: {error}"),
+            }),
+        }
+    }
+
+    fn validate_module_object(
+        &self,
+        store: &SemanticStore,
+        package: SymbolId,
+        object: SymbolId,
+    ) -> Result<(), ResolutionError> {
+        let malformed = || ResolutionError::Malformed {
+            reason: format!("package term {object:?} is not a valid canonical module object"),
+        };
+        let Some(identity) = self
+            .session
+            .modules
+            .values()
+            .find(|identity| identity.object == object)
+        else {
+            return Err(malformed());
+        };
+        if !store.symbols.contains(object) || !store.symbols.contains(identity.module_class) {
+            return Err(malformed());
+        }
+        let object_symbol = store.symbols.get(object).clone();
+        let module_class = store.symbols.get(identity.module_class).clone();
+        let expected_module_name = format!("{}$", store.names.resolve(object_symbol.name.text()));
+        let Some(scope) = self.package_scope(package) else {
+            return Err(malformed());
+        };
+        if !store.scopes.contains(scope) || store.scopes.get(scope).owner != Some(package) {
+            return Err(malformed());
+        }
+        if object_symbol.kind != SymbolKind::Object
+            || object_symbol.name.namespace() != Namespace::Term
+            || object_symbol.owner != Some(package)
+            || module_class.kind != SymbolKind::ModuleClass
+            || module_class.name.namespace() != Namespace::Type
+            || module_class.owner != Some(package)
+            || store.names.resolve(module_class.name.text()) != expected_module_name
+            || store.scopes.get(scope).lookup_all(&object_symbol.name) != [object]
+            || store.scopes.get(scope).lookup_all(&module_class.name) != [identity.module_class]
+        {
+            return Err(malformed());
+        }
+        match object_symbol.info {
+            SymbolInfo::Missing => {}
+            SymbolInfo::Complete(ty) if matches!(store.types.try_get(ty), Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == identity.module_class) =>
+                {}
+            _ => return Err(malformed()),
+        }
+        match module_class.info {
+            SymbolInfo::Missing => {}
+            SymbolInfo::Complete(info) => {
+                let Some(Type::ClassInfo(info)) = store.types.try_get(info) else {
+                    return Err(malformed());
+                };
+                if info.class != identity.module_class
+                    || !store.scopes.contains(info.declarations)
+                    || store.scopes.get(info.declarations).owner != Some(identity.module_class)
+                {
+                    return Err(malformed());
+                }
+            }
+            SymbolInfo::Error | SymbolInfo::Deferred(_) => return Err(malformed()),
+        }
+        Ok(())
     }
 
     fn package_scope(&self, package: SymbolId) -> Option<dotty_core::ScopeId> {
@@ -435,6 +553,30 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let candidates = store.scopes.get(scope).lookup_all(&request.name);
         match candidates {
             [] if store.symbols.get(resolved_owner).kind == SymbolKind::Package
+                && request.name.namespace() == Namespace::Term =>
+            {
+                let package_path =
+                    package_path_of_symbol(store, resolved_owner).ok_or_else(|| {
+                        ResolutionError::Malformed {
+                            reason: "package prefix has an invalid owner chain".to_owned(),
+                        }
+                    })?;
+                let simple_name = store.names.resolve(request.name.text());
+                let binary_name = if package_path.is_empty() {
+                    simple_name.to_owned()
+                } else {
+                    format!("{}/{simple_name}", package_path.join("/"))
+                };
+                let binary_name = BinaryName::from_internal(binary_name);
+                if !binary_name.is_path_safe() {
+                    return Ok(None);
+                }
+                match self.try_ensure_module_identity(store, &binary_name)? {
+                    Some(identity) => Ok(Some(identity.object)),
+                    None => Ok(None),
+                }
+            }
+            [] if store.symbols.get(resolved_owner).kind == SymbolKind::Package
                 && request.name.is_type() =>
             {
                 let package_path =
@@ -520,6 +662,14 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     }
                 }
                 Ok(Some(symbol))
+            }
+            [symbol]
+                if store.symbols.get(resolved_owner).kind == SymbolKind::Package
+                    && request.name.namespace() == Namespace::Term
+                    && store.symbols.get(*symbol).kind == SymbolKind::Object =>
+            {
+                self.validate_module_object(store, resolved_owner, *symbol)?;
+                Ok(Some(*symbol))
             }
             [symbol] => Ok(Some(*symbol)),
             many => Err(ResolutionError::Ambiguous {
@@ -719,6 +869,48 @@ mod tests {
 
     fn fixture_path(relative: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
+    }
+
+    #[derive(Clone)]
+    struct ModuleTastyPath {
+        entries: Arc<Mutex<std::collections::HashMap<BinaryName, Vec<u8>>>>,
+    }
+
+    impl ModuleTastyPath {
+        fn both_fixture() -> Self {
+            let bytes = std::fs::read(fixture_path(
+                "../dotty-tasty-unpickler/tests/fixtures/semantic/Both.tasty",
+            ))
+            .expect("Both.tasty fixture should exist");
+            Self {
+                entries: Arc::new(Mutex::new(std::collections::HashMap::from([(
+                    BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both"),
+                    bytes,
+                )]))),
+            }
+        }
+    }
+
+    impl ClassPathEntry for ModuleTastyPath {
+        fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            Ok(self.entries.lock().unwrap().get(name).map(|bytes| {
+                ClassResource::new(
+                    bytes.clone(),
+                    ClassFormat::Tasty,
+                    ClassOrigin::Directory(PathBuf::from("<module-fixture>")),
+                )
+            }))
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            let prefix = format!("{}/", package.join("/"));
+            Ok(self
+                .entries
+                .lock()
+                .unwrap()
+                .keys()
+                .any(|name| name.as_internal().starts_with(&prefix)))
+        }
     }
 
     struct FixtureClassPath(JdkClassPath);
@@ -970,6 +1162,125 @@ mod tests {
         );
         assert_eq!(store.symbols.get(a).info, SymbolInfo::Missing);
         assert_eq!(store.checkpoint(), mark);
+    }
+
+    #[test]
+    fn package_term_request_materializes_the_canonical_object_idempotently() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            ModuleTastyPath::both_fixture(),
+            definitions,
+            LoadingSession::new(),
+        );
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .unwrap();
+        let prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let request = MemberRequest {
+            prefix,
+            name: Name::new(store.names.intern("Both"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+
+        let object = resolver
+            .resolve_member(&mut store, &request)
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.symbols.get(object).kind, SymbolKind::Object);
+        assert_eq!(store.symbols.get(object).owner, Some(package));
+        let identity = resolver
+            .session
+            .modules
+            .get(&BinaryName::from_internal(
+                "me/cytrowski/tastyfixtures/semantic/Both",
+            ))
+            .expect("TASTy-proven module identity should be cached");
+        assert_eq!(identity.object, object);
+        assert_ne!(identity.object, identity.module_class);
+        assert_eq!(
+            store.symbols.get(identity.module_class).kind,
+            SymbolKind::ModuleClass
+        );
+
+        let checkpoint = store.checkpoint();
+        assert_eq!(
+            resolver.resolve_member(&mut store, &request),
+            Ok(Some(object))
+        );
+        assert_eq!(store.checkpoint(), checkpoint);
+    }
+
+    #[test]
+    fn package_term_without_module_evidence_returns_none_without_mutation() {
+        let name = BinaryName::from_internal("scala/annotation/StaticAnnotation");
+        let bytes = std::fs::read(fixture_path(
+            "../dotty-tasty/tests/fixtures/scala3-library/scala/annotation/StaticAnnotation.tasty",
+        ))
+        .expect("StaticAnnotation.tasty fixture should exist");
+        let path = ModuleTastyPath {
+            entries: Arc::new(Mutex::new(std::collections::HashMap::from([(name, bytes)]))),
+        };
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(path, definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(&mut store, &["scala", "annotation"])
+            .unwrap()
+            .unwrap();
+        let prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let request = MemberRequest {
+            prefix,
+            name: Name::new(store.names.intern("StaticAnnotation"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let store_mark = store.checkpoint();
+        let session_mark = resolver.session.checkpoint();
+
+        assert_eq!(resolver.resolve_member(&mut store, &request), Ok(None));
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+    }
+
+    #[test]
+    fn package_term_does_not_infer_a_module_from_an_ordinary_class() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let path = member_class_path();
+        path.classes.lock().unwrap().insert(
+            BinaryName::from_internal("sample/Foo"),
+            test_class_stub("sample/Foo", 0x0021),
+        );
+        let mut resolver = ClasspathSymbolResolver::new(path, definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(&mut store, &["sample"])
+            .unwrap()
+            .unwrap();
+        let prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let request = MemberRequest {
+            prefix,
+            name: Name::new(store.names.intern("Foo"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let store_mark = store.checkpoint();
+        let session_mark = resolver.session.checkpoint();
+
+        assert_eq!(resolver.resolve_member(&mut store, &request), Ok(None));
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
     }
 
     #[test]
