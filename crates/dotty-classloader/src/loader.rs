@@ -620,6 +620,21 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .record_origin(object, resource.origin().clone());
         self.session
             .record_origin(module_class, resource.origin().clone());
+        if self
+            .store
+            .symbols
+            .get(module_class)
+            .links
+            .companion
+            .is_some()
+            || (decoded.companion_class_kind.is_none()
+                && self.store.symbols.get(object).links.companion.is_some())
+        {
+            return Err(ClassLoadError::IdentityConflict {
+                name: name.clone(),
+                reason: "an existing symbol has an unproven companion link".to_owned(),
+            });
+        }
         self.session
             .cache_identified(module_class_name.clone(), module_class);
         let companion_class = if decoded.companion_class_kind.is_some() {
@@ -6104,6 +6119,87 @@ mod tests {
             SymbolKind::ModuleClass
         );
         assert_eq!(store.symbols.get(identity.object).links.companion, None);
+        assert_eq!(
+            store.symbols.get(identity.module_class).links.companion,
+            None
+        );
+    }
+
+    #[test]
+    fn ensure_module_identity_rejects_an_unproven_existing_companion_link() {
+        let name = BinaryName::from_internal("scala/jdk/CollectionConverters");
+        let bytes =
+            dotty_tasty_fixture_bytes("scala3-library/scala/jdk/CollectionConverters.tasty");
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(
+            InMemoryTastyClassPath(HashMap::from([(name.clone(), bytes)])),
+            &mut store,
+        );
+        let package = loader.session.packages.resolve(loader.store, &name);
+        let scope = loader.session.packages.scope_of(package).unwrap();
+        let object_name = Name::new(
+            loader.store.names.intern("CollectionConverters"),
+            Namespace::Term,
+        );
+        let companion_name = Name::new(
+            loader.store.names.intern("CollectionConverters"),
+            Namespace::Type,
+        );
+        let companion = loader.store.symbols.alloc(Symbol {
+            name: companion_name,
+            owner: Some(package),
+            kind: SymbolKind::Class,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Tasty(loader.store.origins.register_tasty()),
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let object = loader.store.symbols.alloc(Symbol {
+            name: object_name,
+            owner: Some(package),
+            kind: SymbolKind::Object,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Tasty(loader.store.origins.register_tasty()),
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks {
+                companion: Some(companion),
+            },
+        });
+        loader
+            .store
+            .scopes
+            .get_mut(scope)
+            .enter(companion_name, companion);
+        loader
+            .store
+            .scopes
+            .get_mut(scope)
+            .enter(object_name, object);
+
+        let error = loader.ensure_module_identity(&name).unwrap_err();
+
+        assert!(matches!(error, ClassLoadError::IdentityConflict { .. }));
+        assert_eq!(
+            loader.store.symbols.get(object).links.companion,
+            Some(companion)
+        );
+        assert!(
+            loader
+                .store
+                .scopes
+                .get(scope)
+                .lookup_all(&Name::new(
+                    loader.store.names.intern("CollectionConverters$"),
+                    Namespace::Type
+                ))
+                .is_empty()
+        );
     }
 
     #[test]
