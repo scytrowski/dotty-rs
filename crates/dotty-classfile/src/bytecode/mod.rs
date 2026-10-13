@@ -93,6 +93,7 @@ pub use code_sequence::{
 };
 pub use control_flow::{BasicBlock, BasicBlockId, ControlFlowGraph, ControlFlowGraphError};
 pub use stack_map::{FullFrame, StackMapTable, VerificationTypeInfo};
+pub(crate) use stack_map_frames::generate_stack_map_frames_with_receiver;
 pub use stack_map_frames::{
     GeneratedStackMapFrames, StackMapFrameGenerationError, UnsupportedStackMapState,
     generate_stack_map_frames,

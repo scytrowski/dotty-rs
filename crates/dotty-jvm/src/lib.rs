@@ -1,11 +1,11 @@
 //! A JVM backend adapter boundary for already-typed compiler semantics.
 //!
-//! This crate currently defines and validates a borrowed compilation plan. It
-//! does not assemble a source frontend, infer identities from names, mutate
-//! the caller's stores, or emit bytecode. See `docs/jvm-backend.md` for the
-//! boundary and validation assumptions. Its bounded metadata projection
-//! covers public ordinary classes and instance methods whose signatures use
-//! primitive `Int`, `Boolean`, and result-only `Unit`.
+//! This crate defines and validates a borrowed compilation plan, projects
+//! bounded class/method metadata, and lowers a small typed expression subset
+//! into `dotty-classfile`'s symbolic code builder. It does not assemble a
+//! source frontend, infer identities from names, mutate the caller's stores,
+//! or emit complete class files. See `docs/jvm-backend.md` for its supported
+//! subset and boundary assumptions.
 
 use std::collections::HashSet;
 use std::error::Error;
@@ -21,6 +21,15 @@ use dotty_core::types::Type;
 mod descriptor;
 mod expression;
 mod identity;
+
+/// Maximum number of nested typed expression nodes visited by JVM lowering.
+pub const JVM_EXPRESSION_DEPTH_LIMIT: usize = 64;
+
+/// Maximum expanded typed-tree node visits in one JVM lowering call.
+///
+/// Repeated references to a shared subtree count separately because lowering
+/// expands each occurrence into bytecode.
+pub const JVM_EXPRESSION_NODE_BUDGET: usize = 4_096;
 
 /// JVMS limit for a method's parameter slots, including `this` for instance
 /// methods.
@@ -47,6 +56,44 @@ pub enum JvmValueCategory {
 pub enum JvmReturnType {
     Value(JvmType),
     Void,
+}
+
+/// The control-flow result of lowering one expression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmExpressionFlow {
+    /// A value remains on the operand stack at the expression's fallthrough.
+    Value {
+        /// Semantic primitive represented by the int-like stack value.
+        value_type: JvmType,
+        /// JVM operand category exposed to parent lowering.
+        category: JvmValueCategory,
+    },
+    /// Every reachable path terminates through a supported explicit return.
+    Diverges,
+}
+
+/// A standalone lowered expression and its fallthrough contract.
+#[derive(Debug)]
+pub struct JvmLoweredExpression {
+    code: dotty_classfile::bytecode::CodeBuilder,
+    flow: JvmExpressionFlow,
+}
+
+impl JvmLoweredExpression {
+    /// The generated symbolic instructions and labels.
+    pub const fn code(&self) -> &dotty_classfile::bytecode::CodeBuilder {
+        &self.code
+    }
+
+    /// Value or terminating-flow result for parent lowering.
+    pub const fn flow(&self) -> JvmExpressionFlow {
+        self.flow
+    }
+
+    /// Takes the generated method-local instruction builder.
+    pub fn into_code(self) -> dotty_classfile::bytecode::CodeBuilder {
+        self.code
+    }
 }
 
 /// Primitive JVM descriptor and value categories for one method signature.
@@ -277,6 +324,52 @@ pub enum JvmCodegenError {
         tree: TreeId<Typed>,
         error: dotty_classfile::bytecode::CodeBuilderError,
     },
+    /// A conditional expression does not have a Boolean condition.
+    InvalidIfCondition {
+        tree: TreeId<Typed>,
+        found: Option<JvmType>,
+    },
+    /// A reachable conditional branch does not match the other branch's value type.
+    IfBranchTypeMismatch {
+        tree: TreeId<Typed>,
+        branch: TreeId<Typed>,
+        expected: JvmType,
+        found: Option<JvmType>,
+    },
+    /// An If expression's declared type disagrees with its reachable branch values.
+    IfResultTypeMismatch {
+        tree: TreeId<Typed>,
+        expected: Option<JvmType>,
+        found: Option<JvmType>,
+    },
+    /// A typed `Nothing` branch is not backed by supported explicit return flow.
+    UnsupportedBottomFlow { tree: TreeId<Typed> },
+    /// A Return with an explicit target is outside the current local-return subset.
+    UnsupportedReturnTarget {
+        tree: TreeId<Typed>,
+        from: TreeId<Typed>,
+    },
+    /// A return value does not match the method's primitive JVM result.
+    ReturnValueTypeMismatch {
+        tree: TreeId<Typed>,
+        expected: JvmReturnType,
+        found: Option<JvmType>,
+    },
+    /// A method body value does not match its descriptor's return type.
+    MethodBodyTypeMismatch {
+        method: SymbolId,
+        tree: TreeId<Typed>,
+        expected: JvmReturnType,
+        found: Option<JvmType>,
+    },
+    /// Recursive typed-tree lowering exceeded its fixed depth budget.
+    ExpressionDepthExceeded {
+        tree: TreeId<Typed>,
+        position: Option<dotty_core::source::SourceSpan>,
+        limit: usize,
+    },
+    /// Lowering expanded too many typed-tree occurrences in one call.
+    ExpressionNodeBudgetExceeded { tree: TreeId<Typed>, limit: usize },
     /// A method has an unsupported single-clause or monomorphism shape.
     UnsupportedMethodShape {
         method: SymbolId,
@@ -540,6 +633,38 @@ pub fn lower_value_expression(
     code: &mut dotty_classfile::bytecode::CodeBuilder,
 ) -> Result<JvmValueCategory, JvmCodegenError> {
     expression::lower_value_expression(store, typed_ast, definitions, method, tree, code)
+}
+
+/// Lowers one supported typed expression without appending a method epilogue.
+///
+/// Integer/Boolean leaves and nested `If`/local `Return` nodes are supported.
+/// The returned flow states whether a value remains on the stack or every path
+/// terminates. The expression is built into a fresh method-local instruction
+/// builder, so an error never exposes partial code.
+pub fn lower_expression(
+    store: &SemanticStore,
+    typed_ast: &TypedAst,
+    definitions: &Definitions,
+    method: &JvmMethodMetadata,
+    tree: TreeId<Typed>,
+) -> Result<JvmLoweredExpression, JvmCodegenError> {
+    expression::lower_expression(store, typed_ast, definitions, method, tree)
+}
+
+/// Lowers a complete method body and adds only the descriptor-appropriate
+/// terminal return required by its reachable fallthrough.
+///
+/// The returned builder is method-local and is discarded on any lowering
+/// error. Int and Boolean results use `ireturn`; Unit is accepted only for a
+/// body consisting of supported explicit void-return flow.
+pub fn lower_method_body(
+    store: &SemanticStore,
+    typed_ast: &TypedAst,
+    definitions: &Definitions,
+    method: &JvmMethodMetadata,
+    body: TreeId<Typed>,
+) -> Result<dotty_classfile::bytecode::CodeBuilder, JvmCodegenError> {
+    expression::lower_method_body(store, typed_ast, definitions, method, body)
 }
 
 impl JvmParameterLocal {
