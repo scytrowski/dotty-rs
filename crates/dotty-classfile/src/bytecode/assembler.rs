@@ -18,6 +18,7 @@ use crate::encode_error::EncodeError;
 use crate::writer::Writer;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 /// The expected constant-pool tag family for an instruction operand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +152,8 @@ pub struct CodeLayout {
     instruction_offsets: Vec<usize>,
     label_offsets: HashMap<LabelId, usize>,
     code_length: usize,
+    sequence_scope: Arc<()>,
+    sequence_revision: Arc<()>,
 }
 
 impl CodeLayout {
@@ -179,6 +182,14 @@ impl CodeLayout {
     /// Returns the encoded byte length.
     pub const fn code_length(&self) -> usize {
         self.code_length
+    }
+
+    pub(crate) fn shares_sequence_scope(&self, scope: &Arc<()>) -> bool {
+        Arc::ptr_eq(&self.sequence_scope, scope)
+    }
+
+    pub(crate) fn shares_sequence_revision(&self, revision: &Arc<()>) -> bool {
+        Arc::ptr_eq(&self.sequence_revision, revision)
     }
 }
 
@@ -319,6 +330,8 @@ fn assemble_labeled_validated(
             instruction_offsets,
             label_offsets,
             code_length: pc,
+            sequence_scope: Arc::clone(sequence.sequence_scope()),
+            sequence_revision: Arc::clone(sequence.sequence_revision()),
         },
     })
 }

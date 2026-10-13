@@ -9,6 +9,7 @@ use super::{CodeElement, CodeSequence, CodeSequenceError, Instruction, LabelId};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::ops::Range;
+use std::sync::Arc;
 
 /// A stable block index assigned in source order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -89,6 +90,8 @@ pub struct ControlFlowGraph {
     entry_block: BasicBlockId,
     blocks: Vec<BasicBlock>,
     label_blocks: HashMap<LabelId, BasicBlockId>,
+    sequence_scope: Arc<()>,
+    sequence_revision: Arc<()>,
 }
 
 impl ControlFlowGraph {
@@ -246,6 +249,8 @@ impl ControlFlowGraph {
             entry_block,
             blocks,
             label_blocks,
+            sequence_scope: Arc::clone(validated.sequence_scope()),
+            sequence_revision: Arc::clone(validated.sequence_revision()),
         })
     }
 
@@ -267,6 +272,14 @@ impl ControlFlowGraph {
     /// Returns the block for a label defined in the input sequence.
     pub fn block_for_label(&self, label: &LabelId) -> Option<BasicBlockId> {
         self.label_blocks.get(label).copied()
+    }
+
+    pub(crate) fn sequence_scope(&self) -> &Arc<()> {
+        &self.sequence_scope
+    }
+
+    pub(crate) fn sequence_revision(&self) -> &Arc<()> {
+        &self.sequence_revision
     }
 }
 
