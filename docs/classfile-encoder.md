@@ -126,8 +126,11 @@ provisions Temurin JDK 21 and sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, making all
 three runtime scenarios mandatory. The JDK corpus itself is checked in, so
 the structural round-trip suite does not depend on an installed JDK.
 
-The supported subset remains limited to straight-line methods. Labels,
-branches and other control-flow graph features, `StackMapTable` generation,
-exception edges, and general verification of arbitrary input bytecode are out
-of scope for this increment. It does not add Scala compilation or a JVM
-backend.
+The existing assembler, analyzer, `CodeBuilder`, and class builder remain
+limited to straight-line methods. The bytecode model also exposes a separate
+symbolic `CodeSequence` API for labels and `goto`/`goto_w`, `ifeq`, `ifne`, and
+`if_icmp{eq,ne,lt,ge,gt,le}` branches. It validates label ownership,
+definitions, and executable target positions, but does not assign byte offsets
+or encode branches. Control-flow analysis, `StackMapTable` generation,
+exception edges, and general verification of arbitrary input bytecode remain
+out of scope. This does not add Scala compilation or a JVM backend.
