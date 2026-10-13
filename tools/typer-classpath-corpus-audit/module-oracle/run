@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+repo_root="$(CDPATH= cd -- "$script_dir/../../.." && pwd)"
+
+: "${SCALA39_ROOT:?set SCALA39_ROOT to the pinned Scala 3.9.0 checkout}"
+: "${JAVA_HOME:?set JAVA_HOME to Temurin JDK 21.0.8}"
+: "${COURSIER_MAVEN_ROOT:?set COURSIER_MAVEN_ROOT to the Scala 3.9.0 Maven cache root}"
+: "${SCALA39_JDK_RELEASE:?set SCALA39_JDK_RELEASE=21}"
+
+revision="$(git -C "$SCALA39_ROOT" rev-parse HEAD)"
+if [[ "$revision" != "777528f19a58e794c9954a42f433373472ec57f8" ]]; then
+    printf 'SCALA39_ROOT is at %s; expected the pinned Scala 3.9.0 revision\n' "$revision" >&2
+    exit 1
+fi
+jdk_version="$(sed -n 's/^JAVA_VERSION="\([^"]*\)".*/\1/p' "$JAVA_HOME/release")"
+if [[ "$jdk_version" != "21.0.8" || "$SCALA39_JDK_RELEASE" != 21 ]]; then
+    printf 'module oracle requires Temurin 21.0.8 (found Java %s, feature %s)\n' \
+        "$jdk_version" "$SCALA39_JDK_RELEASE" >&2
+    exit 1
+fi
+
+scala_jars=(
+    "$COURSIER_MAVEN_ROOT/org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar"
+    "$COURSIER_MAVEN_ROOT/org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar"
+    "$COURSIER_MAVEN_ROOT/org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar"
+    "$COURSIER_MAVEN_ROOT/org/scala-lang/tasty-core_3/3.9.0/tasty-core_3-3.9.0.jar"
+    "$COURSIER_MAVEN_ROOT/org/scala-lang/scala3-interfaces/3.9.0/scala3-interfaces-3.9.0.jar"
+    "$COURSIER_MAVEN_ROOT/org/scala-lang/modules/scala-asm/9.9.0-scala-1/scala-asm-9.9.0-scala-1.jar"
+    "$COURSIER_MAVEN_ROOT/org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar"
+    "$COURSIER_MAVEN_ROOT/org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar"
+)
+for jar in "${scala_jars[@]}"; do
+    if [[ ! -f "$jar" ]]; then
+        printf 'missing Scala 3.9.0 artifact: %s\n' "$jar" >&2
+        exit 1
+    fi
+done
+export SCALA39_CLASSPATH="$(IFS=:; printf '%s' "${scala_jars[*]}")"
+
+output="$(mktemp -d)"
+trap 'rm -rf "$output"' EXIT
+"$JAVA_HOME/bin/javac" -d "$output" "$script_dir/Dollar$.java"
+"$JAVA_HOME/bin/java" -cp "$SCALA39_CLASSPATH" dotty.tools.dotc.Main \
+    -classpath "$SCALA39_CLASSPATH:$output" \
+    -d "$output" "$script_dir/ModuleFixtures.scala"
+
+cd "$repo_root"
+DOTTY_MODULE_ORACLE_ROOT="$output" cargo test -p dotty-typer --test module_identity_oracle \
+    pinned_scala39_oracle_pins_object_and_module_class_identity --locked -- --ignored --nocapture
