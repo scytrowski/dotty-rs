@@ -267,6 +267,28 @@ fn branch_targets(code: &[u8]) -> (Vec<usize>, Vec<(usize, &'static str)>) {
     (instruction_pcs, targets)
 }
 
+fn javap_contains_branch(output: &str, mnemonic: &str, target: usize) -> bool {
+    let target = target.to_string();
+    output.lines().any(|line| {
+        let mut tokens = line.split_whitespace();
+        let is_instruction = tokens
+            .next()
+            .and_then(|token| token.strip_suffix(':'))
+            .and_then(|pc| pc.parse::<usize>().ok())
+            .is_some();
+        is_instruction && tokens.next() == Some(mnemonic) && tokens.next() == Some(target.as_str())
+    })
+}
+
+#[test]
+fn matches_javap_branch_columns_independent_of_whitespace() {
+    let javap_output = "  2: if_icmpge     7\n\t22: goto\t4\n 30: if_icmpge 17\n";
+    assert!(javap_contains_branch(javap_output, "if_icmpge", 7));
+    assert!(javap_contains_branch(javap_output, "goto", 4));
+    assert!(!javap_contains_branch(javap_output, "if_icmpge", 1));
+    assert!(!javap_contains_branch(javap_output, "iconst_0", 7));
+}
+
 fn build_calculator(version: ClassFileVersion) -> Vec<u8> {
     let mut calculator =
         ClassFileBuilder::new("Calculator", version).expect("Java 21 class builder is supported");
@@ -683,10 +705,9 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
                 &calculator.methods[3],
             ] {
                 for (target, mnemonic) in branch_targets(code(method).code).1 {
-                    let branch = format!("{mnemonic} {target}");
                     assert!(
-                        javap_output.contains(&branch),
-                        "javap output is missing branch target {branch:?}:\n{javap_output}"
+                        javap_contains_branch(&javap_output, mnemonic, target),
+                        "javap output is missing branch {mnemonic} to {target}:\n{javap_output}"
                     );
                 }
             }
