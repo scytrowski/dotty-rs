@@ -115,18 +115,20 @@ fn pinned_scala39_oracle_pins_object_and_module_class_identity() {
     assert!(kind_paths(&pair, SymbolKind::Object).contains(&"issue1046.Pair".to_owned()));
     assert!(kind_paths(&pair, SymbolKind::ModuleClass).contains(&"issue1046.Pair$".to_owned()));
 
+    assert!(kind_paths(&package, SymbolKind::Object).contains(&"issue1046.pkg.package".to_owned()));
     assert!(
-        package
-            .iter()
-            .any(|symbol| symbol.kind == SymbolKind::Object && symbol.path.contains("package")),
-        "package-object TASTy should enter an object identity: {package:?}"
+        kind_paths(&package, SymbolKind::ModuleClass)
+            .contains(&"issue1046.pkg.package$".to_owned())
     );
 
     let qualified_object = qualified
         .iter()
         .find(|symbol| symbol.kind == SymbolKind::Object && symbol.path == "issue1046.Qualified")
         .expect("qualified object has a TASTy object identity");
-    assert_ne!(qualified_object.visibility, Visibility::Public);
+    assert!(matches!(
+        qualified_object.visibility,
+        Visibility::PrivateWithin(_)
+    ));
     assert!(
         kind_paths(&qualified, SymbolKind::ModuleClass)
             .contains(&"issue1046.Qualified$".to_owned())
