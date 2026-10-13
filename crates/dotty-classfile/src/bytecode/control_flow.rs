@@ -224,7 +224,10 @@ impl ControlFlowGraph {
             let source = blocks[source_index].id;
             let successors = blocks[source_index].successors.clone();
             for successor in successors {
-                push_unique(&mut blocks[successor.index()].predecessors, source);
+                // Each source block's successors are already deduplicated.
+                // Appending directly preserves source order while keeping
+                // predecessor construction linear in the number of edges.
+                blocks[successor.index()].predecessors.push(source);
             }
         }
 
