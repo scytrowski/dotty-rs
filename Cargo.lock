@@ -36,6 +36,14 @@ name = "dotty-core"
 version = "0.1.0"
 
 [[package]]
+name = "dotty-jvm"
+version = "0.1.0"
+dependencies = [
+ "dotty-classfile",
+ "dotty-core",
+]
+
+[[package]]
 name = "dotty-lexer"
 version = "0.1.0"
 dependencies = [

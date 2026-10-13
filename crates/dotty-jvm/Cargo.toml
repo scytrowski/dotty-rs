@@ -1,0 +1,8 @@
+[package]
+name = "dotty-jvm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dotty-core = { path = "../dotty-core" }
+dotty-classfile = { path = "../dotty-classfile" }
