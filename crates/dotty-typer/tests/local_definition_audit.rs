@@ -1452,14 +1452,70 @@ fn source_audit_resolver(
     )
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ScalaSourceModuleSnapshot {
     object: String,
     class: String,
     module_class: String,
-    module_parent_count: usize,
-    module_member_count: usize,
+    module_parent_types: Vec<String>,
+    module_declaration_buckets: Vec<String>,
+    module_info_shape: String,
     stdin: String,
+}
+
+fn symbol_type_shape(store: &SemanticStore, symbol: SymbolId, depth: u8) -> String {
+    match store.symbols.get(symbol).info {
+        dotty_core::SymbolInfo::Complete(ty) => semantic_type_shape(store, ty, depth + 1),
+        dotty_core::SymbolInfo::Missing => "Missing".to_owned(),
+        dotty_core::SymbolInfo::Deferred(_) => "Deferred".to_owned(),
+        dotty_core::SymbolInfo::Error => "Error".to_owned(),
+    }
+}
+
+fn declaration_bucket_shapes(
+    store: &SemanticStore,
+    scope: &dotty_core::Scope,
+    depth: u8,
+) -> Vec<String> {
+    let mut buckets = BTreeMap::<(String, String), Vec<String>>::new();
+    for symbol in scope.entered_symbols() {
+        let entry = store.symbols.get(symbol);
+        let name = store.names.resolve(entry.name.text()).to_owned();
+        let key = (format!("{:?}", entry.name.namespace()), name);
+        buckets.entry(key).or_default().push(format!(
+            "kind={:?};owner={};flags={:?};visibility={:?};type={}",
+            entry.kind,
+            entry
+                .owner
+                .map(|owner| audit_symbol_path(store, owner))
+                .unwrap_or_default(),
+            entry.flags,
+            entry.visibility,
+            symbol_type_shape(store, symbol, depth)
+        ));
+    }
+    buckets
+        .into_iter()
+        .map(|((namespace, name), mut declarations)| {
+            declarations.sort();
+            format!("{namespace}:{name}=[{}]", declarations.join(";"))
+        })
+        .collect()
+}
+
+fn class_info_components(
+    store: &SemanticStore,
+    info: &dotty_core::ClassInfo,
+    depth: u8,
+) -> (Vec<String>, Vec<String>) {
+    let parents = info
+        .parents
+        .iter()
+        .map(|parent| semantic_type_shape(store, *parent, depth + 1))
+        .collect();
+    let declarations =
+        declaration_bucket_shapes(store, store.scopes.get(info.declarations), depth + 1);
+    (parents, declarations)
 }
 
 fn semantic_type_shape(store: &SemanticStore, ty: dotty_core::TypeId, depth: u8) -> String {
@@ -1522,11 +1578,15 @@ fn semantic_type_shape(store: &SemanticStore, ty: dotty_core::TypeId, depth: u8)
         }
         Type::Bounds { low, high } => format!("Bounds({}..{})", nested(*low), nested(*high)),
         Type::AliasingBounds { alias } => format!("Alias({})", nested(*alias)),
-        Type::ClassInfo(info) => format!(
-            "ClassInfo({};parents={})",
-            audit_symbol_path(store, info.class),
-            info.parents.len()
-        ),
+        Type::ClassInfo(info) => {
+            let (parents, declarations) = class_info_components(store, info, depth + 1);
+            format!(
+                "ClassInfo({};parents=[{}];declarations=[{}])",
+                audit_symbol_path(store, info.class),
+                parents.join(","),
+                declarations.join(",")
+            )
+        }
         Type::SuperType { .. } => "SuperType".to_owned(),
         Type::And { .. } => "And".to_owned(),
         Type::Or { .. } => "Or".to_owned(),
@@ -1545,7 +1605,7 @@ fn scala_source_module_snapshot(
     store: &mut SemanticStore,
     definitions: Definitions,
     resolver: &mut impl SymbolResolver,
-) -> ScalaSourceModuleSnapshot {
+) -> (ScalaSourceModuleSnapshot, SymbolId) {
     let resolver: &mut dyn SymbolResolver = resolver;
     let package = resolver
         .resolve_package(store, &["scala", "io"])
@@ -1629,18 +1689,14 @@ fn scala_source_module_snapshot(
         completed_checkpoint,
         "repeated completion must not allocate duplicate module state"
     );
-    let dotty_core::SymbolInfo::Complete(info) = store.symbols.get(module_class).info else {
+    let dotty_core::SymbolInfo::Complete(info_type) = store.symbols.get(module_class).info else {
         unreachable!("completion check above establishes complete module information");
     };
-    let Type::ClassInfo(info) = store.types.get(info) else {
+    let Type::ClassInfo(info) = store.types.get(info_type) else {
         unreachable!("valid module class info is a ClassInfo");
     };
-    let module_parent_count = info.parents.len();
-    let module_member_count = store
-        .scopes
-        .get(info.declarations)
-        .entered_symbols()
-        .count();
+    let (module_parent_types, module_declaration_buckets) = class_info_components(store, info, 0);
+    let module_info_shape = semantic_type_shape(store, info_type, 0);
 
     let module_prefix = store.types.alloc(Type::TermRef {
         prefix,
@@ -1698,14 +1754,18 @@ fn scala_source_module_snapshot(
             semantic_type
         )
     };
-    ScalaSourceModuleSnapshot {
-        object: describe(source_term),
-        class: describe(source_type),
-        module_class: describe(module_class),
-        module_parent_count,
-        module_member_count,
-        stdin: describe(stdin),
-    }
+    (
+        ScalaSourceModuleSnapshot {
+            object: describe(source_term),
+            class: describe(source_type),
+            module_class: describe(module_class),
+            module_parent_types,
+            module_declaration_buckets,
+            module_info_shape,
+            stdin: describe(stdin),
+        },
+        module_class,
+    )
 }
 
 #[test]
@@ -1717,17 +1777,59 @@ fn audit_and_classpath_resolvers_match_for_real_scala_source_module() {
         direct_definitions,
         LoadingSession::new(),
     );
-    let expected = scala_source_module_snapshot(&mut direct_store, direct_definitions, &mut direct);
+    let (expected, direct_module_class) =
+        scala_source_module_snapshot(&mut direct_store, direct_definitions, &mut direct);
 
     let mut audit_store = SemanticStore::new();
     let (audit_definitions, mut audit) =
         source_audit_resolver(&mut audit_store, "scala.io.Source.scala", "Source.stdin");
-    let actual = scala_source_module_snapshot(&mut audit_store, audit_definitions, &mut audit);
+    let (actual, _) = scala_source_module_snapshot(&mut audit_store, audit_definitions, &mut audit);
 
     assert_eq!(
         actual, expected,
         "the audit wrapper must preserve production semantics"
     );
+
+    let dotty_core::SymbolInfo::Complete(class_info_type) =
+        direct_store.symbols.get(direct_module_class).info
+    else {
+        unreachable!("the direct Source module was completed");
+    };
+    let Type::ClassInfo(class_info) = direct_store.types.get(class_info_type).clone() else {
+        unreachable!("completed Source module carries ClassInfo");
+    };
+    assert!(!class_info.parents.is_empty());
+    let mut changed_parent = class_info.clone();
+    changed_parent.parents[0] = direct_definitions.int;
+    let changed_parent_type = direct_store.types.alloc(Type::ClassInfo(changed_parent));
+    assert_ne!(
+        semantic_type_shape(&direct_store, changed_parent_type, 0),
+        expected.module_info_shape,
+        "normalized ClassInfo must observe changed parent types"
+    );
+
+    let declared_members = direct_store
+        .scopes
+        .get(class_info.declarations)
+        .entered_symbols()
+        .collect::<Vec<_>>();
+    assert!(declared_members.len() > 1);
+    let mut changed_scope = dotty_core::Scope::new(Some(direct_module_class));
+    for symbol in declared_members.iter().skip(1) {
+        changed_scope.enter(direct_store.symbols.get(*symbol).name, *symbol);
+    }
+    let changed_scope_id = direct_store.scopes.alloc(changed_scope);
+    let mut changed_declarations = class_info;
+    changed_declarations.declarations = changed_scope_id;
+    let changed_declarations_type = direct_store
+        .types
+        .alloc(Type::ClassInfo(changed_declarations));
+    assert_ne!(
+        semantic_type_shape(&direct_store, changed_declarations_type, 0),
+        expected.module_info_shape,
+        "normalized ClassInfo must observe changed declaration buckets"
+    );
+
     let observations = &audit.metrics.borrow().module_operation_observations;
     let identity_lookups = observations
         .iter()
