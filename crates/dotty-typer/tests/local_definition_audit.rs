@@ -1725,16 +1725,14 @@ fn audit_and_classpath_resolvers_match_for_real_scala_source_module() {
         "the audit wrapper must preserve production semantics"
     );
     let observations = &audit.metrics.borrow().module_operation_observations;
-    for (operation, outcome) in [("module_class_of_object", "resolved")] {
-        let matches = observations
-            .iter()
-            .filter(|observation| observation.operation == operation)
-            .collect::<Vec<_>>();
-        assert_eq!(matches.len(), 1, "{operation} must be recorded once");
-        assert_eq!(matches[0].result, outcome);
-        assert_eq!(matches[0].source_file, "scala.io.Source.scala");
-        assert_eq!(matches[0].enclosing_attempt, "Source.stdin");
-    }
+    let identity_lookups = observations
+        .iter()
+        .filter(|observation| observation.operation == "module_class_of_object")
+        .collect::<Vec<_>>();
+    assert_eq!(identity_lookups.len(), 1);
+    assert_eq!(identity_lookups[0].result, "resolved");
+    assert_eq!(identity_lookups[0].source_file, "scala.io.Source.scala");
+    assert_eq!(identity_lookups[0].enclosing_attempt, "Source.stdin");
     let completions = observations
         .iter()
         .filter(|observation| observation.operation == "complete_module_class")
