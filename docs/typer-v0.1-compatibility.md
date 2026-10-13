@@ -1626,3 +1626,21 @@ source fixture nevertheless verifies `scala.io.Source.stdin` end to end.
 See the [#1051 checkpoint](typer-classpath-corpus-audit-3.9.0.md#1051-package-term-hardening-checkpoint)
 for frozen-row movement, blocker reasons, performance limits, and the single
 next-sprint recommendation. No default-import behavior is implied.
+
+### #1072 post-parity Object module reprofile
+
+The current audit also emits
+`typer-classpath-corpus-audit-3.9.0-object-module-reprofile.tsv`, joined against
+the immutable 576-row #1051 checkpoint in
+`typer-classpath-corpus-audit-1051-object-module-blockers.tsv`. Stable keys use
+source paths and AST tree indexes, never arena IDs. The frozen rows include the
+method and failed-attempt trees, direct/inherited attribution, and any exact
+package-term requests/module identities observed at the baseline. Current rows
+separate Object origin, ModuleClass lookup outcome and state, completion,
+member lookup, rollback, and the enclosing method's current first blocker.
+
+The ignored audit test reports progress every 25 files; these progress messages
+are outside the normalized report. `--verify-determinism` still compares the
+normalized report itself byte-for-byte. A completion or member result marked
+`rolled_back` is an attempted operation and is not counted as committed
+semantic state.
