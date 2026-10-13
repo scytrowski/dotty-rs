@@ -1638,9 +1638,10 @@ fn scala_source_module_snapshot(
         .entered_symbols()
         .count();
 
-    let module_prefix = store
-        .types
-        .alloc(Type::type_ref(definitions.no_prefix, module_class));
+    let module_prefix = store.types.alloc(Type::TermRef {
+        prefix,
+        target: dotty_core::TermRefTarget::Symbol(source_term),
+    });
     let stdin_name = dotty_core::Name::new(store.names.intern("stdin"), Namespace::Term);
     let stdin = resolver
         .resolve_member(
