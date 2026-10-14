@@ -1644,3 +1644,29 @@ are outside the normalized report. `--verify-determinism` still compares the
 normalized report itself byte-for-byte. A completion or member result marked
 `rolled_back` is an attempted operation and is not counted as committed
 semantic state.
+
+### #1073 corrected resolver-parity checkpoint
+
+Source-owned objects obtain their `ModuleClass` from the source semantic index;
+external objects require the classpath resolver's authoritative module
+identity. A `$`-suffixed class name alone never establishes an Object. The
+audit-wrapper fixture checks exact parity with the direct classpath resolver
+for the pinned Scala 3.9.0 `scala.io.Source.stdin`, including successful
+ModuleClass completion, a resolved `stdin` member, and a missing-member result.
+Rollback regressions also verify that observations remain visible as attempts
+while rolled-back symbols do not count as committed state, and that the same
+module member can be resolved again after rollback.
+
+The corrected corpus contains 17 external ModuleClass completions and 58
+module-member successes across nine distinct members. It retains all 576
+#1051 module observations and all 369 #1046 module/import rows; 197 rows moved
+past their baseline first blocker and none of the 3,297 local methods typed.
+The largest attributable residual is first-segment/package import resolution:
+2,394 observations across 209 files and 30 targets. The 31 remaining
+`ObjectModuleClassUnavailable` rows have no authoritative Object target
+identity, so they do not establish a new broad module-completion gap.
+
+See the [#1073 corrected audit checkpoint](typer-classpath-corpus-audit-3.9.0.md#1073-post-auditresolver-parity-gate-and-next-sprint)
+and [append-only classpath comparison](typer-deferred-classpath-hardening-3.9.0.md#1073-post-parity-comparison-and-sprint-recommendation)
+for the independent metric definitions, limits, and single recommended next
+sprint. The two normalized pinned reports compared byte-for-byte.

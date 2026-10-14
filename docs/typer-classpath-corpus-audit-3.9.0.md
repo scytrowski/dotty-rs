@@ -50,6 +50,36 @@ Current first blockers in the frozen cohort: `ApplicationCalleeNotMethod` 1, `If
 
 See [`typer-classpath-corpus-audit-3.9.0-object-module-reprofile.tsv`](typer-classpath-corpus-audit-3.9.0-object-module-reprofile.tsv) for each frozen row, its request keys, Object/ModuleClass identities, lookup/completion/member outcomes, rollback status, and current first blocker.
 
+## #1073 Post-AuditResolver-parity gate and next sprint
+
+This checkpoint uses the corrected pinned #1072 corpus output, produced by two
+normalized runs that compared byte-for-byte. #1073 adds regression and
+reporting gates without changing resolver behavior, so those exact audit
+inputs and outcomes remain current. The audit processed 1,236 files with no
+read, parser, or namer failures. Frozen #976/#1023/#1051 checkpoints remain
+unchanged.
+
+| Independent measure | Corrected corpus result |
+| --- | --- |
+| Package-term requests / canonical Object results | 14,157 / 13,083; 1 non-object, 1,073 unresolved, 0 errors |
+| External ModuleClass completion / module-member successes | 17 completions / 58 member successes across 9 distinct members |
+| Frozen #1051 module rows | 576 rows / 77 files retained; row sidecar records each lookup, completion, member outcome, rollback state, and new blocker |
+| Frozen #1046 module/import cohort | 369 rows accounted for; 358 validated module identities; 197 rows past their baseline blocker; 0 fully typed |
+| External class target gate | All 29 previously successful target keys retained; 13,452 class-symbol successes / 88 distinct class identities |
+| Local method typing | 0 / 3,297; denominator and definition unchanged |
+| Dependency profile | Median / p95 / max depth 0 / 2 / 4; max completed-class fanout 8 (limits: p95 <= 6, fanout <= 16) |
+| Remaining first blockers | `ImportQualifierNotFound` 2,573 / 228 files; first-segment/package cause 2,394 / 209 files / 30 targets; term/object materialization gap 150 / 17 files / 4 targets |
+
+| Next-sprint candidate | Current evidence | Reuse and risk |
+| --- | --- | --- |
+| A. Genuine Object/ModuleClass completion gap | 31 `ObjectModuleClassUnavailable` observations / 4 files / 0 distinct targets with authoritative Object provenance; the corpus already records 17 completions and 58 member successes | Resolver parity and the positive `Source.stdin` fixture are proven; the residual rows do not identify a grounded target for a broader module sprint |
+| B. Bounded source import first-segment/package resolution | 2,394 first-segment/package failures / 209 files / 30 targets, plus 150 term/object materialization-gap observations / 17 files / 4 targets | Reuses package and resolver attribution; keep the slice bounded to observed root/owner prefixes, without default imports. Main risk is crossing package/import ownership boundaries |
+| C. Scala TASTy unresolved supertypes | 212 failures / 26 requested roots / 51 files, including `scala/annotation/retainsCap` | Reuses structured TASTy failure reporting; broader binary semantic-reference compatibility than B |
+| D. Anonymous class instantiation | 32 observations / 15 files | Reuses ordinary `new` typing; requires anonymous identity, ownership, ClassInfo, and constructor lowering |
+| E. External generic member adaptation | No current blocker evidence isolates generic adaptation; successful module members are reported separately | Do not implement speculatively until the audit reaches and measures this case |
+
+**Recommend exactly one next sprint: B, a bounded source import first-segment/package resolution slice.** It has the largest corrected, attributable reach (2,394 observations, 209 files, 30 exact targets); the additional 150 term/object gap observations identify four more target forms. The module parity work is now exercised by 17 full-corpus completions and 58 member successes, while residual module-unavailable rows have no authoritative target identities. Preserve explicit unresolved and ambiguous cases, and do not add default imports. This recommendation supersedes the historical #1051 recommendation above; that checkpoint remains immutable.
+
 ## #946–#950 impure function hardening and next sprint
 
 Historical #950 snapshot: the frozen #946 cohort retained all 13 method observations across 3 `FunctionWithMods` trees in 2 files, with the original one-argument `[Impure]` ordinary-arrow shape and 1 direct / 12 inherited attributions. The old first-blocker count was 13 / 2 files; after #949 it was 0 / 0. Per-row accounting in that snapshot showed all 13 stopping at `SymbolResolution`; none was fully typed. The source-type cache was rolled back with each enclosing failed method transaction, so the snapshot’s `projection=not_completed` column meant no projected root type was published after that method attempt. Focused source projection regressions verified that the impure alias was selected and preserved before normalization; the corpus result was bounded by symbol resolution. The figures and recommendation in this section record the #950 snapshot and are not recalculated by this script.

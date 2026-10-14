@@ -339,3 +339,43 @@ fixture gate.
 Build parallelism and full-workspace test concurrency were limited to two.
 The frozen #976 report is byte-for-byte identical to the pre-sprint checked
 report; only the current report and its generated cohort sidecar are refreshed.
+
+## #1073 post-parity comparison and sprint recommendation
+
+This is an append-only checkpoint; the #976, #1023, and #1051 results and
+recommendations above remain historical. The corrected pinned audit already
+compares two normalized Scala 3.9.0 / Temurin 21.0.8 runs byte-for-byte. The
+#1073 changes add regression assertions and this comparison, not resolver
+behavior, so the audit output remains the same.
+
+| Measure | Corrected result | Gate / interpretation |
+| --- | ---: | --- |
+| Package-term requests / canonical Object results | 14,157 / 13,083 | One non-object result, 1,073 unresolved, zero errors; object identity remains separate from module completion |
+| External ModuleClass completion / module-member success | 17 / 58 across 9 distinct members | Positive full-corpus reach after parity; the pinned `scala.io.Source.stdin` path separately completes and resolves through the audit wrapper |
+| #1051 module reprofile cohort | 576 rows / 77 files | Every frozen row has a stable source/method key and current lookup, completion, member, rollback, and blocker outcome |
+| #1046 module/import cohort | 369 rows; 358 validated identities; 197 past baseline blocker; 0 fully typed | Moved first blockers are not counted as fully typed methods |
+| Historical successful class target keys | 29 retained | Current audit has 13,452 class-symbol successes / 88 distinct identities |
+| Dependency completion depth | median / p95 / max = 0 / 2 / 4 | p95 <= 6 |
+| Maximum completed-class fanout | 8 | <= 16 |
+| Typed local methods | 0 / 3,297 | Original denominator and definition retained |
+
+The post-parity import split is 2,394 `ImportQualifierNotFound` observations
+whose cause is first-segment/package unresolved (209 files, 30 exact targets),
+plus 150 term/object materialization-gap observations (17 files, four targets).
+These prefixes are not successfully materialized. The competing candidates
+are 31 `ObjectModuleClassUnavailable` observations in four files with zero
+distinct targets carrying authoritative Object provenance, 212 TASTy
+unresolved-supertype failures across 26 roots / 51 files, and 32 anonymous
+class instantiation observations across 15 files. Module parity is working at
+the corpus boundary (17 completions and 58 member successes); the remaining
+unavailable rows do not identify a grounded target for a wider module sprint.
+
+**Recommend exactly one next sprint: a bounded source import first-segment /
+package resolution slice.** It has the largest corrected attributable reach:
+2,394 observations, 209 files, 30 exact targets, with four additional target
+forms in the term/object materialization-gap bucket. Reuse the package and
+resolver attribution paths, keep ownership boundaries explicit, and do not
+add default imports. TASTy parent work and anonymous classes remain measured
+alternatives with separate owners and higher scope/identity risk. Generic
+member adaptation has no isolated corpus blocker that justifies implementing
+it speculatively.

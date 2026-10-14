@@ -9,7 +9,7 @@ use dotty_classloader::classloader::{
 };
 use dotty_core::ast::{Match, Modifier, Tree, TreeKind, Untyped, UntypedNode, VisibilitySyntax};
 use dotty_core::ids::TreeId;
-use dotty_core::types::{Type, TypeRefTarget};
+use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, MemberRequest, MemberSelector, MemberSpace, Namespace, Packages, ResolutionError,
     ResolverCheckpoint, SemanticStore, SourceId, SourceText, SymbolId, SymbolResolver, TextRange,
@@ -2050,6 +2050,155 @@ fn audit_and_classpath_resolvers_match_for_real_scala_source_module() {
     }));
 }
 
+#[test]
+fn source_expression_failure_rolls_back_module_before_successful_member_retry() {
+    let text = "object Audit { def use: Int = { scala.io.Source.stdin; true } }";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    let mut namer_packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "module-transaction.scala",
+        &mut store,
+        &mut namer_packages,
+    )
+    .unwrap();
+    let (rhs, method) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            Some((definition.rhs?, index.symbol_at(source, tree)?))
+        })
+        .expect("fixture contains one method body");
+    let stdin_selection = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::Select(select) if store.names.resolve(select.name.text()) == "stdin" => {
+                Some(tree)
+            }
+            _ => None,
+        })
+        .expect("fixture contains the real Source.stdin selection");
+    let metrics = Rc::new(RefCell::new(ResolverMetrics {
+        current_file: "module-transaction.scala".to_owned(),
+        current_method: "Audit.use".to_owned(),
+        ..ResolverMetrics::default()
+    }));
+    let resolver = AuditResolver {
+        inner: ClasspathSymbolResolver::new(
+            ScalaSourceAuditPath,
+            definitions,
+            LoadingSession::with_packages(namer_packages),
+        )
+        .with_load_profile_collection()
+        .with_module_resolution_profile_collection(),
+        metrics: Rc::clone(&metrics),
+        class_path_probe: None,
+    };
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let context = typer.expression_context_for(method).unwrap();
+    let store_before = typer.store().checkpoint();
+    let typed_before = typer.typed_ast().checkpoint();
+
+    let error = typer
+        .type_expression_expected(rhs, context, definitions.int)
+        .expect_err("the final Boolean should fail the enclosing Int conformance check");
+    assert!(matches!(
+        error,
+        TyperError::ExpectedExpressionTypeMismatch {
+            source: error_source,
+            tree_index,
+            actual,
+            expected,
+        } if error_source == source
+            && tree_index == rhs.index()
+            && actual == definitions.boolean
+            && expected == definitions.int
+    ));
+    assert_eq!(typer.store().checkpoint(), store_before);
+    assert_eq!(typer.typed_ast().checkpoint(), typed_before);
+    assert_eq!(typer.source_type_index().type_at(source, rhs), None);
+    assert_eq!(
+        typer.source_typed_index().get(source, stdin_selection),
+        None
+    );
+
+    let typed_stdin = typer
+        .type_expression(stdin_selection, context)
+        .expect("Source.stdin must type through SourceTyper and AuditResolver");
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(stdin),
+        ..
+    } = typer
+        .store()
+        .types
+        .get(typer.typed_ast().get(typed_stdin).ty)
+    else {
+        panic!("Source.stdin should preserve the canonical member symbol");
+    };
+    let stdin = *stdin;
+    let stdin_entry = typer.store().symbols.get(stdin);
+    assert_eq!(
+        typer.store().names.resolve(stdin_entry.name.text()),
+        "stdin"
+    );
+    assert_eq!(
+        audit_symbol_path(typer.store(), stdin_entry.owner.unwrap()),
+        "scala.io.Source$"
+    );
+    assert_eq!(
+        typer.source_typed_index().get(source, stdin_selection),
+        Some(typed_stdin)
+    );
+
+    let metrics = metrics.borrow();
+    let source_module_completions = metrics
+        .module_operation_observations
+        .iter()
+        .filter(|observation| {
+            observation.operation == "complete_module_class"
+                && observation
+                    .module_class_identity
+                    .contains("scala/io/Source")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(source_module_completions.len(), 2);
+    assert!(source_module_completions.iter().all(|observation| {
+        observation.result == "completed"
+            && observation.result_state == "Complete(ClassInfo)"
+            && observation.module_state == "Complete(ClassInfo)"
+    }));
+    assert_eq!(
+        source_module_completions[0].transaction_state,
+        "rolled_back"
+    );
+    assert_eq!(source_module_completions[1].transaction_state, "observed");
+}
+
 fn module_audit_object(
     store: &mut SemanticStore,
     definitions: Definitions,
@@ -2270,6 +2419,57 @@ fn audit_module_completion_failure_is_atomic() {
     assert_eq!(observations[1].result, "error");
     assert_eq!(observations[1].result_state, "Missing");
     assert_eq!(observations[1].error_category, Some("malformed"));
+}
+
+#[test]
+fn audit_module_completion_records_an_unowned_false_result() {
+    let mut store = SemanticStore::new();
+    let (definitions, mut direct) = direct_module_resolver(&mut store, true);
+    let object = module_audit_object(&mut store, definitions, &mut direct);
+    let module_class = direct
+        .module_class_of_object(&store, object)
+        .unwrap()
+        .unwrap();
+
+    let metrics = Rc::new(RefCell::new(ResolverMetrics {
+        current_file: "fixture.scala".to_owned(),
+        current_method: "unowned-module-completion()".to_owned(),
+        ..ResolverMetrics::default()
+    }));
+    let mut audit = AuditResolver {
+        inner: ClasspathSymbolResolver::new(
+            ModuleAuditPath {
+                include_object_class: true,
+            },
+            definitions,
+            LoadingSession::new(),
+        )
+        .with_load_profile_collection(),
+        metrics: Rc::clone(&metrics),
+        class_path_probe: None,
+    };
+    let checkpoint = store.checkpoint();
+    assert_eq!(
+        audit.complete_module_class(&mut store, module_class),
+        Ok(false)
+    );
+    assert_eq!(store.checkpoint(), checkpoint);
+
+    let metrics = metrics.borrow();
+    assert_eq!(metrics.module_completion_resolver_calls, 1);
+    assert_eq!(
+        metrics
+            .module_completion_resolver_outcomes
+            .get("unsupported"),
+        Some(&1)
+    );
+    let [observation] = metrics.module_operation_observations.as_slice() else {
+        panic!("the attempted unsupported completion should be retained");
+    };
+    assert_eq!(observation.operation, "complete_module_class");
+    assert_eq!(observation.result, "unsupported");
+    assert_eq!(observation.result_state, "Missing");
+    assert_eq!(observation.transaction_state, "observed");
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2500,6 +2700,89 @@ fn existing_module_shell_rollback_snapshot(
     )
 }
 
+fn existing_module_member_rollback_snapshot(
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    resolver: &mut dyn SymbolResolver,
+) -> String {
+    let object = module_audit_object(store, definitions, resolver);
+    let module_class = resolver
+        .module_class_of_object(store, object)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.symbols.get(module_class).info,
+        dotty_core::SymbolInfo::Missing
+    );
+
+    let package = store.symbols.get(object).owner.unwrap();
+    let package_prefix = store
+        .types
+        .alloc(Type::type_ref(definitions.no_prefix, package));
+    let object_prefix = store.types.alloc(Type::TermRef {
+        prefix: package_prefix,
+        target: dotty_core::TermRefTarget::Symbol(object),
+    });
+    let make_request = MemberRequest {
+        prefix: object_prefix,
+        name: dotty_core::Name::new(store.names.intern("make"), Namespace::Term),
+        selector: MemberSelector::Unique,
+        space: MemberSpace::Prefix,
+    };
+
+    let store_checkpoint = store.checkpoint();
+    let resolver_checkpoint = resolver.checkpoint();
+    assert!(resolver.complete_module_class(store, module_class).unwrap());
+    let first_member = resolver
+        .resolve_member(store, &make_request)
+        .unwrap()
+        .expect("Both.make should resolve from the completed module");
+    assert_eq!(store.symbols.get(first_member).owner, Some(module_class));
+    let completed_checkpoint = store.checkpoint();
+    assert_eq!(
+        resolver.resolve_member(store, &make_request),
+        Ok(Some(first_member)),
+        "a repeated member lookup reuses its canonical symbol"
+    );
+    assert_eq!(store.checkpoint(), completed_checkpoint);
+
+    resolver.rollback_to(store, resolver_checkpoint);
+    store.rollback_to(store_checkpoint);
+    assert_eq!(store.checkpoint(), store_checkpoint);
+    assert_eq!(
+        store.symbols.get(module_class).info,
+        dotty_core::SymbolInfo::Missing,
+        "rollback restores the existing module shell"
+    );
+    assert!(!store.symbols.contains(first_member));
+    assert_eq!(
+        resolver.module_class_of_object(store, object),
+        Ok(Some(module_class))
+    );
+
+    assert!(resolver.complete_module_class(store, module_class).unwrap());
+    let retried_member = resolver
+        .resolve_member(store, &make_request)
+        .unwrap()
+        .expect("the same module member should resolve after rollback");
+    assert_eq!(store.symbols.get(retried_member).owner, Some(module_class));
+    let retried_checkpoint = store.checkpoint();
+    assert_eq!(
+        resolver.resolve_member(store, &make_request),
+        Ok(Some(retried_member)),
+        "a successful retry is stable and idempotent"
+    );
+    assert_eq!(store.checkpoint(), retried_checkpoint);
+    let entry = store.symbols.get(retried_member);
+    format!(
+        "{}|{}|{:?}|{}",
+        audit_symbol_path(store, object),
+        audit_symbol_path(store, module_class),
+        entry.kind,
+        audit_symbol_path(store, entry.owner.unwrap())
+    )
+}
+
 #[test]
 fn audit_and_classpath_resolvers_match_for_module_rollbacks_and_retry() {
     let mut direct_new_store = SemanticStore::new();
@@ -2566,6 +2849,47 @@ fn audit_and_classpath_resolvers_match_for_module_rollbacks_and_retry() {
         .filter(|observation| observation.operation == "complete_module_class")
         .count();
     assert_eq!(completion_observations, 3);
+
+    let mut direct_member_store = SemanticStore::new();
+    let (direct_member_definitions, mut direct_member) =
+        direct_module_resolver(&mut direct_member_store, true);
+    let expected_member = existing_module_member_rollback_snapshot(
+        &mut direct_member_store,
+        direct_member_definitions,
+        &mut direct_member,
+    );
+
+    let mut audit_member_store = SemanticStore::new();
+    let (audit_member_definitions, mut audit_member) = module_audit_resolver(
+        &mut audit_member_store,
+        true,
+        "fixture.scala",
+        "existing-shell-member-rollback()",
+    );
+    let actual_member = existing_module_member_rollback_snapshot(
+        &mut audit_member_store,
+        audit_member_definitions,
+        &mut audit_member,
+    );
+    assert_eq!(actual_member, expected_member);
+    let member_observations = audit_member.metrics.borrow();
+    let module_members = &member_observations.module_member_observations;
+    assert_eq!(module_members.len(), 4);
+    assert!(
+        module_members[..2]
+            .iter()
+            .all(|observation| observation.transaction_state == "rolled_back")
+    );
+    assert!(
+        module_members[2..]
+            .iter()
+            .all(|observation| observation.transaction_state == "observed")
+    );
+    assert!(module_members.iter().all(|observation| {
+        observation.request_key.contains("name=make::")
+            && observation.result == "success"
+            && observation.module_state_after == "Complete(ClassInfo)"
+    }));
 }
 
 #[test]
