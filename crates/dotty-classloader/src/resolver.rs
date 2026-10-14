@@ -965,6 +965,10 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             return Ok(None);
         }
 
+        // Enter the root only after the full target has positive evidence.
+        // This lets us detect a conflicting top-level term before Packages
+        // adds the first package segment to the root scope.
+        self.session.packages.resolve_package(store, "");
         let mut prefix = Vec::with_capacity(path.len());
         let mut resolved = None;
         for (index, segment) in path.iter().enumerate() {
@@ -3542,6 +3546,42 @@ mod tests {
             [term_b]
         );
         assert!(resolver.session.packages.get(&["a", "b"]).is_none());
+    }
+
+    #[test]
+    fn a_top_level_term_collision_is_checked_before_entering_a_package() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = dotty_core::Packages::new();
+        let root =
+            packages.enter::<&str>(&mut store, dotty_core::SymbolOrigin::Synthetic, &[])[0].symbol;
+        let root_scope = packages.scope_of(root).unwrap();
+        let name_a = Name::new(store.names.intern("a"), Namespace::Term);
+        let term_a = store.symbols.alloc(Symbol {
+            name: name_a,
+            owner: Some(root),
+            kind: SymbolKind::Object,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: dotty_core::SymbolOrigin::Source(SourceId::from_index(6)),
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store.scopes.get_mut(root_scope).enter(name_a, term_a);
+        let mut resolver = ClasspathSymbolResolver::new(
+            DescendantOnlyClassPath,
+            definitions,
+            LoadingSession::with_packages(packages),
+        );
+
+        assert_eq!(
+            resolver.resolve_package(&mut store, &["a"]),
+            Err(ResolutionError::Ambiguous { candidates: 2 })
+        );
+        assert_eq!(store.scopes.get(root_scope).lookup_all(&name_a), [term_a]);
+        assert!(resolver.session.packages.get(&["a"]).is_none());
     }
 
     #[test]
