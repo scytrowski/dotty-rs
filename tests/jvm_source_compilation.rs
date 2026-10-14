@@ -13,8 +13,7 @@ use dotty_core::{
 };
 use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
-    JvmCodegenError, JvmCompilationUnit, JvmIntIntrinsic, JvmLocalBinding, JvmMethodPlan,
-    emit_class,
+    JvmCodegenError, JvmCompilationUnit, JvmLocalBinding, JvmMethodPlan, emit_class,
 };
 use dotty_lexer::{ContextualScanner, LexerDiagnostic};
 use dotty_namer::{
@@ -505,14 +504,35 @@ fn scala_delegator_calls_and_blocks_flow_through_the_frontend_into_a_verifiable_
 }
 
 #[test]
-fn canonical_int_arithmetic_lowers_to_ordered_jvm_instructions() {
-    let output = TestOutputDirectory::new("int-arithmetic-intrinsics");
-    let artifact = compile_source(
-        "class IntegerOps { def add(a: Int, b: Int): Int = a + b; def subtract(a: Int, b: Int): Int = a - b; def multiply(a: Int, b: Int): Int = a * b; def divide(a: Int, b: Int): Int = a / b; def remainder(a: Int, b: Int): Int = a % b; def left(): Int = 6; def right(): Int = 2; def ordered(): Int = left() + right(); def nested(x: Int, y: Int): Int = (x + y) * 2; def localState(n: Int): Int = { var total = n + 1; total = total + n; total }; def branch(x: Int): Int = if true then x + 1 else x * 2; def loop(): Int = { var total = 0; while false do { total = total + 1 }; total } }\n",
-        "IntegerOps.scala",
-        output.path(),
-    )
-    .unwrap();
+fn canonical_int_arithmetic_and_comparisons_lower_to_ordered_jvm_instructions() {
+    let output = TestOutputDirectory::new("int-operator-intrinsics");
+    let source = r#"class IntegerOps {
+          def add(a: Int, b: Int): Int = a + b
+          def subtract(a: Int, b: Int): Int = a - b
+          def multiply(a: Int, b: Int): Int = a * b
+          def divide(a: Int, b: Int): Int = a / b
+          def remainder(a: Int, b: Int): Int = a % b
+          def left(): Int = 6
+          def right(): Int = 2
+          def ordered(): Int = left() + right()
+          def nested(x: Int, y: Int): Int = (x + y) * 2
+          def localState(n: Int): Int = { var total = n + 1; total = total + n; total }
+          def branch(x: Int): Int = if true then x + 1 else x * 2
+          def loop(): Int = { var total = 0; while false do { total = total + 1 }; total }
+          def less(a: Int, b: Int): Boolean = a < b
+          def lessOrEqual(a: Int, b: Int): Boolean = a <= b
+          def greater(a: Int, b: Int): Boolean = a > b
+          def greaterOrEqual(a: Int, b: Int): Boolean = a >= b
+          def savedFlag(a: Int, b: Int): Boolean = { val flag: Boolean = a < b; flag }
+          def comparisonIf(a: Int, b: Int): Int = if a < b then 1 else 0
+          def nestedComparison(a: Int, b: Int): Int = if a < b then { if a <= b then 1 else 2 } else { if a >= b then 3 else 4 }
+          def comparisonLoop(limit: Int): Int = { var i = 0; while i <= limit do { i = i + 1 }; i }
+        }
+"#;
+    let artifact = compile_source(source, "IntegerOps.scala", output.path()).unwrap();
+    let second_output = TestOutputDirectory::new("int-operator-intrinsics-second");
+    let second_artifact = compile_source(source, "IntegerOps.scala", second_output.path()).unwrap();
+    assert_eq!(artifact.class.bytes(), second_artifact.class.bytes());
     let mut reader = Reader::new(artifact.class.bytes());
     let class = ClassFile::decode(&mut reader).expect("IntegerOps should decode");
     class
@@ -563,12 +583,62 @@ fn canonical_int_arithmetic_lowers_to_ordered_jvm_instructions() {
         "loop back-edge remains in CFG"
     );
 
+    for (name, opcode) in [
+        ("less", 0xa1),
+        ("lessOrEqual", 0xa4),
+        ("greater", 0xa3),
+        ("greaterOrEqual", 0xa2),
+    ] {
+        let code = emitted_method_code(&class, name);
+        assert_opcode_sequence(code, &[0x1b, 0x1c, opcode, 0x03, 0xa7, 0x04, 0xac]);
+        assert!(
+            has_stack_map_table(&class, name),
+            "{name} should have generated join frames"
+        );
+        let branch_targets = decode_branch_targets(code)
+            .into_iter()
+            .map(|(_, _, target)| target)
+            .collect::<Vec<_>>();
+        let mut expected_frame_pcs = branch_targets.clone();
+        expected_frame_pcs.sort_unstable();
+        expected_frame_pcs.dedup();
+        assert_eq!(stack_map_frame_pcs(&class, name), expected_frame_pcs);
+    }
+    assert_opcode_sequence(
+        emitted_method_code(&class, "savedFlag"),
+        &[0x1b, 0x1c, 0xa1, 0x03, 0xa7, 0x04, 0x3e, 0x1d, 0xac],
+    );
+    let if_opcodes = decode_subset_instructions(emitted_method_code(&class, "comparisonIf"));
+    assert!(
+        if_opcodes.iter().any(|(_, opcode)| *opcode == 0xa1),
+        "if condition lowers the comparison branch"
+    );
+    let nested_opcodes =
+        decode_subset_instructions(emitted_method_code(&class, "nestedComparison"));
+    assert_eq!(
+        nested_opcodes
+            .iter()
+            .filter(|(_, opcode)| (0xa1..=0xa4).contains(opcode))
+            .count(),
+        3,
+        "nested If expressions retain all signed comparison branches"
+    );
+    let comparison_loop = decode_subset_instructions(emitted_method_code(&class, "comparisonLoop"));
+    assert!(
+        comparison_loop.iter().any(|(_, opcode)| *opcode == 0xa4),
+        "while condition lowers the <= comparison"
+    );
+    assert!(
+        comparison_loop.iter().any(|(_, opcode)| *opcode == 0xa7),
+        "comparison loop retains its back-edge"
+    );
+
     if require_jdk_or_skip() {
         let output_path = output.path().to_str().expect("UTF-8 output path");
         let harness_path = output.path().join("IntegerOpsHarness.java");
         fs::write(
             &harness_path,
-            "public final class IntegerOpsHarness { public static void main(String[] args) { IntegerOps value = new IntegerOps(); if (value.add(2, 5) != 7 || value.subtract(2, 5) != -3 || value.multiply(-7, 3) != -21) throw new AssertionError(\"basic arithmetic\"); if (value.divide(-7, 3) != -2 || value.divide(Integer.MIN_VALUE, -1) != Integer.MIN_VALUE) throw new AssertionError(\"division semantics\"); if (value.remainder(-7, 3) != -1 || value.remainder(7, -3) != 1 || value.remainder(Integer.MIN_VALUE, -1) != 0) throw new AssertionError(\"remainder semantics\"); if (value.add(Integer.MAX_VALUE, 1) != Integer.MIN_VALUE) throw new AssertionError(\"addition overflow\"); if (value.ordered() != 8 || value.nested(3, 4) != 14 || value.localState(5) != 11 || value.branch(3) != 4 || value.loop() != 0) throw new AssertionError(\"nested/local/control-flow lowering\"); try { value.divide(1, 0); throw new AssertionError(\"division by zero returned\"); } catch (ArithmeticException expected) { } try { value.remainder(1, 0); throw new AssertionError(\"remainder by zero returned\"); } catch (ArithmeticException expected) { } System.out.println(\"integer intrinsics ok\"); } }\n",
+            "public final class IntegerOpsHarness { public static void main(String[] args) { IntegerOps value = new IntegerOps(); if (value.add(2, 5) != 7 || value.subtract(2, 5) != -3 || value.multiply(-7, 3) != -21) throw new AssertionError(\"basic arithmetic\"); if (value.divide(-7, 3) != -2 || value.divide(Integer.MIN_VALUE, -1) != Integer.MIN_VALUE) throw new AssertionError(\"division semantics\"); if (value.remainder(-7, 3) != -1 || value.remainder(7, -3) != 1 || value.remainder(Integer.MIN_VALUE, -1) != 0) throw new AssertionError(\"remainder semantics\"); if (value.add(Integer.MAX_VALUE, 1) != Integer.MIN_VALUE) throw new AssertionError(\"addition overflow\"); if (value.ordered() != 8 || value.nested(3, 4) != 14 || value.localState(5) != 11 || value.branch(3) != 4 || value.loop() != 0) throw new AssertionError(\"arithmetic lowering\"); if (!value.less(-2, -1) || value.less(1, 1) || !value.less(Integer.MIN_VALUE, Integer.MAX_VALUE) || value.less(Integer.MAX_VALUE, Integer.MIN_VALUE)) throw new AssertionError(\"less signed boundaries\"); if (!value.lessOrEqual(5, 5) || value.lessOrEqual(6, 5) || !value.lessOrEqual(Integer.MIN_VALUE, Integer.MAX_VALUE)) throw new AssertionError(\"less-or-equal\"); if (!value.greater(1, -1) || value.greater(2, 2) || !value.greater(Integer.MAX_VALUE, Integer.MIN_VALUE)) throw new AssertionError(\"greater signed boundaries\"); if (!value.greaterOrEqual(2, 2) || value.greaterOrEqual(-2, -1) || !value.greaterOrEqual(Integer.MAX_VALUE, Integer.MIN_VALUE)) throw new AssertionError(\"greater-or-equal\"); if (!value.savedFlag(-1, 0)) throw new AssertionError(\"boolean local value\"); if (value.comparisonIf(1, 2) != 1 || value.comparisonIf(3, 2) != 0 || value.nestedComparison(1, 1) != 3 || value.nestedComparison(1, 2) != 1 || value.nestedComparison(3, 2) != 3 || value.comparisonLoop(3) != 4) throw new AssertionError(\"comparison control flow\"); try { value.divide(1, 0); throw new AssertionError(\"division by zero returned\"); } catch (ArithmeticException expected) { } try { value.remainder(1, 0); throw new AssertionError(\"remainder by zero returned\"); } catch (ArithmeticException expected) { } System.out.println(\"integer intrinsics ok\"); } }\n",
         )
         .expect("write IntegerOpsHarness");
         let javac = Command::new("javac")
@@ -605,19 +675,11 @@ fn canonical_int_arithmetic_lowers_to_ordered_jvm_instructions() {
 }
 
 #[test]
-fn canonical_int_comparison_is_recognized_but_not_miscompiled_as_a_call() {
+fn int_equality_remains_outside_the_relational_intrinsic_subset() {
     assert_source_failure(
-        "int-comparison-not-lowered",
-        "class UnsupportedComparison { def less(a: Int, b: Int): Boolean = a < b }\n",
-        |failure| {
-            matches!(
-                failure,
-                PipelineFailure::Codegen(JvmCodegenError::UnsupportedIntIntrinsic {
-                    intrinsic: JvmIntIntrinsic::IntLessThan,
-                    ..
-                })
-            )
-        },
+        "int-equality-not-lowered",
+        "class UnsupportedEquality { def equal(a: Int, b: Int): Boolean = a == b }\n",
+        |failure| matches!(failure, PipelineFailure::Typer(_)),
     );
 }
 
@@ -659,6 +721,42 @@ fn emitted_method_code<'a>(class: &ClassFile<'a>, name: &str) -> &'a [u8] {
         panic!("{name} should have one Code attribute");
     };
     code.code
+}
+
+fn has_stack_map_table(class: &ClassFile<'_>, method_name: &str) -> bool {
+    let method = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok(method_name))
+        .unwrap_or_else(|| panic!("missing method {method_name}"));
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("{method_name} should have one Code attribute");
+    };
+    code.attributes.iter().any(|attribute| {
+        matches!(attribute, Attribute::Other(raw) if class.constant_pool.utf8(raw.name_index) == Ok("StackMapTable"))
+    })
+}
+
+fn stack_map_frame_pcs(class: &ClassFile<'_>, method_name: &str) -> Vec<usize> {
+    let method = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok(method_name))
+        .unwrap_or_else(|| panic!("missing method {method_name}"));
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("{method_name} should have one Code attribute");
+    };
+    let [Attribute::Other(stack_map)] = code
+        .attributes
+        .iter()
+        .filter(|attribute| {
+            matches!(attribute, Attribute::Other(raw) if class.constant_pool.utf8(raw.name_index) == Ok("StackMapTable"))
+        })
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("{method_name} should have one StackMapTable");
+    };
+    decode_full_frame_pcs(stack_map.bytes)
 }
 
 fn assert_virtual_invocations(
@@ -726,7 +824,7 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
             | 0xac
             | 0xb1 => 1,
             0x10 | 0x15 | 0x36 => 2,
-            0x99 | 0xa7 | 0xb6..=0xb8 => 3,
+            0x99 | 0x9f..=0xa4 | 0xa7 | 0xb6..=0xb8 => 3,
             other => panic!("unexpected opcode in supported JVM fixture: {other:#04x}"),
         };
         assert!(
@@ -742,7 +840,7 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
 fn decode_branch_targets(code: &[u8]) -> Vec<(usize, u8, usize)> {
     decode_subset_instructions(code)
         .into_iter()
-        .filter(|(_, opcode)| matches!(*opcode, 0x99 | 0xa7))
+        .filter(|(_, opcode)| matches!(*opcode, 0x99 | 0x9f..=0xa4 | 0xa7))
         .map(|(offset, opcode)| {
             let displacement = i16::from_be_bytes([code[offset + 1], code[offset + 2]]);
             let target = offset as isize + isize::from(displacement);

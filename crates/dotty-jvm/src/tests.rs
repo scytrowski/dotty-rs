@@ -5508,6 +5508,44 @@ fn same_named_noncanonical_int_method_is_not_an_intrinsic() {
         resolve_int_intrinsic(&fixture.store, &fixture.ast, call, &fixture.definitions),
         Ok(None)
     );
+
+    let name = fixture.store.names.intern("<");
+    let signature = fixture.store.types.alloc(Type::Method(MethodType {
+        params: vec![MethodParam {
+            name: TermName::new(name),
+            ty: fixture.definitions.int,
+            erased: false,
+            varargs: false,
+        }],
+        result: fixture.definitions.boolean,
+        kind: MethodKind::Plain,
+    }));
+    let comparison = fixture.store.symbols.alloc(Symbol {
+        name: Name::new(name, Namespace::Term),
+        owner: fixture
+            .store
+            .types
+            .get(fixture.definitions.int)
+            .reference_symbol(),
+        kind: SymbolKind::Method,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Complete(signature),
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let comparison_call = fixture.call(comparison, fixture.definitions.boolean);
+    assert_eq!(
+        resolve_int_intrinsic(
+            &fixture.store,
+            &fixture.ast,
+            comparison_call,
+            &fixture.definitions,
+        ),
+        Ok(None)
+    );
 }
 
 #[test]

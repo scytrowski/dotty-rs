@@ -917,22 +917,6 @@ fn emit_int_intrinsic(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    match intrinsic {
-        JvmIntIntrinsic::IntAdd
-        | JvmIntIntrinsic::IntSubtract
-        | JvmIntIntrinsic::IntMultiply
-        | JvmIntIntrinsic::IntDivide
-        | JvmIntIntrinsic::IntRemainder => {}
-        JvmIntIntrinsic::IntLessThan
-        | JvmIntIntrinsic::IntLessOrEqual
-        | JvmIntIntrinsic::IntGreaterThan
-        | JvmIntIntrinsic::IntGreaterOrEqual => {
-            return Err(JvmCodegenError::UnsupportedIntIntrinsic {
-                tree: tree_id,
-                intrinsic,
-            });
-        }
-    }
     let receiver = match &context.tree(function)?.kind {
         TreeKind::Select(select) => select.qualifier,
         _ => {
@@ -965,7 +949,7 @@ fn emit_int_intrinsic(
         }
     }
 
-    let instruction = match intrinsic {
+    match intrinsic {
         JvmIntIntrinsic::IntAdd => code.iadd(),
         JvmIntIntrinsic::IntSubtract => code.isub(),
         JvmIntIntrinsic::IntMultiply => code.imul(),
@@ -974,9 +958,59 @@ fn emit_int_intrinsic(
         JvmIntIntrinsic::IntLessThan
         | JvmIntIntrinsic::IntLessOrEqual
         | JvmIntIntrinsic::IntGreaterThan
-        | JvmIntIntrinsic::IntGreaterOrEqual => unreachable!("comparisons returned above"),
-    };
-    instruction.map_err(|error| JvmCodegenError::CodeBuilder {
+        | JvmIntIntrinsic::IntGreaterOrEqual => {
+            let truthy = code
+                .new_label()
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            let end = code
+                .new_label()
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            match intrinsic {
+                JvmIntIntrinsic::IntLessThan => code.if_icmplt(truthy.clone()),
+                JvmIntIntrinsic::IntLessOrEqual => code.if_icmple(truthy.clone()),
+                JvmIntIntrinsic::IntGreaterThan => code.if_icmpgt(truthy.clone()),
+                JvmIntIntrinsic::IntGreaterOrEqual => code.if_icmpge(truthy.clone()),
+                _ => unreachable!("arithmetic operations returned above"),
+            }
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: tree_id,
+                error,
+            })?;
+            code.iconst(0)
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            code.goto(end.clone())
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            code.mark(truthy)
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            code.iconst(1)
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            code.mark(end)
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            return Ok(Flow::Value(JvmType::Boolean));
+        }
+    }
+    .map_err(|error| JvmCodegenError::CodeBuilder {
         tree: tree_id,
         error,
     })?;
