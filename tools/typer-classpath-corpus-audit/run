@@ -169,8 +169,13 @@ module_profile_path="${output_path%.md}-package-term-profile.tsv"
 module_blockers_path="${output_path%.md}-package-term-first-blockers.tsv"
 frozen_module_profile="$repo_root/docs/typer-classpath-corpus-audit-3.9.0-package-term-profile.tsv"
 frozen_module_blockers="$repo_root/docs/typer-classpath-corpus-audit-3.9.0-package-term-first-blockers.tsv"
+frozen_object_module_blockers="$repo_root/docs/typer-classpath-corpus-audit-1051-object-module-blockers.tsv"
 if [[ ! -f "$frozen_module_profile" || ! -f "$frozen_module_blockers" ]]; then
     printf 'frozen #1046 package-term cohort files are missing\n' >&2
+    exit 1
+fi
+if [[ ! -f "$frozen_object_module_blockers" ]]; then
+    printf 'frozen #1051 ObjectModuleClassUnavailable cohort is missing\n' >&2
     exit 1
 fi
 if [[ "$module_profile_path" != "$frozen_module_profile" ]]; then
@@ -178,6 +183,13 @@ if [[ "$module_profile_path" != "$frozen_module_profile" ]]; then
 fi
 if [[ "$module_blockers_path" != "$frozen_module_blockers" ]]; then
     cp "$frozen_module_blockers" "$module_blockers_path"
+fi
+module_reprofile_path="${output_path%.md}-object-module-reprofile.tsv"
+PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/object_module_reprofile.py" compare \
+    "$frozen_object_module_blockers" "$tmp_dir/first.report" \
+    --rows "$tmp_dir/object-module-reprofile.tsv" >"$tmp_dir/object-module-summary.txt"
+if [[ "$module_reprofile_path" != "$frozen_object_module_blockers" ]]; then
+    cp "$tmp_dir/object-module-reprofile.tsv" "$module_reprofile_path"
 fi
 printf 'Frozen #1046 baseline: 2,749 package-term observations across 80 keys; 369 first blockers (361 imports, 8 term names). Runtime resolver outcomes and distinct targets are reported separately in the audit report.\n' \
     >"$tmp_dir/module-profile-summary.txt"
@@ -203,6 +215,10 @@ printf '| Scala TASTy supertype failures | 212 errors / 26 requested roots / 51 
 printf '| Anonymous class instantiation | 32 observations / 15 files | Bounded source feature, but requires anonymous identity, ownership, ClassInfo, and constructor lowering |\n'
 printf '| External generic member adaptation | Zero corpus member successes reached | Substitution work has no measured corpus entry point yet |\n\n'
 printf '**Recommend one next sprint: resolve verified object ModuleClass availability and completion.** It is the leading current semantic blocker and applies to 46 authoritative module identities across 77 files. Start from the frozen module rows and require completed module-member resolution through the real-artifact source path. Keep import first-segment gaps observable, and do not add default imports or infer module identity from `$` resource names.\n\n'
+    printf '## #1072 Object module reprofile after resolver parity\n\n'
+    printf 'The frozen #1051 cohort retains all 576 observations across 77 source files, keyed by source method tree and original failed attempt; direct and inherited attributions are explicit. This current outcome table keeps rows whose first blocker moved or whose method was not observed. The category and blocker totals are from the first of the two byte-compared audit runs; the audit is pinned to Scala revision `%s` and JDK %s. The historical #976, #1023, and #1051 baseline sections above are not rewritten.\n\n' "$revision" "$jdk_version"
+    cat "$tmp_dir/object-module-summary.txt"
+    printf '\nSee [`%s`](%s) for each frozen row, its request keys, Object/ModuleClass identities, lookup/completion/member outcomes, rollback status, and current first blocker.\n\n' "$(basename -- "$module_reprofile_path")" "$(basename -- "$module_reprofile_path")"
 printf '## #946–#950 impure function hardening and next sprint\n\n'
 printf 'Historical #950 snapshot: the frozen #946 cohort retained all 13 method observations across 3 `FunctionWithMods` trees in 2 files, with the original one-argument `[Impure]` ordinary-arrow shape and 1 direct / 12 inherited attributions. The old first-blocker count was 13 / 2 files; after #949 it was 0 / 0. Per-row accounting in that snapshot showed all 13 stopping at `SymbolResolution`; none was fully typed. The source-type cache was rolled back with each enclosing failed method transaction, so the snapshot’s `projection=not_completed` column meant no projected root type was published after that method attempt. Focused source projection regressions verified that the impure alias was selected and preserved before normalization; the corpus result was bounded by symbol resolution. The figures and recommendation in this section record the #950 snapshot and are not recalculated by this script.\n\n'
 printf 'The full structural census still contains `FunctionWithMods` trees independently of first blockers. It also counts plain ordinary `Function` trees, which represent pure ordinary arrows in the parser. Modifier and family distributions, erased-parameter count, and `CapturesAndResult` adjacency appear in `function_with_mods_structural_inventory` below. Structural presence is not counted as a first-blocker failure.\n\n'
