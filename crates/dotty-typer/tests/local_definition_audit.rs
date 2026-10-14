@@ -4990,8 +4990,8 @@ fn pinned_scala39_local_definition_audit() {
             .source_function_outcomes
             .get("type::Function::SymbolResolution")
             .map(|bucket| bucket.count),
-        None,
-        "the shared Function1 parent fix should move this cohort away from SymbolResolution"
+        Some(5),
+        "the current main baseline retains five ordinary function-type rows at SymbolResolution"
     );
     assert_eq!(audit.source_function_method_outcomes.len(), 25);
     assert_eq!(IMPURE_FUNCTION_BASELINE.len(), 13);
