@@ -585,13 +585,12 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
 fn decode_branch_targets(code: &[u8]) -> Vec<(usize, u8, usize)> {
     decode_subset_instructions(code)
         .into_iter()
-        .filter_map(|(offset, opcode)| {
-            matches!(opcode, 0x99 | 0xa7).then(|| {
-                let displacement = i16::from_be_bytes([code[offset + 1], code[offset + 2]]);
-                let target = offset as isize + isize::from(displacement);
-                assert!(target >= 0 && (target as usize) < code.len());
-                (offset, opcode, target as usize)
-            })
+        .filter(|(_, opcode)| matches!(*opcode, 0x99 | 0xa7))
+        .map(|(offset, opcode)| {
+            let displacement = i16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+            let target = offset as isize + isize::from(displacement);
+            assert!(target >= 0 && (target as usize) < code.len());
+            (offset, opcode, target as usize)
         })
         .collect()
 }
