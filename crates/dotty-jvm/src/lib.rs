@@ -12,11 +12,11 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
-use dotty_core::ast::{Tree, Typed, TypedAst};
+use dotty_core::ast::{Tree, TreeKind, Typed, TypedAst};
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TreeId, TypeId};
 use dotty_core::store::SemanticStore;
-use dotty_core::symbols::{SymbolInfo, SymbolKind};
+use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
 
 mod call_target;
@@ -291,9 +291,34 @@ pub struct JvmMethodPlan {
     pub method: SymbolId,
     /// Parameter symbols in JVM/source order, supplied by the frontend.
     pub parameters: Vec<SymbolId>,
+    /// Ordinary local value declarations in ascending typed-tree ID order.
+    pub locals: Vec<JvmLocalBinding>,
     /// Root of this method's body in the supplied typed AST arena.
     /// `None` represents a declaration without a body.
     pub body: Option<TreeId<Typed>>,
+}
+
+/// Canonical identity binding for one typed local `val` or `var` declaration.
+///
+/// Bindings belong to exactly one [`JvmMethodPlan`]. `mutable` records the
+/// mutability observed by the frontend; validation checks it against the
+/// canonical symbol flags. This contract does not assign local slots or emit
+/// initialization instructions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JvmLocalBinding {
+    /// Exact typed `ValDef` node in the compilation unit's typed arena.
+    pub declaration: TreeId<Typed>,
+    /// Existing canonical local symbol in the compilation unit's store.
+    pub symbol: SymbolId,
+    /// Whether the source declaration is mutable (`var`).
+    pub mutable: bool,
+}
+
+impl JvmMethodPlan {
+    /// Local declarations in deterministic typed-tree ID order.
+    pub fn locals(&self) -> &[JvmLocalBinding] {
+        &self.locals
+    }
 }
 
 /// A plan failed validation against its caller-owned semantic input.
@@ -305,6 +330,8 @@ pub enum JvmCodegenError {
     UnknownMethod { method: SymbolId },
     /// The parameter ID is outside the supplied symbol table.
     UnknownParameter { parameter: SymbolId },
+    /// A local symbol ID is outside the supplied symbol table.
+    UnknownLocalSymbol { method: SymbolId, symbol: SymbolId },
     /// A symbol has a kind that is not supported for its plan role.
     UnsupportedSymbolKind {
         symbol: SymbolId,
@@ -325,6 +352,51 @@ pub enum JvmCodegenError {
     DuplicateParameter {
         parameter: SymbolId,
         method: SymbolId,
+    },
+    /// The same typed declaration is bound more than once in the unit.
+    DuplicateLocalDeclaration {
+        declaration: TreeId<Typed>,
+        method: SymbolId,
+    },
+    /// The same canonical local symbol is bound more than once in the unit.
+    DuplicateLocalSymbol { symbol: SymbolId, method: SymbolId },
+    /// A local binding names a typed node outside the supplied arena.
+    UnknownLocalDeclaration {
+        method: SymbolId,
+        declaration: TreeId<Typed>,
+    },
+    /// A local binding's typed node is not an ordinary `ValDef`.
+    InvalidLocalDeclaration {
+        method: SymbolId,
+        declaration: TreeId<Typed>,
+    },
+    /// A local declaration is not reachable from its planned method body.
+    LocalDeclarationOutsideMethod {
+        method: SymbolId,
+        declaration: TreeId<Typed>,
+    },
+    /// A method parameter was incorrectly supplied as a local declaration.
+    LocalIsMethodParameter { method: SymbolId, symbol: SymbolId },
+    /// The local binding order is not deterministic by typed declaration ID.
+    UnorderedLocalBindings { method: SymbolId },
+    /// The typed declaration and canonical local symbol disagree on type.
+    LocalTypeMismatch {
+        declaration: TreeId<Typed>,
+        symbol: SymbolId,
+        declaration_type: TypeId,
+        symbol_type: TypeId,
+    },
+    /// Frontend mutability evidence disagrees with canonical symbol flags.
+    LocalMutabilityMismatch {
+        declaration: TreeId<Typed>,
+        symbol: SymbolId,
+        recorded_mutable: bool,
+        symbol_mutable: bool,
+    },
+    /// A local declaration has a modifier outside ordinary `val`/`var`.
+    UnsupportedLocalFlag {
+        symbol: SymbolId,
+        flag: UnsupportedJvmLocalFlag,
     },
     /// A method plan does not name a typed body root.
     MissingTypedBody { method: SymbolId },
@@ -641,6 +713,16 @@ pub enum SymbolRole {
     Class,
     Method,
     Parameter,
+    Local,
+}
+
+/// Unsupported semantic modifier for an ordinary JVM local binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsupportedJvmLocalFlag {
+    Lazy,
+    Given,
+    Implicit,
+    Erased,
 }
 
 /// Why a typed semantic slot cannot be consumed as an actual type.
@@ -1027,6 +1109,8 @@ impl JvmCompilationUnit<'_> {
     pub fn validate(&self) -> Result<(), JvmCodegenError> {
         let mut seen_classes = HashSet::new();
         let mut seen_methods = HashSet::new();
+        let mut seen_local_declarations = HashSet::new();
+        let mut seen_local_symbols = HashSet::new();
 
         for class_plan in &self.classes {
             if !seen_classes.insert(class_plan.class) {
@@ -1125,6 +1209,124 @@ impl JvmCompilationUnit<'_> {
                         tree: body,
                     });
                 }
+
+                let mut previous_declaration_index = None;
+                for binding in &method_plan.locals {
+                    if !seen_local_declarations.insert(binding.declaration) {
+                        return Err(JvmCodegenError::DuplicateLocalDeclaration {
+                            declaration: binding.declaration,
+                            method: method_plan.method,
+                        });
+                    }
+                    if !seen_local_symbols.insert(binding.symbol) {
+                        return Err(JvmCodegenError::DuplicateLocalSymbol {
+                            symbol: binding.symbol,
+                            method: method_plan.method,
+                        });
+                    }
+                    if previous_declaration_index
+                        .is_some_and(|previous| previous >= binding.declaration.index())
+                    {
+                        return Err(JvmCodegenError::UnorderedLocalBindings {
+                            method: method_plan.method,
+                        });
+                    }
+                    previous_declaration_index = Some(binding.declaration.index());
+
+                    let declaration = self.typed_ast.try_get(binding.declaration).ok_or(
+                        JvmCodegenError::UnknownLocalDeclaration {
+                            method: method_plan.method,
+                            declaration: binding.declaration,
+                        },
+                    )?;
+                    if !matches!(declaration.kind, TreeKind::ValDef(_)) {
+                        return Err(JvmCodegenError::InvalidLocalDeclaration {
+                            method: method_plan.method,
+                            declaration: binding.declaration,
+                        });
+                    }
+                    if !typed_tree_contains(self.typed_ast, body, binding.declaration) {
+                        return Err(JvmCodegenError::LocalDeclarationOutsideMethod {
+                            method: method_plan.method,
+                            declaration: binding.declaration,
+                        });
+                    }
+                    validate_tree_type(self.store, binding.declaration, declaration)?;
+
+                    if method_plan.parameters.contains(&binding.symbol) {
+                        return Err(JvmCodegenError::LocalIsMethodParameter {
+                            method: method_plan.method,
+                            symbol: binding.symbol,
+                        });
+                    }
+                    let local = self
+                        .store
+                        .symbols
+                        .contains(binding.symbol)
+                        .then(|| self.store.symbols.get(binding.symbol))
+                        .ok_or(JvmCodegenError::UnknownLocalSymbol {
+                            method: method_plan.method,
+                            symbol: binding.symbol,
+                        })?;
+                    if local.kind != SymbolKind::Local {
+                        return Err(JvmCodegenError::UnsupportedSymbolKind {
+                            symbol: binding.symbol,
+                            expected: SymbolRole::Local,
+                            found: local.kind,
+                        });
+                    }
+                    if local.owner != Some(method_plan.method) {
+                        return Err(JvmCodegenError::WrongOwner {
+                            symbol: binding.symbol,
+                            expected: method_plan.method,
+                            actual: local.owner,
+                        });
+                    }
+                    for (flag, required_flag) in [
+                        (UnsupportedJvmLocalFlag::Lazy, SymbolFlags::LAZY),
+                        (UnsupportedJvmLocalFlag::Given, SymbolFlags::GIVEN),
+                        (UnsupportedJvmLocalFlag::Implicit, SymbolFlags::IMPLICIT),
+                        (UnsupportedJvmLocalFlag::Erased, SymbolFlags::ERASED),
+                    ] {
+                        if local.flags.contains(required_flag) {
+                            return Err(JvmCodegenError::UnsupportedLocalFlag {
+                                symbol: binding.symbol,
+                                flag,
+                            });
+                        }
+                    }
+                    self.validate_symbol_type(binding.symbol)?;
+                    let symbol_type = match self.store.symbols.info(binding.symbol) {
+                        SymbolInfo::Complete(ty) => *ty,
+                        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+                            return Err(JvmCodegenError::MissingSemanticInfo {
+                                symbol: binding.symbol,
+                            });
+                        }
+                        SymbolInfo::Error => {
+                            return Err(JvmCodegenError::ErrorSemanticInfo {
+                                symbol: binding.symbol,
+                            });
+                        }
+                    };
+                    if declaration.ty != symbol_type {
+                        return Err(JvmCodegenError::LocalTypeMismatch {
+                            declaration: binding.declaration,
+                            symbol: binding.symbol,
+                            declaration_type: declaration.ty,
+                            symbol_type,
+                        });
+                    }
+                    let symbol_mutable = local.flags.contains(SymbolFlags::MUTABLE);
+                    if binding.mutable != symbol_mutable {
+                        return Err(JvmCodegenError::LocalMutabilityMismatch {
+                            declaration: binding.declaration,
+                            symbol: binding.symbol,
+                            recorded_mutable: binding.mutable,
+                            symbol_mutable,
+                        });
+                    }
+                }
             }
         }
 
@@ -1171,6 +1373,150 @@ fn validate_type(store: &SemanticStore, ty: TypeId) -> Result<(), InvalidTypeRea
         Some(Type::NoPrefix) => Err(InvalidTypeReason::NoPrefix),
         Some(_) => Ok(()),
     }
+}
+
+fn typed_tree_contains(ast: &TypedAst, root: TreeId<Typed>, sought: TreeId<Typed>) -> bool {
+    let mut pending = vec![root];
+    let mut visited = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if id == sought {
+            return true;
+        }
+        if !visited.insert(id) {
+            continue;
+        }
+        let Some(tree) = ast.try_get(id) else {
+            continue;
+        };
+        match &tree.kind {
+            TreeKind::Ident(_)
+            | TreeKind::This(_)
+            | TreeKind::Literal(_)
+            | TreeKind::TypeTree(_) => {}
+            TreeKind::Select(node) => pending.push(node.qualifier),
+            TreeKind::Super(node) => pending.push(node.qual),
+            TreeKind::Apply(node) => {
+                pending.push(node.function);
+                pending.extend(node.args.iter().copied());
+            }
+            TreeKind::TypeApply(node) => {
+                pending.push(node.function);
+                pending.extend(node.args.iter().copied());
+            }
+            TreeKind::New(node) => pending.push(node.tpt),
+            TreeKind::Typed(node) => pending.extend([node.expr, node.tpt]),
+            TreeKind::NamedArg(node) => pending.push(node.arg),
+            TreeKind::Assign(node) => pending.extend([node.lhs, node.rhs]),
+            TreeKind::Block(node) => {
+                pending.extend(node.stats.iter().copied());
+                pending.push(node.expr);
+            }
+            TreeKind::If(node) => pending.extend([node.cond, node.then_branch, node.else_branch]),
+            TreeKind::Match(node) => {
+                pending.push(node.selector);
+                pending.extend(node.cases.iter().copied());
+            }
+            TreeKind::CaseDef(node) => {
+                pending.extend([node.pattern, node.body]);
+                pending.extend(node.guard);
+            }
+            TreeKind::Return(node) => pending.extend(node.expr.into_iter().chain(node.from)),
+            TreeKind::While(node) => pending.extend([node.cond, node.body]),
+            TreeKind::Try(node) => {
+                pending.push(node.expr);
+                pending.extend(node.cases.iter().copied());
+                pending.extend(node.finalizer);
+            }
+            TreeKind::Closure(node) => {
+                pending.extend(node.env.iter().copied());
+                pending.push(node.method);
+                pending.extend(node.tpt);
+            }
+            TreeKind::ValDef(node) => {
+                pending.push(node.tpt);
+                pending.extend(node.rhs);
+            }
+            TreeKind::DefDef(node) => {
+                pending.extend(node.type_params.iter().copied());
+                pending.extend(node.value_param_clauses.iter().flatten().copied());
+                pending.push(node.tpt);
+                pending.extend(node.rhs);
+            }
+            TreeKind::TypeDef(node) => pending.push(node.rhs),
+            TreeKind::Template(node) => {
+                pending.push(node.constructor);
+                pending.extend(node.parents.iter().copied());
+                pending.extend(node.self_val);
+                pending.extend(node.body.iter().copied());
+            }
+            TreeKind::PackageDef(node) => {
+                pending.push(node.name);
+                pending.extend(node.stats.iter().copied());
+            }
+            TreeKind::Import(node) => {
+                pending.push(node.expr);
+                pending.extend(node.selectors.iter().flat_map(|selector| selector.renamed));
+                pending.extend(node.selectors.iter().flat_map(|selector| selector.bound));
+            }
+            TreeKind::Export(node) => {
+                pending.push(node.expr);
+                pending.extend(node.selectors.iter().flat_map(|selector| selector.renamed));
+                pending.extend(node.selectors.iter().flat_map(|selector| selector.bound));
+            }
+            TreeKind::SingletonTypeTree(node) => pending.push(node.reference),
+            TreeKind::AppliedTypeTree(node) => {
+                pending.push(node.tpt);
+                pending.extend(node.args.iter().copied());
+            }
+            TreeKind::RefinedTypeTree(node) => {
+                pending.push(node.tpt);
+                pending.extend(node.refinements.iter().copied());
+            }
+            TreeKind::LambdaTypeTree(node) => {
+                pending.extend(node.type_params.iter().copied());
+                pending.push(node.body);
+            }
+            TreeKind::MatchTypeTree(node) => {
+                pending.extend(node.bound);
+                pending.push(node.selector);
+                pending.extend(node.cases.iter().copied());
+            }
+            TreeKind::ByNameTypeTree(node) => pending.push(node.result),
+            TreeKind::TypeBoundsTree(node) => {
+                pending.extend(node.low);
+                pending.extend(node.high);
+                pending.extend(node.alias);
+            }
+            TreeKind::Bind(node) => pending.push(node.body),
+            TreeKind::Alternative(node) => pending.extend(node.alternatives.iter().copied()),
+            TreeKind::UnApply(node) => {
+                pending.push(node.function);
+                pending.extend(node.implicits.iter().copied());
+                pending.extend(node.patterns.iter().copied());
+            }
+            TreeKind::Annotated(node) => pending.extend([node.expr, node.annotation]),
+            TreeKind::Quote(node) => {
+                pending.push(node.body);
+                pending.extend(node.tags.iter().copied());
+            }
+            TreeKind::Splice(node) => pending.push(node.expr),
+            TreeKind::QuotePattern(node) => {
+                pending.extend(node.bindings.iter().copied());
+                pending.extend([node.body, node.quotes]);
+            }
+            TreeKind::SplicePattern(node) => {
+                pending.push(node.body);
+                pending.extend(node.type_args.iter().copied());
+                pending.extend(node.args.iter().copied());
+            }
+            TreeKind::Inlined(node) => {
+                pending.extend(node.bindings.iter().copied());
+                pending.push(node.expansion);
+            }
+            TreeKind::PhaseSpecific(never) => match *never {},
+        }
+    }
+    false
 }
 
 #[cfg(test)]
