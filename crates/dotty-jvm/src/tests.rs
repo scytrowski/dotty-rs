@@ -2,6 +2,7 @@ use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::class_file::ClassFileVersion;
 use dotty_classfile::class_file_builder::ClassFileBuilder;
+use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 use dotty_classfile::reader::Reader;
 use dotty_core::ast::{
@@ -22,8 +23,8 @@ use std::process::Command;
 
 use crate::{
     InvalidJvmClassInfoKind, InvalidTypeReason, JvmClassInitializationPlan, JvmClassPlan,
-    JvmCodegenError, JvmCompilationUnit, JvmInvocationKind, JvmMethodPlan, JvmNameKind,
-    JvmReturnType, JvmType, JvmValueCategory, SymbolRole, UnsupportedJvmCallShapeKind,
+    JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmInvocationKind, JvmMethodPlan,
+    JvmNameKind, JvmReturnType, JvmType, JvmValueCategory, SymbolRole, UnsupportedJvmCallShapeKind,
     UnsupportedJvmClassKind, UnsupportedJvmSymbolFlag, UnsupportedJvmTypeKind,
     UnsupportedMethodShapeKind, emit_class,
 };
@@ -1914,6 +1915,107 @@ fn encode_receiver_code(code: dotty_classfile::bytecode::CodeBuilder) -> Vec<u8>
         .unwrap()
 }
 
+fn emitted_method_code<'a>(class: &'a ClassFile, name: &str) -> &'a [u8] {
+    let method = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok(name))
+        .unwrap();
+    method
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            Attribute::Code(code) => Some(&code.code),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn assert_virtual_method_ref(
+    class: &ClassFile,
+    code: &[u8],
+    opcode_offset: usize,
+    owner: &str,
+    method: &str,
+    descriptor: &str,
+) {
+    assert_eq!(code[opcode_offset], 0xb6);
+    let index = u16::from_be_bytes([code[opcode_offset + 1], code[opcode_offset + 2]]);
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = class.constant_pool.get(ConstantPoolIndex(index)).unwrap()
+    else {
+        panic!("invokevirtual must reference a Methodref constant")
+    };
+    assert_eq!(class.constant_pool.class_name(*class_index), Ok(owner));
+    assert_eq!(
+        class.constant_pool.name_and_type(*name_and_type_index),
+        Ok((method, descriptor))
+    );
+}
+
+fn set_method_body_to_parameter(
+    fixture: &mut EmissionFixture,
+    method: SymbolId,
+    parameter: SymbolId,
+) {
+    let method_index = fixture
+        .methods
+        .iter()
+        .position(|candidate| *candidate == method)
+        .unwrap();
+    let prefix = fixture.definitions.no_prefix;
+    let reference = fixture.store.types.alloc(Type::TermRef {
+        prefix,
+        target: TermRefTarget::Symbol(parameter),
+    });
+    let body = fixture.ast.alloc(Tree {
+        kind: TreeKind::Ident(Ident {
+            name: fixture.store.symbols.get(parameter).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: reference,
+    });
+    fixture.bodies[method_index] = body;
+}
+
+fn typed_call_to(
+    fixture: &mut EmissionFixture,
+    method: SymbolId,
+    args: Vec<TreeId<dotty_core::ast::Typed>>,
+    result: dotty_core::TypeId,
+    explicit_this: bool,
+) -> TreeId<dotty_core::ast::Typed> {
+    let function = if explicit_this {
+        let this_type = fixture.store.types.alloc(Type::ThisType {
+            class: fixture.class,
+        });
+        let receiver = fixture.ast.alloc(Tree {
+            kind: TreeKind::This(This { qual: None }),
+            position: None,
+            ty: this_type,
+        });
+        let ty = fixture.store.types.alloc(Type::TermRef {
+            prefix: this_type,
+            target: TermRefTarget::Symbol(method),
+        });
+        fixture.ast.alloc(Tree {
+            kind: TreeKind::Select(Select {
+                qualifier: receiver,
+                name: fixture.store.symbols.get(method).name,
+                backquoted: false,
+            }),
+            position: None,
+            ty,
+        })
+    } else {
+        typed_method_ident(fixture, method)
+    };
+    typed_call(fixture, function, args, ApplyKind::Regular, result)
+}
+
 #[test]
 fn resolves_ident_this_calls_and_supported_zero_argument_results_by_symbol() {
     let mut fixture = EmissionFixture::new(false);
@@ -2105,6 +2207,439 @@ fn lowers_explicit_and_implicit_same_class_call_receivers_once() {
         )
         .unwrap();
     assert_eq!(encode_receiver_code(explicit_code), vec![0x2a, 0xb0]);
+}
+
+#[test]
+fn emits_explicit_and_implicit_virtual_calls_with_exact_owner_and_descriptor() {
+    for explicit_this in [false, true] {
+        let mut fixture = EmissionFixture::new(false);
+        let int_type = fixture.definitions.int;
+        let identity =
+            add_call_target_method(&mut fixture, "identity", &[("value", int_type)], int_type);
+        let identity_parameter = fixture.parameters[2][0];
+        set_method_body_to_parameter(&mut fixture, identity, identity_parameter);
+        let left = fixture.parameters[1][1];
+        let prefix = fixture.definitions.no_prefix;
+        let argument = typed_method_ident_with_prefix(&mut fixture, left, prefix);
+        let call = typed_call_to(
+            &mut fixture,
+            identity,
+            vec![argument],
+            int_type,
+            explicit_this,
+        );
+        fixture.bodies[1] = call;
+        let constant = fixture.ast.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: Constant::Int(42),
+            }),
+            position: None,
+            ty: int_type,
+        });
+        let value_call = typed_call_to(&mut fixture, identity, vec![constant], int_type, false);
+        fixture.bodies[0] = fixture.ast.alloc(Tree {
+            kind: TreeKind::Return(dotty_core::ast::Return {
+                expr: Some(value_call),
+                from: None,
+            }),
+            position: None,
+            ty: fixture.definitions.nothing_type,
+        });
+
+        let generated = fixture.emit().unwrap();
+        let mut reader = Reader::new(generated.bytes());
+        let class = ClassFile::decode(&mut reader).unwrap();
+        class.validate_references().unwrap();
+        let code = emitted_method_code(&class, "select");
+        assert_eq!(code.len(), 6);
+        assert_eq!(&code[..3], &[0x2a, 0x1c, 0xb6]);
+        assert_eq!(code[5], 0xac);
+        assert_virtual_method_ref(&class, code, 2, "example/Answer", "identity", "(I)I");
+        let value_code = emitted_method_code(&class, "value");
+        assert_eq!(value_code.len(), 7);
+        assert_eq!(&value_code[..3], &[0x2a, 0x10, 42]);
+        assert_eq!(value_code[3], 0xb6);
+        assert_eq!(value_code[6], 0xac);
+        assert_virtual_method_ref(&class, value_code, 3, "example/Answer", "identity", "(I)I");
+        assert_eq!(generated.bytes(), fixture.emit().unwrap().bytes());
+        if !explicit_this && require_jdk_or_skip() {
+            verify_emitted_call_class_with_jdk(
+                generated.bytes(),
+                "public final class CallHarness { public static void main(String[] args) { example.Answer answer = new example.Answer(); System.out.println(answer.value() + \":\" + answer.select(true, 7, 9) + \":\" + answer.select(false, 11, 13)); } }\n",
+                "42:7:11",
+            );
+        }
+    }
+}
+
+#[test]
+fn emits_nested_calls_and_evaluates_two_arguments_in_source_order() {
+    let mut nested = EmissionFixture::new(false);
+    let int_type = nested.definitions.int;
+    let identity =
+        add_call_target_method(&mut nested, "identity", &[("value", int_type)], int_type);
+    let identity_parameter = nested.parameters[2][0];
+    set_method_body_to_parameter(&mut nested, identity, identity_parameter);
+    let left = nested.parameters[1][1];
+    let prefix = nested.definitions.no_prefix;
+    let inner_arg = typed_method_ident_with_prefix(&mut nested, left, prefix);
+    let inner = typed_call_to(&mut nested, identity, vec![inner_arg], int_type, false);
+    let outer = typed_call_to(&mut nested, identity, vec![inner], int_type, false);
+    nested.bodies[1] = outer;
+    let generated = nested.emit().unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "select");
+    assert_eq!(code.len(), 10);
+    assert_eq!(&code[..4], &[0x2a, 0x2a, 0x1c, 0xb6]);
+    assert_eq!(code[6], 0xb6);
+    assert_eq!(code[9], 0xac);
+    assert_virtual_method_ref(&class, code, 3, "example/Answer", "identity", "(I)I");
+    assert_virtual_method_ref(&class, code, 6, "example/Answer", "identity", "(I)I");
+
+    let mut pair = EmissionFixture::new(false);
+    let int_type = pair.definitions.int;
+    let combine = add_call_target_method(
+        &mut pair,
+        "combine",
+        &[("first", int_type), ("second", int_type)],
+        int_type,
+    );
+    let first = pair.parameters.last().unwrap()[0];
+    set_method_body_to_parameter(&mut pair, combine, first);
+    let right = pair.parameters[1][2];
+    let left = pair.parameters[1][1];
+    let prefix = pair.definitions.no_prefix;
+    let first_argument = typed_method_ident_with_prefix(&mut pair, right, prefix);
+    let second_argument = typed_method_ident_with_prefix(&mut pair, left, prefix);
+    let call = typed_call_to(
+        &mut pair,
+        combine,
+        vec![first_argument, second_argument],
+        int_type,
+        false,
+    );
+    pair.bodies[1] = call;
+    let generated = pair.emit().unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "select");
+    assert_eq!(code.len(), 7);
+    assert_eq!(&code[..4], &[0x2a, 0x1d, 0x1c, 0xb6]);
+    assert_eq!(code[6], 0xac);
+    assert_virtual_method_ref(&class, code, 3, "example/Answer", "combine", "(II)I");
+}
+
+#[test]
+fn rejects_calls_in_control_flow_branches_with_reference_frames() {
+    let mut fixture = EmissionFixture::new(false);
+    let int_type = fixture.definitions.int;
+    let identity =
+        add_call_target_method(&mut fixture, "identity", &[("value", int_type)], int_type);
+    let identity_parameter = fixture.parameters[2][0];
+    set_method_body_to_parameter(&mut fixture, identity, identity_parameter);
+
+    let prefix = fixture.definitions.no_prefix;
+    let parameters = fixture.parameters[1].clone();
+    let condition = typed_method_ident_with_prefix(&mut fixture, parameters[0], prefix);
+    let left = typed_method_ident_with_prefix(&mut fixture, parameters[1], prefix);
+    let right = typed_method_ident_with_prefix(&mut fixture, parameters[2], prefix);
+    let then_call = typed_call_to(&mut fixture, identity, vec![left], int_type, false);
+    let else_call = typed_call_to(&mut fixture, identity, vec![right], int_type, false);
+    fixture.bodies[1] = fixture.ast.alloc(Tree {
+        kind: TreeKind::If(If {
+            cond: condition,
+            then_branch: then_call,
+            else_branch: else_call,
+        }),
+        position: None,
+        ty: int_type,
+    });
+
+    assert_eq!(
+        fixture.emit().unwrap_err(),
+        JvmCodegenError::JvmCallInUnsupportedControlFlow {
+            tree: then_call,
+            method: fixture.methods[1],
+        }
+    );
+}
+
+#[test]
+fn emits_explicit_empty_clause_calls_and_unit_results() {
+    let mut fixture = EmissionFixture::new(false);
+    let int_type = fixture.definitions.int;
+    let constant = add_call_target_method(&mut fixture, "constant", &[], int_type);
+    let call = typed_call_to(&mut fixture, constant, Vec::new(), int_type, false);
+    fixture.bodies[1] = call;
+    let generated = fixture.emit().unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "select");
+    assert_eq!(code.len(), 5);
+    assert_eq!(&code[..2], &[0x2a, 0xb6]);
+    assert_eq!(code[4], 0xac);
+    assert_virtual_method_ref(&class, code, 1, "example/Answer", "constant", "()I");
+
+    let unit_type = fixture.definitions.unit;
+    let noop = add_call_target_method(&mut fixture, "noop", &[], unit_type);
+    let declarations = match fixture.store.symbols.info(fixture.class) {
+        SymbolInfo::Complete(ty) => match fixture.store.types.get(*ty) {
+            Type::ClassInfo(info) => info.declarations,
+            _ => panic!("fixture class info should be ClassInfo"),
+        },
+        _ => panic!("fixture class info should be complete"),
+    };
+    let (run, run_parameters) = add_emission_method(
+        &mut fixture.store,
+        fixture.class,
+        declarations,
+        "run",
+        &[],
+        unit_type,
+    );
+    fixture.methods.push(run);
+    fixture.parameters.push(run_parameters);
+    let unit_body = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Unit,
+        }),
+        position: None,
+        ty: unit_type,
+    });
+    fixture.bodies.push(unit_body);
+    let call = typed_call_to(&mut fixture, noop, Vec::new(), unit_type, false);
+    let run_index = fixture
+        .methods
+        .iter()
+        .position(|method| *method == run)
+        .unwrap();
+    fixture.bodies[run_index] = call;
+    let generated = fixture.emit().unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "run");
+    assert_eq!(code.len(), 5);
+    assert_eq!(&code[..2], &[0x2a, 0xb6]);
+    assert_eq!(code[4], 0xb1);
+    assert_virtual_method_ref(&class, code, 1, "example/Answer", "noop", "()V");
+}
+
+#[test]
+fn emits_the_overload_selected_by_the_canonical_method_symbol() {
+    let mut fixture = EmissionFixture::new(false);
+    let int_type = fixture.definitions.int;
+    let boolean_type = fixture.definitions.boolean;
+    let _integer_overload =
+        add_call_target_method(&mut fixture, "identity", &[("value", int_type)], int_type);
+    let boolean_overload = add_call_target_method(
+        &mut fixture,
+        "identity",
+        &[("value", boolean_type)],
+        int_type,
+    );
+    let flag = fixture.parameters[1][0];
+    let prefix = fixture.definitions.no_prefix;
+    let argument = typed_method_ident_with_prefix(&mut fixture, flag, prefix);
+    let call = typed_call_to(
+        &mut fixture,
+        boolean_overload,
+        vec![argument],
+        int_type,
+        false,
+    );
+    fixture.bodies[1] = call;
+
+    let generated = fixture.emit().unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "select");
+    assert_eq!(&code[..3], &[0x2a, 0x1b, 0xb6]);
+    assert_eq!(code[5], 0xac);
+    assert_virtual_method_ref(&class, code, 2, "example/Answer", "identity", "(Z)I");
+}
+
+#[test]
+fn rejects_call_arity_argument_and_result_mismatches_without_class_output() {
+    let mut arity = EmissionFixture::new(false);
+    let int_type = arity.definitions.int;
+    let target = add_call_target_method(&mut arity, "identity", &[("value", int_type)], int_type);
+    let call = typed_call_to(&mut arity, target, Vec::new(), int_type, false);
+    arity.bodies[1] = call;
+    assert_eq!(
+        arity.emit().unwrap_err(),
+        JvmCodegenError::JvmCallArityMismatch {
+            tree: call,
+            method: target,
+            expected: 1,
+            found: 0,
+        }
+    );
+
+    let mut argument_type = EmissionFixture::new(false);
+    let int_type = argument_type.definitions.int;
+    let target = add_call_target_method(
+        &mut argument_type,
+        "identity",
+        &[("value", int_type)],
+        int_type,
+    );
+    let boolean_parameter = argument_type.parameters[1][0];
+    let prefix = argument_type.definitions.no_prefix;
+    let argument = typed_method_ident_with_prefix(&mut argument_type, boolean_parameter, prefix);
+    let call = typed_call_to(&mut argument_type, target, vec![argument], int_type, false);
+    argument_type.bodies[1] = call;
+    assert_eq!(
+        argument_type.emit().unwrap_err(),
+        JvmCodegenError::JvmCallArgumentMismatch {
+            tree: call,
+            argument,
+            method: target,
+            index: 0,
+            expected: JvmType::Int,
+            found: JvmExpressionFlow::Value {
+                value_type: JvmType::Boolean,
+                category: JvmValueCategory::IntLike,
+            },
+        }
+    );
+
+    let mut unit_argument = EmissionFixture::new(false);
+    let int_type = unit_argument.definitions.int;
+    let target = add_call_target_method(
+        &mut unit_argument,
+        "identity",
+        &[("value", int_type)],
+        int_type,
+    );
+    let unit_type = unit_argument.definitions.unit;
+    let argument = unit_argument.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Unit,
+        }),
+        position: None,
+        ty: unit_type,
+    });
+    let call = typed_call_to(&mut unit_argument, target, vec![argument], int_type, false);
+    unit_argument.bodies[1] = call;
+    assert_eq!(
+        unit_argument.emit().unwrap_err(),
+        JvmCodegenError::JvmCallArgumentMismatch {
+            tree: call,
+            argument,
+            method: target,
+            index: 0,
+            expected: JvmType::Int,
+            found: JvmExpressionFlow::Unit,
+        }
+    );
+
+    let mut diverging_argument = EmissionFixture::new(false);
+    let int_type = diverging_argument.definitions.int;
+    let target = add_call_target_method(
+        &mut diverging_argument,
+        "identity",
+        &[("value", int_type)],
+        int_type,
+    );
+    let value = diverging_argument.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(4),
+        }),
+        position: None,
+        ty: int_type,
+    });
+    let argument = diverging_argument.ast.alloc(Tree {
+        kind: TreeKind::Return(dotty_core::ast::Return {
+            expr: Some(value),
+            from: None,
+        }),
+        position: None,
+        ty: diverging_argument.definitions.nothing_type,
+    });
+    let call = typed_call_to(
+        &mut diverging_argument,
+        target,
+        vec![argument],
+        int_type,
+        false,
+    );
+    diverging_argument.bodies[1] = call;
+    assert_eq!(
+        diverging_argument.emit().unwrap_err(),
+        JvmCodegenError::JvmCallArgumentMismatch {
+            tree: call,
+            argument,
+            method: target,
+            index: 0,
+            expected: JvmType::Int,
+            found: JvmExpressionFlow::Diverges,
+        }
+    );
+
+    let mut result_type = EmissionFixture::new(false);
+    let int_type = result_type.definitions.int;
+    let target = add_call_target_method(
+        &mut result_type,
+        "identity",
+        &[("value", int_type)],
+        int_type,
+    );
+    let argument = result_type.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(4),
+        }),
+        position: None,
+        ty: int_type,
+    });
+    let boolean_type = result_type.definitions.boolean;
+    let call = typed_call_to(
+        &mut result_type,
+        target,
+        vec![argument],
+        boolean_type,
+        false,
+    );
+    result_type.bodies[1] = call;
+    assert_eq!(
+        result_type.emit().unwrap_err(),
+        JvmCodegenError::JvmCallResultTypeMismatch {
+            tree: call,
+            method: target,
+            expected: JvmReturnType::Value(JvmType::Int),
+            found: Some(JvmReturnType::Value(JvmType::Boolean)),
+        }
+    );
+}
+
+#[test]
+fn rejects_a_missing_call_argument_tree_without_publishing_a_class() {
+    let mut fixture = EmissionFixture::new(false);
+    let int_type = fixture.definitions.int;
+    let target = add_call_target_method(&mut fixture, "identity", &[("value", int_type)], int_type);
+    let mut foreign_ast = TypedAst::new();
+    let missing = (0..100)
+        .map(|_| {
+            foreign_ast.alloc(Tree {
+                kind: TreeKind::Literal(Literal {
+                    value: Constant::Int(1),
+                }),
+                position: None,
+                ty: int_type,
+            })
+        })
+        .last()
+        .unwrap();
+    let call = typed_call_to(&mut fixture, target, vec![missing], int_type, false);
+    fixture.bodies[1] = call;
+
+    assert_eq!(
+        fixture.emit().unwrap_err(),
+        JvmCodegenError::UnsupportedTypedExpression {
+            tree: missing,
+            node: "missing tree",
+        }
+    );
 }
 
 #[test]
@@ -3029,6 +3564,57 @@ fn verify_emitted_class_with_jdk(bytes: &[u8]) {
         String::from_utf8_lossy(&java.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "42:7:9");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+fn verify_emitted_call_class_with_jdk(bytes: &[u8], harness_source: &str, expected_output: &str) {
+    let directory =
+        std::env::temp_dir().join(format!("dotty-jvm-call-emission-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&directory);
+    let class_directory = directory.join("example");
+    fs::create_dir_all(&class_directory).unwrap();
+    fs::write(class_directory.join("Answer.class"), bytes).unwrap();
+    let classpath = directory.to_str().unwrap();
+
+    let javap = Command::new("javap")
+        .args(["-c", "-classpath", classpath, "example.Answer"])
+        .output()
+        .unwrap();
+    assert!(
+        javap.status.success(),
+        "javap rejected emitted call class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    assert!(String::from_utf8_lossy(&javap.stdout).contains("invokevirtual"));
+
+    let harness = directory.join("CallHarness.java");
+    fs::write(&harness, harness_source).unwrap();
+    let javac = Command::new("javac")
+        .args(["-classpath", classpath, "-d", classpath])
+        .arg(&harness)
+        .output()
+        .unwrap();
+    assert!(
+        javac.status.success(),
+        "javac rejected emitted call harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args(["-Xverify:all", "-classpath", classpath, "CallHarness"])
+        .output()
+        .unwrap();
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected emitted call class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        expected_output
+    );
     fs::remove_dir_all(directory).unwrap();
 }
 
