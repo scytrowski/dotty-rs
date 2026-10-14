@@ -629,7 +629,7 @@ fn verify_delegator_with_jdk(output_directory: &Path) {
 }
 
 #[test]
-fn unsupported_local_val_and_while_fail_at_the_jvm_codegen_stage() {
+fn initialized_local_reads_and_while_remain_unsupported_at_codegen() {
     let local_output = TestOutputDirectory::new("unsupported-local-val");
     let local_error = compile_source(
         "class LocalVal { def run(x: Int): Int = { val y = x; y } }\n",
@@ -640,7 +640,7 @@ fn unsupported_local_val_and_while_fail_at_the_jvm_codegen_stage() {
     assert!(matches!(
         local_error,
         PipelineFailure::Codegen(JvmCodegenError::UnsupportedTypedExpression {
-            node: "ValDef",
+            node: "initialized local read",
             ..
         })
     ));
@@ -658,6 +658,58 @@ fn unsupported_local_val_and_while_fail_at_the_jvm_codegen_stage() {
         PipelineFailure::Codegen(JvmCodegenError::UnsupportedTypedExpression { node: "While", .. })
     ));
     assert!(while_output.class_files().is_empty());
+}
+
+#[test]
+fn source_primitive_local_initializers_emit_load_store_and_correct_max_locals() {
+    let output = TestOutputDirectory::new("primitive-local-initializers");
+    let artifact = compile_source(
+        "class LocalInit { def run(x: Int): Int = { val saved = x; var current = 42; x } }\n",
+        "LocalInit.scala",
+        output.path(),
+    )
+    .unwrap();
+    let mut reader = Reader::new(artifact.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("LocalInit should decode");
+    let run = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok("run"))
+        .expect("run method should be emitted");
+    let Attribute::Code(code) = &run.attributes[0] else {
+        panic!("run method has no Code attribute")
+    };
+    assert_eq!(
+        code.code.as_ref(),
+        &[0x1b, 0x3d, 0x10, 42, 0x3e, 0x1b, 0xac]
+    );
+    assert_eq!(code.max_locals, 4);
+}
+
+#[test]
+fn nested_same_named_source_locals_keep_distinct_slots_after_parameter_shadowing() {
+    let output = TestOutputDirectory::new("nested-shadowed-local-initializers");
+    let artifact = compile_source(
+        "class NestedLocal { def run(left: Int, value: Int): Int = { val value = left; { val value = 42; left } } }\n",
+        "NestedLocal.scala",
+        output.path(),
+    )
+    .unwrap();
+    let mut reader = Reader::new(artifact.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("NestedLocal should decode");
+    let run = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok("run"))
+        .expect("run method should be emitted");
+    let Attribute::Code(code) = &run.attributes[0] else {
+        panic!("run method has no Code attribute")
+    };
+    assert_eq!(
+        code.code.as_ref(),
+        &[0x1b, 0x3e, 0x10, 42, 0x36, 4, 0x1b, 0xac]
+    );
+    assert_eq!(code.max_locals, 5);
 }
 
 #[test]

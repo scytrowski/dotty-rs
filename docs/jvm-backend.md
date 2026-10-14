@@ -35,10 +35,8 @@ typed declaration ID for deterministic plan validation. Bindings live only in
 their containing method plan. Validation rejects stale or non-`ValDef` trees,
 foreign owners, duplicate declaration or symbol IDs, parameter reuse,
 incomplete types, type or mutability disagreement, and unsupported lazy,
-given, implicit, or erased flags. The semantic store and typed arena remain
-borrowed and read-only. The binding contract adds no initial stores, loads,
-assignments, or loop lowering; source methods containing locals remain outside
-whole-class emission until those operations have their own backend contract.
+given, implicit, erased, or inline flags. The semantic store and typed arena
+remain borrowed and read-only.
 
 `JvmCompilationUnit::local_layout` builds a deterministic storage layout for a
 planned method after validating the complete unit. The explicit
@@ -53,9 +51,14 @@ allocator is monotonic and does not reuse slots for shadowed locals. Its
 the u16 class-file field before each slot is published. The layout carries the
 canonical `SymbolId`, typed declaration ID, primitive type, and mutability;
 lookup is by `SymbolId` only. Reserving a slot does not establish definite
-initialization: reads remain invalid until later code generation emits a
-store, and this increment adds no bytecode reads, writes, or control-flow
-handling for locals.
+initialization. Planned method lowering accepts ordinary local `ValDef`
+statements with an initializer: it lowers the RHS once, checks the resulting
+primitive type, then emits one `istore` and marks that symbol initialized.
+Missing bindings, missing initializers, unsupported types and modifiers,
+initializer type mismatches, and detectable reads before the store fail with
+typed errors. Reads after initialization, assignments, loops, and `PatDef`
+remain unsupported. The existing bytecode analyzer remains responsible for
+verifier local state and stack-map frames.
 
 The initial plan subset accepts `SymbolKind::Class`, `SymbolKind::Method`, and
 `SymbolKind::Parameter`; other kinds return a structured unsupported-kind
