@@ -515,6 +515,10 @@ fn write_instruction(
         Instruction::LStore(index) => write_local(writer, index, 0x37, 0x3f),
         Instruction::AStore(index) => write_local(writer, index, 0x3a, 0x4b),
         Instruction::IAdd => writer.write_u1(0x60),
+        Instruction::ISub => writer.write_u1(0x64),
+        Instruction::IMul => writer.write_u1(0x68),
+        Instruction::IDiv => writer.write_u1(0x6c),
+        Instruction::IRem => writer.write_u1(0x70),
         Instruction::Dup => writer.write_u1(0x59),
         Instruction::Pop => writer.write_u1(0x57),
         Instruction::GetField(reference) => {
@@ -956,6 +960,35 @@ mod tests {
         }
         expected.extend_from_slice(&[0xb1, 0xac, 0xb0, 0xad]);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn encodes_integer_arithmetic_opcodes_in_straight_and_labeled_code() {
+        let pool = ConstantPool::default();
+        let operations = [
+            Instruction::ISub,
+            Instruction::IMul,
+            Instruction::IDiv,
+            Instruction::IRem,
+        ];
+        let bytes = assemble(&operations, &pool).unwrap();
+        assert_eq!(bytes, [0x64, 0x68, 0x6c, 0x70]);
+
+        let mut sequence = super::super::CodeSequence::new();
+        let end = sequence.new_label().unwrap();
+        sequence.instruction(Instruction::IConst(SmallIntConstant::Zero));
+        sequence.branch(super::super::BranchInstruction::IfEq(end.clone()));
+        for operation in operations {
+            sequence.instruction(operation);
+        }
+        sequence.bind(end).unwrap();
+        sequence.instruction(Instruction::Return);
+        let assembled = assemble_labeled(&sequence, &pool).unwrap();
+        assert_eq!(
+            assembled.bytes,
+            [0x03, 0x99, 0x00, 0x07, 0x64, 0x68, 0x6c, 0x70, 0xb1]
+        );
+        assert_eq!(assembled.layout.code_length(), 9);
     }
 
     #[test]

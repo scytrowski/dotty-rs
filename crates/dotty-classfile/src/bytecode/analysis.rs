@@ -622,7 +622,11 @@ impl Frame {
             Instruction::AStore(index) => {
                 self.store_local(instruction_index, index, ValueKind::Reference)?
             }
-            Instruction::IAdd => {
+            Instruction::IAdd
+            | Instruction::ISub
+            | Instruction::IMul
+            | Instruction::IDiv
+            | Instruction::IRem => {
                 self.pop_expected(instruction_index, ValueKind::Int)?;
                 self.pop_expected(instruction_index, ValueKind::Int)?;
                 self.push(instruction_index, ValueKind::Int)?;
@@ -1313,9 +1317,10 @@ impl CfgCodeAnalyzer {
     /// incompatible stack state fails explicitly instead of growing a cycle.
     ///
     /// The analyzer supports integer constants, integer local loads/stores,
-    /// `iadd`, `dup`, integer comparisons, gotos, and `return`/`ireturn`.
-    /// Reference, category-two, floating-point, exception, and switch flows
-    /// are not supported. No byte offsets or stack-map frames are produced.
+    /// `iadd`, `isub`, `imul`, `idiv`, `irem`, `dup`, integer comparisons,
+    /// gotos, and `return`/`ireturn`. Reference, category-two, floating-point,
+    /// exception, and switch flows are not supported. No byte offsets or
+    /// stack-map frames are produced.
     pub fn analyze(
         graph: &ControlFlowGraph,
         method_descriptor: &str,
@@ -1516,6 +1521,10 @@ fn validate_flow_instruction(
             | Instruction::ILoad(_)
             | Instruction::IStore(_)
             | Instruction::IAdd
+            | Instruction::ISub
+            | Instruction::IMul
+            | Instruction::IDiv
+            | Instruction::IRem
             | Instruction::Dup
             | Instruction::Pop
             | Instruction::Return
@@ -1766,6 +1775,32 @@ mod tests {
             }
         );
         assert_eq!(analyze("(II)I", true, &instructions, &pool), Ok(analysis));
+    }
+
+    #[test]
+    fn analyzes_each_integer_arithmetic_operation_with_two_ints() {
+        let pool = ConstantPool::default();
+        for operation in [
+            Instruction::ISub,
+            Instruction::IMul,
+            Instruction::IDiv,
+            Instruction::IRem,
+        ] {
+            let analysis = analyze(
+                "(II)I",
+                true,
+                &[
+                    Instruction::ILoad(LocalIndex::new(0)),
+                    Instruction::ILoad(LocalIndex::new(1)),
+                    operation,
+                    Instruction::IReturn,
+                ],
+                &pool,
+            )
+            .unwrap();
+            assert_eq!(analysis.max_stack, 2, "{operation:?}");
+            assert_eq!(analysis.max_locals, 2, "{operation:?}");
+        }
     }
 
     #[test]
@@ -2095,6 +2130,89 @@ mod tests {
                 available: 0,
             })
         );
+    }
+
+    #[test]
+    fn integer_arithmetic_rejects_underflow_and_non_integer_operands() {
+        let pool = ConstantPool::default();
+        let mut pool_builder = ConstantPoolBuilder::new();
+        let double_method = pool_builder
+            .method_ref("example/C", "double", "()D")
+            .unwrap();
+        let pool_with_double = pool_builder.finish().unwrap();
+        for operation in [
+            Instruction::ISub,
+            Instruction::IMul,
+            Instruction::IDiv,
+            Instruction::IRem,
+        ] {
+            assert_eq!(
+                analyze("()I", true, &[operation, Instruction::IReturn], &pool),
+                Err(AnalysisError::StackUnderflow {
+                    instruction: 0,
+                    needed: 1,
+                    available: 0,
+                }),
+                "{operation:?}"
+            );
+            assert_eq!(
+                analyze(
+                    "()I",
+                    true,
+                    &[
+                        Instruction::AConstNull,
+                        Instruction::IConst(SmallIntConstant::One),
+                        operation,
+                        Instruction::IReturn,
+                    ],
+                    &pool,
+                ),
+                Err(AnalysisError::StackTypeMismatch {
+                    instruction: 2,
+                    expected: ValueKind::Int,
+                    actual: ValueKind::Reference,
+                }),
+                "{operation:?}"
+            );
+            assert_eq!(
+                analyze(
+                    "()I",
+                    true,
+                    &[
+                        Instruction::LConst(SmallLongConstant::Zero),
+                        operation,
+                        Instruction::IReturn,
+                    ],
+                    &pool,
+                ),
+                Err(AnalysisError::StackTypeMismatch {
+                    instruction: 1,
+                    expected: ValueKind::Int,
+                    actual: ValueKind::Long,
+                }),
+                "{operation:?}"
+            );
+            assert_eq!(
+                analyze(
+                    "()I",
+                    true,
+                    &[
+                        Instruction::InvokeStatic(StaticMethodReference::new(operand(
+                            double_method
+                        ))),
+                        operation,
+                        Instruction::IReturn,
+                    ],
+                    &pool_with_double,
+                ),
+                Err(AnalysisError::StackTypeMismatch {
+                    instruction: 1,
+                    expected: ValueKind::Int,
+                    actual: ValueKind::Double,
+                }),
+                "{operation:?}"
+            );
+        }
     }
 
     #[test]
