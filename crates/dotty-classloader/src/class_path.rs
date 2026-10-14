@@ -274,8 +274,8 @@ impl DirectoryClassPath {
         // Iterative traversal is limited to the requested package subtree.
         // Symlinks are not followed, preventing both cycles and escapes from
         // the classpath root.
-        let mut pending = vec![package_directory];
-        while let Some(directory) = pending.pop() {
+        let mut pending = vec![(package_directory, package.join("/"))];
+        while let Some((directory, logical_package)) = pending.pop() {
             let entries = match std::fs::read_dir(&directory) {
                 Ok(entries) => entries,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -292,13 +292,32 @@ impl DirectoryClassPath {
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                     Err(error) => return Err(error.into()),
                 };
+                let Some(entry_name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
                 if file_type.is_dir() {
-                    pending.push(entry.path());
+                    if !safe_package_segments(&[&entry_name]) {
+                        continue;
+                    }
+                    let child_package = if logical_package.is_empty() {
+                        entry_name
+                    } else {
+                        format!("{logical_package}/{entry_name}")
+                    };
+                    pending.push((entry.path(), child_package));
                 } else if file_type.is_file()
-                    && entry
-                        .path()
-                        .extension()
-                        .is_some_and(|extension| extension == "class" || extension == "tasty")
+                    && [".class", ".tasty"].iter().any(|extension| {
+                        entry_name
+                            .strip_suffix(extension)
+                            .is_some_and(|simple_name| {
+                                let resource_name = if logical_package.is_empty() {
+                                    simple_name.to_owned()
+                                } else {
+                                    format!("{logical_package}/{simple_name}")
+                                };
+                                BinaryName::from_internal(resource_name).is_path_safe()
+                            })
+                    })
                 {
                     return Ok(true);
                 }

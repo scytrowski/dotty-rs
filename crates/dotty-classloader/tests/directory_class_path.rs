@@ -249,6 +249,38 @@ fn package_prefix_rejects_unsafe_segments() {
 
 #[cfg(unix)]
 #[test]
+fn package_prefix_ignores_resources_with_unsafe_descendant_names() {
+    let root = TemporaryDirectory::new("directory-package-prefix-unsafe-descendants");
+    for path in [
+        "a/b:bad/ColonDirectory.class",
+        "a/c\\bad/BackslashDirectory.tasty",
+        "a/d/ColonFile:bad.class",
+        "a/e/BackslashFile\\bad.tasty",
+    ] {
+        let path = root.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"unsafe logical name").unwrap();
+    }
+
+    let class_path = DirectoryClassPath::new(root.path().clone());
+
+    assert!(!class_path.contains_package_prefix(&["a"]).unwrap());
+    for name in [
+        "a/b:bad/ColonDirectory",
+        "a/c\\bad/BackslashDirectory",
+        "a/d/ColonFile:bad",
+        "a/e/BackslashFile\\bad",
+    ] {
+        assert!(
+            class_path
+                .find_class(&BinaryName::from_internal(name))
+                .is_err()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn package_prefix_does_not_follow_symlinked_files_or_directories() {
     use std::os::unix::fs::symlink;
 
