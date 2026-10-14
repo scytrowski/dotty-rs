@@ -1485,6 +1485,363 @@ fn local_layout_rejects_unsupported_semantic_types() {
 }
 
 #[test]
+fn emits_local_initializers_once_in_declaration_order_with_canonical_slots() {
+    let mut fixture = EmissionFixture::new(false);
+    let method_index = 1;
+    let int_ty = fixture.definitions.int;
+    let parameter = fixture.parameters[method_index][1];
+    let parameter_ty = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TermRefTarget::Symbol(parameter),
+    });
+    let parameter_name = fixture.store.symbols.get(parameter).name;
+    let parameter_ref = fixture.ast.alloc(Tree {
+        kind: TreeKind::Ident(Ident {
+            name: parameter_name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: parameter_ty,
+    });
+    let first_symbol = add_emission_local_symbol(
+        &mut fixture,
+        method_index,
+        "saved",
+        int_ty,
+        false,
+        SymbolFlags::EMPTY,
+    );
+    let first_decl = add_emission_local_valdef(
+        &mut fixture,
+        method_index,
+        first_symbol,
+        int_ty,
+        Some(parameter_ref),
+    );
+    let second_symbol = add_emission_local_symbol(
+        &mut fixture,
+        method_index,
+        "current",
+        int_ty,
+        true,
+        SymbolFlags::EMPTY,
+    );
+    let initializer = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(42),
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    let second_decl = add_emission_local_valdef(
+        &mut fixture,
+        method_index,
+        second_symbol,
+        int_ty,
+        Some(initializer),
+    );
+    let final_expr = fixture.bodies[method_index];
+    fixture.bodies[method_index] = typed_block(
+        &mut fixture,
+        vec![first_decl, second_decl],
+        final_expr,
+        int_ty,
+    );
+
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[method_index].locals = vec![
+        JvmLocalBinding {
+            declaration: first_decl,
+            symbol: first_symbol,
+            mutable: false,
+        },
+        JvmLocalBinding {
+            declaration: second_decl,
+            symbol: second_symbol,
+            mutable: true,
+        },
+    ];
+    let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "select");
+    assert_eq!(
+        &code[..7],
+        &[0x1c, 0x36, 0x04, 0x10, 42, 0x36, 0x05],
+        "parameter load/store and constant/store should each occur once in declaration order"
+    );
+    assert_eq!(code[7], 0x1b, "the following source body starts afterward");
+    let select = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok("select"))
+        .unwrap();
+    let Attribute::Code(select_code) = &select.attributes[0] else {
+        panic!("select method has no Code attribute")
+    };
+    assert_eq!(select_code.max_locals, 6);
+}
+
+#[test]
+fn rejects_missing_initializer_type_mismatch_and_self_reference() {
+    let mut missing = EmissionFixture::new(false);
+    let method_index = 0;
+    let missing_int = missing.definitions.int;
+    let symbol = add_emission_local_symbol(
+        &mut missing,
+        method_index,
+        "missing",
+        missing_int,
+        false,
+        SymbolFlags::EMPTY,
+    );
+    let declaration =
+        add_emission_local_valdef(&mut missing, method_index, symbol, missing_int, None);
+    let final_expr = missing.bodies[method_index];
+    missing.bodies[method_index] =
+        typed_block(&mut missing, vec![declaration], final_expr, missing_int);
+    let mut unit = missing.unit();
+    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
+        declaration,
+        symbol,
+        mutable: false,
+    }];
+    assert_eq!(
+        emit_class(&unit, missing.class, &missing.definitions),
+        Err(JvmCodegenError::MissingLocalInitializer {
+            method: missing.methods[method_index],
+            declaration,
+        })
+    );
+
+    let mut mismatch = EmissionFixture::new(false);
+    let mismatch_int = mismatch.definitions.int;
+    let symbol = add_emission_local_symbol(
+        &mut mismatch,
+        method_index,
+        "wrongType",
+        mismatch_int,
+        false,
+        SymbolFlags::EMPTY,
+    );
+    let boolean_rhs = mismatch.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Boolean(true),
+        }),
+        position: None,
+        ty: mismatch.definitions.boolean,
+    });
+    let declaration = add_emission_local_valdef(
+        &mut mismatch,
+        method_index,
+        symbol,
+        mismatch_int,
+        Some(boolean_rhs),
+    );
+    let final_expr = mismatch.bodies[method_index];
+    mismatch.bodies[method_index] =
+        typed_block(&mut mismatch, vec![declaration], final_expr, mismatch_int);
+    let mut unit = mismatch.unit();
+    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
+        declaration,
+        symbol,
+        mutable: false,
+    }];
+    assert!(matches!(
+        emit_class(&unit, mismatch.class, &mismatch.definitions),
+        Err(JvmCodegenError::LocalInitializerFlowMismatch {
+            method: found_method,
+            declaration: found_declaration,
+            symbol: found_symbol,
+            expected: JvmType::Int,
+            found: JvmExpressionFlow::Value {
+                value_type: JvmType::Boolean,
+                ..
+            },
+        }) if found_method == mismatch.methods[method_index]
+            && found_declaration == declaration
+            && found_symbol == symbol
+    ));
+
+    let mut recursive = EmissionFixture::new(false);
+    let recursive_int = recursive.definitions.int;
+    let symbol = add_emission_local_symbol(
+        &mut recursive,
+        method_index,
+        "recursive",
+        recursive_int,
+        false,
+        SymbolFlags::EMPTY,
+    );
+    let recursive_type = recursive.store.types.alloc(Type::TermRef {
+        prefix: recursive.definitions.no_prefix,
+        target: TermRefTarget::Symbol(symbol),
+    });
+    let recursive_ref = recursive.ast.alloc(Tree {
+        kind: TreeKind::Ident(Ident {
+            name: recursive.store.symbols.get(symbol).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: recursive_type,
+    });
+    let declaration = add_emission_local_valdef(
+        &mut recursive,
+        method_index,
+        symbol,
+        recursive_int,
+        Some(recursive_ref),
+    );
+    let final_expr = recursive.bodies[method_index];
+    recursive.bodies[method_index] =
+        typed_block(&mut recursive, vec![declaration], final_expr, recursive_int);
+    let mut unit = recursive.unit();
+    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
+        declaration,
+        symbol,
+        mutable: false,
+    }];
+    assert_eq!(
+        emit_class(&unit, recursive.class, &recursive.definitions),
+        Err(JvmCodegenError::UninitializedLocalRead {
+            tree: recursive_ref,
+            symbol,
+        })
+    );
+}
+
+#[test]
+fn lowers_conditional_initializer_before_its_single_store() {
+    let mut fixture = EmissionFixture::new(false);
+    let method_index = 1;
+    let int_ty = fixture.definitions.int;
+    let condition_symbol = fixture.parameters[method_index][0];
+    let condition_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TermRefTarget::Symbol(condition_symbol),
+    });
+    let condition = fixture.ast.alloc(Tree {
+        kind: TreeKind::Ident(Ident {
+            name: fixture.store.symbols.get(condition_symbol).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: condition_type,
+    });
+    let then_value = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(11),
+        }),
+        position: None,
+        ty: int_ty,
+    });
+    let else_value = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(12),
+        }),
+        position: None,
+        ty: int_ty,
+    });
+    let initializer = fixture.ast.alloc(Tree {
+        kind: TreeKind::If(If {
+            cond: condition,
+            then_branch: then_value,
+            else_branch: else_value,
+        }),
+        position: None,
+        ty: int_ty,
+    });
+    let symbol = add_emission_local_symbol(
+        &mut fixture,
+        method_index,
+        "selected",
+        int_ty,
+        false,
+        SymbolFlags::EMPTY,
+    );
+    let declaration = add_emission_local_valdef(
+        &mut fixture,
+        method_index,
+        symbol,
+        int_ty,
+        Some(initializer),
+    );
+    let final_expr = fixture.bodies[method_index];
+    fixture.bodies[method_index] = typed_block(&mut fixture, vec![declaration], final_expr, int_ty);
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
+        declaration,
+        symbol,
+        mutable: false,
+    }];
+
+    let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "select");
+    assert_eq!(code[0], 0x1b, "condition is evaluated first");
+    assert_eq!(
+        code.windows(2)
+            .filter(|instruction| *instruction == [0x36, 0x04])
+            .count(),
+        1,
+        "conditional initializer stores once to local slot four"
+    );
+    let select = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok("select"))
+        .unwrap();
+    assert!(select.attributes.iter().any(|attribute| matches!(attribute,
+        Attribute::Code(code) if code.attributes.iter().any(|nested| matches!(nested, Attribute::Other(raw)
+            if class.constant_pool.utf8(raw.name_index) == Ok("StackMapTable"))))));
+}
+
+#[test]
+fn rejects_inline_local_modifiers_before_lowering() {
+    let mut fixture = EmissionFixture::new(false);
+    let method_index = 0;
+    let int_ty = fixture.definitions.int;
+    let initializer = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(1),
+        }),
+        position: None,
+        ty: int_ty,
+    });
+    let symbol = add_emission_local_symbol(
+        &mut fixture,
+        method_index,
+        "inlineValue",
+        int_ty,
+        false,
+        SymbolFlags::INLINE,
+    );
+    let declaration = add_emission_local_valdef(
+        &mut fixture,
+        method_index,
+        symbol,
+        int_ty,
+        Some(initializer),
+    );
+    let final_expr = fixture.bodies[method_index];
+    fixture.bodies[method_index] = typed_block(&mut fixture, vec![declaration], final_expr, int_ty);
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
+        declaration,
+        symbol,
+        mutable: false,
+    }];
+    assert_eq!(
+        emit_class(&unit, fixture.class, &fixture.definitions),
+        Err(JvmCodegenError::UnsupportedLocalFlag {
+            symbol,
+            flag: UnsupportedJvmLocalFlag::Inline,
+        })
+    );
+}
+
+#[test]
 fn local_slot_u16_boundary_does_not_publish_an_overflow_assignment() {
     let fixture = Fixture::new();
     let binding = JvmLocalBinding {
@@ -2444,6 +2801,53 @@ fn typed_block(
 ) -> TreeId<dotty_core::ast::Typed> {
     fixture.ast.alloc(Tree {
         kind: TreeKind::Block(Block { stats, expr }),
+        position: None,
+        ty,
+    })
+}
+
+fn add_emission_local_symbol(
+    fixture: &mut EmissionFixture,
+    method_index: usize,
+    text: &str,
+    ty: dotty_core::TypeId,
+    mutable: bool,
+    extra_flags: SymbolFlags,
+) -> SymbolId {
+    let name_id = fixture.store.names.intern(text);
+    fixture.store.symbols.alloc(Symbol {
+        name: Name::new(name_id, Namespace::Term),
+        owner: Some(fixture.methods[method_index]),
+        kind: SymbolKind::Local,
+        flags: if mutable {
+            extra_flags | SymbolFlags::MUTABLE
+        } else {
+            extra_flags
+        },
+        visibility: Visibility::Public,
+        info: SymbolInfo::Complete(ty),
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    })
+}
+
+fn add_emission_local_valdef(
+    fixture: &mut EmissionFixture,
+    method_index: usize,
+    symbol: SymbolId,
+    ty: dotty_core::TypeId,
+    rhs: Option<TreeId<dotty_core::ast::Typed>>,
+) -> TreeId<dotty_core::ast::Typed> {
+    let name = fixture.store.symbols.get(symbol).name;
+    fixture.ast.alloc(Tree {
+        kind: TreeKind::ValDef(ValDef {
+            name: TermName::new(name.text()),
+            tpt: fixture.bodies[method_index],
+            rhs,
+            metadata: (),
+        }),
         position: None,
         ty,
     })

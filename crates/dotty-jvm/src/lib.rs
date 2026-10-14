@@ -422,6 +422,29 @@ pub enum JvmCodegenError {
         symbol: SymbolId,
         flag: UnsupportedJvmLocalFlag,
     },
+    /// A planned local `ValDef` has no initializer expression.
+    MissingLocalInitializer {
+        method: SymbolId,
+        declaration: TreeId<Typed>,
+    },
+    /// A typed local declaration has no canonical binding in the plan.
+    LocalDeclarationNotInPlan {
+        method: SymbolId,
+        declaration: TreeId<Typed>,
+    },
+    /// A local initializer does not produce its declared primitive value.
+    LocalInitializerFlowMismatch {
+        method: SymbolId,
+        declaration: TreeId<Typed>,
+        symbol: SymbolId,
+        expected: JvmType,
+        found: JvmExpressionFlow,
+    },
+    /// An initializer reads its local before the corresponding store.
+    UninitializedLocalRead {
+        tree: TreeId<Typed>,
+        symbol: SymbolId,
+    },
     /// A method plan does not name a typed body root.
     MissingTypedBody { method: SymbolId },
     /// A method body's typed root does not belong to the supplied arena.
@@ -753,6 +776,7 @@ pub enum UnsupportedJvmLocalFlag {
     Given,
     Implicit,
     Erased,
+    Inline,
 }
 
 /// Why a typed semantic slot cannot be consumed as an actual type.
@@ -1400,6 +1424,7 @@ impl JvmCompilationUnit<'_> {
                         (UnsupportedJvmLocalFlag::Given, SymbolFlags::GIVEN),
                         (UnsupportedJvmLocalFlag::Implicit, SymbolFlags::IMPLICIT),
                         (UnsupportedJvmLocalFlag::Erased, SymbolFlags::ERASED),
+                        (UnsupportedJvmLocalFlag::Inline, SymbolFlags::INLINE),
                     ] {
                         if local.flags.contains(required_flag) {
                             return Err(JvmCodegenError::UnsupportedLocalFlag {

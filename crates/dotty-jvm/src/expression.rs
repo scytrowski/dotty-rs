@@ -1,7 +1,9 @@
 //! Lowering for the first, value-producing typed expression leaves.
 
+use std::collections::HashSet;
+
 use dotty_classfile::bytecode::CodeBuilder;
-use dotty_core::ast::{Tree, TreeKind, Typed, TypedAst};
+use dotty_core::ast::{Tree, TreeKind, Typed, TypedAst, ValDef};
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TreeId, TypeId};
 use dotty_core::store::SemanticStore;
@@ -11,8 +13,8 @@ use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 use crate::{
     InvalidTypeReason, JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmCallTarget,
     JvmClassMetadata, JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmInvocationKind,
-    JvmLoweredExpression, JvmMethodMetadata, JvmReturnType, JvmType, JvmValueCategory,
-    UnsupportedJvmCallShapeKind,
+    JvmLocalLayout, JvmLoweredExpression, JvmMethodMetadata, JvmReturnType, JvmType,
+    JvmValueCategory, UnsupportedJvmCallShapeKind,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +138,8 @@ struct JvmLoweringContext<'a> {
     typed_ast: &'a TypedAst,
     definitions: &'a Definitions,
     method: &'a JvmMethodMetadata,
+    local_layout: Option<&'a JvmLocalLayout>,
+    initialized_locals: HashSet<SymbolId>,
     call_context: Option<(&'a JvmCompilationUnit<'a>, &'a JvmClassMetadata)>,
     control_flow_depth: usize,
     node_visits: usize,
@@ -153,6 +157,8 @@ impl<'a> JvmLoweringContext<'a> {
             typed_ast,
             definitions,
             method,
+            local_layout: None,
+            initialized_locals: HashSet::new(),
             call_context: None,
             control_flow_depth: 0,
             node_visits: 0,
@@ -250,7 +256,10 @@ pub(super) fn lower_planned_method_body(
     body: TreeId<Typed>,
 ) -> Result<CodeBuilder, JvmCodegenError> {
     let mut code = CodeBuilder::new();
+    let local_layout =
+        unit.local_layout(class.identity().symbol(), method.symbol(), definitions)?;
     let mut context = JvmLoweringContext::new(unit.store, unit.typed_ast, definitions, method);
+    context.local_layout = Some(&local_layout);
     context.call_context = Some((unit, class));
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
     append_method_return(method, body, flow, &mut code)?;
@@ -347,6 +356,25 @@ fn lower_leaf(
                 }) => Some(*symbol),
                 _ => None,
             };
+            if let Some(symbol) = symbol.filter(|symbol| {
+                context.local_layout.is_some_and(|layout| {
+                    layout
+                        .locals()
+                        .iter()
+                        .any(|local| local.symbol() == *symbol)
+                })
+            }) {
+                if !context.initialized_locals.contains(&symbol) {
+                    return Err(JvmCodegenError::UninitializedLocalRead {
+                        tree: tree_id,
+                        symbol,
+                    });
+                }
+                return Err(JvmCodegenError::UnsupportedTypedExpression {
+                    tree: tree_id,
+                    node: "initialized local read",
+                });
+            }
             let Some(parameter) = symbol.and_then(|symbol| {
                 context
                     .method
@@ -453,6 +481,10 @@ fn emit_block(
     };
 
     for stat in stats {
+        if matches!(context.tree(stat)?.kind, TreeKind::ValDef(_)) {
+            emit_local_declaration(context, stat, code, depth + 1)?;
+            continue;
+        }
         match emit_expression(context, stat, code, depth + 1)? {
             Flow::Value(_) => {
                 code.pop()
@@ -495,6 +527,61 @@ fn emit_block(
             found: public_flow(flow),
         }),
     }
+}
+
+fn emit_local_declaration(
+    context: &mut JvmLoweringContext<'_>,
+    declaration: TreeId<Typed>,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<(), JvmCodegenError> {
+    context.visit(declaration, depth)?;
+    let method = context.method.symbol();
+    let local = context
+        .local_layout
+        .and_then(|layout| {
+            layout
+                .locals()
+                .iter()
+                .find(|local| local.declaration() == declaration)
+                .copied()
+        })
+        .ok_or(JvmCodegenError::LocalDeclarationNotInPlan {
+            method,
+            declaration,
+        })?;
+    let rhs = match &context.tree(declaration)?.kind {
+        TreeKind::ValDef(ValDef { rhs, .. }) => *rhs,
+        _ => {
+            return Err(JvmCodegenError::InvalidLocalDeclaration {
+                method,
+                declaration,
+            });
+        }
+    }
+    .ok_or(JvmCodegenError::MissingLocalInitializer {
+        method,
+        declaration,
+    })?;
+
+    let flow = emit_expression(context, rhs, code, depth + 1)?;
+    if flow != Flow::Value(local.ty()) {
+        return Err(JvmCodegenError::LocalInitializerFlowMismatch {
+            method,
+            declaration,
+            symbol: local.symbol(),
+            expected: local.ty(),
+            found: public_flow(flow),
+        });
+    }
+
+    code.istore(usize::from(local.slot()))
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: declaration,
+            error,
+        })?;
+    context.initialized_locals.insert(local.symbol());
+    Ok(())
 }
 
 fn block_types_match(
@@ -717,7 +804,9 @@ fn emit_if_body(
             tree: tree_id,
             error,
         })?;
+    let initialized_before_branches = context.initialized_locals.clone();
     let then_flow = emit_expression(context, then_branch, code, depth + 1)?;
+    let initialized_then = context.initialized_locals.clone();
     let join_label = if matches!(then_flow, Flow::Value(_) | Flow::Unit) {
         let join_label = code
             .new_label()
@@ -740,7 +829,9 @@ fn emit_if_body(
             tree: tree_id,
             error,
         })?;
+    context.initialized_locals = initialized_before_branches.clone();
     let else_flow = emit_expression(context, else_branch, code, depth + 1)?;
+    let initialized_else = context.initialized_locals.clone();
     let flow = merge_if_flows(
         context,
         tree_id,
@@ -750,6 +841,15 @@ fn emit_if_body(
         else_branch,
         else_flow,
     )?;
+    context.initialized_locals = match (then_flow, else_flow) {
+        (Flow::Value(_) | Flow::Unit, Flow::Value(_) | Flow::Unit) => initialized_then
+            .intersection(&initialized_else)
+            .copied()
+            .collect(),
+        (Flow::Value(_) | Flow::Unit, Flow::Diverges) => initialized_then,
+        (Flow::Diverges, Flow::Value(_) | Flow::Unit) => initialized_else,
+        (Flow::Diverges, Flow::Diverges) => initialized_before_branches,
+    };
     if let Some(join_label) = join_label {
         code.mark(join_label)
             .map_err(|error| JvmCodegenError::CodeBuilder {
@@ -1994,6 +2094,14 @@ mod tests {
         ];
         for (stat, node) in unsupported {
             let block = fixture.block(vec![stat], value, fixture.definitions.int);
+            let expected = if node == "ValDef" {
+                JvmCodegenError::LocalDeclarationNotInPlan {
+                    method: fixture.method.symbol(),
+                    declaration: stat,
+                }
+            } else {
+                JvmCodegenError::UnsupportedTypedExpression { tree: stat, node }
+            };
             assert_eq!(
                 lower_expression(
                     &fixture.store,
@@ -2003,7 +2111,7 @@ mod tests {
                     block,
                 )
                 .unwrap_err(),
-                JvmCodegenError::UnsupportedTypedExpression { tree: stat, node }
+                expected
             );
         }
 
