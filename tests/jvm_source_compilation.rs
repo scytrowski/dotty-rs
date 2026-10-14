@@ -679,10 +679,7 @@ fn source_primitive_local_initializers_emit_load_store_and_correct_max_locals() 
     let Attribute::Code(code) = &run.attributes[0] else {
         panic!("run method has no Code attribute")
     };
-    assert_eq!(
-        code.code.as_ref(),
-        &[0x1b, 0x3d, 0x10, 42, 0x3e, 0x1b, 0xac]
-    );
+    assert_eq!(code.code, &[0x1b, 0x3d, 0x10, 42, 0x3e, 0x1b, 0xac]);
     assert_eq!(code.max_locals, 4);
 }
 
@@ -705,10 +702,7 @@ fn nested_same_named_source_locals_keep_distinct_slots_after_parameter_shadowing
     let Attribute::Code(code) = &run.attributes[0] else {
         panic!("run method has no Code attribute")
     };
-    assert_eq!(
-        code.code.as_ref(),
-        &[0x1b, 0x3e, 0x10, 42, 0x36, 4, 0x1b, 0xac]
-    );
+    assert_eq!(code.code, &[0x1b, 0x3e, 0x10, 42, 0x36, 4, 0x1b, 0xac]);
     assert_eq!(code.max_locals, 5);
 }
 
