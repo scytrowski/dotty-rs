@@ -646,6 +646,8 @@ pub enum UnsupportedJvmCallShapeKind {
     NonThisReceiver,
     /// A selected member's `this` receiver is not the current class.
     NonCurrentThis,
+    /// A selected member uses a qualified `this` expression.
+    QualifiedThisReceiver,
     /// The canonical term reference has a prefix outside this call subset.
     UnsupportedReceiverPrefix,
 }
@@ -937,6 +939,50 @@ impl JvmCompilationUnit<'_> {
         definitions: &Definitions,
     ) -> Result<JvmCallTarget, JvmCodegenError> {
         call_target::resolve_same_class_call(self, caller_class, caller_method, call, definitions)
+    }
+
+    /// Lowers the receiver for a validated same-class instance call.
+    ///
+    /// The complete `Apply` tree is first resolved through
+    /// [`Self::resolve_same_class_call`]. This proves an implicit identifier
+    /// names a planned instance method, while an explicit selection must use
+    /// the current class's unqualified `this`. On success, the returned
+    /// method-local builder contains exactly one `aload(0)` instruction. The
+    /// caller must append argument evaluation after this builder so the
+    /// receiver is pushed before call arguments. No call or arguments are
+    /// emitted here, and an error returns no partial builder.
+    pub fn lower_same_class_call_receiver(
+        &self,
+        caller_class: SymbolId,
+        caller_method: SymbolId,
+        call: TreeId<Typed>,
+        definitions: &Definitions,
+    ) -> Result<dotty_classfile::bytecode::CodeBuilder, JvmCodegenError> {
+        let class_plan = self
+            .classes
+            .iter()
+            .find(|plan| plan.class == caller_class)
+            .ok_or(JvmCodegenError::MissingClassPlan {
+                class: caller_class,
+            })?;
+        let class_metadata = class_plan.metadata(self.store, definitions)?;
+        let caller_metadata = class_metadata
+            .methods()
+            .iter()
+            .find(|method| method.symbol() == caller_method)
+            .ok_or(JvmCodegenError::CallerMethodNotInJvmPlan {
+                class: caller_class,
+                method: caller_method,
+            })?;
+        let target =
+            self.resolve_same_class_call(caller_class, caller_method, call, definitions)?;
+        expression::lower_current_receiver(
+            self.typed_ast,
+            &class_metadata,
+            caller_metadata,
+            call,
+            &target,
+        )
     }
 
     /// Validates the plan without mutating or copying semantic state.

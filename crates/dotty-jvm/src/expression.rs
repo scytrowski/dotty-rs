@@ -9,9 +9,9 @@ use dotty_core::symbols::SymbolInfo;
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 
 use crate::{
-    InvalidTypeReason, JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmCodegenError,
-    JvmExpressionFlow, JvmLoweredExpression, JvmMethodMetadata, JvmReturnType, JvmType,
-    JvmValueCategory,
+    InvalidTypeReason, JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmCallTarget,
+    JvmClassMetadata, JvmCodegenError, JvmExpressionFlow, JvmLoweredExpression, JvmMethodMetadata,
+    JvmReturnType, JvmType, JvmValueCategory, UnsupportedJvmCallShapeKind,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +26,93 @@ enum ExpressionShape {
     If,
     Return,
     Unsupported(&'static str),
+}
+
+pub(super) fn lower_current_receiver(
+    typed_ast: &TypedAst,
+    class: &JvmClassMetadata,
+    caller: &JvmMethodMetadata,
+    call_id: TreeId<Typed>,
+    target: &JvmCallTarget,
+) -> Result<CodeBuilder, JvmCodegenError> {
+    let class_symbol = class.identity().symbol();
+    if !class
+        .methods()
+        .iter()
+        .any(|method| method.symbol() == caller.symbol())
+    {
+        return Err(JvmCodegenError::CallerMethodNotInJvmPlan {
+            class: class_symbol,
+            method: caller.symbol(),
+        });
+    }
+    if !class
+        .methods()
+        .iter()
+        .any(|method| method.symbol() == target.method_symbol())
+        || target.owner_internal_name() != class.identity().internal_name()
+    {
+        return Err(JvmCodegenError::MethodNotInJvmPlan {
+            tree: call_id,
+            class: class_symbol,
+            method: target.method_symbol(),
+        });
+    }
+
+    let call = typed_ast
+        .try_get(call_id)
+        .ok_or(JvmCodegenError::UnsupportedTypedExpression {
+            tree: call_id,
+            node: "missing tree",
+        })?;
+    let TreeKind::Apply(application) = &call.kind else {
+        return Err(JvmCodegenError::UnsupportedJvmCallShape {
+            tree: call_id,
+            kind: UnsupportedJvmCallShapeKind::NotApplication,
+        });
+    };
+    let function = typed_ast.try_get(application.function).ok_or(
+        JvmCodegenError::UnsupportedTypedExpression {
+            tree: application.function,
+            node: "missing tree",
+        },
+    )?;
+    if let TreeKind::Select(select) = &function.kind {
+        let receiver = typed_ast.try_get(select.qualifier).ok_or(
+            JvmCodegenError::UnsupportedTypedExpression {
+                tree: select.qualifier,
+                node: "missing tree",
+            },
+        )?;
+        match &receiver.kind {
+            TreeKind::This(this) if this.qual.is_none() => {}
+            TreeKind::This(_) => {
+                return Err(JvmCodegenError::UnsupportedJvmCallShape {
+                    tree: select.qualifier,
+                    kind: UnsupportedJvmCallShapeKind::QualifiedThisReceiver,
+                });
+            }
+            _ => {
+                return Err(JvmCodegenError::UnsupportedJvmCallShape {
+                    tree: select.qualifier,
+                    kind: UnsupportedJvmCallShapeKind::NonThisReceiver,
+                });
+            }
+        }
+    } else if !matches!(function.kind, TreeKind::Ident(_)) {
+        return Err(JvmCodegenError::UnsupportedJvmCallShape {
+            tree: application.function,
+            kind: UnsupportedJvmCallShapeKind::UnsupportedFunctionTree,
+        });
+    }
+
+    let mut code = CodeBuilder::new();
+    code.aload(0)
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: call_id,
+            error,
+        })?;
+    Ok(code)
 }
 
 /// Read-only semantic inputs shared by every recursive lowering step.

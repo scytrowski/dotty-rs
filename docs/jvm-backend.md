@@ -103,6 +103,16 @@ explicit empty clause return typed errors. This API resolves metadata only:
 it does not check argument arity or types, evaluate arguments, load `this`, or
 emit an invocation instruction.
 
+`JvmCompilationUnit::lower_same_class_call_receiver` composes that validated
+call context with receiver lowering. A `Select` receiver must be the current
+class's unqualified `this`; an `Ident` is accepted only after the resolver has
+proved it names a planned instance method. The method returns a fresh builder
+containing exactly one `aload(0)`. Callers append argument evaluation after
+that builder so the receiver precedes the arguments. Qualified `this`,
+`super`, other receiver expressions, and static caller methods return typed
+errors. This API emits neither arguments nor the invocation and does not
+introduce general JVM reference-value lowering.
+
 This metadata layer does not encode Scala operator names, nested-class `$`
 names, companion/module classes, trait forwarders, bridges, private-access
 semantics, constructors, classfile hierarchy, or bytecode. Unsupported ABI
