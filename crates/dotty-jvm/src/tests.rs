@@ -5348,7 +5348,7 @@ impl PrimitiveIntrinsicFixture {
         });
         let name = self.store.symbols.get(method).name;
         let function_type = self.store.types.alloc(Type::TermRef {
-            prefix: self.definitions.no_prefix,
+            prefix: receiver_type,
             target: TermRefTarget::Symbol(method),
         });
         let function = self.ast.alloc(Tree {
@@ -5377,6 +5377,30 @@ impl PrimitiveIntrinsicFixture {
             position: None,
             ty: result,
         })
+    }
+
+    fn set_function_prefix(
+        &mut self,
+        call: TreeId<dotty_core::ast::Typed>,
+        prefix: dotty_core::TypeId,
+    ) -> TreeId<dotty_core::ast::Typed> {
+        let function = match &self.ast.get(call).kind {
+            TreeKind::Apply(apply) => apply.function,
+            _ => unreachable!(),
+        };
+        let method = match self.store.types.get(self.ast.get(function).ty) {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(method),
+                ..
+            } => *method,
+            _ => unreachable!(),
+        };
+        let function_type = self.store.types.alloc(Type::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(method),
+        });
+        self.ast.get_mut(function).ty = function_type;
+        function
     }
 }
 
@@ -5564,6 +5588,56 @@ fn canonical_intrinsic_reports_wrong_arity_and_owner() {
         Err(JvmIntIntrinsicError::WrongOwner { tree, method: found, .. })
             if tree == valid_call && found == method
     ));
+}
+
+#[test]
+fn canonical_intrinsic_rejects_unsupported_or_receiver_inconsistent_prefixes() {
+    let mut fixture = PrimitiveIntrinsicFixture::new();
+    let method = fixture
+        .definitions
+        .int_primitive_operator_symbols(&fixture.store)
+        .unwrap()
+        .plus;
+    let unsupported_call = fixture.call(method, fixture.definitions.int);
+    let unsupported = fixture.definitions.no_prefix;
+    let unsupported_function = fixture.set_function_prefix(unsupported_call, unsupported);
+    assert_eq!(
+        resolve_int_intrinsic(
+            &fixture.store,
+            &fixture.ast,
+            unsupported_call,
+            &fixture.definitions
+        ),
+        Err(JvmIntIntrinsicError::UnsupportedFunctionPrefix {
+            tree: unsupported_function,
+            prefix: unsupported,
+        })
+    );
+
+    let mismatched_call = fixture.call(method, fixture.definitions.int);
+    let mismatched_function =
+        fixture.set_function_prefix(mismatched_call, fixture.definitions.boolean);
+    let receiver_id = match &fixture.ast.get(mismatched_call).kind {
+        TreeKind::Apply(apply) => match &fixture.ast.get(apply.function).kind {
+            TreeKind::Select(select) => select.qualifier,
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    };
+    let receiver = fixture.ast.get(receiver_id).ty;
+    assert_eq!(
+        resolve_int_intrinsic(
+            &fixture.store,
+            &fixture.ast,
+            mismatched_call,
+            &fixture.definitions
+        ),
+        Err(JvmIntIntrinsicError::FunctionPrefixMismatch {
+            tree: mismatched_function,
+            prefix: fixture.definitions.boolean,
+            receiver,
+        })
+    );
 }
 
 #[test]

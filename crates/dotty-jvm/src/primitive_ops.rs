@@ -43,6 +43,15 @@ pub enum JvmIntIntrinsicError {
     UnresolvedFunctionTarget {
         tree: TreeId<Typed>,
     },
+    UnsupportedFunctionPrefix {
+        tree: TreeId<Typed>,
+        prefix: TypeId,
+    },
+    FunctionPrefixMismatch {
+        tree: TreeId<Typed>,
+        prefix: TypeId,
+        receiver: TypeId,
+    },
     UnknownMethod {
         tree: TreeId<Typed>,
         method: SymbolId,
@@ -120,11 +129,11 @@ pub fn resolve_int_intrinsic(
     };
 
     let function = get_tree(store, typed_ast, function_id)?;
-    let method = match function.kind {
+    let (method, prefix) = match function.kind {
         TreeKind::Select(_) => selected_method(store, function.ty)
             .ok_or(JvmIntIntrinsicError::UnresolvedFunctionTarget { tree: function_id })?,
         _ => {
-            if let Some(method) = selected_method(store, function.ty)
+            if let Some((method, _)) = selected_method(store, function.ty)
                 && registered_operation(definitions.int_primitive_operator_symbols(store), method)
                     .is_some()
             {
@@ -212,6 +221,23 @@ pub fn resolve_int_intrinsic(
             operand: select.qualifier,
         });
     }
+    if store
+        .types
+        .try_get(prefix)
+        .is_none_or(|ty| matches!(ty, Type::NoType | Type::NoPrefix | Type::Error(_)))
+    {
+        return Err(JvmIntIntrinsicError::UnsupportedFunctionPrefix {
+            tree: function_id,
+            prefix,
+        });
+    }
+    if prefix != receiver.ty {
+        return Err(JvmIntIntrinsicError::FunctionPrefixMismatch {
+            tree: function_id,
+            prefix,
+            receiver: receiver.ty,
+        });
+    }
     let argument = get_tree(store, typed_ast, args[0])?;
     if primitive_semantic_type(store, argument.ty, definitions) != Some(definitions.int) {
         return Err(JvmIntIntrinsicError::WrongOperandType {
@@ -250,12 +276,12 @@ fn get_tree<'a>(
     Ok(tree)
 }
 
-fn selected_method(store: &SemanticStore, ty: TypeId) -> Option<SymbolId> {
+fn selected_method(store: &SemanticStore, ty: TypeId) -> Option<(SymbolId, TypeId)> {
     match store.types.try_get(ty)? {
         Type::TermRef {
+            prefix,
             target: TermRefTarget::Symbol(method),
-            ..
-        } => Some(*method),
+        } => Some((*method, *prefix)),
         _ => None,
     }
 }
