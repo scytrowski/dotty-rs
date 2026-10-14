@@ -8,6 +8,7 @@ use dotty_classfile::reader::Reader;
 use dotty_core::ast::{DefDef, Template, TreeKind, Untyped};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolId, SymbolKind, TreeId,
+    Visibility,
 };
 use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
@@ -160,7 +161,8 @@ fn compile_source(
     };
     let source_methods =
         collect_source_methods(&parsed.ast, &template.body, source_id, &index, &store)?;
-    let initialization = prove_implicit_noarg_constructor(&parsed.ast, template);
+    let initialization =
+        prove_implicit_noarg_constructor(&parsed.ast, template, source_id, &index, &store);
 
     let mut typer = SourceTyper::new(
         &parsed.ast,
@@ -296,20 +298,37 @@ fn collect_source_methods(
 fn prove_implicit_noarg_constructor(
     ast: &dotty_core::AstArena<Untyped>,
     template: &Template<Untyped>,
+    source: SourceId,
+    index: &SourceSemanticIndex,
+    store: &SemanticStore,
 ) -> JvmClassInitializationPlan {
-    let constructor_has_no_parameters = match &ast.get(template.constructor).kind {
+    let constructor_is_public =
+        index
+            .symbol_at(source, template.constructor)
+            .is_some_and(|constructor| {
+                store.symbols.contains(constructor)
+                    && store.symbols.get(constructor).kind == SymbolKind::Constructor
+                    && store.symbols.get(constructor).visibility == Visibility::Public
+            });
+    let constructor_matches_emitted_shape = match &ast.get(template.constructor).kind {
         TreeKind::DefDef(DefDef {
             type_params,
             value_param_clauses,
+            metadata,
             ..
-        }) => type_params.is_empty() && value_param_clauses.iter().all(Vec::is_empty),
+        }) => {
+            constructor_is_public
+                && metadata.visibility.is_none()
+                && type_params.is_empty()
+                && value_param_clauses.iter().all(Vec::is_empty)
+        }
         _ => false,
     };
     let body_contains_methods_only = template
         .body
         .iter()
         .all(|tree| matches!(ast.get(*tree).kind, TreeKind::DefDef(_)));
-    if constructor_has_no_parameters
+    if constructor_matches_emitted_shape
         && template.parents.is_empty()
         && template.self_val.is_none()
         && body_contains_methods_only
@@ -498,6 +517,17 @@ fn verify_with_jdk(output_directory: &Path) {
 fn field_initializer_is_rejected_without_a_partial_class_file() {
     let output = TestOutputDirectory::new("field-initializer");
     let error = compile_fixture("FieldInitializer.scala", output.path()).unwrap_err();
+    assert!(matches!(
+        error,
+        PipelineFailure::Codegen(JvmCodegenError::UnsupportedConstructor { .. })
+    ));
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn private_primary_constructor_is_rejected_without_a_public_constructor_file() {
+    let output = TestOutputDirectory::new("private-constructor");
+    let error = compile_fixture("PrivateConstructor.scala", output.path()).unwrap_err();
     assert!(matches!(
         error,
         PipelineFailure::Codegen(JvmCodegenError::UnsupportedConstructor { .. })
