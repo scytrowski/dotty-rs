@@ -681,9 +681,10 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let prefix = prefix_profile(store, request.prefix);
         let module_class = match prefix.target_kind {
             "ModuleClass" => prefix.symbol,
-            "Object" => prefix
-                .symbol
-                .and_then(|object| self.module_class_of_object(store, object).ok().flatten()),
+            "Object" => prefix.symbol.and_then(|object| {
+                canonical_module_class_of_object(store, object)
+                    .or_else(|| self.module_class_of_object(store, object).ok().flatten())
+            }),
             _ => None,
         };
         let module_class_identity =
@@ -2012,7 +2013,7 @@ fn audit_and_classpath_resolvers_match_for_real_scala_source_module() {
         .iter()
         .filter(|observation| observation.operation == "module_class_of_object")
         .collect::<Vec<_>>();
-    assert_eq!(identity_lookups.len(), 3);
+    assert_eq!(identity_lookups.len(), 1);
     assert!(identity_lookups.iter().all(|observation| {
         observation.result == "resolved"
             && observation.source_file == "scala.io.Source.scala"
@@ -2734,6 +2735,34 @@ fn module_class_observed_state(store: &SemanticStore, module_class: SymbolId) ->
             _ => "Complete(NonClassInfo)",
         },
     }
+}
+
+fn canonical_module_class_of_object(store: &SemanticStore, object: SymbolId) -> Option<SymbolId> {
+    if !store.symbols.contains(object)
+        || store.symbols.get(object).kind != dotty_core::SymbolKind::Object
+    {
+        return None;
+    }
+    let dotty_core::SymbolInfo::Complete(info) = store.symbols.get(object).info else {
+        return None;
+    };
+    if !store.types.contains(info) {
+        return None;
+    }
+    let module_class = match store.types.get(info) {
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        }
+        | Type::TermRef {
+            target: dotty_core::TermRefTarget::Symbol(symbol),
+            ..
+        } => *symbol,
+        _ => return None,
+    };
+    (store.symbols.contains(module_class)
+        && store.symbols.get(module_class).kind == dotty_core::SymbolKind::ModuleClass)
+        .then_some(module_class)
 }
 
 fn completed_module_class_targets(metrics: &ResolverMetrics) -> BTreeSet<String> {
