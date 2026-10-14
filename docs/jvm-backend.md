@@ -121,11 +121,16 @@ Scala operator. Calls whose symbol is not in the canonical registry continue
 through ordinary same-class call resolution and retain its receiver and
 control-flow restrictions. Generic expression lowering without a validated
 compilation unit still rejects applications because it has no intrinsic or
-call-target context. Canonical relational operators are recognized but return
-a structured unsupported-intrinsic error until Boolean comparison lowering is
-implemented. JVM overflow, signed division/remainder, and division-by-zero
-behavior are preserved by emitting the corresponding JVM instruction without
-constant folding or prechecks.
+call-target context. Canonical relational operators `<`, `<=`, `>`, and `>=`
+emit their signed `if_icmp*` branch to a true label, materialize `0` on the
+false path and `1` on the true path, then join. The classfile builder computes
+branch offsets and `StackMapTable` frames. The Boolean values work as results,
+local values, and conditions in `if` and `while`. Calls with reference
+receivers remain unsupported in control-flow graphs because the current
+analyzer still models only integer-like stack states there. Equality operators
+`==` and `!=` remain unsupported. JVM overflow, signed
+division/remainder, and division-by-zero behavior are preserved by emitting
+the corresponding JVM instruction without constant folding or prechecks.
 
 ## Class and method metadata subset
 

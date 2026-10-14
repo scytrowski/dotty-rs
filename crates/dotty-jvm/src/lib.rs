@@ -558,11 +558,6 @@ pub enum JvmCodegenError {
         tree: TreeId<Typed>,
         error: JvmIntIntrinsicError,
     },
-    /// A canonical intrinsic has been resolved but its operation is not yet lowered.
-    UnsupportedIntIntrinsic {
-        tree: TreeId<Typed>,
-        intrinsic: JvmIntIntrinsic,
-    },
     /// A resolved Int operand did not lower to one JVM Int value.
     IntIntrinsicOperandFlowMismatch {
         tree: TreeId<Typed>,
