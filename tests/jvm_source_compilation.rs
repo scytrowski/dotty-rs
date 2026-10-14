@@ -683,6 +683,122 @@ fn int_equality_remains_outside_the_relational_intrinsic_subset() {
     );
 }
 
+#[test]
+fn canonical_int_intrinsics_compose_across_loop_and_branch_control_flow() {
+    let output = TestOutputDirectory::new("compositional-int-intrinsics");
+    let source = r#"class IntrinsicControlFlow {
+              def sumTo(n: Int): Int = {
+                var i = 1
+                var sum = 0
+                while i <= n do {
+                  sum = sum + i
+                  i = i + 1
+                }
+                sum
+              }
+              def select(a: Int, b: Int): Int = if a < b then a + b else a - b
+              def operandOrder(flag: Boolean): Int = {
+                var i = 1
+                val value = if flag then i + { i = i + 1; i } else i
+                value * 10 + i
+              }
+              def nestedComparison(a: Int, b: Int): Boolean =
+                if a < b then a <= b else a >= b
+              def localAfterBranch(flag: Boolean): Int = {
+                val selected = if flag then 5 else 7
+                selected
+              }
+            }
+"#;
+    let artifact = compile_source(source, "IntrinsicControlFlow.scala", output.path()).unwrap();
+    let second_output = TestOutputDirectory::new("compositional-int-intrinsics-second");
+    let second_artifact =
+        compile_source(source, "IntrinsicControlFlow.scala", second_output.path()).unwrap();
+    assert_eq!(artifact.class.bytes(), second_artifact.class.bytes());
+    let mut reader = Reader::new(artifact.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("IntrinsicControlFlow should decode");
+
+    for name in [
+        "sumTo",
+        "select",
+        "operandOrder",
+        "nestedComparison",
+        "localAfterBranch",
+    ] {
+        let code = emitted_method_code(&class, name);
+        let mut expected_frame_pcs = decode_branch_targets(code)
+            .into_iter()
+            .map(|(_, _, target)| target)
+            .collect::<Vec<_>>();
+        expected_frame_pcs.sort_unstable();
+        expected_frame_pcs.dedup();
+        assert_eq!(
+            stack_map_frame_pcs(&class, name),
+            expected_frame_pcs,
+            "{name} should use the classfile CFG's frame targets"
+        );
+        assert!(
+            !decode_subset_instructions(code)
+                .iter()
+                .any(|(_, opcode)| *opcode == 0xb6),
+            "{name} should lower canonical operators without invokevirtual"
+        );
+    }
+    let sum_to = decode_subset_instructions(emitted_method_code(&class, "sumTo"));
+    for opcode in [0x60, 0xa4, 0xa7] {
+        assert!(
+            sum_to.iter().any(|(_, found)| *found == opcode),
+            "sumTo should contain the expected intrinsic/loop opcode {opcode:#04x}"
+        );
+    }
+    assert!(
+        decode_subset_instructions(emitted_method_code(&class, "select"))
+            .iter()
+            .any(|(_, opcode)| *opcode == 0x60),
+        "If branches should lower nested arithmetic intrinsics"
+    );
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness_path = output.path().join("IntrinsicControlFlowHarness.java");
+        fs::write(
+            &harness_path,
+            "public final class IntrinsicControlFlowHarness { public static void main(String[] args) { IntrinsicControlFlow value = new IntrinsicControlFlow(); if (value.sumTo(0) != 0 || value.sumTo(1) != 1 || value.sumTo(10) != 55) throw new AssertionError(\"multi-iteration sumTo\"); if (value.select(2, 5) != 7 || value.select(5, 2) != 3) throw new AssertionError(\"comparison-selected arithmetic\"); if (value.operandOrder(true) != 32 || value.operandOrder(false) != 11) throw new AssertionError(\"intrinsic operand order and single evaluation\"); if (!value.nestedComparison(1, 2) || !value.nestedComparison(2, 1) || !value.nestedComparison(2, 2)) throw new AssertionError(\"nested Boolean comparison\"); if (value.localAfterBranch(true) != 5 || value.localAfterBranch(false) != 7) throw new AssertionError(\"local after branch join\"); System.out.println(\"compositional intrinsics ok\"); } }\n",
+        )
+        .expect("write compositional intrinsic harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected IntrinsicControlFlowHarness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "IntrinsicControlFlowHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected IntrinsicControlFlow\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "compositional intrinsics ok"
+        );
+    }
+}
+
 fn assert_invoked_method_names(class: &ClassFile<'_>, code: &[u8], expected: &[&str]) {
     let instructions = decode_subset_instructions(code);
     let calls = instructions
@@ -1553,6 +1669,19 @@ fn while_loops_reject_invalid_conditions_and_calls_inside_control_flow() {
         PipelineFailure::Codegen(JvmCodegenError::JvmCallInUnsupportedControlFlow { .. })
     ));
     assert!(call_output.class_files().is_empty());
+
+    let branch_output = TestOutputDirectory::new("if-call-control-flow");
+    let branch_error = compile_source(
+        "class IfCall { def identity(value: Int): Int = value; def run(flag: Boolean): Int = if flag then identity(1) else 0 }\n",
+        "IfCall.scala",
+        branch_output.path(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        branch_error,
+        PipelineFailure::Codegen(JvmCodegenError::JvmCallInUnsupportedControlFlow { .. })
+    ));
+    assert!(branch_output.class_files().is_empty());
 }
 
 #[test]

@@ -125,12 +125,17 @@ call-target context. Canonical relational operators `<`, `<=`, `>`, and `>=`
 emit their signed `if_icmp*` branch to a true label, materialize `0` on the
 false path and `1` on the true path, then join. The classfile builder computes
 branch offsets and `StackMapTable` frames. The Boolean values work as results,
-local values, and conditions in `if` and `while`. Calls with reference
-receivers remain unsupported in control-flow graphs because the current
-analyzer still models only integer-like stack states there. Equality operators
-`==` and `!=` remain unsupported. JVM overflow, signed
-division/remainder, and division-by-zero behavior are preserved by emitting
-the corresponding JVM instruction without constant folding or prechecks.
+local values, and conditions in `if` and `while`. This compositional subset
+includes initialized integer locals updated by arithmetic assignments across
+multiple loop iterations, comparison conditions, nested Boolean branches, and
+`if` branches that return arithmetic values. Loop locals must be initialized
+before the loop; a local initialized only in the body is not assumed to exist
+on the zero-iteration exit. Calls with reference receivers remain unsupported
+in control-flow graphs because the current analyzer still models only
+integer-like stack states there. Equality operators `==` and `!=` remain
+unsupported. JVM overflow, signed division/remainder, and division-by-zero
+behavior are preserved by emitting the corresponding JVM instruction without
+constant folding or prechecks.
 
 ## Class and method metadata subset
 
