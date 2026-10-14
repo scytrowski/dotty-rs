@@ -589,6 +589,13 @@ pub enum JvmCodegenError {
         tree: TreeId<Typed>,
         found: Option<JvmType>,
     },
+    /// A while condition does not produce a Boolean value on normal flow.
+    InvalidWhileCondition {
+        tree: TreeId<Typed>,
+        found: Option<JvmType>,
+    },
+    /// A typed while node does not carry the canonical Unit result type.
+    WhileResultTypeMismatch { tree: TreeId<Typed>, ty: TypeId },
     /// A reachable conditional branch does not match the other branch's value type.
     IfBranchTypeMismatch {
         tree: TreeId<Typed>,

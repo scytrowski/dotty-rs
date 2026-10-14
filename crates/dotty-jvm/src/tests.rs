@@ -1568,6 +1568,68 @@ fn assignments_reject_immutable_nonlocal_and_mistyped_targets_without_class_outp
 }
 
 #[test]
+fn loop_body_initialization_is_not_assumed_after_a_zero_iteration_path() {
+    let mut fixture = EmissionFixture::new(false);
+    let method_index = 1;
+    let int_ty = fixture.definitions.int;
+    let unit_ty = fixture.definitions.unit;
+    let local = add_emission_local_symbol(
+        &mut fixture,
+        method_index,
+        "insideLoop",
+        int_ty,
+        false,
+        SymbolFlags::EMPTY,
+    );
+    let initializer = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(1),
+        }),
+        position: None,
+        ty: int_ty,
+    });
+    let declaration =
+        add_emission_local_valdef(&mut fixture, method_index, local, int_ty, Some(initializer));
+    let unit_value = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Unit,
+        }),
+        position: None,
+        ty: unit_ty,
+    });
+    let loop_body = typed_block(&mut fixture, vec![declaration], unit_value, unit_ty);
+    let false_condition = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Boolean(false),
+        }),
+        position: None,
+        ty: fixture.definitions.boolean,
+    });
+    let loop_tree = fixture.ast.alloc(Tree {
+        kind: TreeKind::While(dotty_core::ast::While {
+            cond: false_condition,
+            body: loop_body,
+        }),
+        position: None,
+        ty: unit_ty,
+    });
+    let result = typed_emission_symbol_ident(&mut fixture, local);
+    fixture.bodies[method_index] = typed_block(&mut fixture, vec![loop_tree], result, int_ty);
+
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
+        declaration,
+        symbol: local,
+        mutable: false,
+    }];
+    assert!(matches!(
+        emit_class(&unit, fixture.class, &fixture.definitions),
+        Err(JvmCodegenError::UninitializedLocalRead { tree, symbol })
+            if tree == result && symbol == local
+    ));
+}
+
+#[test]
 fn emits_local_initializers_once_in_declaration_order_with_canonical_slots() {
     let mut fixture = EmissionFixture::new(false);
     let method_index = 1;
