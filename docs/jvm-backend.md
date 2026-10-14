@@ -120,6 +120,31 @@ The CI JVM gate writes this generated class to disk, inspects it with `javap`,
 compiles a small Java caller with `javac`, and executes it with
 `java -Xverify:all` on JDK 21 or newer.
 
+## Source frontend integration gate
+
+The root crate's `jvm_source_compilation` integration test is the bounded
+source-to-execution path. It reads `tests/fixtures/jvm/Answer.scala`, runs the
+shared source through the lexer, parser, namer, and typer, and builds JVM plans
+from canonical `SourceSemanticIndex` identities while preserving the source
+parameter order. The fixture uses an explicit empty parameter clause for its
+zero-argument `value()` method; the current typer represents a parameterless
+Scala method without that clause differently, and that shape is not accepted
+by the current JVM descriptor contract.
+
+The test decodes and validates the emitted version-65 class, checks its method
+descriptors and stack map, compares bytes from independent output directories,
+then uses JDK 21+ `javap`, `javac`, and `java -Xverify:all` to verify and execute
+it. CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail that
+gate. Two negative fixtures check that an unsupported field initializer and
+parser diagnostics produce no `.class` file. Run the test locally with
+`cargo test --test jvm_source_compilation --locked`; without the JDK it still
+runs the structural and negative checks and skips Java verification.
+
+This path targets the repository's pinned Scala 3.9.0 source compatibility
+reference at revision `777528f19a58e794c9954a42f433373472ec57f8`. It demonstrates
+only the explicitly supported frontend and JVM subset; the class has no
+`.tasty` payload and does not claim full Scala ABI or `scalac` compatibility.
+
 ## Typed expression leaves
 
 `lower_value_expression` accepts typed `Literal` nodes containing `Constant::Int`
