@@ -644,10 +644,11 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
     }
 
     fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
-        let mut metrics = self.metrics.borrow_mut();
+        let metrics = self.metrics.borrow_mut();
         let Some((inner_checkpoint, operation_offset, member_offset)) = metrics
             .module_operation_checkpoints
-            .remove(&checkpoint.token())
+            .get(&checkpoint.token())
+            .copied()
         else {
             return;
         };
@@ -670,7 +671,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         }
         metrics
             .module_operation_checkpoints
-            .retain(|token, _| *token < checkpoint.token());
+            .retain(|token, _| *token <= checkpoint.token());
     }
 
     fn resolve_member(
