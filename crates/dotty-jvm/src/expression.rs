@@ -445,8 +445,17 @@ fn validate_branch(
 ) -> Result<(), JvmCodegenError> {
     let tree_ty = context.tree(tree)?.ty;
     match flow {
-        Flow::Diverges if is_nothing_type(context.store, tree_ty, context.definitions) => Ok(()),
-        Flow::Diverges => Err(JvmCodegenError::UnsupportedBottomFlow { tree }),
+        Flow::Diverges => {
+            let diverges_with_supported_type =
+                is_nothing_type(context.store, tree_ty, context.definitions)
+                    || (is_unit_type(context.store, tree_ty, context.definitions)
+                        && matches!(&context.tree(tree)?.kind, TreeKind::If(_)));
+            if diverges_with_supported_type {
+                Ok(())
+            } else {
+                Err(JvmCodegenError::UnsupportedBottomFlow { tree })
+            }
+        }
         Flow::Unit if is_unit_type(context.store, tree_ty, context.definitions) => Ok(()),
         Flow::Unit => Err(JvmCodegenError::UnitFlowTypeMismatch { tree, ty: tree_ty }),
         Flow::Value(_) if is_nothing_type(context.store, tree_ty, context.definitions) => {
@@ -482,34 +491,35 @@ fn emit_return(
         return Err(JvmCodegenError::UnsupportedBottomFlow { tree: tree_id });
     }
     match (expr, context.method.descriptor().result()) {
-        (Some(value), JvmReturnType::Value(expected)) => {
-            match emit_expression(context, value, code, depth + 1)? {
-                Flow::Value(found) if found == expected => {
-                    code.ireturn()
-                        .map_err(|error| JvmCodegenError::CodeBuilder {
-                            tree: tree_id,
-                            error,
-                        })?;
-                    Ok(Flow::Diverges)
-                }
-                Flow::Diverges => Ok(Flow::Diverges),
-                Flow::Unit => Err(JvmCodegenError::ReturnValueTypeMismatch {
-                    tree: tree_id,
-                    expected: context.method.descriptor().result(),
-                    found: None,
-                }),
-                Flow::Value(found) => Err(JvmCodegenError::ReturnValueTypeMismatch {
-                    tree: tree_id,
-                    expected: context.method.descriptor().result(),
-                    found: Some(found),
-                }),
+        (Some(value), expected) => match emit_expression(context, value, code, depth + 1)? {
+            Flow::Diverges => Ok(Flow::Diverges),
+            Flow::Unit if expected == JvmReturnType::Void => {
+                code.return_void()
+                    .map_err(|error| JvmCodegenError::CodeBuilder {
+                        tree: tree_id,
+                        error,
+                    })?;
+                Ok(Flow::Diverges)
             }
-        }
-        (Some(_), expected) => Err(JvmCodegenError::ReturnValueTypeMismatch {
-            tree: tree_id,
-            expected,
-            found: None,
-        }),
+            Flow::Unit => Err(JvmCodegenError::ReturnValueTypeMismatch {
+                tree: tree_id,
+                expected,
+                found: None,
+            }),
+            Flow::Value(found) if expected == JvmReturnType::Value(found) => {
+                code.ireturn()
+                    .map_err(|error| JvmCodegenError::CodeBuilder {
+                        tree: tree_id,
+                        error,
+                    })?;
+                Ok(Flow::Diverges)
+            }
+            Flow::Value(found) => Err(JvmCodegenError::ReturnValueTypeMismatch {
+                tree: tree_id,
+                expected,
+                found: Some(found),
+            }),
+        },
         (None, JvmReturnType::Void) => {
             code.return_void()
                 .map_err(|error| JvmCodegenError::CodeBuilder {
@@ -1264,6 +1274,52 @@ mod tests {
     }
 
     #[test]
+    fn explicit_void_return_consumes_unit_literal_or_if_flow() {
+        let mut fixture = Fixture::new(&[JvmType::Boolean]);
+        fixture.set_result(JvmReturnType::Void);
+        let unit_literal = fixture.literal(Constant::Unit, fixture.definitions.unit);
+        let return_unit = fixture.return_expr(Some(unit_literal), None);
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    return_unit,
+                )
+                .unwrap(),
+            ),
+            vec![0xb1]
+        );
+
+        let condition_type = fixture.store.types.alloc(Type::TermRef {
+            prefix: fixture.definitions.no_prefix,
+            target: TermRefTarget::Symbol(fixture.parameters[0]),
+        });
+        let condition = fixture.ident(condition_type);
+        let then_unit = fixture.literal(Constant::Unit, fixture.definitions.unit);
+        let else_unit = fixture.literal(Constant::Unit, fixture.definitions.unit);
+        let unit_if = fixture.if_expr(condition, then_unit, else_unit, fixture.definitions.unit);
+        let return_unit_if = fixture.return_expr(Some(unit_if), None);
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    return_unit_if,
+                )
+                .unwrap(),
+            ),
+            vec![0x1b, 0x99, 0x00, 0x06, 0xa7, 0x00, 0x03, 0xb1]
+        );
+    }
+
+    #[test]
     fn unit_typed_if_with_only_returns_still_diverges_without_an_epilogue() {
         let mut fixture = Fixture::new(&[JvmType::Boolean, JvmType::Int, JvmType::Int]);
         let ids = fixture.parameters.clone();
@@ -1312,6 +1368,62 @@ mod tests {
                 .unwrap(),
             ),
             vec![0x1b, 0x99, 0x00, 0x05, 0x1c, 0xac, 0x1d, 0xac]
+        );
+    }
+
+    #[test]
+    fn unit_typed_diverging_if_is_valid_as_a_nested_unit_branch() {
+        let mut fixture = Fixture::new(&[JvmType::Boolean, JvmType::Boolean]);
+        fixture.set_result(JvmReturnType::Void);
+        let parameters = fixture.parameters.clone();
+        let references = parameters
+            .into_iter()
+            .map(|symbol| {
+                let ty = fixture.store.types.alloc(Type::TermRef {
+                    prefix: fixture.definitions.no_prefix,
+                    target: TermRefTarget::Symbol(symbol),
+                });
+                fixture.ident(ty)
+            })
+            .collect::<Vec<_>>();
+        let inner_then_return = fixture.return_expr(None, None);
+        let inner_else_return = fixture.return_expr(None, None);
+        let inner = fixture.if_expr(
+            references[1],
+            inner_then_return,
+            inner_else_return,
+            fixture.definitions.unit,
+        );
+        let outer_unit = fixture.literal(Constant::Unit, fixture.definitions.unit);
+        let root = fixture.if_expr(references[0], inner, outer_unit, fixture.definitions.unit);
+
+        assert_eq!(
+            lower_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                root,
+            )
+            .unwrap()
+            .flow(),
+            JvmExpressionFlow::Unit
+        );
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    root,
+                )
+                .unwrap(),
+            ),
+            vec![
+                0x1b, 0x99, 0x00, 0x09, 0x1c, 0x99, 0x00, 0x04, 0xb1, 0xb1, 0xb1
+            ]
         );
     }
 
