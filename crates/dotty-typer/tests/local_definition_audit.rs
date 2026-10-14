@@ -679,17 +679,13 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         request: &MemberRequest,
     ) -> Result<Option<SymbolId>, ResolutionError> {
         let prefix = prefix_profile(store, request.prefix);
-        let module_class =
-            match prefix.target_kind {
-                "ModuleClass" => prefix.symbol,
-                "Object" => prefix.symbol.and_then(|object| {
-                    match self.module_class_of_object(store, object) {
-                        Ok(module_class) => module_class,
-                        Err(_) => None,
-                    }
-                }),
-                _ => None,
-            };
+        let module_class = match prefix.target_kind {
+            "ModuleClass" => prefix.symbol,
+            "Object" => prefix
+                .symbol
+                .and_then(|object| self.module_class_of_object(store, object).ok().flatten()),
+            _ => None,
+        };
         let module_class_identity =
             module_class.map_or_else(String::new, |symbol| audit_symbol_path(store, symbol));
         let module_state_before = module_class.map_or("NotModuleClass", |symbol| {
