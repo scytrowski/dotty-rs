@@ -17,7 +17,7 @@ use the existing `Definitions.boolean` `TypeId`.
 
 | Source operator | Scala 3.9 canonical target and signature | Expected typed expression | RHS evaluation | JVM strategy in Scala 3.9 | dotty-rs audit status |
 | --- | --- | --- | --- | --- | --- |
-| `!a` | `BooleanId.unary_!(): Boolean` | Zero-argument `Select(a, unary_!)`; no `Apply` | One operand | `ZNOT`; condition generation reverses success/failure branches | Parser and namer accept it. Typer reports missing `Boolean` `ClassInfo`. |
+| `!a` | Parameterless `BooleanId.unary_! : Boolean` (no argument clause) | `Select(a, unary_!)`; no `Apply` | One operand | `ZNOT`; condition generation reverses success/failure branches | Parser and namer accept it. Typer reports missing `Boolean` `ClassInfo`. |
 | `a && b` | `BooleanId.&&(Boolean): Boolean` | `Apply(Select(a, &&), [b])` | Short-circuit: evaluate `b` only when `a` is true | `ZAND`; branch to skip RHS when the left condition is false | Same missing `Boolean` `ClassInfo`. |
 | `a || b` | `BooleanId.||(Boolean): Boolean` | `Apply(Select(a, ||), [b])` | Short-circuit: evaluate `b` only when `a` is false | `ZOR`; branch to skip RHS when the left condition is true | Same missing `Boolean` `ClassInfo`. |
 | `a & b` | `BooleanId.&(Boolean): Boolean` | `Apply(Select(a, &), [b])` | Eager; evaluate both operands left to right | `AND`; load both values, then primitive logical operation | Same missing `Boolean` `ClassInfo`. |
@@ -33,6 +33,15 @@ because the compiler would not build. The typed call shape alone therefore
 does not encode whether the RHS is conditional; the selected canonical method
 identity supplies that meaning.
 
+`unary_!` is parameterless: Scala declares `def unary_! : Boolean`, with no
+argument clause. It is not `def unary_!(): Boolean`, which the pinned Scala
+oracle rejects for prefix syntax with E100 (`method unary_! ... must be called
+with () argument`). The source Typer audit confirms that the no-clause form
+selects as a `Select` without `Apply`. The distinct empty-clause form is
+rejected as `PrefixMethodNeedsArgumentList` by the existing Typer test. A future
+Boolean class-info projection must preserve this distinction when it completes
+method metadata.
+
 For `==` and `!=`, the receiver's static type matters. Scala `Boolean` declares
 Boolean-parameter overloads, while `Any` declares universal equality methods.
 Scala's `Definitions.Boolean_==` and `Boolean_!=` specifically find the
@@ -42,15 +51,23 @@ Boolean primitive: `Any_==`/`Any_!=` preserve universal equality behavior.
 ## Source and pipeline observations
 
 The audit test parses every operator on Boolean parameters, in local-value
-expressions, in `if` conditions, and in `while` conditions. It also covers
-literal operands and RHS expressions with division-by-zero effects. The parser
-produces no diagnostics and the namer enters the declarations. Typing stops
-before a built-in Boolean operator application can be completed:
+expressions, in `if` conditions, and directly in `while` conditions. Its
+untyped AST assertions verify that the loop's `cond` child is the operator
+expression itself, rather than an identifier initialized from a separate
+operator expression. It also covers literal operands and RHS expressions with
+division-by-zero effects. The parser produces no diagnostics and the namer
+enters the declarations. Typing stops before a built-in Boolean operator
+application can be completed:
 
 - `!true`, `true && false`, `a && b`, `a || b`, `a & b`, `a | b`, `a ^ b`,
   Boolean `a == b`, and Boolean `a != b` report
   `TyperError::MemberLookup(ClassInfoUnavailable { symbol: BooleanId,
   state: Missing })`.
+- A source class with the valid parameterless declaration
+  `def unary_! : Boolean` types the prefix use as `Select` without `Apply` and
+  resolves its own method `SymbolId`. The distinct invalid declaration
+  `def unary_!(): Boolean` is covered by the Typer's
+  `PrefixMethodNeedsArgumentList` regression test and by the Scala E100 oracle.
 - `a == b` and `a != b` with `a` and `b` statically typed `Any` stop at the
   analogous missing canonical `Any` class information. This is a separate
   observed path from Boolean equality.
@@ -107,7 +124,7 @@ lowering belongs to the follow-up implementation increments.
 
 ## Scala 3.9.0 source references
 
-- [`Boolean.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/library/src/scala/Boolean.scala#L22-L119) declares the Boolean methods, documents short circuit for `&&`/`||`, and documents eager operands for `&`/`|`/`^`.
+- [`Boolean.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/library/src/scala/Boolean.scala#L22-L119) declares parameterless `unary_!` and the Boolean methods, documents short circuit for `&&`/`||`, and documents eager operands for `&`/`|`/`^`.
 - [`Definitions.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/core/Definitions.scala#L297-L318) declares universal `Any_==`/`Any_!=`; [the Boolean definitions](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/core/Definitions.scala#L609-L623) select canonical Boolean methods, including equality overloads by Boolean parameter type.
 - [`ScalaPrimitives.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/backend/ScalaPrimitives.scala#L170-L179) maps Boolean `==`, `!=`, `unary_!`, `||`, `&&`, `|`, `&`, and `^` by their method symbols.
 - [`ScalaPrimitivesOps.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/backend/ScalaPrimitivesOps.scala#L37-L43) defines `ZNOT`, `ZOR`, and `ZAND`; its [logical opcode categories](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/backend/ScalaPrimitivesOps.scala#L194-L225) distinguish comparisons, logical operations, and eager bitwise operations.

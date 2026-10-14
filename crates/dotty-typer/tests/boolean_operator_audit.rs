@@ -1,6 +1,6 @@
 //! Audit Boolean operator source typing without adding Boolean intrinsics.
 
-use dotty_core::ast::{AstArena, TreeKind, Untyped};
+use dotty_core::ast::{AstArena, TreeKind, Untyped, UntypedNode};
 use dotty_core::types::{MethodKind, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SourceText, SymbolId,
@@ -129,7 +129,7 @@ class BooleanOperators {
 }
 "#;
 
-fn contextual_operator_sources() -> (String, Vec<String>) {
+fn contextual_operator_sources() -> (String, Vec<String>, Vec<(String, String)>) {
     let operators = [
         ("not", "!", true),
         ("and", "&&", false),
@@ -142,6 +142,7 @@ fn contextual_operator_sources() -> (String, Vec<String>) {
     ];
     let mut methods = Vec::new();
     let mut names = Vec::new();
+    let mut while_conditions = Vec::new();
     for (name, operator, unary) in operators {
         let local_expression = if unary {
             "!left".to_owned()
@@ -177,13 +178,15 @@ fn contextual_operator_sources() -> (String, Vec<String>) {
 
         let in_while = format!("while{name}");
         methods.push(format!(
-            "def {in_while}({parameters}): Unit = {{ var keepGoing: Boolean = {condition}; while keepGoing do keepGoing = false }}"
+            "def {in_while}({parameters}): Unit = while {condition} do ()"
         ));
         names.push(in_while);
+        while_conditions.push((format!("while{name}"), operator.to_owned()));
     }
     (
         format!("class BooleanOperatorContexts {{ {} }}", methods.join("; ")),
         names,
+        while_conditions,
     )
 }
 
@@ -238,10 +241,28 @@ fn all_boolean_operator_sources_reach_the_typer_and_report_the_bootstrap_blocker
         assert_boolean_receiver_class_info_blocker(&mut fixture, method);
     }
 
-    let (source, contextual_methods) = contextual_operator_sources();
+    let (source, contextual_methods, while_conditions) = contextual_operator_sources();
     let mut contexts = Fixture::new(&source);
     for method in contextual_methods {
         assert_boolean_receiver_class_info_blocker(&mut contexts, &method);
+    }
+    for (method, expected_operator) in while_conditions {
+        let (_, rhs) = contexts.method(&method);
+        let TreeKind::While(loop_tree) = &contexts.ast.get(rhs).kind else {
+            panic!("{method} should have a While as its direct method body");
+        };
+        let actual_operator = match &contexts.ast.get(loop_tree.cond).kind {
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) => {
+                contexts.store.names.resolve(infix.op.text())
+            }
+            TreeKind::PhaseSpecific(UntypedNode::PrefixOp(prefix)) => {
+                contexts.store.names.resolve(prefix.op.text())
+            }
+            kind => panic!(
+                "{method} should put its operator directly in the loop condition; got {kind:?}"
+            ),
+        };
+        assert_eq!(actual_operator, expected_operator, "{method}");
     }
 }
 
@@ -320,6 +341,33 @@ fn malformed_boolean_operands_fail_at_the_typer_boundary() {
         typer.type_expression(not_rhs, context),
         Err(TyperError::MemberNotFound { .. })
     ));
+}
+
+#[test]
+fn parameterless_prefix_member_types_as_a_select_without_an_argument_clause() {
+    let mut fixture = Fixture::new(
+        "class ParameterlessBoolean { def unary_! : Boolean = true; def use(value: ParameterlessBoolean): Boolean = !value }",
+    );
+    let unary_method = fixture.method_named_symbol("unary_!");
+    let (method, rhs) = fixture.method("use");
+    let boolean = fixture.definitions.boolean;
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+    let TreeKind::Select(_) = &typer.typed_ast().get(typed).kind else {
+        panic!("a parameterless unary method should select without Apply");
+    };
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(typed).ty),
+        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+            if *symbol == unary_method
+    ));
+    assert_eq!(
+        typer
+            .widen_expression_type(typer.typed_ast().get(typed).ty)
+            .unwrap(),
+        boolean
+    );
 }
 
 #[test]
