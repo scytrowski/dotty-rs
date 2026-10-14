@@ -1627,6 +1627,19 @@ See the [#1051 checkpoint](typer-classpath-corpus-audit-3.9.0.md#1051-package-te
 for frozen-row movement, blocker reasons, performance limits, and the single
 next-sprint recommendation. No default-import behavior is implied.
 
+### #1130 intermediate classpath packages
+
+The classpath resolver can reuse or materialize canonical package symbols for
+intermediate paths when a usable class/TASTy resource exists anywhere below
+the complete requested path. Direct package evidence and descendant-only
+evidence remain distinguishable in resolver audit traces. Missing next
+segments remain unresolved, source-owned packages retain their identity and
+members, and a non-package term collision is reported as an ambiguity. Package
+prefix recognition does not change source import precedence or establish a
+class/object member at the package name. Package entry and rollback use the
+shared `Packages` registry, preserving its existing origin and ownership
+rules.
+
 ### #1072 post-parity Object module reprofile
 
 The current audit also emits

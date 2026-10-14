@@ -438,12 +438,12 @@ impl ClassPathEntry for PrefixOnlyAuditEntry {
         Ok(None)
     }
 
-    fn contains_package(&self, _package: &[&str]) -> Result<bool, ClassPathError> {
-        Ok(false)
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        Ok(package == ["direct"])
     }
 
     fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
-        Ok(package == ["outer"])
+        Ok(package == ["outer"] || package == ["direct"])
     }
 }
 
@@ -455,6 +455,32 @@ fn shared_audit_classpath_delegates_descendant_package_evidence() {
 
     assert!(!classpath.contains_package(&["outer"]).unwrap());
     assert!(classpath.contains_package_prefix(&["outer"]).unwrap());
+}
+
+#[test]
+fn unresolved_package_details_uses_prefix_evidence_and_stable_causes() {
+    let classpath = SharedClassPath(Arc::new(CompositeClassPath::new(vec![Box::new(
+        PrefixOnlyAuditEntry,
+    )])));
+
+    assert_eq!(
+        unresolved_package_details(Some(&classpath), &["outer"]),
+        (
+            "descendant-only package evidence".to_owned(),
+            "outer".to_owned()
+        )
+    );
+    assert_eq!(
+        unresolved_package_details(Some(&classpath), &["direct"]),
+        ("direct package evidence".to_owned(), "direct".to_owned())
+    );
+    assert_eq!(
+        unresolved_package_details(Some(&classpath), &["outer", "missing"]),
+        (
+            "truly unresolved next segment".to_owned(),
+            "outer.missing::resolved-prefix=outer::first-missing=missing".to_owned()
+        )
+    );
 }
 
 impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
@@ -1230,17 +1256,63 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let result = self.inner.resolve_package(store, path);
         let mut metrics = self.metrics.borrow_mut();
         metrics.resolver_package_requests += 1;
-        let (target, outcome, cause) = match &result {
-            Ok(Some(_)) => (path.join("."), "package success".to_owned(), None),
+        let (target, outcome, cause, materialized_prefix) = match &result {
+            Ok(Some(symbol)) => {
+                let package_path = stable_package_path(store, *symbol);
+                let owner_path = store
+                    .symbols
+                    .get(*symbol)
+                    .owner
+                    .map(|owner| stable_package_path(store, owner))
+                    .unwrap_or_else(|| "<root>".to_owned());
+                let source_owned = matches!(
+                    store.symbols.get(*symbol).origin,
+                    dotty_core::SymbolOrigin::Source(_)
+                );
+                let tasty_owned = matches!(
+                    store.symbols.get(*symbol).origin,
+                    dotty_core::SymbolOrigin::Tasty(_)
+                );
+                let classification = if source_owned {
+                    "existing source-owned package"
+                } else if tasty_owned {
+                    "existing TASTy-owned package"
+                } else if let Some(class_path) = self.class_path_probe.as_ref() {
+                    match class_path.contains_package(path) {
+                        Ok(true) => "direct package evidence",
+                        Ok(false) => match class_path.contains_package_prefix(path) {
+                            Ok(true) => "descendant-only package evidence",
+                            Ok(false) => "existing cached package",
+                            Err(_) => "classloader error",
+                        },
+                        Err(_) => "classloader error",
+                    }
+                } else {
+                    "package success"
+                };
+                (
+                    package_path.clone(),
+                    "package success".to_owned(),
+                    Some(classification.to_owned()),
+                    Some(format!("package={package_path}::owner={owner_path}")),
+                )
+            }
             Ok(None) => {
                 let (cause, target) =
                     unresolved_package_details(self.class_path_probe.as_ref(), path);
-                (target, "package unresolved".to_owned(), Some(cause))
+                (target, "package unresolved".to_owned(), Some(cause), None)
             }
             Err(_) => (
                 path.join("."),
                 "package error".to_owned(),
-                Some("classloader error".to_owned()),
+                Some(
+                    if matches!(&result, Err(ResolutionError::Ambiguous { .. })) {
+                        "non-package qualifier".to_owned()
+                    } else {
+                        "classloader error".to_owned()
+                    },
+                ),
+                None,
             ),
         };
         if !metrics.current_method.is_empty() {
@@ -1253,7 +1325,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     target,
                     outcome,
                     cause,
-                    materialized_prefix: None,
+                    materialized_prefix,
                     enclosing_attempt: method.clone(),
                 });
         }
@@ -3781,31 +3853,67 @@ fn unresolved_package_details(
     class_path: Option<&SharedClassPath>,
     path: &[&str],
 ) -> (String, String) {
-    let mut resolved = 0;
+    let mut resolved_prefix = 0;
     if let Some(class_path) = class_path {
         for length in 1..=path.len() {
-            match class_path.contains_package(&path[..length]) {
-                Ok(true) => resolved = length,
+            match class_path.contains_package_prefix(&path[..length]) {
+                Ok(true) => resolved_prefix = length,
                 Ok(false) => break,
                 Err(_) => return ("classloader error".to_owned(), path.join(".")),
             }
         }
     }
-    if resolved == 0 {
+    if resolved_prefix == path.len() && resolved_prefix > 0 {
+        let direct = class_path
+            .and_then(|class_path| class_path.contains_package(path).ok())
+            .unwrap_or(false);
+        return (
+            if direct {
+                "direct package evidence".to_owned()
+            } else {
+                "descendant-only package evidence".to_owned()
+            },
+            path.join("."),
+        );
+    }
+    if resolved_prefix == 0 {
         (
-            "first segment/package unresolved".to_owned(),
+            "truly unresolved next segment".to_owned(),
             format!("{}::<first-segment-unresolved>", path.join(".")),
         )
     } else {
         (
-            "first segment/package unresolved".to_owned(),
+            "truly unresolved next segment".to_owned(),
             format!(
                 "{}::resolved-prefix={}::first-missing={}",
                 path.join("."),
-                path[..resolved].join("."),
-                path.get(resolved).copied().unwrap_or("<unknown>")
+                path[..resolved_prefix].join("."),
+                path.get(resolved_prefix).copied().unwrap_or("<unknown>")
             ),
         )
+    }
+}
+
+fn stable_package_path(store: &SemanticStore, mut package: SymbolId) -> String {
+    let mut segments = Vec::new();
+    while store.symbols.contains(package)
+        && store.symbols.get(package).kind == dotty_core::SymbolKind::Package
+    {
+        let symbol = store.symbols.get(package);
+        let segment = store.names.resolve(symbol.name.text());
+        if !segment.is_empty() {
+            segments.push(segment.to_owned());
+        }
+        let Some(owner) = symbol.owner else {
+            break;
+        };
+        package = owner;
+    }
+    segments.reverse();
+    if segments.is_empty() {
+        "<root>".to_owned()
+    } else {
+        segments.join("/")
     }
 }
 
