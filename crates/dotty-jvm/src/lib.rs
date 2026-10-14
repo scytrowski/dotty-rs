@@ -19,6 +19,7 @@ use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
 
+mod call_target;
 mod descriptor;
 mod emission;
 mod expression;
@@ -113,6 +114,24 @@ pub struct JvmMethodDescriptor {
     /// Primitive parameters in declaration order.
     parameters: Vec<JvmType>,
     /// Primitive result, or JVM `void` for Scala `Unit`.
+    result: JvmReturnType,
+}
+
+/// Invocation mode selected by the bounded same-class call-target resolver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmInvocationKind {
+    /// Ordinary dynamically dispatched instance invocation.
+    Virtual,
+}
+
+/// A validated target for a same-class typed instance call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmCallTarget {
+    owner_internal_name: String,
+    method_name: String,
+    descriptor: JvmMethodDescriptor,
+    method: SymbolId,
+    invocation: JvmInvocationKind,
     result: JvmReturnType,
 }
 
@@ -529,6 +548,28 @@ pub enum JvmCodegenError {
     },
     /// The selected class symbol has no corresponding class plan in the unit.
     MissingClassPlan { class: SymbolId },
+    /// The caller method is not part of the supplied current-class plan.
+    CallerMethodNotInJvmPlan { class: SymbolId, method: SymbolId },
+    /// A canonical method reference is not selected for JVM emission.
+    MethodNotInJvmPlan {
+        tree: TreeId<Typed>,
+        class: SymbolId,
+        method: SymbolId,
+    },
+    /// A typed call site or its function expression has an unsupported shape.
+    UnsupportedJvmCallShape {
+        tree: TreeId<Typed>,
+        kind: UnsupportedJvmCallShapeKind,
+    },
+    /// The function tree does not carry a canonical method-symbol reference.
+    UnresolvedJvmCallTarget { tree: TreeId<Typed> },
+    /// The typed call result disagrees with the selected method descriptor.
+    JvmCallResultTypeMismatch {
+        tree: TreeId<Typed>,
+        method: SymbolId,
+        expected: JvmReturnType,
+        found: Option<JvmReturnType>,
+    },
     /// The class plan cannot prove that synthesizing the minimal constructor is safe.
     UnsupportedConstructor { class: SymbolId },
     /// The class's parent list is not exactly its canonical `Object` type.
@@ -586,6 +627,25 @@ pub enum UnsupportedMethodShapeKind {
     NonPlainClause,
     ParameterCountMismatch,
     NotMethodType,
+}
+
+/// Why a typed call is outside same-class virtual target resolution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsupportedJvmCallShapeKind {
+    /// The supplied call root is not a term application.
+    NotApplication,
+    /// The application uses a contextual/implicit argument clause.
+    UsingClause,
+    /// The function is explicitly type-applied.
+    TypeApplication,
+    /// The function is itself an application (a curried/nested call).
+    NestedApplication,
+    /// The function is not a supported typed identifier or selection.
+    UnsupportedFunctionTree,
+    /// A selected member's receiver is not a `this` tree.
+    NonThisReceiver,
+    /// A selected member's `this` receiver is not the current class.
+    NonCurrentThis,
 }
 
 /// Unsupported semantic type form in this descriptor projection.
@@ -676,6 +736,38 @@ impl JvmClassMetadata {
     /// Selected method metadata in the class plan's order.
     pub fn methods(&self) -> &[JvmMethodMetadata] {
         &self.methods
+    }
+}
+
+impl JvmCallTarget {
+    /// JVM internal name of the selected method's owner.
+    pub fn owner_internal_name(&self) -> &str {
+        &self.owner_internal_name
+    }
+
+    /// Unmangled JVM method name projected from the selected canonical symbol.
+    pub fn method_name(&self) -> &str {
+        &self.method_name
+    }
+
+    /// Exact JVM method descriptor projected for the selected symbol.
+    pub const fn descriptor(&self) -> &JvmMethodDescriptor {
+        &self.descriptor
+    }
+
+    /// Canonical selected method identity.
+    pub const fn method_symbol(&self) -> SymbolId {
+        self.method
+    }
+
+    /// Invocation mode for the resolved target.
+    pub const fn invocation_kind(&self) -> JvmInvocationKind {
+        self.invocation
+    }
+
+    /// Result contract, including `Void` for Scala `Unit`.
+    pub const fn result(&self) -> JvmReturnType {
+        self.result
     }
 }
 
@@ -825,6 +917,24 @@ impl JvmCompilationUnit<'_> {
         definitions: &Definitions,
     ) -> Result<Vec<JvmClassMetadata>, JvmCodegenError> {
         identity::unit_metadata(self, definitions)
+    }
+
+    /// Resolves a typed ordinary call to a planned same-class virtual target.
+    ///
+    /// `call` must identify the complete typed `Apply` tree so the resolver can
+    /// reject contextual application and validate the call result. Its
+    /// function must be a canonical method reference in an `Ident` or a
+    /// `Select` whose receiver is the current class's `this`. Resolution uses
+    /// the selected method `SymbolId` and this unit's explicit emission plan;
+    /// it does not evaluate arguments, load a receiver, or emit instructions.
+    pub fn resolve_same_class_call(
+        &self,
+        caller_class: SymbolId,
+        caller_method: SymbolId,
+        call: TreeId<Typed>,
+        definitions: &Definitions,
+    ) -> Result<JvmCallTarget, JvmCodegenError> {
+        call_target::resolve_same_class_call(self, caller_class, caller_method, call, definitions)
     }
 
     /// Validates the plan without mutating or copying semantic state.

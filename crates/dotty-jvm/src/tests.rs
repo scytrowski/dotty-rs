@@ -2,7 +2,9 @@ use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 use dotty_classfile::reader::Reader;
-use dotty_core::ast::{Ident, If, Literal, Tree, TreeKind, TypedAst};
+use dotty_core::ast::{
+    Apply, ApplyKind, Ident, If, Literal, Select, This, Tree, TreeKind, TypeApply, TypedAst,
+};
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TreeId};
 use dotty_core::names::{Name, Namespace, TermName};
@@ -18,8 +20,9 @@ use std::process::Command;
 
 use crate::{
     InvalidJvmClassInfoKind, InvalidTypeReason, JvmClassInitializationPlan, JvmClassPlan,
-    JvmCodegenError, JvmCompilationUnit, JvmMethodPlan, JvmNameKind, JvmReturnType, JvmType,
-    JvmValueCategory, SymbolRole, UnsupportedJvmClassKind, UnsupportedJvmTypeKind,
+    JvmCodegenError, JvmCompilationUnit, JvmInvocationKind, JvmMethodPlan, JvmNameKind,
+    JvmReturnType, JvmType, JvmValueCategory, SymbolRole, UnsupportedJvmCallShapeKind,
+    UnsupportedJvmClassKind, UnsupportedJvmSymbolFlag, UnsupportedJvmTypeKind,
     UnsupportedMethodShapeKind, emit_class,
 };
 
@@ -1768,6 +1771,790 @@ fn add_emission_method(
         .get_mut(declarations)
         .enter(symbol_name, method);
     (method, parameter_ids)
+}
+
+fn add_call_target_method(
+    fixture: &mut EmissionFixture,
+    name: &str,
+    parameters: &[(&str, dotty_core::TypeId)],
+    result: dotty_core::TypeId,
+) -> SymbolId {
+    let class_type = match fixture.store.symbols.info(fixture.class) {
+        SymbolInfo::Complete(ty) => *ty,
+        _ => panic!("emission fixture class info should be complete"),
+    };
+    let declarations = match fixture.store.types.get(class_type) {
+        Type::ClassInfo(info) => info.declarations,
+        _ => panic!("emission fixture class type should be ClassInfo"),
+    };
+    let (method, parameter_ids) = add_emission_method(
+        &mut fixture.store,
+        fixture.class,
+        declarations,
+        name,
+        parameters,
+        result,
+    );
+    let literal = if result == fixture.definitions.unit {
+        Constant::Unit
+    } else if result == fixture.definitions.boolean {
+        Constant::Boolean(true)
+    } else {
+        Constant::Int(0)
+    };
+    let body = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal { value: literal }),
+        position: None,
+        ty: result,
+    });
+    fixture.methods.push(method);
+    fixture.parameters.push(parameter_ids);
+    fixture.bodies.push(body);
+    method
+}
+
+fn add_unplanned_call_target_method(
+    fixture: &mut EmissionFixture,
+    name: &str,
+    parameters: &[(&str, dotty_core::TypeId)],
+    result: dotty_core::TypeId,
+) -> SymbolId {
+    let class_type = match fixture.store.symbols.info(fixture.class) {
+        SymbolInfo::Complete(ty) => *ty,
+        _ => panic!("emission fixture class info should be complete"),
+    };
+    let declarations = match fixture.store.types.get(class_type) {
+        Type::ClassInfo(info) => info.declarations,
+        _ => panic!("emission fixture class type should be ClassInfo"),
+    };
+    add_emission_method(
+        &mut fixture.store,
+        fixture.class,
+        declarations,
+        name,
+        parameters,
+        result,
+    )
+    .0
+}
+
+fn typed_method_ident(
+    fixture: &mut EmissionFixture,
+    method: SymbolId,
+) -> TreeId<dotty_core::ast::Typed> {
+    let name = fixture.store.symbols.get(method).name;
+    let ty = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TermRefTarget::Symbol(method),
+    });
+    fixture.ast.alloc(Tree {
+        kind: TreeKind::Ident(Ident {
+            name,
+            backquoted: false,
+        }),
+        position: None,
+        ty,
+    })
+}
+
+fn typed_call(
+    fixture: &mut EmissionFixture,
+    function: TreeId<dotty_core::ast::Typed>,
+    args: Vec<TreeId<dotty_core::ast::Typed>>,
+    kind: ApplyKind,
+    ty: dotty_core::TypeId,
+) -> TreeId<dotty_core::ast::Typed> {
+    fixture.ast.alloc(Tree {
+        kind: TreeKind::Apply(Apply {
+            function,
+            args,
+            kind,
+        }),
+        position: None,
+        ty,
+    })
+}
+
+#[test]
+fn resolves_ident_this_calls_and_supported_zero_argument_results_by_symbol() {
+    let mut fixture = EmissionFixture::new(false);
+    let int_type = fixture.definitions.int;
+    let unit_type = fixture.definitions.unit;
+    let int_argument = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(7),
+        }),
+        position: None,
+        ty: int_type,
+    });
+    let identity =
+        add_call_target_method(&mut fixture, "identity", &[("value", int_type)], int_type);
+    let ident_function = typed_method_ident(&mut fixture, identity);
+    let ident_call = typed_call(
+        &mut fixture,
+        ident_function,
+        vec![int_argument],
+        ApplyKind::Regular,
+        int_type,
+    );
+
+    let this_type = fixture.store.types.alloc(Type::ThisType {
+        class: fixture.class,
+    });
+    let this_tree = fixture.ast.alloc(Tree {
+        kind: TreeKind::This(This { qual: None }),
+        position: None,
+        ty: this_type,
+    });
+    let identity_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: this_type,
+        target: TermRefTarget::Symbol(identity),
+    });
+    let select_function = fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: this_tree,
+            name: fixture.store.symbols.get(identity).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: identity_type,
+    });
+    let this_call = typed_call(
+        &mut fixture,
+        select_function,
+        vec![int_argument],
+        ApplyKind::Regular,
+        int_type,
+    );
+
+    let checkpoint = fixture.store.checkpoint();
+    let unit = fixture.unit();
+    let ident_target = unit
+        .resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            ident_call,
+            &fixture.definitions,
+        )
+        .unwrap();
+    let this_target = unit
+        .resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            this_call,
+            &fixture.definitions,
+        )
+        .unwrap();
+    assert_eq!(fixture.store.checkpoint(), checkpoint);
+    assert_eq!(ident_target, this_target);
+    assert_eq!(ident_target.owner_internal_name(), "example/Answer");
+    assert_eq!(ident_target.method_name(), "identity");
+    assert_eq!(ident_target.method_symbol(), identity);
+    assert_eq!(ident_target.descriptor().as_str(), "(I)I");
+    assert_eq!(ident_target.result(), JvmReturnType::Value(JvmType::Int));
+    assert_eq!(ident_target.invocation_kind(), JvmInvocationKind::Virtual);
+
+    let noop = add_call_target_method(&mut fixture, "noop", &[], unit_type);
+    let noop_function = typed_method_ident(&mut fixture, noop);
+    let noop_call = typed_call(
+        &mut fixture,
+        noop_function,
+        Vec::new(),
+        ApplyKind::Regular,
+        unit_type,
+    );
+    let value_method = fixture.methods[0];
+    let value_function = typed_method_ident(&mut fixture, value_method);
+    let value_call = typed_call(
+        &mut fixture,
+        value_function,
+        Vec::new(),
+        ApplyKind::Regular,
+        int_type,
+    );
+    let checkpoint = fixture.store.checkpoint();
+    let unit = fixture.unit();
+    let noop_target = unit
+        .resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            noop_call,
+            &fixture.definitions,
+        )
+        .unwrap();
+    let value_target = unit
+        .resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            value_call,
+            &fixture.definitions,
+        )
+        .unwrap();
+    assert_eq!(noop_target.descriptor().as_str(), "()V");
+    assert_eq!(noop_target.result(), JvmReturnType::Void);
+    assert_eq!(value_target.descriptor().as_str(), "()I");
+    assert_eq!(fixture.store.checkpoint(), checkpoint);
+}
+
+#[test]
+fn overload_targets_follow_the_typed_symbol_not_the_printed_name() {
+    let mut fixture = EmissionFixture::new(false);
+    let int_type = fixture.definitions.int;
+    let boolean_type = fixture.definitions.boolean;
+    let int_overload =
+        add_call_target_method(&mut fixture, "choose", &[("value", int_type)], int_type);
+    let boolean_overload = add_call_target_method(
+        &mut fixture,
+        "choose",
+        &[("value", boolean_type)],
+        boolean_type,
+    );
+    let int_function = typed_method_ident(&mut fixture, int_overload);
+    let bool_function = typed_method_ident(&mut fixture, boolean_overload);
+    let int_arg = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(1),
+        }),
+        position: None,
+        ty: int_type,
+    });
+    let bool_arg = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Boolean(true),
+        }),
+        position: None,
+        ty: boolean_type,
+    });
+    let int_call = typed_call(
+        &mut fixture,
+        int_function,
+        vec![int_arg],
+        ApplyKind::Regular,
+        int_type,
+    );
+    let bool_call = typed_call(
+        &mut fixture,
+        bool_function,
+        vec![bool_arg],
+        ApplyKind::Regular,
+        boolean_type,
+    );
+    let unit = fixture.unit();
+    let int_target = unit
+        .resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            int_call,
+            &fixture.definitions,
+        )
+        .unwrap();
+    let bool_target = unit
+        .resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            bool_call,
+            &fixture.definitions,
+        )
+        .unwrap();
+    assert_eq!(int_target.method_symbol(), int_overload);
+    assert_eq!(int_target.descriptor().as_str(), "(I)I");
+    assert_eq!(bool_target.method_symbol(), boolean_overload);
+    assert_eq!(bool_target.descriptor().as_str(), "(Z)Z");
+
+    let duplicate =
+        add_call_target_method(&mut fixture, "choose", &[("another", int_type)], int_type);
+    let duplicate_function = typed_method_ident(&mut fixture, duplicate);
+    let duplicate_call = typed_call(
+        &mut fixture,
+        duplicate_function,
+        vec![int_arg],
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        fixture.unit().resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            duplicate_call,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::DuplicateJvmMethodIdentity {
+            class: fixture.class,
+            method: duplicate,
+            previous: int_overload,
+            name: "choose".to_owned(),
+            descriptor: "(I)I".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn rejects_unsupported_and_unplanned_call_targets_with_typed_errors() {
+    let mut fixture = EmissionFixture::new(false);
+    let int_type = fixture.definitions.int;
+    let identity =
+        add_call_target_method(&mut fixture, "identity", &[("value", int_type)], int_type);
+    let function = typed_method_ident(&mut fixture, identity);
+    let call = typed_call(
+        &mut fixture,
+        function,
+        Vec::new(),
+        ApplyKind::Using,
+        int_type,
+    );
+    assert_eq!(
+        fixture.unit().resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            call,
+            &fixture.definitions
+        ),
+        Err(JvmCodegenError::UnsupportedJvmCallShape {
+            tree: call,
+            kind: UnsupportedJvmCallShapeKind::UsingClause,
+        })
+    );
+
+    let function = typed_method_ident(&mut fixture, identity);
+    let type_application = fixture.ast.alloc(Tree {
+        kind: TreeKind::TypeApply(TypeApply {
+            function,
+            args: Vec::new(),
+        }),
+        position: None,
+        ty: fixture.store.types.alloc(Type::Method(MethodType {
+            params: Vec::new(),
+            result: int_type,
+            kind: MethodKind::Plain,
+        })),
+    });
+    let type_call = typed_call(
+        &mut fixture,
+        type_application,
+        Vec::new(),
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        fixture.unit().resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            type_call,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::UnsupportedJvmCallShape {
+            tree: type_application,
+            kind: UnsupportedJvmCallShapeKind::TypeApplication,
+        })
+    );
+
+    let outside_plan = add_unplanned_call_target_method(&mut fixture, "notPlanned", &[], int_type);
+    let outside_function = typed_method_ident(&mut fixture, outside_plan);
+    let outside_call = typed_call(
+        &mut fixture,
+        outside_function,
+        Vec::new(),
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        fixture.unit().resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            outside_call,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::MethodNotInJvmPlan {
+            tree: outside_function,
+            class: fixture.class,
+            method: outside_plan,
+        })
+    );
+}
+
+#[test]
+fn rejects_unresolved_foreign_and_inconsistent_call_references() {
+    let mut fixture = EmissionFixture::new(false);
+    let int_type = fixture.definitions.int;
+    let boolean_type = fixture.definitions.boolean;
+    let identity =
+        add_call_target_method(&mut fixture, "identity", &[("value", int_type)], int_type);
+    let mut external = EmissionFixture::new(false);
+    let mut missing_symbol = alloc_symbol(
+        &mut external.store,
+        SymbolKind::Value,
+        None,
+        external.definitions.int,
+    );
+    while fixture.store.symbols.contains(missing_symbol) {
+        missing_symbol = alloc_symbol(
+            &mut external.store,
+            SymbolKind::Value,
+            None,
+            external.definitions.int,
+        );
+    }
+    let missing_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TermRefTarget::Symbol(missing_symbol),
+    });
+    let missing_function = fixture.ast.alloc(Tree {
+        kind: TreeKind::Ident(Ident {
+            name: fixture.store.symbols.get(identity).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: missing_type,
+    });
+    let missing_call = typed_call(
+        &mut fixture,
+        missing_function,
+        Vec::new(),
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        fixture.unit().resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            missing_call,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::UnknownMethod {
+            method: missing_symbol,
+        })
+    );
+
+    let unresolved_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TermRefTarget::Name(TermName::new(fixture.store.names.intern("identity"))),
+    });
+    let unresolved_function = fixture.ast.alloc(Tree {
+        kind: TreeKind::Ident(Ident {
+            name: fixture.store.symbols.get(identity).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: unresolved_type,
+    });
+    let unresolved_call = typed_call(
+        &mut fixture,
+        unresolved_function,
+        Vec::new(),
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        fixture.unit().resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            unresolved_call,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::UnresolvedJvmCallTarget {
+            tree: unresolved_function,
+        })
+    );
+
+    let foreign_class = alloc_symbol(&mut fixture.store, SymbolKind::Class, None, int_type);
+    let foreign_method = alloc_symbol(
+        &mut fixture.store,
+        SymbolKind::Method,
+        Some(foreign_class),
+        int_type,
+    );
+    let foreign_function = typed_method_ident(&mut fixture, foreign_method);
+    let foreign_call = typed_call(
+        &mut fixture,
+        foreign_function,
+        Vec::new(),
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        fixture.unit().resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            foreign_call,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::WrongOwner {
+            symbol: foreign_method,
+            expected: fixture.class,
+            actual: Some(foreign_class),
+        })
+    );
+
+    let function = typed_method_ident(&mut fixture, identity);
+    let mismatched = typed_call(
+        &mut fixture,
+        function,
+        Vec::new(),
+        ApplyKind::Regular,
+        boolean_type,
+    );
+    assert_eq!(
+        fixture.unit().resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            mismatched,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::JvmCallResultTypeMismatch {
+            tree: mismatched,
+            method: identity,
+            expected: JvmReturnType::Value(JvmType::Int),
+            found: Some(JvmReturnType::Value(JvmType::Boolean)),
+        })
+    );
+}
+
+#[test]
+fn rejects_visibility_flags_static_extension_and_constructor_call_targets() {
+    let mut private = EmissionFixture::new(false);
+    let int_type = private.definitions.int;
+    let private_method = add_call_target_method(&mut private, "privateCall", &[], int_type);
+    private.store.symbols.get_mut(private_method).visibility = Visibility::Private;
+    let function = typed_method_ident(&mut private, private_method);
+    let call = typed_call(
+        &mut private,
+        function,
+        Vec::new(),
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        private.unit().resolve_same_class_call(
+            private.class,
+            private.methods[1],
+            call,
+            &private.definitions,
+        ),
+        Err(JvmCodegenError::UnsupportedJvmVisibility {
+            symbol: private_method,
+            visibility: Visibility::Private,
+        })
+    );
+
+    for (flag, expected) in [
+        (SymbolFlags::STATIC, UnsupportedJvmSymbolFlag::Static),
+        (SymbolFlags::EXTENSION, UnsupportedJvmSymbolFlag::Extension),
+    ] {
+        let mut fixture = EmissionFixture::new(false);
+        let int_type = fixture.definitions.int;
+        let method = add_call_target_method(&mut fixture, "flagged", &[], int_type);
+        fixture.store.symbols.get_mut(method).flags = flag;
+        let function = typed_method_ident(&mut fixture, method);
+        let call = typed_call(
+            &mut fixture,
+            function,
+            Vec::new(),
+            ApplyKind::Regular,
+            int_type,
+        );
+        assert_eq!(
+            fixture.unit().resolve_same_class_call(
+                fixture.class,
+                fixture.methods[1],
+                call,
+                &fixture.definitions,
+            ),
+            Err(JvmCodegenError::UnsupportedJvmSymbolFlag {
+                symbol: method,
+                flag: expected,
+            })
+        );
+    }
+
+    for clause_kind in [MethodKind::Implicit, MethodKind::Contextual] {
+        let mut fixture = EmissionFixture::new(false);
+        let int_type = fixture.definitions.int;
+        let method = add_call_target_method(&mut fixture, "contextual", &[], int_type);
+        let method_type = fixture.store.types.alloc(Type::Method(MethodType {
+            params: Vec::new(),
+            result: int_type,
+            kind: clause_kind,
+        }));
+        fixture
+            .store
+            .symbols
+            .set_info(method, SymbolInfo::Complete(method_type));
+        let function = typed_method_ident(&mut fixture, method);
+        let call = typed_call(
+            &mut fixture,
+            function,
+            Vec::new(),
+            ApplyKind::Regular,
+            int_type,
+        );
+        assert_eq!(
+            fixture.unit().resolve_same_class_call(
+                fixture.class,
+                fixture.methods[1],
+                call,
+                &fixture.definitions,
+            ),
+            Err(JvmCodegenError::UnsupportedMethodShape {
+                method,
+                ty: method_type,
+                kind: UnsupportedMethodShapeKind::NonPlainClause,
+            })
+        );
+    }
+
+    let mut constructor = EmissionFixture::new(false);
+    let int_type = constructor.definitions.int;
+    let constructor_symbol = alloc_symbol(
+        &mut constructor.store,
+        SymbolKind::Constructor,
+        Some(constructor.class),
+        int_type,
+    );
+    let function = typed_method_ident(&mut constructor, constructor_symbol);
+    let call = typed_call(
+        &mut constructor,
+        function,
+        Vec::new(),
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        constructor.unit().resolve_same_class_call(
+            constructor.class,
+            constructor.methods[1],
+            call,
+            &constructor.definitions,
+        ),
+        Err(JvmCodegenError::UnsupportedSymbolKind {
+            symbol: constructor_symbol,
+            expected: SymbolRole::Method,
+            found: SymbolKind::Constructor,
+        })
+    );
+}
+
+#[test]
+fn rejects_non_this_receivers_non_current_this_and_nullary_methods() {
+    let mut fixture = EmissionFixture::new(false);
+    let int_type = fixture.definitions.int;
+    let identity =
+        add_call_target_method(&mut fixture, "identity", &[("value", int_type)], int_type);
+    let select_parameters = fixture.parameters[1].clone();
+    let receiver_symbol = select_parameters[0];
+    let receiver_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TermRefTarget::Symbol(receiver_symbol),
+    });
+    let receiver = fixture.ast.alloc(Tree {
+        kind: TreeKind::Ident(Ident {
+            name: fixture.store.symbols.get(receiver_symbol).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: receiver_type,
+    });
+    let identity_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: receiver_type,
+        target: TermRefTarget::Symbol(identity),
+    });
+    let select = fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: receiver,
+            name: fixture.store.symbols.get(identity).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: identity_type,
+    });
+    let call = typed_call(
+        &mut fixture,
+        select,
+        Vec::new(),
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        fixture.unit().resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            call,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::UnsupportedJvmCallShape {
+            tree: select,
+            kind: UnsupportedJvmCallShapeKind::NonThisReceiver,
+        })
+    );
+
+    let other_class = alloc_symbol(&mut fixture.store, SymbolKind::Class, None, int_type);
+    let other_this_type = fixture
+        .store
+        .types
+        .alloc(Type::ThisType { class: other_class });
+    let other_this = fixture.ast.alloc(Tree {
+        kind: TreeKind::This(This { qual: None }),
+        position: None,
+        ty: other_this_type,
+    });
+    let selected_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: other_this_type,
+        target: TermRefTarget::Symbol(identity),
+    });
+    let selected = fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: other_this,
+            name: fixture.store.symbols.get(identity).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: selected_type,
+    });
+    let call = typed_call(
+        &mut fixture,
+        selected,
+        Vec::new(),
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        fixture.unit().resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            call,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::UnsupportedJvmCallShape {
+            tree: selected,
+            kind: UnsupportedJvmCallShapeKind::NonCurrentThis,
+        })
+    );
+
+    let value = fixture.methods[0];
+    fixture
+        .store
+        .symbols
+        .set_info(value, SymbolInfo::Complete(int_type));
+    let function = typed_method_ident(&mut fixture, value);
+    let nullary_call = typed_call(
+        &mut fixture,
+        function,
+        Vec::new(),
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        fixture.unit().resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            nullary_call,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::UnsupportedMethodShape {
+            method: value,
+            ty: int_type,
+            kind: UnsupportedMethodShapeKind::NotMethodType,
+        })
+    );
 }
 
 #[test]

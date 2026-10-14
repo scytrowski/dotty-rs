@@ -86,6 +86,20 @@ types. Instance local slot zero is reserved for `this`; supported `Int` and
 parameter records its type, first slot, and width so later category-two types
 can extend the layout contract without changing identity semantics.
 
+`JvmCompilationUnit::resolve_same_class_call` accepts a complete typed
+`Apply` tree plus the planned caller class and method. It resolves only a
+canonical `TermRefTarget::Symbol` carried by an `Ident` or a `Select` on that
+class's `this`, then requires the target to belong to the same class's
+explicit emission plan and declaration scope. The result carries the exact
+owner internal name, JVM method name and descriptor, canonical method symbol,
+`Virtual` invocation kind, and result contract. The typed call result must
+agree with the projected descriptor. Contextual `using` calls, type
+applications, other receivers, constructors, static or extension methods,
+unresolved name-designed references, and parameterless methods without an
+explicit empty clause return typed errors. This API resolves metadata only:
+it does not check argument arity or types, evaluate arguments, load `this`, or
+emit an invocation instruction.
+
 This metadata layer does not encode Scala operator names, nested-class `$`
 names, companion/module classes, trait forwarders, bridges, private-access
 semantics, constructors, classfile hierarchy, or bytecode. Unsupported ABI
