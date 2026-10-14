@@ -130,12 +130,11 @@ fn validate_emittable_class(
 
     let declarations = store.scopes.get(class_info.declarations).entered_symbols();
     let declared: HashSet<_> = declarations.collect();
-    let selected_methods: HashSet<_> = plan.methods.iter().map(|method| method.method).collect();
-    for method in &selected_methods {
-        if !declared.contains(method) {
+    for method in &plan.methods {
+        if !declared.contains(&method.method) {
             return Err(JvmCodegenError::MethodNotInClassDeclarations {
                 class: plan.class,
-                method: *method,
+                method: method.method,
             });
         }
     }
@@ -182,7 +181,14 @@ fn validate_primary_constructor(
         SymbolInfo::Missing | SymbolInfo::Deferred(_) => Ok(()),
         SymbolInfo::Error => Err(JvmCodegenError::UnsupportedConstructor { class }),
         SymbolInfo::Complete(ty) => match store.types.try_get(ty) {
-            Some(Type::Method(MethodType { params, .. })) if params.is_empty() => Ok(()),
+            Some(Type::Method(MethodType { params, result, .. })) if params.is_empty() => {
+                match store.types.try_get(*result) {
+                    Some(Type::Method(_) | Type::Poly(_)) | None => {
+                        Err(JvmCodegenError::UnsupportedConstructor { class })
+                    }
+                    Some(_) => Ok(()),
+                }
+            }
             _ => Err(JvmCodegenError::UnsupportedConstructor { class }),
         },
     }

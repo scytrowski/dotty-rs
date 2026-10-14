@@ -1971,6 +1971,49 @@ fn class_emission_fails_closed_for_unknown_constructor_fields_and_superclasses()
         })
     );
 
+    let mut nested_clause = EmissionFixture::new(false);
+    let declarations = match nested_clause.store.symbols.info(nested_clause.class) {
+        SymbolInfo::Complete(ty) => match nested_clause.store.types.get(*ty) {
+            Type::ClassInfo(info) => info.declarations,
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    };
+    let (constructor, _) = add_emission_method(
+        &mut nested_clause.store,
+        nested_clause.class,
+        declarations,
+        "<init>",
+        &[],
+        nested_clause.definitions.unit,
+    );
+    nested_clause.store.symbols.get_mut(constructor).kind = SymbolKind::Constructor;
+    let inner_clause = nested_clause.store.types.alloc(Type::Method(MethodType {
+        params: vec![MethodParam {
+            name: TermName::new(nested_clause.store.names.intern("seed")),
+            ty: nested_clause.definitions.int,
+            erased: false,
+            varargs: false,
+        }],
+        result: nested_clause.definitions.unit,
+        kind: MethodKind::Plain,
+    }));
+    let empty_outer_clause = nested_clause.store.types.alloc(Type::Method(MethodType {
+        params: Vec::new(),
+        result: inner_clause,
+        kind: MethodKind::Plain,
+    }));
+    nested_clause
+        .store
+        .symbols
+        .set_info(constructor, SymbolInfo::Complete(empty_outer_clause));
+    assert_eq!(
+        nested_clause.emit(),
+        Err(JvmCodegenError::UnsupportedConstructor {
+            class: nested_clause.class
+        })
+    );
+
     let field_name = fixture.store.names.intern("field");
     let field = fixture.store.symbols.alloc(Symbol {
         name: Name::new(field_name, Namespace::Term),
@@ -2025,4 +2068,28 @@ fn class_emission_fails_closed_for_unknown_constructor_fields_and_superclasses()
             parent: Some(superclass.definitions.int)
         })
     );
+}
+
+#[test]
+fn missing_class_declaration_errors_follow_method_plan_order() {
+    let mut fixture = EmissionFixture::new(false);
+    let class_info_type = match fixture.store.symbols.info(fixture.class) {
+        SymbolInfo::Complete(ty) => *ty,
+        _ => unreachable!(),
+    };
+    let Type::ClassInfo(info) = fixture.store.types.get(class_info_type) else {
+        unreachable!()
+    };
+    let declarations = info.declarations;
+    let expected_method = fixture.methods[0];
+    for method in &fixture.methods {
+        fixture.store.scopes.get_mut(declarations).remove(*method);
+    }
+
+    let expected = Err(JvmCodegenError::MethodNotInClassDeclarations {
+        class: fixture.class,
+        method: expected_method,
+    });
+    assert_eq!(fixture.emit(), expected);
+    assert_eq!(fixture.emit(), expected);
 }
