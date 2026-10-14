@@ -192,6 +192,26 @@ pub trait ClassPathEntry: Send + Sync {
         let _ = package;
         Ok(false)
     }
+
+    /// Whether this entry has positive classpath evidence for `package` or
+    /// any descendant package. `true` only establishes that at least one
+    /// usable `.class` or `.tasty` resource exists at or below this logical
+    /// package path; it does not imply a direct class, module, or
+    /// package-object term exists in `package`. `false` means this entry has
+    /// no such evidence and is not a negative result for other entries or
+    /// source declarations.
+    ///
+    /// The default preserves compatibility for custom entries by treating
+    /// [`Self::contains_package`] as partial positive evidence. Such entries
+    /// may not discover descendant-only packages. Filesystem and archive
+    /// implementations must reject unsafe package segments and propagate
+    /// actual I/O or archive errors.
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        if !safe_package_segments(package) {
+            return Ok(false);
+        }
+        self.contains_package(package)
+    }
 }
 
 /// A [`ClassPathEntry`] backed by a single filesystem directory, mapping
@@ -331,11 +351,52 @@ pub(crate) fn safe_package_segments(package: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct DirectEvidenceClassPath(AtomicUsize);
+
+    impl ClassPathEntry for DirectEvidenceClassPath {
+        fn find_class(&self, _name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            Ok(None)
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(package == ["pkg"])
+        }
+    }
 
     #[test]
     fn class_path_error_displays_the_source_error() {
         let error = ClassPathError::from(io::Error::new(io::ErrorKind::PermissionDenied, "nope"));
         assert_eq!(error.to_string(), "classpath I/O error: nope");
+    }
+
+    #[test]
+    fn package_prefix_default_uses_direct_evidence_as_a_compatible_fallback() {
+        let entry = DirectEvidenceClassPath(AtomicUsize::new(0));
+
+        assert!(entry.contains_package_prefix(&["pkg"]).unwrap());
+        assert!(!entry.contains_package_prefix(&["pkg", "nested"]).unwrap());
+        assert_eq!(entry.0.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn package_prefix_default_rejects_unsafe_segments_before_delegating() {
+        let entry = DirectEvidenceClassPath(AtomicUsize::new(0));
+
+        for package in [
+            &["."][..],
+            &[".."],
+            &["a/b"],
+            &["a\\b"],
+            &["a:b"],
+            &["a\0b"],
+            &[""],
+        ] {
+            assert!(!entry.contains_package_prefix(package).unwrap());
+        }
+        assert_eq!(entry.0.load(Ordering::Relaxed), 0);
     }
 
     #[test]
