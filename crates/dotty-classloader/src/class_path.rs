@@ -405,6 +405,18 @@ impl ClassPathEntry for CompositeClassPath {
         }
         Ok(false)
     }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        if !safe_package_segments(package) {
+            return Ok(false);
+        }
+        for entry in &self.entries {
+            if entry.contains_package_prefix(package)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 pub(crate) fn safe_package_segments(package: &[&str]) -> bool {
@@ -519,6 +531,21 @@ mod tests {
         }
     }
 
+    struct PrefixEvidenceEntry(Result<bool, ()>);
+
+    impl ClassPathEntry for PrefixEvidenceEntry {
+        fn find_class(&self, _name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            Ok(None)
+        }
+
+        fn contains_package_prefix(&self, _package: &[&str]) -> Result<bool, ClassPathError> {
+            self.0
+                .as_ref()
+                .copied()
+                .map_err(|()| ClassPathError::from(io::Error::other("prefix evidence failed")))
+        }
+    }
+
     fn found(marker: u8) -> Result<Option<ClassResource>, ()> {
         Ok(Some(ClassResource::new(
             vec![marker],
@@ -555,6 +582,40 @@ mod tests {
             .unwrap();
 
         assert_eq!(resource.bytes(), &[2]);
+    }
+
+    #[test]
+    fn composite_package_prefix_stops_after_first_positive_evidence() {
+        let composite = CompositeClassPath::new(vec![
+            Box::new(PrefixEvidenceEntry(Ok(false))),
+            Box::new(PrefixEvidenceEntry(Ok(true))),
+            Box::new(PrefixEvidenceEntry(Err(()))),
+        ]);
+
+        assert!(composite.contains_package_prefix(&["a", "b"]).unwrap());
+    }
+
+    #[test]
+    fn composite_package_prefix_propagates_first_error_before_later_evidence() {
+        let composite = CompositeClassPath::new(vec![
+            Box::new(PrefixEvidenceEntry(Err(()))),
+            Box::new(PrefixEvidenceEntry(Ok(true))),
+        ]);
+
+        assert_eq!(
+            composite
+                .contains_package_prefix(&["a"])
+                .unwrap_err()
+                .to_string(),
+            "classpath I/O error: prefix evidence failed"
+        );
+    }
+
+    #[test]
+    fn composite_package_prefix_rejects_unsafe_segments_before_delegating() {
+        let composite = CompositeClassPath::new(vec![Box::new(PrefixEvidenceEntry(Ok(true)))]);
+
+        assert!(!composite.contains_package_prefix(&["a", ".."]).unwrap());
     }
 
     #[test]

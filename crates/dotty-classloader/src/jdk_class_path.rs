@@ -51,6 +51,10 @@ impl ClassPathEntry for JdkClassPath {
     fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
         self.composite.contains_package(package)
     }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.composite.contains_package_prefix(package)
+    }
 }
 
 #[cfg(test)]
@@ -98,6 +102,16 @@ mod tests {
         assert!(class_path.contains_package(&["pool"]).unwrap());
         assert!(!class_path.contains_package(&["missing"]).unwrap());
         assert!(!class_path.contains_package(&["..", "pool"]).unwrap());
+    }
+
+    #[test]
+    fn package_prefix_searches_descendants_across_jmods() {
+        let class_path = JdkClassPath::new(fixture_path("tests/fixtures/jdk_classpath")).unwrap();
+
+        assert!(class_path.contains_package_prefix(&["pool"]).unwrap());
+        assert!(class_path.contains_package_prefix(&["other"]).unwrap());
+        assert!(!class_path.contains_package_prefix(&["missing"]).unwrap());
+        assert!(!class_path.contains_package_prefix(&["..", "pool"]).unwrap());
     }
 
     #[test]

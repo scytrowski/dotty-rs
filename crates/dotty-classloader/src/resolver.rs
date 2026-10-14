@@ -1376,6 +1376,13 @@ mod tests {
             }
             self.0.contains_package(package)
         }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            if package == ["java", "lang"] {
+                return Ok(true);
+            }
+            self.0.contains_package_prefix(package)
+        }
     }
 
     struct EmptyCountingClassPath(Arc<AtomicUsize>);
@@ -2809,6 +2816,10 @@ mod tests {
 
         fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
             Ok(package == ["java", "lang"])
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(package == ["java"] || package == ["java", "lang"])
         }
     }
 
