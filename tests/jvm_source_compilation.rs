@@ -361,6 +361,69 @@ fn scala_answer_source_flows_through_the_frontend_into_a_verifiable_class() {
     }
 }
 
+#[test]
+fn source_blocks_keep_term_reference_results_and_nested_divergence() {
+    let output = TestOutputDirectory::new("block-review-regressions");
+    let artifact = compile_source(
+        "class BlockCases {\n  def parameter(x: Int): Int = { 1; x }\n  def nested(): Int = { { return 4; 5 } }\n}\n",
+        "BlockCases.scala",
+        output.path(),
+    )
+    .unwrap();
+    let mut reader = Reader::new(artifact.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("emitted BlockCases should decode");
+    let method_code = |name: &str| {
+        let method = class
+            .methods
+            .iter()
+            .find(|method| class.constant_pool.utf8(method.name_index) == Ok(name))
+            .unwrap_or_else(|| panic!("missing method {name}"));
+        let [Attribute::Code(code)] = method.attributes.as_slice() else {
+            panic!("{name} should contain one Code attribute");
+        };
+        code.code
+    };
+    assert_eq!(method_code("parameter"), [0x04, 0x57, 0x1b, 0xac]);
+    assert_eq!(method_code("nested"), [0x07, 0xac]);
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 temporary path");
+        let harness_path = output.path().join("BlockCasesHarness.java");
+        fs::write(
+            &harness_path,
+            "public final class BlockCasesHarness { public static void main(String[] args) { BlockCases cases = new BlockCases(); System.out.println(cases.parameter(37) + \":\" + cases.nested()); } }\n",
+        )
+        .expect("write block invocation harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected BlockCasesHarness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "BlockCasesHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected BlockCases\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "37:4");
+    }
+}
+
 fn verify_class_structure(bytes: &[u8]) {
     let mut reader = Reader::new(bytes);
     let class = ClassFile::decode(&mut reader).expect("emitted class should decode");

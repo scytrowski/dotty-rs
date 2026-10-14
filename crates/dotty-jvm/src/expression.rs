@@ -471,18 +471,22 @@ fn emit_block(
         }
     }
 
+    let expression_type = context.tree(expr)?.ty;
     let flow = emit_expression(context, expr, code, depth + 1)?;
     match flow {
         Flow::Value(value)
-            if primitive_type(context.store, declared_type, context.definitions) == Some(value) =>
+            if block_types_match(context, tree_id, declared_type, expression_type)?
+                && block_value_type(context, tree_id, declared_type)? == Some(value) =>
         {
             Ok(flow)
         }
-        Flow::Unit if is_unit_type(context.store, declared_type, context.definitions) => Ok(flow),
-        Flow::Diverges
-            if is_nothing_type(context.store, declared_type, context.definitions)
-                || is_unit_type(context.store, declared_type, context.definitions) =>
+        Flow::Unit
+            if is_unit_type(context.store, declared_type, context.definitions)
+                && block_types_match(context, tree_id, declared_type, expression_type)? =>
         {
+            Ok(flow)
+        }
+        Flow::Diverges if block_types_match(context, tree_id, declared_type, expression_type)? => {
             Ok(flow)
         }
         _ => Err(JvmCodegenError::BlockResultTypeMismatch {
@@ -491,6 +495,84 @@ fn emit_block(
             found: public_flow(flow),
         }),
     }
+}
+
+fn block_types_match(
+    context: &JvmLoweringContext<'_>,
+    tree: TreeId<Typed>,
+    declared: TypeId,
+    expression: TypeId,
+) -> Result<bool, JvmCodegenError> {
+    if declared == expression || is_nothing_type(context.store, expression, context.definitions) {
+        return Ok(true);
+    }
+    if is_unit_type(context.store, declared, context.definitions)
+        && is_unit_type(context.store, expression, context.definitions)
+    {
+        return Ok(true);
+    }
+
+    let declared = block_value_type(context, tree, declared)?;
+    let expression = block_value_type(context, tree, expression)?;
+    Ok(declared.is_some() && declared == expression)
+}
+
+fn block_value_type(
+    context: &JvmLoweringContext<'_>,
+    tree: TreeId<Typed>,
+    ty: TypeId,
+) -> Result<Option<JvmType>, JvmCodegenError> {
+    if let Some(value_type) = primitive_type(context.store, ty, context.definitions) {
+        return Ok(Some(value_type));
+    }
+    let Some(Type::TermRef {
+        target: TermRefTarget::Symbol(symbol),
+        ..
+    }) = context.store.types.try_get(ty)
+    else {
+        return Ok(None);
+    };
+    let Some(parameter) = context
+        .method
+        .parameters()
+        .iter()
+        .find(|parameter| parameter.symbol() == *symbol)
+        .copied()
+    else {
+        return Err(JvmCodegenError::InvalidParameterReference {
+            tree,
+            symbol: Some(*symbol),
+        });
+    };
+    if !context.store.symbols.contains(*symbol) {
+        return Err(JvmCodegenError::InvalidParameterReference {
+            tree,
+            symbol: Some(*symbol),
+        });
+    }
+    let parameter_symbol = context.store.symbols.get(*symbol);
+    if parameter_symbol.kind != dotty_core::symbols::SymbolKind::Parameter
+        || parameter_symbol.owner != Some(context.method.symbol())
+    {
+        return Err(JvmCodegenError::InvalidParameterReference {
+            tree,
+            symbol: Some(*symbol),
+        });
+    }
+    let symbol_type = match context.store.symbols.info(*symbol) {
+        SymbolInfo::Complete(ty) => Some(*ty),
+        SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => None,
+    };
+    let found = symbol_type.and_then(|ty| primitive_type(context.store, ty, context.definitions));
+    if found != Some(parameter.ty()) {
+        return Err(JvmCodegenError::ParameterReferenceTypeMismatch {
+            tree,
+            parameter: *symbol,
+            expected: parameter.ty(),
+            found,
+        });
+    }
+    Ok(found)
 }
 
 fn emit_apply(
@@ -1705,6 +1787,34 @@ mod tests {
     }
 
     #[test]
+    fn block_result_accepts_a_validated_parameter_term_reference() {
+        let mut fixture = Fixture::new(&[JvmType::Int]);
+        let parameter = fixture.parameters[0];
+        let term_reference = fixture.store.types.alloc(Type::TermRef {
+            prefix: fixture.definitions.no_prefix,
+            target: TermRefTarget::Symbol(parameter),
+        });
+        let discarded = fixture.literal(Constant::Int(1), fixture.definitions.int);
+        let result = fixture.ident(term_reference);
+        let block = fixture.block(vec![discarded], result, term_reference);
+
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    block,
+                )
+                .unwrap(),
+            ),
+            vec![0x04, 0x57, 0x1b, 0xac]
+        );
+    }
+
+    #[test]
     fn block_stops_after_a_diverging_stat_and_emits_no_unreachable_suffix() {
         let mut fixture = Fixture::new(&[]);
         let value = fixture.literal(Constant::Int(4), fixture.definitions.int);
@@ -1729,6 +1839,31 @@ mod tests {
                     &fixture.definitions,
                     &fixture.method,
                     block,
+                )
+                .unwrap(),
+            ),
+            vec![0x07, 0xac]
+        );
+    }
+
+    #[test]
+    fn nested_value_typed_block_preserves_a_diverging_final_flow() {
+        let mut fixture = Fixture::new(&[]);
+        let value = fixture.literal(Constant::Int(4), fixture.definitions.int);
+        let returned = fixture.return_expr(Some(value), None);
+        let unreachable = fixture.literal(Constant::Int(5), fixture.definitions.int);
+        let inner = fixture.block(vec![returned], unreachable, fixture.definitions.int);
+        let outer = fixture.block(Vec::new(), inner, fixture.definitions.int);
+
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    outer,
                 )
                 .unwrap(),
             ),
