@@ -446,7 +446,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 .module_identity_resolver_outcomes
                 .entry(outcome)
                 .or_default() += 1;
-            if metrics.module_identity_resolver_calls % 1_000 == 0 {
+            if metrics.module_identity_resolver_calls.is_multiple_of(1_000) {
                 eprintln!(
                     "module identity resolver calls={} file={}",
                     metrics.module_identity_resolver_calls, metrics.current_file
